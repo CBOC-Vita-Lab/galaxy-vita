@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 2,
+  "releaseId": "galaxy-v1.0",
+  "version": "1.0",
+  "date": "2026-10-24",
+  "titleId": "SMGV00001",
+  "package": {
+    "path": "Galaxy-Vita.vpk",
+    "sha256": "07052caa40b897b6f5bda39145131b5e9662eef36a6674c75089cfd81802b846",
+    "runtimeSha256": "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b"
+  },
+  "source": {
+    "revision": "56e8263a393a0242e604e9778c467468f28a9aeb",
+    "manifest": "docs/SOURCE-MANIFEST.json"
+  },
+  "buildOptions": {
+    "driver": "python3 -I tools/vgx_build/build.py all",
+    "PORT_RUNTIME_DIAGNOSTICS": 0,
+    "PORT_LOGGING": 0,
+    "PORT_SILENT_STDIO": true,
+    "gameLTO": "ThinLTO, ld.lld -r --lto-O2, emulated TLS",
+    "rendererOpt": "-O3",
+    "vitaGL": "nhustd (tools/vitagl/build-release.sh)"
+  },
+  "toolchain": {
+    "clang": "18.1.3",
+    "vitaGcc": "15.2.0"
+  },
+  "dataPreparation": {
+    "disc": "RMGE01 (Wii, USA, revision 0)",
+    "mainDolSha256": "2c680585a8f58e1cc9c5521b579057f12b124ff0ef409e470a57606c50a93c09",
+    "installerStep": "galaxy",
+    "destination": "ux0:data/smg/game"
+  },
+  "verification": {
+    "hostTests": "python3 -m unittest discover -s tests; the tools/test_*.sh host suites",
+    "emulator": "Vita3K (correctness only): boot, Gateway Galaxy, the Comet Observatory, shader cache migration on update and fresh install",
+    "earlierConsoleRuns": "Two test builds from this source line ran on a PS Vita on 23 Oct 2026 (automatic quality before and after the calm rules)",
+    "physicalVita": false,
+    "desktopInstaller": false
+  },
+  "publicReleaseAccepted": false
+}

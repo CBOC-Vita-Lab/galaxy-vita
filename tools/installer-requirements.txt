@@ -1,0 +1,2 @@
+# Build dependency only. The finished installer includes its Python runtime.
+pyinstaller==6.22.3

@@ -1,0 +1,32 @@
+Shader compile: the compiler's size argument is strlen of the source (as Strikers 2564de4)
+
+Same value as s->size on every path that reaches compile_shader (only
+glShaderSource writes s->size, except commit_shader_candidate, which sets
+s->prog together with it, and compile_shader returns when s->prog is set),
+but taken from the text the compiler parses, as the Strikers port's fix
+does, so it cannot depend on that bookkeeping.
+---
+ source/custom_shaders.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 1419be6..0f1f8cd 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -810,9 +810,13 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
+ 		return;
+ 	shader candidate = {0};
+ 	// The compiler owns its output. Do not publish it or clobber the source length.
+-	// (galaxy: the size argument is in/out: vitaShaRK reads the SOURCE length from it (shark_input.size = *size) and writes
+-	// the program size back. The Strikers port passed 0 here, so the compiler was handed an empty source.)
+-	candidate.size = s->size;
++	// The size argument is in/out: vitaShaRK reads the SOURCE length from it (shark_input.size = *size, see the disassembly of
++	// libvitashark.a) and writes the program size back. The Strikers port first passed 0 here (the compiler got an empty file,
++	// "fatal internal error on line -1", for every fresh compile; fixed there in 2564de4 the same way). s->size would also be
++	// the source length on every path that reaches here (only glShaderSource writes it, except commit_shader_candidate, which
++	// sets s->prog at the same time, and compile_shader returns at once when s->prog is set), but strlen of the text the
++	// compiler parses does not depend on that. The source is NUL-terminated by glShaderSource.
++	candidate.size = (uint32_t)strlen((const char *)s->source);
+ 	const SceGxmProgram *output = shark_compile_shader_extended((const char *)s->source, &candidate.size, s->type == GL_FRAGMENT_SHADER ? SHARK_FRAGMENT_SHADER : SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
+ 	if (output && candidate.size) {
+ 		SceGxmProgram *res = (SceGxmProgram *)vglMalloc(candidate.size);

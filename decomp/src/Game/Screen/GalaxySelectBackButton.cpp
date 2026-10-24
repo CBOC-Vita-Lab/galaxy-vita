@@ -1,0 +1,83 @@
+#include "Game/Screen/GalaxySelectBackButton.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Screen/ButtonPaneController.hpp"
+#include "Game/Util/LayoutUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+
+namespace NrvGalaxySelectBackButton {
+    NEW_NERVE(GalaxySelectBackButtonNrvAppear, GalaxySelectBackButton, Appear);
+    NEW_NERVE(GalaxySelectBackButtonNrvDisappear, GalaxySelectBackButton, Disappear);
+    NEW_NERVE(GalaxySelectBackButtonNrvDecide, GalaxySelectBackButton, Decide);
+};  // namespace NrvGalaxySelectBackButton
+
+GalaxySelectBackButton::GalaxySelectBackButton() : LayoutActor("\x83\x4d\x83\x83\x83\x89\x83\x4e\x83\x56\x81\x5b\x91\x49\x91\xf0\x96\xdf\x82\xe9\x83\x7b\x83\x5e\x83\x93", true) {
+}
+
+void GalaxySelectBackButton::init(const JMapInfoIter&) {
+    initLayoutManager("BackButton", 1);
+    MR::connectToSceneLayout(this);
+
+    mPaneCtrl = new ButtonPaneController(this, "Back", "BoxButton", 0, true);
+    mPaneCtrl->_23 = true;
+
+    initNerve(GET_NERVE(GalaxySelectBackButton, GalaxySelectBackButtonNrvAppear));
+}
+
+void GalaxySelectBackButton::appear() {
+    LayoutActor::appear();
+    setNerve(GET_NERVE(GalaxySelectBackButton, GalaxySelectBackButtonNrvAppear));
+}
+
+void GalaxySelectBackButton::disappear() {
+    setNerve(GET_NERVE(GalaxySelectBackButton, GalaxySelectBackButtonNrvDisappear));
+}
+
+void GalaxySelectBackButton::decide() {
+    setNerve(GET_NERVE(GalaxySelectBackButton, GalaxySelectBackButtonNrvDecide));
+}
+
+bool GalaxySelectBackButton::isPointing() const {
+    return mPaneCtrl->isPointingPaneDirect();
+}
+
+bool GalaxySelectBackButton::tryPointing() {
+    return mPaneCtrl->onPointing();
+}
+
+bool GalaxySelectBackButton::isAppearing() const {
+    return mPaneCtrl->isAppearing();
+}
+
+bool GalaxySelectBackButton::isDisappearing() const {
+    return mPaneCtrl->isDisappearing();
+}
+
+void GalaxySelectBackButton::control() {
+    mPaneCtrl->update();
+}
+
+void GalaxySelectBackButton::exeAppear() {
+    if (MR::isFirstStep(this)) {
+        mPaneCtrl->appear();
+    }
+}
+
+void GalaxySelectBackButton::exeDisappear() {
+    if (MR::isFirstStep(this)) {
+        mPaneCtrl->disappear();
+    }
+
+    if (mPaneCtrl->isHidden()) {
+        kill();
+    }
+}
+
+void GalaxySelectBackButton::exeDecide() {
+    if (MR::isFirstStep(this)) {
+        mPaneCtrl->decide();
+    }
+
+    if (mPaneCtrl->isHidden()) {
+        kill();
+    }
+}

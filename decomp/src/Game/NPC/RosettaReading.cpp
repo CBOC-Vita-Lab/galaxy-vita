@@ -1,0 +1,129 @@
+#include "Game/NPC/RosettaReading.hpp"
+#include "Game/Demo/DemoFunction.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Screen/PictureBookLayout.hpp"
+#include "Game/Util/CameraUtil.hpp"
+#include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/EventUtil.hpp"
+#include "Game/Util/JointUtil.hpp"
+#include "Game/Util/LayoutUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+#include "Game/Util/TalkUtil.hpp"
+
+namespace {
+    const s32 cOverlayStartStep = 122;
+    const s32 cOverlayFrame = 1;
+};  // namespace
+
+namespace {
+    s32 getChapterNumberMin() {
+        return MR::getPictureBookChapterAlreadyRead() + 1;
+    }
+
+    s32 getChapterNumberMax() {
+        return MR::getPictureBookChapterCanRead();
+    }
+};  // namespace
+
+namespace NrvRosettaReading {
+    NEW_NERVE(RosettaReadingNrvPictureBookBefore, RosettaReading, PictureBookBefore);
+    NEW_NERVE(RosettaReadingNrvPictureBook, RosettaReading, PictureBook);
+    NEW_NERVE(RosettaReadingNrvPictureBookAfter, RosettaReading, PictureBookAfter);
+};  // namespace NrvRosettaReading
+
+RosettaReading::RosettaReading(const char* pName) : LiveActor(pName), mPictureBookLayout() {
+}
+
+void RosettaReading::init(const JMapInfoIter& rIter) {
+    MR::initDefaultPos(this, rIter);
+    initModelManagerWithAnm("RosettaReading", nullptr, false);
+    initSound(2, false);
+    MR::connectToSceneNpc(this);
+    MR::invalidateClipping(this);
+    MR::initLightCtrl(this);
+    MR::tryRegisterDemoCast(this, rIter);
+    DemoFunction::tryCreateDemoTalkAnimCtrlForScene(this, rIter, "DemoRosettaReading", nullptr, 0, 0);
+    DemoFunction::registerDemoTalkMessageCtrl(
+        this, MR::createTalkCtrlDirectOnRootNodeAutomatic(
+                  this, rIter,
+                  ::getChapterNumberMax() == PictureBookLayout::getChapterMax() ? "LibraryRoom_RosettaReading003" : "LibraryRoom_RosettaReading000",
+                  gZeroVec, MR::getJointMtx(this, "Chin")));
+
+    if (::getChapterNumberMin() <= ::getChapterNumberMax()) {
+        mPictureBookLayout = new PictureBookLayout(::getChapterNumberMin(), ::getChapterNumberMax(), true);
+        mPictureBookLayout->initWithoutIter();
+    }
+
+    initNerve(GET_NERVE(RosettaReading, RosettaReadingNrvPictureBookBefore));
+    makeActorDead();
+}
+
+void RosettaReading::appear() {
+    LiveActor::appear();
+    setNerve(GET_NERVE(RosettaReading, RosettaReadingNrvPictureBookBefore));
+}
+
+void RosettaReading::kill() {
+    LiveActor::kill();
+}
+
+void RosettaReading::makeArchiveList(NameObjArchiveListCollector* pCollector, const JMapInfoIter& rIter) {
+    if (::getChapterNumberMin() <= ::getChapterNumberMax()) {
+        PictureBookLayout::makeArchiveList(pCollector, ::getChapterNumberMin(), ::getChapterNumberMax(), true);
+    }
+}
+
+void RosettaReading::exePictureBookBefore() {
+    if (MR::isDemoPartActive("\x98\x4e\x93\xc7\x8a\x4a\x8e\x6e") || MR::isDemoPartActive("\x83\x8d\x83\x5b\x83\x62\x83\x5e\x89\xef\x98\x62[\x8a\x4a\x8e\x6e]") || MR::isDemoPartLessEqualStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8a\x4a\x8e\x6e", 60)) {
+        MR::startSystemLevelSE("SE_SM_LV_TICO_WAIT_LIBRARY");
+    }
+
+    if (MR::isDemoPartStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8a\x4a\x8e\x6e", 100)) {
+        MR::startSound(this, "SE_SM_ROSETTA_BOOK_OPEN");
+    }
+
+    if (MR::isDemoPartFirstStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8a\x4a\x8e\x6e")) {
+        MR::stopStageBGM(120);
+    }
+
+    if (MR::isDemoPartLastStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8a\x4a\x8e\x6e")) {
+        MR::pauseTimeKeepDemo(this);
+        setNerve(GET_NERVE(RosettaReading, RosettaReadingNrvPictureBook));
+    }
+}
+
+void RosettaReading::exePictureBook() {
+    if (MR::isFirstStep(this)) {
+        mPictureBookLayout->appear();
+        MR::forceToScreenCinemaFrame();
+    }
+
+    if (MR::isDead(mPictureBookLayout)) {
+        for (int c = ::getChapterNumberMin(); c <= ::getChapterNumberMax(); c++) {
+            MR::setPictureBookChapterAlreadyRead(c);
+        }
+
+        MR::forceToFrameCinemaFrame();
+        MR::resumeTimeKeepDemo(this);
+        setNerve(GET_NERVE(RosettaReading, RosettaReadingNrvPictureBookAfter));
+    }
+}
+
+void RosettaReading::exePictureBookAfter() {
+    if (MR::isDemoPartGreaterStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8f\x49\x97\xb9", 30) || MR::isDemoPartActive("\x83\x8d\x83\x5b\x83\x62\x83\x5e\x89\xef\x98\x62[\x8f\x49\x97\xb9]")) {
+        MR::startSystemLevelSE("SE_SM_LV_TICO_WAIT_LIBRARY");
+    }
+
+    if (MR::isDemoPartStep("\x8a\x47\x96\x7b\x83\x66\x83\x82\x8f\x49\x97\xb9", ::cOverlayStartStep)) {
+        MR::overlayWithPreviousScreen(::cOverlayFrame);
+    }
+
+    if (MR::isTimeKeepDemoActive()) {
+        return;
+    }
+
+    kill();
+}

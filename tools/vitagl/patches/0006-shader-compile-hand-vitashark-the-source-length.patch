@@ -1,0 +1,27 @@
+Shader compile: hand vitaShaRK the source length (fix of the Strikers port's change)
+
+shark_compile_shader_extended's size argument is in/out: it reads the
+source length from it (input.size = *size, checked in the disassembly of
+libvitashark.a) and writes the program size back. The Strikers code passed
+a zeroed candidate.size so as not to clobber s->size, which handed the
+compiler an empty source (in Vita3K: 13 'fatal internal error' compiles in
+a 400 s Gateway run that the old code never shows). The candidate now
+starts with the source length; s->size is still left alone.
+---
+ source/custom_shaders.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 723b583..1419be6 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -810,6 +810,9 @@ static inline __attribute__((always_inline)) void compile_shader(shader *s, GLbo
+ 		return;
+ 	shader candidate = {0};
+ 	// The compiler owns its output. Do not publish it or clobber the source length.
++	// (galaxy: the size argument is in/out: vitaShaRK reads the SOURCE length from it (shark_input.size = *size) and writes
++	// the program size back. The Strikers port passed 0 here, so the compiler was handed an empty source.)
++	candidate.size = s->size;
+ 	const SceGxmProgram *output = shark_compile_shader_extended((const char *)s->source, &candidate.size, s->type == GL_FRAGMENT_SHADER ? SHARK_FRAGMENT_SHADER : SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
+ 	if (output && candidate.size) {
+ 		SceGxmProgram *res = (SceGxmProgram *)vglMalloc(candidate.size);

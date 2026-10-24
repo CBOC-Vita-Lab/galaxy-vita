@@ -1,0 +1,234 @@
+Strikers patches (uniform pool lifetime, blit flip)
+
+---
+ source/framebuffers.c    |  4 +--
+ source/gxm.c             | 54 +++++++++++++++++++++++++++++++
+ source/utils/gxm_utils.c | 82 ++++++++++++++++++++++++++++++++++++++----------
+ source/utils/gxm_utils.h |  6 ++++
+ 4 files changed, 128 insertions(+), 18 deletions(-)
+
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index e7a4f2f..c376bf3 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -885,8 +885,8 @@ void glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLin
+ 		texcoord.x /= (float)read_fb->width;
+ 		texcoord.y /= (float)read_fb->width;
+ #ifndef HAVE_UNFLIPPED_FBOS
+-		texcoord.z = ((float)read_fb->height - (float)srcY0) / (float)read_fb->height;
+-		texcoord.w = ((float)read_fb->height - (float)srcY1) / (float)read_fb->height;
++		texcoord.z = (float)srcY1 / (float)read_fb->height;
++		texcoord.w = (float)srcY0 / (float)read_fb->height;
+ #else
+ 		texcoord.z = ((float)read_fb->height - (float)srcY1) / (float)read_fb->height;
+ 		texcoord.w = ((float)read_fb->height - (float)srcY0) / (float)read_fb->height;
+diff --git a/source/gxm.c b/source/gxm.c
+index 3894e19..e9938bb 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -579,6 +579,60 @@ static inline __attribute__((always_inline)) void scene_end(void) {
+ 		sceDisplayWaitVblankStartMulti(vsync_interval);
+ }
+ 
++GLboolean vglFinishUniformPoolScene(void) {
++	GLboolean resume = needs_end_scene;
++	if (resume) {
++		// Finish does not submit the current unended scene.
++		query_fence.value++;
++		int r = sceGxmEndScene(gxm_context, NULL, &query_fence);
++		if (r) {
++			vgl_log("[VGL_UNIFORM_LIFETIME] fatal: sceGxmEndScene=%d\n", r);
++			abort();
++		}
++		needs_end_scene = GL_FALSE;
++	}
++	sceGxmFinish(gxm_context);
++	return resume;
++}
++
++void vglResumeUniformPoolScene(GLboolean resume) {
++	if (!resume)
++		return;
++	int r;
++	if (!in_use_framebuffer) {
++		r = sceGxmBeginScene(gxm_context, 0, gxm_render_target, NULL, NULL,
++			gxm_sync_objects[gxm_back_buffer_index], &gxm_color_surfaces[gxm_back_buffer_index],
++			&gxm_depth_stencil_surface);
++	} else {
++#ifdef HAVE_SHARED_RENDERTARGETS
++		render_target *fbo_rt = (render_target *)in_use_framebuffer->target;
++		r = sceGxmBeginScene(gxm_context, 0, fbo_rt->rt,
++#else
++		r = sceGxmBeginScene(gxm_context, 0, in_use_framebuffer->target,
++#endif
++			NULL, NULL, NULL, &in_use_framebuffer->colorbuffer, in_use_framebuffer->depthbuffer_ptr);
++	}
++	if (r) {
++		vgl_log("[VGL_UNIFORM_LIFETIME] fatal: sceGxmBeginScene=%d\n", r);
++		abort();
++	}
++	needs_end_scene = GL_TRUE;
++	scene_not_flushed = GL_TRUE;
++	// Do not scene_reset here: its scissor draws replace an in-progress shader.
++	vglSetViewport(gxm_context, x_port, x_scale, y_port, y_scale, z_port, z_scale);
++#ifndef DISABLE_TILE_CLIPPER
++	if (scissor_test_state) {
++		uint32_t y = region.y;
++#ifndef HAVE_UNFLIPPED_FBOS
++		if (!is_rendering_display)
++			y = region.gl_y > 0 ? region.gl_y : 0;
++#endif
++		sceGxmSetRegionClip(gxm_context, SCE_GXM_REGION_CLIP_OUTSIDE, region.x, y,
++			region.x + region.w - 1, y + region.h - 1);
++	}
++#endif
++}
++
+ void scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
+ 		scene_not_flushed = GL_TRUE;
+diff --git a/source/utils/gxm_utils.c b/source/utils/gxm_utils.c
+index 61803f3..39df837 100644
+--- a/source/utils/gxm_utils.c
++++ b/source/utils/gxm_utils.c
+@@ -28,12 +28,15 @@
+ #define XXH_memset sceClibMemset
+ #include "xxhash_utils.h"
+ 
+-#define UNIFORM_CIRCULAR_POOL_SIZE (2 * 1024 * 1024)
++#define UNIFORM_CIRCULAR_POOL_SIZE (8 * 1024 * 1024)
+ 
+ void *vgl_def_frag_buf = NULL;
+ void *vgl_def_vert_buf = NULL;
++uint32_t vgl_def_frag_buf_size = 0;
++uint32_t vgl_def_vert_buf_size = 0;
+ static uint8_t *unif_pool = NULL;
+ static uint32_t unif_idx = 0;
++static uint32_t unif_rollovers = 0;
+ 
+ #define VERTEX_PROGRAM_CACHE_WAYS 4
+ #define VERTEX_PROGRAM_CACHE_SETS 64
+@@ -218,28 +221,75 @@ void vglVertexProgramCacheInvalidate(SceGxmShaderPatcherId id) {
+ 	sceGxmShaderPatcherForceUnregisterProgram(gxm_shader_patcher, id);
+ }
+ 
++static uint8_t *vglAllocUniformPool(void) {
++	// The general GPU allocator can recursively glFinish/GC on OOM mid-upload.
++	const vglMemType types[] = {VGL_MEM_RAM, VGL_MEM_PHYCONT, VGL_MEM_BUDGET, VGL_MEM_VRAM, VGL_MEM_EXTERNAL};
++	const uint32_t count = use_extra_mem ? 5 : 4;
++	for (uint32_t i = 0; i < count; i++) {
++		uint8_t *pool = vgl_memalign(MEM_ALIGNMENT, UNIFORM_CIRCULAR_POOL_SIZE, types[i]);
++		if (pool)
++			return pool;
++	}
++	vgl_log("[VGL_UNIFORM_LIFETIME] fatal: fresh %u-byte backing allocation failed\n", UNIFORM_CIRCULAR_POOL_SIZE);
++	abort();
++	return NULL;
++}
++
+ void vglSetupUniformCircularPool() {
+ 	if (!unif_pool) {
+-		unif_pool = gpu_alloc_mapped_for_cpu(UNIFORM_CIRCULAR_POOL_SIZE);
++		unif_pool = vglAllocUniformPool();
++		vgl_log("[VGL_UNIFORM_LIFETIME] active=scene-retire-cache-migrate-v1 arena_bytes=%u peak_arenas=2\n", UNIFORM_CIRCULAR_POOL_SIZE);
++	}
++}
++
++static __attribute__((noinline, cold)) void vglRolloverUniformPool(uint32_t size, uint32_t reserved_size) {
++	uint32_t vert_size = vgl_def_vert_buf ? VGL_ALIGN(vgl_def_vert_buf_size, 16) : 0;
++	uint32_t frag_size = vgl_def_frag_buf ? VGL_ALIGN(vgl_def_frag_buf_size, 16) : 0;
++	if (vert_size > UNIFORM_CIRCULAR_POOL_SIZE - reserved_size ||
++		frag_size > UNIFORM_CIRCULAR_POOL_SIZE - reserved_size - vert_size) {
++		vgl_log("[VGL_UNIFORM_LIFETIME] fatal: cache/request exceed backing capacity\n");
++		abort();
++	}
++	uint8_t *next_pool = vglAllocUniformPool();
++	GLboolean resume = vglFinishUniformPoolScene();
++	uint32_t next_idx = 0;
++	// GPU completion alone is insufficient: clean stages reuse cached defaults.
++	if (vgl_def_vert_buf) {
++		vgl_fast_memcpy(next_pool, vgl_def_vert_buf, vgl_def_vert_buf_size);
++		vgl_def_vert_buf = next_pool;
++		next_idx = vert_size;
++	}
++	if (vgl_def_frag_buf) {
++		vgl_fast_memcpy(next_pool + next_idx, vgl_def_frag_buf, vgl_def_frag_buf_size);
++		vgl_def_frag_buf = next_pool + next_idx;
++		next_idx += frag_size;
++	}
++	uint8_t *old_pool = unif_pool;
++	uint32_t old_idx = unif_idx;
++	unif_pool = next_pool;
++	unif_idx = next_idx;
++	vglResumeUniformPoolScene(resume);
++	vglRestoreVertexUniformBuffer();
++	vglRestoreFragmentUniformBuffer();
++	vgl_free(old_pool);
++	unif_rollovers++;
++	if (unif_rollovers <= 8 || unif_rollovers % 600 == 0) {
++		vgl_log("[VGL_UNIFORM_LIFETIME] rollover=%u frame=%u old_bytes=%u cached_bytes=%u request=%u resumed=%u\n",
++			unif_rollovers, vgl_framecount, old_idx, next_idx, size, resume);
+ 	}
+ }
+ 
+ void *vglReserveUniformCircularPoolBuffer(uint32_t size) {
+-	void *r;
+-	if (unif_idx + size >= UNIFORM_CIRCULAR_POOL_SIZE) {
+-#ifndef SKIP_ERROR_HANDLING
+-		static uint32_t last_frame_swap = 0;
+-		if (last_frame_swap == vgl_framecount) {
+-			vgl_log("%s:%d Circular Uniform Pool outage detected! Consider increasing UNIFORM_CIRCULAR_POOL_SIZE...\n", __FILE__, __LINE__);
+-		}
+-		last_frame_swap = vgl_framecount;
+-#endif
+-		r = unif_pool;
+-		unif_idx = size;
+-	} else {
+-		r = (unif_pool + unif_idx);
+-		unif_idx += size;
++	if (size > UNIFORM_CIRCULAR_POOL_SIZE) {
++		vgl_log("[VGL_UNIFORM_LIFETIME] fatal: oversized request=%u\n", size);
++		abort();
++	}
++	uint32_t reserved_size = VGL_ALIGN(size, 16);
++	if (reserved_size > UNIFORM_CIRCULAR_POOL_SIZE - unif_idx) {
++		vglRolloverUniformPool(size, reserved_size);
+ 	}
++	void *r = unif_pool + unif_idx;
++	unif_idx += reserved_size;
+ 	return r;
+ }
+ 
+diff --git a/source/utils/gxm_utils.h b/source/utils/gxm_utils.h
+index e297278..25837da 100644
+--- a/source/utils/gxm_utils.h
++++ b/source/utils/gxm_utils.h
+@@ -26,10 +26,14 @@
+ 
+ extern void *vgl_def_frag_buf;
+ extern void *vgl_def_vert_buf;
++extern uint32_t vgl_def_frag_buf_size;
++extern uint32_t vgl_def_vert_buf_size;
+ extern SceGxmContext *gxm_context;
+ 
+ void vglSetupUniformCircularPool(void);
+ void *vglReserveUniformCircularPoolBuffer(uint32_t size);
++GLboolean vglFinishUniformPoolScene(void);
++void vglResumeUniformPoolScene(GLboolean resume);
+ 
+ #ifdef HAVE_PROFILING
+ typedef struct {
+@@ -67,11 +71,13 @@ static inline __attribute__((always_inline)) void vglRestoreVertexUniformBuffer(
+ }
+ static inline __attribute__((always_inline)) void *vglReserveFragmentUniformBuffer(uint32_t size) {
+ 	vgl_def_frag_buf = vglReserveUniformCircularPoolBuffer(size);
++	vgl_def_frag_buf_size = size;
+ 	sceGxmSetFragmentDefaultUniformBuffer(gxm_context, vgl_def_frag_buf);
+ 	return vgl_def_frag_buf;
+ }
+ static inline __attribute__((always_inline)) void *vglReserveVertexUniformBuffer(uint32_t size) {
+ 	vgl_def_vert_buf = vglReserveUniformCircularPoolBuffer(size);
++	vgl_def_vert_buf_size = size;
+ 	sceGxmSetVertexDefaultUniformBuffer(gxm_context, vgl_def_vert_buf);
+ 	return vgl_def_vert_buf;
+ }

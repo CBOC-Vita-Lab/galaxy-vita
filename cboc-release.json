@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "galaxy-v1.0",
+  "titleId": "SMGV00001",
+  "displayName": "Super Mario Galaxy",
+  "version": "1.0",
+  "minInstallerVersion": "1.1",
+  "visibility": "public",
+  "releaseState": "ready",
+  "recipeId": "galaxy",
+  "package": {
+    "path": "Galaxy-Vita.vpk",
+    "sha256": "07052caa40b897b6f5bda39145131b5e9662eef36a6674c75089cfd81802b846",
+    "runtimeSha256": "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b"
+  },
+  "requiredInputs": [
+    {
+      "id": "game",
+      "label": "Wii USA game file (RMGE01)",
+      "kind": "galaxy-disc"
+    },
+    {
+      "id": "shader",
+      "label": "Shader compiler (libshacccg.suprx)",
+      "kind": "shader-compiler"
+    }
+  ],
+  "optionalInputs": [],
+  "destinations": {
+    "data": "ux0:data/smg/game"
+  },
+  "preparation": [
+    {
+      "input": "game",
+      "step": "galaxy"
+    }
+  ],
+  "protectedPaths": [
+    "ux0:data/smg/saves",
+    "ux0:data/smg/settings.ini",
+    "ux0:data/smg/env.txt",
+    "ux0:data/smg/hdtex.pack"
+  ],
+  "prerequisites": [
+    "shader-compiler"
+  ],
+  "limits": {
+    "maxFiles": 10000,
+    "maxFileBytes": 17179869184,
+    "maxTotalBytes": 34359738368
+  },
+  "appUpdateFrom": []
+}

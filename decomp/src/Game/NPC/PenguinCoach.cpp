@@ -1,0 +1,323 @@
+#include "Game/NPC/PenguinCoach.hpp"
+#include "Game/LiveActor/LiveActorGroup.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Map/RaceManager.hpp"
+#include "Game/NPC/Rosetta.hpp"
+#include "Game/NPC/TalkMessageFunc.hpp"
+#include "Game/NPC/TurnJointCtrl.hpp"
+#include "Game/Ride/SurfRayTutorial.hpp"
+#include "Game/Util/ActorCameraUtil.hpp"
+#include "Game/Util/ActorSensorUtil.hpp"
+#include "Game/Util/ActorSwitchUtil.hpp"
+#include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/EventUtil.hpp"
+#include "Game/Util/JMapUtil.hpp"
+#include "Game/Util/JointUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/NPCUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+#include "Game/Util/PlayerUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+#include "Game/Util/TalkUtil.hpp"
+
+namespace {
+    static const f32 sTurnSpeed = 180.0f;
+};  // namespace
+
+namespace NrvPenguinCoach {
+    NEW_NERVE(PenguinCoachNrvTakeOutStar, PenguinCoach, TakeOutStar);
+    NEW_NERVE(PenguinCoachNrvRace, PenguinCoach, Race);
+    NEW_NERVE(PenguinCoachNrvReaction, PenguinCoach, Reaction);
+    NEW_NERVE(PenguinCoachNrvPrep, PenguinCoach, Prep);
+    NEW_NERVE(PenguinCoachNrvWait, PenguinCoach, Wait);
+    NEW_NERVE(PenguinCoachNrvFade, PenguinCoach, Fade);
+    NEW_NERVE(PenguinCoachNrvTutorial, PenguinCoach, Tutorial);
+    NEW_NERVE(PenguinCoachNrvPraise, PenguinCoach, Praise);
+};  // namespace NrvPenguinCoach
+
+PenguinCoach::PenguinCoach(const char* pName) : NPCActor(pName), mIsRaceComplete(false), mTakeOutStar(nullptr), mBehavior(-1), mCameraInfo(nullptr) {
+}
+
+void PenguinCoach::init(const JMapInfoIter& rIter) {
+    NPCActorCaps caps("PenguinCoach");
+    caps.setDefault();
+    caps.mWaitNerve = GET_NERVE(PenguinCoach, PenguinCoachNrvWait);
+    caps.mBinder = false;
+    caps.mShadowSize = 130.0f;
+    caps.mSensor = false;
+    caps.mMakeActor = false;
+    caps.mMessageOffset = TVec3f(0.0f, 430.0f, 0.0f);
+    caps.mPointerSize = 180.0f;
+    caps.mStarPointerOffs.set(0.0f, 200.0f, 80.0f);
+
+    MR::getJMapInfoArg0NoInit(rIter, &mBehavior);
+
+    initialize(rIter, caps);
+
+    if (mBehavior == Behavior_Star) {
+        MR::useStageSwitchWriteA(this, rIter);
+        MR::declarePowerStar(this);
+        mTakeOutStar = new TakeOutStar(this, "TakeOutStar", "TakeOutStarPenguinCoach", GET_NERVE(PenguinCoach, PenguinCoachNrvTakeOutStar));
+    } else if (mBehavior == Behavior_Tutorial || mBehavior == Behavior_Race) {
+        MR::declarePowerStar(this);
+        mTakeOutStar = new TakeOutStar(this, "TakeOutStar", "TakeOutStarPenguinCoach", GET_NERVE(PenguinCoach, PenguinCoachNrvTakeOutStar));
+        RaceManagerFunction::entryAudience(this);
+    }
+
+    initHitSensor(2);
+    MR::addHitSensorPush(this, "body", 8, 160.0f, TVec3f(0.0f, 150.0f, 0.0f));
+    MR::addHitSensorPush(this, "head", 8, 150.0f, TVec3f(0.0f, 300.0f, 40.0f));
+
+    if (mBehavior == Behavior_Tutorial || mBehavior == Behavior_Race) {
+        if (mBehavior == Behavior_Tutorial) {
+            MR::initMultiActorCamera(this, rIter, &mCameraInfo, "\x83\x60\x83\x85\x81\x5b\x83\x67\x83\x8a\x83\x41\x83\x8b");  // tutorial
+        }
+        MR::initMultiActorCamera(this, rIter, &mCameraInfo, "\x89\xef\x98\x62");  // conversation
+
+        MR::joinToGroupArray(this, rIter, nullptr, 0x20);
+        MR::invalidateClipping(this);
+
+        if (mBehavior == Behavior_Tutorial) {
+            MR::offReadNodeAutomatic(mMsgCtrl);
+        }
+        setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvPrep));
+    }
+
+    mTutorial = new SurfRayTutorial(this, MR::createTalkCtrlDirect(this, rIter, "Common_SurfingTutorial000", caps.mMessageOffset, nullptr), rIter);
+    mTurnJointCtrl = new TurnJointCtrl(this);
+    mTurnJointCtrl->init(90.0f, 10.0f, 40.0f);
+    mTurnJointCtrl->addFace("Head", 1.0f, TurnJointCtrl::X, TurnJointCtrl::Y, TurnJointCtrl::Z);
+    mTurnJointCtrl->_60 = 0.1f;
+    mTurnJointCtrl->_5C = 800.0f;
+    makeActorAppeared();
+
+    mParam.setMoveAction("Wait", "Turn");
+    mParam.setTalkAction("Talk", "TalkTurn");
+    mParam._8 = 1.0f;
+    _134 = "Trampled";
+    _13C = "Reaction";
+    _130 = "Reaction";
+    _138 = "Pointing";
+
+    if (mMsgCtrl != nullptr) {
+        MR::registerBranchFunc(getMsgCtrl(), TalkMessageFunc(this, &PenguinCoach::branchFunc));
+        MR::registerEventFunc(getMsgCtrl(), TalkMessageFunc(this, &PenguinCoach::eventFunc));
+        MR::setDistanceToTalk(mMsgCtrl, 350.0f);
+    }
+}
+
+void PenguinCoach::initAfterPlacement() {
+    if (mBehavior == Behavior_Tutorial) {
+        LiveActorGroup* group = MR::getGroupFromArray(this);
+        mActor = group->getActor(0) == this ? group->getActor(1) : group->getActor(0);
+    }
+}
+
+void PenguinCoach::calcAndSetBaseMtx() {
+    mTurnJointCtrl->setCallBackFunction();
+    NPCActor::calcAndSetBaseMtx();
+}
+
+bool PenguinCoach::receiveMsgPlayerAttack(u32 msg, HitSensor* pSender, HitSensor* pReceiver) {
+    if (MR::isMsgPlayerSpinAttack(msg)) {
+        _E3 = true;
+        return true;
+    }
+
+    return NPCActor::receiveMsgPlayerAttack(msg, pSender, pReceiver);
+}
+
+void PenguinCoach::control() {
+    TVec3f starePos;
+    MR::calcPlayerFaceStarePos(&starePos, MR::getJointMtx(this, "Head"), getBaseMtx());
+    mTurnJointCtrl->setStarePos(starePos);
+    mTurnJointCtrl->update();
+    NPCActor::control();
+}
+
+bool PenguinCoach::branchFunc(u32 state) {
+    if (state == 0) {
+        return MR::isPlayerCarryAny();
+    } else if (state == 1) {
+        return MR::isPlayerCarryAny() && MR::isPlayerTakingActor("\x83\x53\x81\x5b\x83\x8b\x83\x66\x83\x93\x8d\x62\x97\x85");
+    } else if (state == 2) {
+        return MR::isOnGameEventFlagSurfingTutorialAtFirst();
+    } else if (state == 3) {
+        return mIsRaceComplete;
+    } else if (state == 4) {
+        return MR::getRaceCurrentTime() < 90 * 60;
+    } else if (state == 5) {
+        return MR::getRaceCurrentTime() < 180 * 60;
+    }
+
+    return false;
+}
+
+void PenguinCoach::setTutorialPos() {
+    MR::setNPCActorPos(this, "\x83\x52\x81\x5b\x83\x60\x83\x60\x83\x85\x81\x5b\x83\x67\x83\x8a\x83\x41\x83\x8b\x88\xca\x92\x75");
+}
+
+void PenguinCoach::setPlayerNoSelectionPos() {
+    MR::setPlayerPos("\x82\xa2\x82\xa2\x82\xa6\x91\x49\x91\xf0\x88\xda\x93\xae\x88\xca\x92\x75");
+}
+
+void PenguinCoach::setFinishPos() {
+    MR::setNPCActorPos(this, "\x83\x52\x81\x5b\x83\x60\x83\x8c\x81\x5b\x83\x58\x8f\x49\x97\xb9\x8c\xe3\x88\xca\x92\x75");
+}
+
+bool PenguinCoach::eventFunc(u32 state) {
+    if (state == 0) {
+        MR::onSwitchA(this);
+        return true;
+    } else if (state == 1) {
+        if (mTakeOutStar->isFirstStep()) {
+            mTurnJointCtrl->endCtrl(60);
+        }
+        mTakeOutStar->takeOut();
+        if (mTakeOutStar->isLastStep()) {
+            mTurnJointCtrl->startCtrl(60);
+            return true;
+        }
+        return false;
+    } else if (state == 2) {
+        MR::forceKillPlayerByGroundRace();
+        return true;
+    }
+
+    return true;
+}
+void PenguinCoach::resetAudience() {
+    mIsRaceComplete = true;
+    MR::onReadNodeAutomatic(mMsgCtrl);
+    setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvPraise));
+    MR::requestMovementOn(this);
+    if (mBehavior == Behavior_Tutorial) {
+        setFinishPos();
+    }
+
+    turnToPlayer(::sTurnSpeed);
+}
+
+void PenguinCoach::prepAudience() {
+}
+
+void PenguinCoach::exeTakeOutStar() {
+}
+
+void PenguinCoach::exeRace() {
+}
+
+void PenguinCoach::exePrep() {
+    if (mBehavior == Behavior_Race) {
+        if (MR::isTalkStart(mMsgCtrl)) {
+            MR::startMultiActorCameraTargetSelf(this, mCameraInfo, "\x89\xef\x98\x62", -1);
+        }
+
+        if (MR::isTalkEnd(mMsgCtrl)) {
+        }
+    }
+
+    if (!MR::tryStartReactionAndPushNerve(this, GET_NERVE(PenguinCoach, PenguinCoachNrvReaction)) &&
+        MR::tryTalkNearPlayerAtEndAndStartTalkAction(this)) {
+        if (mBehavior == Behavior_Tutorial || (mBehavior == Behavior_Race && MR::tryTalkSelectLeft(mMsgCtrl))) {
+            MR::startTalkingSequenceWithoutCinemaFrame(this);
+            MR::closeWipeFade();
+            setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvFade));
+        } else if (mBehavior == Behavior_Race && MR::tryTalkSelectRight(mMsgCtrl)) {
+            MR::endMultiActorCamera(this, mCameraInfo, "\x89\xef\x98\x62", false, -1);
+        }
+    }
+}
+
+void PenguinCoach::exeWait() {
+    if (!MR::tryStartReactionAndPushNerve(this, GET_NERVE(PenguinCoach, PenguinCoachNrvReaction))) {
+        MR::tryTalkNearPlayerAndStartTalkAction(this);
+    }
+}
+
+void PenguinCoach::exeFade() {
+    if (MR::isWipeActive()) {
+        return;
+    }
+
+    MR::openWipeFade();
+    MR::endTalkingSequence(this);
+
+    if (mBehavior == Behavior_Tutorial) {
+        if (MR::isOnGameEventFlagSurfingTutorialAtFirst()) {
+            if (MR::tryTalkSelectLeft(mMsgCtrl)) {
+                MR::startMultiActorCameraTargetSelf(this, mCameraInfo, "\x83\x60\x83\x85\x81\x5b\x83\x67\x83\x8a\x83\x41\x83\x8b", 0);
+                setTutorialPos();
+                setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvTutorial));
+            } else {
+                setFinishPos();
+                mTutorial->omitTutorial();
+                setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvRace));
+            }
+        } else {
+            if (MR::tryTalkSelectLeft(mMsgCtrl)) {
+                MR::startMultiActorCameraTargetSelf(this, mCameraInfo, "\x83\x60\x83\x85\x81\x5b\x83\x67\x83\x8a\x83\x41\x83\x8b", 0);
+                setTutorialPos();
+                setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvTutorial));
+            } else {
+                MR::clearTalkState(mMsgCtrl);
+                setPlayerNoSelectionPos();
+                setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvPrep));
+            }
+        }
+    } else {
+        MR::setPlayerPos("\x83\x58\x83\x5e\x81\x5b\x83\x67\x88\xca\x92\x75\x81\x69\x83\x54\x81\x5b\x83\x74\x83\x42\x83\x93\x81\x6a");
+        MR::endMultiActorCamera(this, mCameraInfo, "\x89\xef\x98\x62", false, 0);
+        setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvRace));
+    }
+}
+
+void PenguinCoach::exeReaction() {
+    if (MR::isFirstStep(this)) {
+        mTurnJointCtrl->endCtrl(4);
+    }
+
+    if (_D8) {
+        MR::startSound(this, "SE_SM_PENGUIN_TRAMPLED");
+        MR::startSound(this, "SE_SV_PENGUIN_L_TRAMPLED");
+    }
+
+    if (isPointingSe()) {
+        MR::startSound(this, "SE_SV_PENGUIN_L_POINTED_2P");
+        MR::startDPDHitSound();
+    }
+
+    if (_D9) {
+        MR::startSound(this, "SE_SV_PENGUIN_L_SPIN_HIT");
+        MR::startSound(this, "SE_SM_PENGUIN_L_SPIN_HIT");
+    }
+
+    if (_DB) {
+        MR::startSound(this, "SE_SV_PENGUIN_L_STAR_PIECE");
+        MR::startSound(this, "SE_SM_PENGUIN_L_SPIN_HIT");
+    }
+
+    if (MR::tryStartReactionAndPopNerve(this)) {
+        mTurnJointCtrl->startCtrl(60);
+    }
+}
+
+void PenguinCoach::exeTutorial() {
+    if (mTutorial->update()) {
+        setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvRace));
+        MR::endMultiActorCamera(this, mCameraInfo, "\x83\x60\x83\x85\x81\x5b\x83\x67\x83\x8a\x83\x41\x83\x8b", true, 120);
+        MR::onGameEventFlagSurfingTutorialAtFirst();
+    }
+}
+
+void PenguinCoach::exePraise() {
+    if (MR::isFirstStep(this)) {
+        MR::startMultiActorCameraTargetSelf(this, mCameraInfo, "\x89\xef\x98\x62", 0);
+    }
+
+    if (MR::isWipeOpen() && MR::tryTalkForceAtEndAndStartTalkAction(this)) {
+        MR::endMultiActorCamera(this, mCameraInfo, "\x89\xef\x98\x62", true, -1);
+        setNerve(GET_NERVE(PenguinCoach, PenguinCoachNrvWait));
+    }
+}

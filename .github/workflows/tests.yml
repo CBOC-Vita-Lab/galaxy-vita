@@ -1,0 +1,16 @@
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Release files, build driver, cooker layout and download checker
+        run: python3 -m unittest discover -s tests -v
+      - name: Download checker on the repository itself
+        run: python3 tools/check-files.py --directory .

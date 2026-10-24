@@ -1,0 +1,154 @@
+#include "Game/Enemy/WalkerStateStagger.hpp"
+#include "Game/Enemy/WalkerStateFunction.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Util/ActorMovementUtil.hpp"
+#include "Game/Util/ActorSensorUtil.hpp"
+#include "Game/Util/EffectUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/MathUtil.hpp"
+#include "Game/Util/NerveUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+
+void WalkerStateStagger_FORCE_MATCH_SDATA2() {
+    (void)1.0f;
+    (void)0.0f;
+    (void)0.5f;
+    (void)3.0f;
+}
+
+namespace {
+    WalkerStateStaggerParam sDefaultStaggerParam;
+};  // namespace
+
+namespace NrvWalkerStateStagger {
+    NEW_NERVE(WalkerStateStaggerNrvStagger, WalkerStateStagger, Stagger);
+    NEW_NERVE(WalkerStateStaggerNrvStaggerEnd, WalkerStateStagger, StaggerEnd);
+};  // namespace NrvWalkerStateStagger
+
+WalkerStateStaggerParam::WalkerStateStaggerParam()
+    : mPunchPowerH(10.0f), mPunchPowerV(10.0f), mPunchPowerSideH(10.0f), mStopSceneFrames(4), mKickEnableStep(15), mStaggerTime(180),
+      mRotateStartTime(60), mRotateEndTime(120), mStaggerFrontPower(0.35f), mStaggerSidePower(0.5f), mStaggerSideCircleRateDegree(3.0f),
+      mRotateRateDegree(40.0f) {
+}
+
+WalkerStateStagger::WalkerStateStagger(LiveActor* pHost, TVec3f* pDirection, WalkerStateParam* pStateParam, WalkerStateStaggerParam* pStaggerParam)
+    : ActorStateBase< LiveActor >("\x95\xe0\x8d\x73\x8c\x5e\x82\xe6\x82\xeb\x82\xdf\x82\xab\x8f\xf3\x91\xd4", pHost), mStateParam(pStateParam), mStaggerParam(pStaggerParam), mVelH(0.0f, 0.0f, 1.0f),
+      mDirection(pDirection) {
+    if (mStaggerParam == nullptr) {
+        mStaggerParam = &::sDefaultStaggerParam;
+    }
+
+    initNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger));
+}
+
+void WalkerStateStagger::appear() {
+    mIsDead = false;
+    setNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger));
+}
+
+void WalkerStateStagger::setPunchDirection(HitSensor* pSender, HitSensor* pReceiver) {
+    MR::calcSensorHorizonNormalize(&mVelH, getHost()->mGravity, pSender, pReceiver);
+    MR::deleteEffectAll(getHost());
+    MR::setVelocitySeparateHV(getHost(), pSender, pReceiver, mStaggerParam->mPunchPowerH, mStaggerParam->mPunchPowerV);
+    MR::addVelocityClockwiseToTarget(getHost(), MR::getSensorPos(pSender), mStaggerParam->mPunchPowerSideH);
+}
+
+void WalkerStateStagger::exeStagger() {
+    if (MR::isFirstStep(this)) {
+        MR::startAction(getHost(), "StaggerStart");
+        MR::stopScene(mStaggerParam->mStopSceneFrames);
+    }
+
+    if (MR::isBckOneTimeAndStopped(getHost())) {
+        MR::startAction(getHost(), "Stagger");
+    }
+
+    TVec3f dir;
+    dir.killElement(mVelH, getHost()->mGravity);
+
+    if (!MR::isNearZero(dir)) {
+        MR::normalize(dir, &mVelH);
+    }
+
+    f32 t = MR::calcNerveEaseInOutValue(this, mStaggerParam->mRotateStartTime, mStaggerParam->mRotateEndTime, 1.0f, 0.0f);
+    MR::rotateDirectionGravityDegree(getHost(), mDirection, mStaggerParam->mRotateRateDegree * t);
+
+    f32 s = MR::sinDegree(MR::repeatDegree(mStaggerParam->mStaggerSideCircleRateDegree * getNerveStep()));
+
+    MR::addVelocityClockwiseToDirection(getHost(), mVelH, t * (mStaggerParam->mStaggerSidePower * s));
+    MR::addVelocityMoveToDirection(getHost(), mVelH, mStaggerParam->mStaggerFrontPower * t);
+    WalkerStateFunction::calcPassiveMovement(getHost(), mStateParam);
+
+    reboundWall();
+
+    if (MR::isGreaterStep(this, mStaggerParam->mStaggerTime)) {
+        setNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStaggerEnd));
+    }
+}
+
+void WalkerStateStagger::exeStaggerEnd() {
+    if (MR::isFirstStep(this)) {
+        MR::startAction(getHost(), "StaggerEnd");
+    }
+
+    WalkerStateFunction::calcPassiveMovement(getHost(), mStateParam);
+
+    if (MR::isBckStopped(getHost())) {
+        kill();
+    }
+}
+
+void WalkerStateStagger::reboundWall() {
+    if (!MR::isBindedWall(getHost())) {
+        return;
+    }
+
+    if (MR::calcReboundVelocity(&getHost()->mVelocity, *MR::getWallNormal(getHost()), 0.9f)) {
+        TVec3f velH;
+        velH.killElement(getHost()->mVelocity, getHost()->mGravity);
+        if (!MR::normalizeOrZero(&velH)) {
+            mVelH.set(velH);
+        }
+    }
+}
+
+bool WalkerStateStagger::isEnableKick() const {
+    if (mIsDead) {
+        return false;
+    }
+
+    if (isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger)) && MR::isLessStep(this, mStaggerParam->mKickEnableStep)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool WalkerStateStagger::isUpsideDown() const {
+    if (mIsDead) {
+        return false;
+    }
+
+    if (isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStaggerEnd)) && MR::isGreaterStep(this, 15)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool WalkerStateStagger::isStaggerStart() const {
+    return isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger)) && MR::isStep(this, 1);
+}
+
+bool WalkerStateStagger::isSwooning(s32 swoonStep) const {
+    return isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger)) && MR::isGreaterEqualStep(this, swoonStep);
+}
+
+bool WalkerStateStagger::isSpinning(s32 spinStartStep, s32 spinEndStep) const {
+    return isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStagger)) && MR::isGreaterEqualStep(this, spinStartStep) &&
+           MR::isLessEqualStep(this, spinEndStep);
+}
+
+bool WalkerStateStagger::isRecoverStart() const {
+    return isNerve(GET_NERVE(WalkerStateStagger, WalkerStateStaggerNrvStaggerEnd)) && MR::isFirstStep(this);
+}

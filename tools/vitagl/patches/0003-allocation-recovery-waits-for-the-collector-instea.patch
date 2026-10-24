@@ -1,0 +1,303 @@
+Allocation recovery waits for the collector instead of sleeping (Strikers a9c11e0)
+
+When a GPU-mapped allocation fails, vitaGL used to signal the garbage
+collector and then sleep one second, up to FRAME_PURGE_FREQ times (a
+multi-second hitch per out-of-memory event). It now enqueues a collector
+cycle and waits for that cycle's completion counter (utils/gc_recovery.h,
+from the Strikers port), then retries; the one-second pause is kept only as
+a last chance for other threads to release memory. The CPU and GPU unsafe
+allocators share one body. Semaphore/thread failures of the collector are
+detected (process exit instead of a silent deadlock).
+---
+ source/gxm.c               |  28 ++++++++----
+ source/shared.h            |   3 ++
+ source/utils/gc_recovery.h | 107 +++++++++++++++++++++++++++++++++++++++++++++
+ source/utils/gpu_utils.c   |  59 ++++++++++++-------------
+ 4 files changed, 158 insertions(+), 39 deletions(-)
+
+diff --git a/source/gxm.c b/source/gxm.c
+index e9938bb..15d8e6e 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -114,7 +114,9 @@ int frame_purge_idx = 0; // Index for currently populatable purge list
+ int frame_elem_purge_idx = 0; // Index for currently populatable purge list element
+ int frame_rt_purge_idx = 0; // Index for currently populatable purge list rendertarget
+ static int frame_purge_clean_idx = 1;
+-SceUID gc_mutex[2];
++SceUID gc_mutex[2] = {-1, -1};
++#include <psp2/kernel/error.h>
++#include "utils/gc_recovery.h"
+ static int gc_thread_priority = 0x10000100;
+ static int gc_thread_affinity = 0;
+ static uint8_t gxm_display_rt_size = 1; // Number of scenes per frame to use for the display rendertarget
+@@ -279,7 +281,11 @@ int garbage_collector(unsigned int args, void *arg) {
+ #ifndef HAVE_SINGLE_THREADED_GC
+ 	for (;;) {
+ 		// Waiting for garbage collection request
+-		sceKernelWaitSema(gc_mutex[0], 1, NULL);
++		int wait_result = sceKernelWaitSema(gc_mutex[0], 1, NULL);
++		if (wait_result < 0) {
++			gc_failure("worker wait", wait_result);
++			break;
++		}
+ #endif
+ 		// Purging all elements marked for deletion
+ 		for (int i = 0; i < FRAME_PURGE_LIST_SIZE; i++) {
+@@ -301,7 +307,7 @@ int garbage_collector(unsigned int args, void *arg) {
+ 		frame_elem_purge_idx = 0;
+ 		frame_rt_purge_idx = 0;
+ #ifndef HAVE_SINGLE_THREADED_GC
+-		sceKernelSignalSema(gc_mutex[1], 1);
++		gc_publish_completion();
+ 	}
+ #ifndef HAVE_PTHREAD
+ 	return sceKernelExitDeleteThread(0);
+@@ -358,13 +364,18 @@ void init_gxm(void) {
+ 	// Initializing garbage collector
+ 	gc_mutex[0] = sceKernelCreateSema("vitaGL GC Sema Push", 0, 0, FRAME_PURGE_FREQ, NULL);
+ 	gc_mutex[1] = sceKernelCreateSema("vitaGL GC Sema Pull", 0, FRAME_PURGE_FREQ, FRAME_PURGE_FREQ, NULL);
++	int gc_start_result = gc_mutex[0] < 0 ? gc_mutex[0] : gc_mutex[1];
++	if (gc_start_result >= 0) {
+ #ifdef HAVE_PTHREAD
+-	pthread_create(&gc_thread, NULL, garbage_collector, NULL);
+-	pthread_setaffinity_np(gc_thread, 4, &gc_thread_affinity);
++		gc_start_result = -pthread_create(&gc_thread, NULL, garbage_collector, NULL);
++		if (gc_start_result == 0)
++			pthread_setaffinity_np(gc_thread, 4, &gc_thread_affinity);
+ #else
+-	gc_thread = sceKernelCreateThread("vitaGL Garbage Collector", &garbage_collector, gc_thread_priority, 0x10000, 0, gc_thread_affinity, NULL);
+-	sceKernelStartThread(gc_thread, 0, NULL);
++		gc_thread = sceKernelCreateThread("vitaGL Garbage Collector", &garbage_collector, gc_thread_priority, 0x10000, 0, gc_thread_affinity, NULL);
++		gc_start_result = gc_thread < 0 ? gc_thread : sceKernelStartThread(gc_thread, 0, NULL);
+ #endif
++	}
++	gc_mark_ready(gc_start_result);
+ #endif
+ 
+ 	// Checking if the running application is a system one
+@@ -1035,8 +1046,7 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ #ifdef HAVE_SINGLE_THREADED_GC
+ 	garbage_collector(0, NULL);
+ #else
+-	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+-	sceKernelSignalSema(gc_mutex[0], 1);
++	gc_enqueue(NULL);
+ #endif
+ }
+ 
+diff --git a/source/shared.h b/source/shared.h
+index 2d4b0f3..7a95c82 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -877,6 +877,9 @@ extern uint16_t *default_line_strips_idx_ptr; // sceGxm mapped progressive indic
+ extern int garbage_collector(unsigned int args, void *arg); // Garbage collector function
+ #endif
+ extern SceUID gc_mutex[2]; // Garbage collector mutex
++extern int vgl_gc_failed(void);
++extern int vgl_gc_recover(void);
++extern int vgl_gc_retry_pause(void);
+ extern GLboolean has_cached_mem; // Flag for whether to use cached memory for mempools or not
+ extern uint8_t gxm_display_buffer_count; // Display buffers count
+ 
+diff --git a/source/utils/gc_recovery.h b/source/utils/gc_recovery.h
+new file mode 100644
+index 0000000..3f09490
+--- /dev/null
++++ b/source/utils/gc_recovery.h
+@@ -0,0 +1,107 @@
++/* Internal to gxm.c. The ordinary frame path stays asynchronous. */
++#ifndef VGL_GC_RECOVERY_H
++#define VGL_GC_RECOVERY_H
++
++static uint32_t gc_requested;
++static uint32_t gc_completed;
++static int gc_ready;
++static int gc_broken;
++static const char *volatile gc_failure_operation;
++static volatile int gc_failure_error;
++
++static __attribute__((noreturn, noinline)) void gc_failure(const char *operation, int error) {
++	if (!__atomic_exchange_n(&gc_broken, 1, __ATOMIC_ACQ_REL)) {
++		gc_failure_operation = operation;
++		gc_failure_error = error;
++	}
++	// A dead collector cannot accept more retirement entries. Exit without heap,
++	// scene or log work; the app's exception UI can otherwise leave threads running.
++	// The diagnostic fields are best effort for a debugger, not a persistent log.
++	sceKernelExitProcess(1);
++	__builtin_trap();
++}
++
++int vgl_gc_failed(void) {
++	// An observer must not keep running while the failing thread is preempted.
++	if (__atomic_load_n(&gc_broken, __ATOMIC_ACQUIRE))
++		gc_failure("observed failure", -1);
++	return 0;
++}
++
++static int gc_return_credit(void) {
++	int res = sceKernelSignalSema(gc_mutex[1], 1);
++	if (res < 0) gc_failure("return credit", res);
++	return res >= 0;
++}
++
++static int gc_enqueue(uint32_t *ticket) {
++	int res;
++	for (;;) {
++		if (vgl_gc_failed()) return 0;
++		unsigned int timeout = 100000;
++		res = sceKernelWaitSema(gc_mutex[1], 1, &timeout);
++		if (res != (int)SCE_KERNEL_ERROR_WAIT_TIMEOUT) break;
++	}
++	if (res < 0) {
++		gc_failure("take credit", res);
++		return 0;
++	}
++	if (vgl_gc_failed()) {
++		gc_return_credit();
++		return 0;
++	}
++	// Every submitted bucket job is counted, including pre-ready legacy retries.
++	uint32_t target = __atomic_add_fetch(&gc_requested, 1, __ATOMIC_RELAXED);
++	res = sceKernelSignalSema(gc_mutex[0], 1);
++	if (res < 0) {
++		gc_failure("post request", res);
++		gc_return_credit();
++		return 0;
++	}
++	if (ticket) *ticket = target;
++	return 1;
++}
++
++static void gc_publish_completion(void) {
++	if (gc_return_credit())
++		__atomic_add_fetch(&gc_completed, 1, __ATOMIC_RELEASE);
++}
++
++static void gc_mark_ready(int started) {
++	if (gc_mutex[0] < 0)
++		gc_failure("create request semaphore", gc_mutex[0]);
++	else if (gc_mutex[1] < 0)
++		gc_failure("create credit semaphore", gc_mutex[1]);
++	else if (started < 0)
++		gc_failure("start worker", started);
++	else if (!vgl_gc_failed())
++		__atomic_store_n(&gc_ready, 1, __ATOMIC_RELEASE);
++}
++
++int vgl_gc_retry_pause(void) {
++	if (vgl_gc_failed()) return 0;
++	int res = sceKernelDelayThread(1000000);
++	if (res < 0) gc_failure("delayed retry", res);
++	return !vgl_gc_failed();
++}
++
++// 0: synchronization failure; 1: legacy delayed collection; 2: acknowledged.
++int vgl_gc_recover(void) {
++	// Allocations can fail before init_gxm has created a queue or a worker.
++	if (!__atomic_load_n(&gc_ready, __ATOMIC_ACQUIRE))
++		return vgl_gc_retry_pause() ? 1 : 0;
++	uint32_t target;
++	if (!gc_enqueue(&target)) return 0;
++	while (!vgl_gc_failed()) {
++		uint32_t done = __atomic_load_n(&gc_completed, __ATOMIC_ACQUIRE);
++		// Credits plus one unpublished completion bound the distance well below
++		// half the sequence space, including when the counter wraps through zero.
++		// This counts completed bucket advances, not ownership of a GC request.
++		if ((uint32_t)(done - target) < UINT32_C(0x80000000)) return 2;
++		int res = sceKernelDelayThread(1000);
++		if (res < 0) gc_failure("completion wait", res);
++	}
++	return 0;
++}
++
++#endif
+diff --git a/source/utils/gpu_utils.c b/source/utils/gpu_utils.c
+index 6ae72c0..c27b179 100644
+--- a/source/utils/gpu_utils.c
++++ b/source/utils/gpu_utils.c
+@@ -155,55 +155,54 @@ static inline __attribute__((always_inline)) uint32_t vgl_cache_old_textures(siz
+ #endif
+ 
+ int unsafe_allocator_counter = 0;
+-void *gpu_alloc_mapped_aligned_unsafe_for_cpu(size_t alignment, size_t size) {
++// (Strikers port, a9c11e0) Allocation recovery waits for the collector to finish a cycle (gc_recovery.h) instead of sleeping
++// one second per attempt; the CPU and GPU variants share one body.
++static void *gpu_alloc_mapped_aligned_recover(size_t alignment, size_t size, GLboolean for_gpu) {
++	if (vgl_gc_failed()) return NULL;
+ 	// Performing a garbage collection cycle prior to attempting to allocate the memory again
+ 	unsafe_allocator_counter++;
+ 	if (unsafe_allocator_counter == 1) {
+-		glFinish();
++		if (for_gpu) {
++			// glFinish can recursively allocate the depth surface being recovered.
++			sceGxmFinish(gxm_context);
++		} else {
++			glFinish();
++		}
+ 	}
++	// A nested depth allocation may have failed through the void glFinish call.
++	if (vgl_gc_failed()) return NULL;
++	int collected = 1;
+ #if defined(HAVE_SINGLE_THREADED_GC) && !defined(HAVE_PTHREAD)
+ 	garbage_collector(0, NULL);
+ #else
+-	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+-	sceKernelSignalSema(gc_mutex[0], 1);
+-	sceKernelDelayThread(1000000);
++	collected = vgl_gc_recover();
++	if (!collected) return NULL;
+ #endif
+ 
+ 	// Allocating requested memblock
+-	void *res = gpu_alloc_mapped_aligned_for_cpu_inner(alignment, size);
++	if (vgl_gc_failed()) return NULL;
++	void *res = for_gpu ? gpu_alloc_mapped_aligned_for_gpu_inner(alignment, size)
++	                   : gpu_alloc_mapped_aligned_for_cpu_inner(alignment, size);
+ 
+ 	// Iterating for as many as possible max pending garbage collector cycles
+ 	if (!res && unsafe_allocator_counter < FRAME_PURGE_FREQ) {
+-		res = gpu_alloc_mapped_aligned_unsafe_for_cpu(alignment, size);
++		res = gpu_alloc_mapped_aligned_recover(alignment, size, for_gpu);
+ 	}
+ 
++	// Inspect all retired buckets promptly. If none suffices, retain the legacy
++	// waiting opportunities for other threads to release shared-heap memory.
++	if (!res && collected == 2 && vgl_gc_retry_pause())
++		res = for_gpu ? gpu_alloc_mapped_aligned_for_gpu_inner(alignment, size)
++		              : gpu_alloc_mapped_aligned_for_cpu_inner(alignment, size);
+ 	return res;
+ }
+ 
+-void *gpu_alloc_mapped_aligned_unsafe_for_gpu(size_t alignment, size_t size) {
+-	// Performing a garbage collection cycle prior to attempting to allocate the memory again
+-	unsafe_allocator_counter++;
+-	if (unsafe_allocator_counter == 1) {
+-		// Ideally we'd want glFinish here, but this would cause a circular dependency if the allocation failing is related to a depthstencil surface allocation
+-		sceGxmFinish(gxm_context);
+-	}
+-#if defined(HAVE_SINGLE_THREADED_GC) && !defined(HAVE_PTHREAD)
+-	garbage_collector(0, NULL);
+-#else
+-	sceKernelWaitSema(gc_mutex[1], 1, NULL);
+-	sceKernelSignalSema(gc_mutex[0], 1);
+-	sceKernelDelayThread(1000000);
+-#endif
+-
+-	// Allocating requested memblock
+-	void *res = gpu_alloc_mapped_aligned_for_gpu_inner(alignment, size);
+-
+-	// Iterating for as many as possible max pending garbage collector cycles
+-	if (!res && unsafe_allocator_counter < FRAME_PURGE_FREQ) {
+-		res = gpu_alloc_mapped_aligned_unsafe_for_gpu(alignment, size);
+-	}
++void *gpu_alloc_mapped_aligned_unsafe_for_cpu(size_t alignment, size_t size) {
++	return gpu_alloc_mapped_aligned_recover(alignment, size, GL_FALSE);
++}
+ 
+-	return res;
++void *gpu_alloc_mapped_aligned_unsafe_for_gpu(size_t alignment, size_t size) {
++	return gpu_alloc_mapped_aligned_recover(alignment, size, GL_TRUE);
+ }
+ 
+ void *gpu_alloc_mapped_aligned_for_cpu(size_t alignment, size_t size) {

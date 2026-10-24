@@ -1,0 +1,75 @@
+#include "Game/Enemy/WalkerStateBindStarPointer.hpp"
+#include "Game/Enemy/AnimScaleController.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Util/ActorMovementUtil.hpp"
+#include "Game/Util/EffectUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/NerveUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+#include "Game/Util/StarPointerUtil.hpp"
+
+namespace {
+    static const s32 sPointCanceBindTime = 5;
+};  // namespace
+
+namespace NrvWalkerStateBindStarPointer {
+    NEW_NERVE(WalkerStateBindStarPointerNrvBind, WalkerStateBindStarPointer, Bind);
+};  // namespace NrvWalkerStateBindStarPointer
+
+WalkerStateBindStarPointer::WalkerStateBindStarPointer(LiveActor* pHost, AnimScaleController* pController)
+    : ActorStateBase("\x95\xe0\x8d\x73\x8c\x5e\x83\x58\x83\x5e\x81\x5b\x83\x7c\x83\x43\x83\x93\x83\x5e\x8d\x53\x91\xa9", pHost), mScaleController(pController), mUpdateCounter(0), mHasEffect(false) {
+    initNerve(GET_NERVE(WalkerStateBindStarPointer, WalkerStateBindStarPointerNrvBind));
+
+    if (!MR::isRegisteredEffect(pHost, "Touch")) {
+        mHasEffect = true;
+        MR::addEffect(pHost, "PointerTouch");
+    }
+}
+
+void WalkerStateBindStarPointer::appear() {
+    mIsDead = false;
+    setNerve(GET_NERVE(WalkerStateBindStarPointer, WalkerStateBindStarPointerNrvBind));
+}
+
+void WalkerStateBindStarPointer::kill() {
+    mIsDead = true;
+    if (mScaleController != nullptr) {
+        mScaleController->startAnim();
+    }
+
+    MR::deleteEffect(getHost(), mHasEffect ? "PointerTouch" : "Touch");
+    if (MR::isExistBck(getHost(), nullptr)) {
+        MR::setBckRate(getHost(), 1.0f);
+    }
+}
+
+bool WalkerStateBindStarPointer::tryStartPointBind() const {
+    return MR::isStarPointerPointing2POnPressButton(getHost(), "\x8e\xe3", true, false);
+}
+
+void WalkerStateBindStarPointer::exeBind() {
+    if (MR::isFirstStep(this)) {
+        MR::startDPDHitSound();
+        mUpdateCounter = 0;
+        MR::emitEffect(getHost(), mHasEffect ? "PointerTouch" : "Touch");
+        if (MR::isExistBck(getHost(), nullptr)) {
+            MR::setBckRate(getHost(), 0.0f);
+        }
+
+        if (mScaleController != nullptr) {
+            mScaleController->startDpdHitVibration();
+        }
+    }
+
+    MR::startDPDFreezeLevelSound(getHost());
+    MR::zeroVelocity(getHost());
+    if (MR::isStarPointerPointing2POnPressButton(getHost(), "\x8e\xe3", true, false)) {
+        mUpdateCounter = 0;
+    } else {
+        mUpdateCounter++;
+    }
+
+    if (mUpdateCounter > ::sPointCanceBindTime) {
+        kill();
+    }
+}

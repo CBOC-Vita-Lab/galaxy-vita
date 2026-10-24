@@ -1,0 +1,36 @@
+Super Mario Galaxy Vita 1.0
+===========================
+
+Thanks for trying Super Mario Galaxy on your PS Vita. It runs natively, not in an
+emulator, and it was built to feel at home on the Vita: touch to point, rear
+touch to aim, tilt to steer, and a button to spin.
+
+What You Need
+-------------
+- A PS Vita with homebrew (VitaShell)
+- About 2.5 GB free on the memory card
+- Your own Super Mario Galaxy disc image (Wii, USA, RMGE01)
+- libshacccg.suprx set up on the Vita (once)
+
+Easy Install
+------------
+Use CBOC Vita Installer: pick Super Mario Galaxy, choose your disc image,
+press Install. https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest
+
+Manual Install
+--------------
+1. Prepare your game files from your disc image (PREPARE-GAME.md).
+2. Copy them to ux0:data/smg/game/ on the Vita.
+3. Copy Galaxy-Vita.vpk to the Vita.
+4. Install it in VitaShell and launch the bubble.
+
+Updating
+--------
+Install the new VPK over the old one. Your saves and settings stay.
+
+Have Fun
+--------
+Controls:     CONTROLS.md
+What's new:   CHANGELOG.md
+Known issues: KNOWN-ISSUES.md
+Project page: https://github.com/CBOC-Vita-Lab/galaxy-vita

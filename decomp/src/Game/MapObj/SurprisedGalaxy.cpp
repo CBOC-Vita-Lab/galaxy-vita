@@ -1,0 +1,110 @@
+#include "Game/MapObj/SurprisedGalaxy.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Util/ActorSensorUtil.hpp"
+#include "Game/Util/ActorSwitchUtil.hpp"
+#include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/EventUtil.hpp"
+#include "Game/Util/JMapUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/ModelUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
+#include "Game/Util/SequenceUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+
+namespace NrvSurprisedGalaxy {
+    NEW_NERVE(SurprisedGalaxyNrvExit, SurprisedGalaxy, Exit);
+    NEW_NERVE(SurprisedGalaxyNrvWait, SurprisedGalaxy, Wait);
+};  // namespace NrvSurprisedGalaxy
+
+SurprisedGalaxy::SurprisedGalaxy(const char* pName) : LiveActor(pName) {
+}
+
+void SurprisedGalaxy::init(const JMapInfoIter& rIter) {
+    const char* objName;
+    MR::getObjectName(&objName, rIter);
+
+    if (strcmp(objName, "SurprisedGalaxy") == 0) {
+        mGalaxyName = "SurfingLv1Galaxy";
+    } else {
+        mGalaxyName = &objName[strlen("Surp")];
+    }
+
+    MR::initDefaultPos(this, rIter);
+    initModelManagerWithAnm("MiniSurprisedGalaxy", nullptr, false);
+    MR::connectToSceneMapObj(this);
+    f32 boundingRadius = 0.0f;
+    MR::calcModelBoundingRadius(&boundingRadius, this);
+    initHitSensor(1);
+    MR::addHitSensorMapObj(this, "Body", 8, boundingRadius, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::setClippingFar200m(this);
+    initNerve(GET_NERVE(SurprisedGalaxy, SurprisedGalaxyNrvWait));
+    MR::useStageSwitchSleep(this, rIter);
+    MR::startAction(this, "MiniSurprisedGalaxy");
+    MR::registerDemoSimpleCastAll(this);
+
+    if (MR::useStageSwitchReadAppear(this, rIter)) {
+        makeActorDead();
+        MR::syncStageSwitchAppear(this);
+    } else {
+        makeActorAppeared();
+
+        if (MR::isGalaxyAppearGreenDriver(mGalaxyName)) {
+            if (!MR::isOnGameEventFlagGreenDriver()) {
+                makeActorDead();
+            }
+        } else if (!MR::isOnGameEventFlagViewCompleteEndingMarioAndLuigi()) {
+            makeActorDead();
+        }
+    }
+}
+
+void SurprisedGalaxy::appear() {
+    LiveActor::appear();
+}
+
+void SurprisedGalaxy::kill() {
+    LiveActor::kill();
+}
+
+void SurprisedGalaxy::attackSensor(HitSensor* pSender, HitSensor* pReceiver) {
+    if (MR::isSensorPlayerOrRide(pReceiver)) {
+        if (!isNerve(GET_NERVE(SurprisedGalaxy, SurprisedGalaxyNrvExit))) {
+            setNerve(GET_NERVE(SurprisedGalaxy, SurprisedGalaxyNrvExit));
+        }
+    }
+}
+
+void SurprisedGalaxy::exeExit() {
+    if (MR::isFirstStep(this)) {
+        MR::submitTrigSE();
+        MR::closeSystemWipeWhiteFade();
+        MR::stopStageBGM(90);
+        MR::stopSubBGM(90);
+        MR::tryStartDemo(this, "\x83\x4d\x83\x83\x83\x89\x83\x4e\x83\x56\x81\x5b\x88\xda\x93\xae");
+    }
+
+    if (MR::isSystemWipeActive()) {
+        return;
+    }
+
+    MR::onGameEventFlagGalaxyOpen(mGalaxyName);
+    MR::endDemo(this, "\x83\x4d\x83\x83\x83\x89\x83\x4e\x83\x56\x81\x5b\x88\xda\x93\xae");
+    MR::permitTrigSE();
+    MR::requestStartScenarioSelect(mGalaxyName);
+}
+
+void SurprisedGalaxy::exeWait() {
+}
+
+bool SurprisedGalaxy::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pReceiver) {
+    switch (msg) {
+    case ACTMES_IS_RUSH_TAKEOVER:
+        if (isNerve(GET_NERVE(SurprisedGalaxy, SurprisedGalaxyNrvWait))) {
+            setNerve(GET_NERVE(SurprisedGalaxy, SurprisedGalaxyNrvExit));
+        }
+        return false;
+    default:
+        return false;
+    }
+}

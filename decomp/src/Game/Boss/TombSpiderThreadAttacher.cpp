@@ -1,0 +1,31 @@
+#include "Game/Boss/TombSpiderThreadAttacher.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/MapObj/SpiderThread.hpp"
+#include "Game/Util/JointUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/ObjUtil.hpp"
+
+namespace NrvTombSpiderThreadAttacher {
+    NEW_NERVE(TombSpiderThreadAttacherNrvFree, TombSpiderThreadAttacher, Free);
+    NEW_NERVE(TombSpiderThreadAttacherNrvAttach, TombSpiderThreadAttacher, Attach);
+};  // namespace NrvTombSpiderThreadAttacher
+
+TombSpiderThreadAttacher::TombSpiderThreadAttacher(LiveActor* pActor, const char* pJointName, f32 radius, f32 offset)
+    : LiveActor("\x91\x83\x82\xcc\x95\x74\x92\x85\x93\x5f"), mJointMtx(nullptr), mRadius(radius), mZOffset(offset) {
+    mJointMtx = MR::getJointMtx(pActor, pJointName);
+}
+
+void TombSpiderThreadAttacher::init(const JMapInfoIter& rIter) {
+    MR::connectToSceneEnemyMovement(this);
+    initNerve(GET_NERVE(TombSpiderThreadAttacher, TombSpiderThreadAttacherNrvFree));
+    MR::invalidateClipping(this);
+    makeActorDead();
+}
+
+void TombSpiderThreadAttacher::exeFree() {
+    TVec3f pos(mJointMtx[0][3], mJointMtx[1][3], mJointMtx[2][3] - mZOffset);
+    MR::tryPushSpiderThread(pos, mRadius);
+}
+
+void TombSpiderThreadAttacher::exeAttach() {
+}

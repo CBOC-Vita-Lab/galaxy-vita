@@ -1,0 +1,9 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates clang lld llvm cmake ninja-build make python3 \
+    p7zip-full libegl1-mesa-dev libgles2-mesa-dev libgl1-mesa-dri \
+    libsdl2-dev libjpeg-dev libpng-dev curl git libssl-dev libbz2-dev \
+    libc++-dev libc++abi-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

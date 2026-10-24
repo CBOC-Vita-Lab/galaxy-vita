@@ -1,0 +1,56 @@
+# Archives (ObjectData/<name>.arc) whose model textures go into the HD pack.
+# Scope (the maintainer, 23 Oct 2026): Mario, the main characters and the key items that are on screen
+# most of the time; nothing else. The Low/Middle LOD models are left out: they are only drawn
+# far away, where a larger texture cannot show.
+# Rules applied to every texture (build_pack.py): colour formats only (CMPR, RGB565, RGB5A3,
+# RGBA8, C4/C8/C14X2); intensity formats (I4/I8/IA4/IA8: environment, highlight, noise,
+# indirect and mask maps, smooth by design) are skipped, as are names matching EXCLUDE_NAMES
+# and textures smaller than 16x16.
+# Optional second column: a regular expression the texture name must match.
+
+# Mario and his forms (Fire Mario is MarioBody.2 / MarioCap.2 of mario.bdl; Ice Mario and
+# Spring Mario have intensity textures only)
+Mario
+MarioHair
+BeeMario
+TeresaMario
+InvincibleMarioMat
+SpinTico
+# Luigi (playable and NPC)
+Luigi
+LuigiNPC
+BeeLuigi
+TeresaLuigi
+# Peach, Rosalina, Lumas, Toads
+Peach
+PeachHair
+Rosetta
+RosettaReading
+Tico
+TicoFat
+TicoShop
+TicoComet
+TicoBaby
+Kinopio
+Kinopi
+# Bowser, Bowser Jr.
+Koopa
+KoopaJr
+# Key items (Star Bits, coins and the Grand Star have no colour textures: their colour is
+# vertex colour and TEV, their textures are highlight / environment maps)
+PowerStar
+GrandStar
+StarPiece
+Coin
+PurpleCoin
+KinokoOneUp
+KinokoLifeUp
+PowerUpLife
+SuperSpinDriver
+SpinDriver
+PowerUpBee
+PowerUpFire
+PowerUpIce
+PowerUpTeresa
+PowerUpHopper
+PowerUpInvincible

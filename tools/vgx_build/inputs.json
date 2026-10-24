@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "scope": "Files the build needs from VGL_DEPS (tools/vitagl/build-release.sh makes that folder) and from VITASDK. Their versions are recorded in docs/SOURCE.md.",
+  "dependencies": [
+    "lib/libvitaGL.a",
+    "lib/libvitashark.a",
+    "lib/libSceShaccCgExt.a",
+    "lib/libmathneon.a",
+    "lib/libtaihen_stub.a",
+    "lib/libkubridge_stub.a",
+    "include/vitaGL.h",
+    "include/vitashark.h",
+    "include/shacccg_ext.h",
+    "include/math_neon.h",
+    "include/taihen.h",
+    "include/kubridge.h"
+  ],
+  "sdk": [
+    "bin/arm-vita-eabi-g++",
+    "bin/arm-vita-eabi-ld",
+    "bin/vita-elf-create",
+    "bin/vita-make-fself",
+    "share/vita.toolchain.cmake",
+    "share/vita.cmake"
+  ]
+}

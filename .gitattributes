@@ -1,0 +1,7 @@
+# Shell scripts keep LF line endings on every platform (bash rejects CRs).
+*.sh text eol=lf
+# Binary data: never converted.
+*.bcsv binary
+*.png binary
+*.jpg binary
+*.ttf binary

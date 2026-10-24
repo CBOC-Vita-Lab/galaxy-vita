@@ -1,0 +1,224 @@
+#include "Game/NPC/ButlerMap.hpp"
+#include "Game/Demo/AstroDemoFunction.hpp"
+#include "Game/LiveActor/Nerve.hpp"
+#include "Game/Map/SphereSelector.hpp"
+#include "Game/NPC/ButlerStateStarPieceReaction.hpp"
+#include "Game/NPC/TalkMessageCtrl.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"
+#include "Game/Screen/GalaxyMapController.hpp"
+#include "Game/Util/ActorSensorUtil.hpp"
+#include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/EffectUtil.hpp"
+#include "Game/Util/EventUtil.hpp"
+#include "Game/Util/JMapUtil.hpp"
+#include "Game/Util/JointUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/NPCUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+#include "Game/Util/TalkUtil.hpp"
+
+void ButlerMap_FORCE_MATCH_SDATA2() {
+    (void)0.0f;
+}
+
+namespace {
+    const char* cDemoNameMapLecture = "\x83\x6f\x83\x67\x83\x89\x81\x5b\x83\x7d\x83\x62\x83\x76\x83\x8c\x83\x4e\x83\x60\x83\x83\x81\x5b";
+};  // namespace
+
+namespace NrvButlerMap {
+    NEW_NERVE(ButlerMapNrvTalk, ButlerMap, Talk);
+    NEW_NERVE(ButlerMapNrvShowGalaxyMap, ButlerMap, ShowGalaxyMap);
+    NEW_NERVE(ButlerMapNrvLectureDemoShowMapBefore, ButlerMap, LectureDemoShowMapBefore);
+    NEW_NERVE(ButlerMapNrvLectureDemoShowMap, ButlerMap, LectureDemoShowMap);
+    NEW_NERVE(ButlerMapNrvLectureDemoShowMapAfter, ButlerMap, LectureDemoShowMapAfter);
+    NEW_NERVE(ButlerMapNrvStarPieceReaction, ButlerMap, StarPieceReaction);
+};  // namespace NrvButlerMap
+
+ButlerMap::ButlerMap(const char* pName) : NPCActor(pName), mStateStarPieceReaction(), mObjArg0() {
+}
+
+void ButlerMap::init(const JMapInfoIter& rIter) {
+    MR::getJMapInfoArg0NoInit(rIter, &mObjArg0);
+
+    NPCActorCaps caps("ButlerMap");
+    caps.mObjectName = "Butler";
+    caps.setDefault();
+    caps.mTalkNerve = GET_NERVE(ButlerMap, ButlerMapNrvTalk);
+    caps.mSensorJoint = "Body";
+    caps.mSensorOffset.x = 0.0f;
+    caps.mSensorOffset.y = 0.0f;
+    caps.mSensorOffset.z = 0.0f;
+    caps.mUseShadow = true;
+    caps.mBinder = false;
+    NPCActor::initialize(rIter, caps);
+    setDefaults2();
+    _13C = "Spin";
+    const char* wait = "Wait";
+    const char* talk = "Talk";
+    mParam._14 = wait;
+    mParam._18 = wait;
+    mParam._1C = talk;
+    mParam._20 = talk;
+    MR::createSceneObj(SceneObj_GalaxyMapController);
+    MR::tryRegisterDemoCast(this, rIter);
+    MR::tryRegisterDemoCast(this, "\x83\x6f\x83\x67\x83\x89\x81\x5b\x95\xf1\x8d\x90", rIter);
+    TVec3f vec;
+    const char* demoNameMapLecture = ::cDemoNameMapLecture;
+    vec.setPSZeroVec();
+    if (MR::tryInitDemoSheetTalkAnim(
+            this, rIter, demoNameMapLecture, "DemoButlerMapLecture",
+            MR::createTalkCtrlDirectOnRootNodeAutomatic(this, rIter, "AstroGalaxy_ButlerMap001", vec, MR::getJointMtx(this, "Body")))) {
+        const char* demoNameMapLecture = ::cDemoNameMapLecture;
+        const MR::FunctorBase& func = MR::Functor(this, &ButlerMap::startLectureDemo);
+        MR::registerDemoActionFunctorDirect(this, func, demoNameMapLecture, "\x8a\x4a\x8e\x6e");
+        MR::registerDemoActionFunctorDirect(this, MR::Functor(this, &ButlerMap::resetStatus), demoNameMapLecture, "\x83\x6f\x83\x67\x83\x89\x81\x5b\x83\x8a\x83\x5a\x83\x62\x83\x67");
+    }
+
+    AstroDemoFunction::tryRegisterGrandStarReturnAndSimpleCast(this, rIter);
+    AstroDemoFunction::tryRegisterDemo(this, "\x83\x6f\x83\x67\x83\x89\x81\x5b\x83\x4f\x83\x8a\x81\x5b\x83\x93\x83\x68\x83\x89\x83\x43\x83\x6f\x90\xe0\x96\xbe", rIter);
+
+    if (mObjArg0) {
+        SphereSelectorFunction::registerTarget(this);
+    }
+
+    mStateStarPieceReaction = new ButlerStateStarPieceReaction(this, rIter, "AstroGalaxy_Butler000");
+    mStateStarPieceReaction->init();
+
+    if (MR::isButlerMapAppear()) {
+        makeActorAppeared();
+    } else {
+        makeActorDead();
+    }
+}
+
+void ButlerMap::appear() {
+    if (MR::isButlerMapAppear()) {
+        MR::setDefaultPose(this);
+        LiveActor::appear();
+        forceNerveToWait();
+    }
+}
+
+void ButlerMap::kill() {
+    if (!MR::isDead(this)) {
+        MR::forceDeleteEffectAll(this);
+        NPCActor::kill();
+    }
+}
+
+void ButlerMap::startLectureDemo() {
+    MR::invalidateClipping(this);
+    LiveActor::appear();
+    setNerve(GET_NERVE(ButlerMap, ButlerMapNrvLectureDemoShowMapBefore));
+}
+
+void ButlerMap::resetStatus() {
+    MR::setDefaultPose(this);
+    MR::startBckNoInterpole(this, "Wait");
+}
+
+void ButlerMap::control() {
+    if (_D8) {
+        MR::startSound(this, "SE_SM_NPC_TRAMPLED");
+        MR::startSound(this, "SE_SV_BUTLER_TRAMPLED");
+    }
+
+    if (NPCActor::isPointingSe()) {
+        MR::startDPDHitSound();
+        MR::startSound(this, "SE_SV_BUTLER_POINT");
+    }
+
+    NPCActor::control();
+}
+
+bool ButlerMap::receiveMsgPlayerAttack(u32 msg, HitSensor* pSender, HitSensor* pReceiver) {
+    if (MR::isMsgLockOnStarPieceShoot(msg)) {
+        return true;
+    }
+
+    if (MR::isMsgStarPieceReflect(msg)) {
+        return false;
+    }
+
+    if (MR::isMsgStarPieceAttack(msg)) {
+        if (isNerve(mWaitNerve) || isNerve(GET_NERVE(ButlerMap, ButlerMapNrvStarPieceReaction))) {
+            setNerve(GET_NERVE(ButlerMap, ButlerMapNrvStarPieceReaction));
+        }
+
+        return true;
+    }
+
+    return NPCActor::receiveMsgPlayerAttack(msg, pSender, pReceiver);
+}
+
+bool ButlerMap::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pReceiver) {
+    if (SphereSelectorFunction::trySyncKillMsgSelectStart(this, msg)) {
+        return true;
+    }
+
+    return MR::isMsgHitmarkEmit(msg);
+}
+
+void ButlerMap::forceNerveToWait() {
+    if (!NPCActor::isEmptyNerve()) {
+        NPCActor::popNerve();
+    }
+
+    setNerve(mWaitNerve);
+}
+
+void ButlerMap::exeShowGalaxyMap() {
+    if (MR::isFirstStep(this)) {
+        if (mObjArg0) {
+            MR::startGalaxyMapLayout();
+        } else {
+            MR::startAstroMapLayout();
+        }
+    } else {
+        forceNerveToWait();
+    }
+}
+
+void ButlerMap::exeLectureDemoShowMap() {
+    if (MR::isFirstStep(this)) {
+        MR::startAstroMapLayoutForNewDomeDiscover();
+        MR::forceOpenWipeFade();
+    } else {
+        setNerve(GET_NERVE(ButlerMap, ButlerMapNrvLectureDemoShowMapAfter));
+    }
+}
+
+void ButlerMap::exeLectureDemoShowMapAfter() {
+    if (MR::isFirstStep(this)) {
+        MR::resumeTimeKeepDemo(this);
+    }
+
+    if (!MR::isTimeKeepDemoActive()) {
+        MR::validateClipping(this);
+        forceNerveToWait();
+    }
+}
+
+void ButlerMap::exeStarPieceReaction() {
+    if (MR::isFirstStep(this)) {
+        mStateStarPieceReaction->appear();
+    }
+
+    if (mStateStarPieceReaction->update()) {
+        forceNerveToWait();
+    }
+}
+
+void ButlerMap::exeTalk() {
+    if (MR::tryTalkNearPlayerAtEndAndStartTalkAction(this)) {
+        setNerve(GET_NERVE(ButlerMap, ButlerMapNrvShowGalaxyMap));
+    }
+}
+
+void ButlerMap::exeLectureDemoShowMapBefore() {
+    if (MR::isDemoPartLastStep("\x83\x7d\x83\x62\x83\x76\x95\x5c\x8e\xa6\x8a\x4a\x8e\x6e")) {
+        MR::pauseTimeKeepDemo(this);
+        setNerve(GET_NERVE(ButlerMap, ButlerMapNrvLectureDemoShowMap));
+    }
+}

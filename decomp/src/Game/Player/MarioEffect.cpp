@@ -1,0 +1,1306 @@
+#include "Game/Player/MarioEffect.hpp"
+#include "Game/Effect/MultiEmitter.hpp"
+#include "Game/Effect/ParticleEmitter.hpp"
+#include "Game/LiveActor/EffectKeeper.hpp"
+#include "Game/LiveActor/ModelObj.hpp"
+#include "Game/Map/HitInfo.hpp"
+#include "Game/Player/Mario.hpp"
+#include "Game/Player/MarioActor.hpp"
+#include "Game/Player/MarioSwim.hpp"
+#include "Game/Util/AreaObjUtil.hpp"
+#include "Game/Util/DemoUtil.hpp"
+#include "Game/Util/EffectUtil.hpp"
+#include "Game/Util/EventUtil.hpp"
+#include "Game/Util/HashUtil.hpp"
+#include "Game/Util/JointUtil.hpp"
+#include "Game/Util/LiveActorUtil.hpp"
+#include "Game/Util/MapUtil.hpp"
+#include "Game/Util/MathUtil.hpp"
+#include "Game/Util/MtxUtil.hpp"
+#include "Game/Util/SoundUtil.hpp"
+#include <JSystem/JParticle/JPAEmitter.hpp>
+#include <JSystem/JParticle/JPAMath.hpp>
+#include <cstdio>
+#include <cstring>
+
+struct MaterialEffectEntry {
+    union FlagWord {
+        u32 mWord;
+        struct {
+            u8 mByte0;
+            u8 mByte1;
+            u8 mByte2;
+            u8 mByte3;
+        };
+    };
+
+    /* 0x00 */ const char* mName;
+    /* 0x04 */ FlagWord mFlag;
+    /* 0x08 */ const char* mEffects[7];
+    /* 0x24 */ const char* mCurrent;
+    /* 0x28 */ MultiEmitter* mEmitter;
+};
+
+struct SmokeEffectEntry {
+    union FlagWord {
+        u32 mWord;
+        struct {
+            u8 mByte0;
+            u8 mByte1;
+            u8 mByte2;
+            u8 mByte3;
+        };
+    };
+
+    /* 0x00 */ const char* mName;
+    /* 0x04 */ FlagWord mType;
+    /* 0x08 */ f32 mScale;
+    /* 0x0C */ f32 mRate;
+    /* 0x10 */ FlagWord mFlags;
+    /* 0x14 */ u16 mInterval;
+    /* 0x16 */ u16 mTimer;
+    /* 0x18 */ u32 mHash;
+    /* 0x1C */ MultiEmitter* mEmitter;
+    /* 0x20 */ u8 mMaterial;
+    /* 0x21 */ u8 _21[3];
+};
+
+MaterialEffectEntry cMaterialEffectTable[] = {
+    {"\x91\xae\x90\xab\x90\x4b\x83\x68\x83\x8d\x83\x62\x83\x76",
+     0x00000000,
+     {"HipDropSmoke", "HipDropWater", "HipDropFlower", "HipDropSand", "HipDropSnow", "MudCircle", "HoneyCircle"},
+     nullptr,
+     nullptr},
+    {"\x91\xae\x90\xab\x83\x6e\x83\x60\x95\x97", 0x03000000, {"Hovering", "HoveringWater", "Hovering", "Hovering", "Hovering", "Hovering", "Hovering"}, nullptr, nullptr},
+    {"\x91\xae\x90\xab\x83\x58\x83\x73\x83\x93", 0x00000000, {nullptr, "WaterSpin", "FlowerSpin", "SandSpin", "SnowSpin", "MudCircle", "HoneyCircle"}, nullptr, nullptr},
+    {"\x91\xae\x90\xab\x83\x58\x83\x65\x81\x5b\x83\x57\x83\x43\x83\x93",
+     0x00000000,
+     {"StageStartGroundSmoke", nullptr, nullptr, "StageStartGroundSand", nullptr, nullptr, nullptr},
+     nullptr,
+     nullptr},
+    {nullptr, 0, {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr}, nullptr, nullptr}};
+
+namespace {
+
+    void addMarioEffectAtJoint(LiveActor* pActor, const char* pEffectName, const char* pJointName, const char* pGroupName) NO_INLINE {
+        MtxPtr mtx = pJointName != nullptr ? MR::getJointMtx(pActor, pJointName) : pActor->getBaseMtx();
+        pActor->mEffectKeeper->registerEffect(pEffectName, mtx, &pActor->mScale, pGroupName, pJointName);
+    }
+
+};  // namespace
+
+void MarioEffect::execute(JPABaseEmitter* pEmitter) {
+    s32 idx = 0;
+    for (s32 i = 0; i < 256; i++) {
+        if (_54[i]._68 == pEmitter) {
+            break;
+        }
+
+        idx++;
+    }
+
+    updateFollowMtx(&_54[idx]);
+}
+
+JPABaseEmitter* MarioEffect::addRequest(const char* pEffectName, MtxPtr pMtx) {
+    u32 requestIndex = 0;
+    for (; requestIndex < 256; requestIndex++) {
+        if (_54[requestIndex]._68 == nullptr) {
+            break;
+        }
+    }
+
+    if (requestIndex == 256) {
+        requestIndex = 0;
+        for (s32 i = 1; i < 256; i++) {
+            if (_54[i]._0 > _54[requestIndex]._0) {
+                requestIndex = i;
+            }
+        }
+    }
+
+    MovingFollowMtx* target = &_54[requestIndex];
+
+    MultiEmitter* emitter = MR::emitEffectWithEmitterCallBack(mActor, pEffectName, this);
+    if (emitter->getParticleEmitter(0) == nullptr) {
+        return nullptr;
+    }
+
+    JPABaseEmitter* baseEmitter = emitter->getParticleEmitter(0)->mEmitter;
+    target->_68 = baseEmitter;
+
+    for (s32 i = 0; i < 256; i++) {
+        if (requestIndex != i && _54[i]._68 == target->_68) {
+            _54[i]._68 = nullptr;
+        }
+    }
+
+    target->_0 = 0;
+    target->_64 = pMtx;
+    return target->_68;
+}
+
+void MarioEffect::updateFollowMtx(MovingFollowMtx* pFollow) {
+    if (pFollow->_68->isEnableDeleteEmitter()) {
+        pFollow->_68 = nullptr;
+        return;
+    }
+
+    if (pFollow->_0 == 0) {
+        Mtx temp;
+        PSMTXCopy(_24, temp);
+
+        const TVec3f& rTrans = getTrans();
+        MR::setMtxTrans(temp, rTrans.x, rTrans.y, rTrans.z);
+
+        if (pFollow->_64 == nullptr) {
+            pFollow->_64 = reinterpret_cast< MtxPtr >(getPlayer()->getMoveBaseMtx());
+            if (pFollow->_64 == nullptr) {
+                return;
+            }
+        }
+
+        Mtx inv;
+        PSMTXInverse(pFollow->_64, inv);
+        MR::multMtx(pFollow->_4, temp, inv);
+        PSMTXCopy(temp, pFollow->_34);
+    } else {
+        MR::multMtx(pFollow->_34, pFollow->_4, pFollow->_64);
+    }
+
+    pFollow->_68->setGlobalRTMatrix(pFollow->_34);
+
+    pFollow->_0++;
+    if (pFollow->_0 == 2) {
+        pFollow->_68->playCalcEmitter();
+        pFollow->_68->becomeInvalidEmitter();
+    }
+}
+
+void MarioActor::initMaterialEffect() {
+    MaterialEffectEntry* entry = cMaterialEffectTable;
+    u32 entryCount = 0;
+    while (entry->mName != nullptr) {
+        for (u32 i = 0; i < 7; i++) {
+            if (entry->mEffects[i] == nullptr) {
+                continue;
+            }
+
+            if (!MR::isRegisteredEffect(this, entry->mEffects[i])) {
+                mEffectKeeper->registerEffectWithoutSRT(entry->mEffects[i], nullptr);
+            } else {
+                MR::setEffectHostSRT(this, entry->mEffects[i], nullptr, nullptr, nullptr);
+            }
+        }
+
+        entry->mCurrent = nullptr;
+        entryCount++;
+        entry->mEmitter = nullptr;
+        entry++;
+    }
+
+    _BA4 = new HashSortTable(entryCount);
+    entry = cMaterialEffectTable;
+    for (int i = 0; i < entryCount; i++) {
+        _BA4->add(cMaterialEffectTable[i].mName, reinterpret_cast< u32 >(&cMaterialEffectTable[i]), false);
+    }
+
+    _BA4->sort();
+}
+
+s32 MarioActor::getFloorMaterialIndex(u32 flags) const {
+    s32 materialIndex = 0;
+
+    if (mMarioEffect->_10 == 0) {
+        return 2;
+    }
+
+    if (_3A8 != 0) {
+        return 1;
+    }
+
+    s32 floor = mMario->_960;
+    if ((floor == 0x0D || floor == 0x1E) && !mMario->isCurrentFloorSand()) {
+        floor = mMario->_962;
+    }
+
+    if (mMario->isStatusActive(MarioStatus_Wall)) {
+        if (mMario->mMovementStates._8) {
+            floor = mMario->_964[0];
+        } else if (mMario->mMovementStates._19) {
+            floor = mMario->_964[1];
+        } else if (mMario->mMovementStates._1A) {
+            floor = mMario->_964[2];
+        }
+    }
+
+    if (mMario->mDrawStates.mIsUnderwater) {
+        floor = 0x17;
+    }
+
+    if (mMario->mDrawStates._13) {
+        floor = 0x17;
+    }
+
+    if (flags & 0x2) {
+        if (mMario->mDrawStates._1D) {
+            floor = 0x17;
+        }
+    }
+
+    if (mMario->_2D0 != 0.0f) {
+        floor = 0x1A;
+    }
+
+    if (mMario->isPlayerModeBee() && MR::isWallCodeNoAction(mMario->mGroundPolygon)) {
+        return -1;
+    }
+
+    switch (floor) {
+    case 0x14:
+    case 0x15:
+    case 0x16:
+    case 0x17:
+        materialIndex = 1;
+        break;
+    case 0x0E:
+    case 0x21:
+        return -1;
+    case 0x0D:
+    case 0x1E:
+        materialIndex = 3;
+        break;
+    case 0x1A:
+        materialIndex = 4;
+        break;
+    case 0x20:
+        materialIndex = 5;
+        if (strcmp(MR::getSoundCodeString(mMario->_45C), "Honey") == 0) {
+            materialIndex = 6;
+        }
+
+        break;
+    case 0x1B:
+    case 0x1C:
+        if (strcmp(MR::getSoundCodeString(mMario->_45C), "Sand") == 0) {
+            materialIndex = 3;
+        }
+
+        break;
+    default:
+        break;
+    }
+
+    if (mMario->mDrawStates.mIsUnderwater || mMario->mDrawStates._13) {
+        materialIndex = 1;
+    }
+
+    if (!mMario->mMovementStates._1) {
+        if (mMario->mSwim->_1B2 != 0) {
+            if (mMario->mSwim->_1B8 < 400.0f) {
+                materialIndex = 1;
+            }
+        }
+    }
+
+    return materialIndex;
+}
+
+MultiEmitter* MarioActor::playMaterialEffect(const char* pName) {
+    MaterialEffectEntry* entry = nullptr;
+    _BA4->search(pName, reinterpret_cast< u32* >(&entry));
+
+    const s32 materialIndex = getFloorMaterialIndex(entry->mFlag.mByte0);
+    if (materialIndex == -1) {
+        return nullptr;
+    }
+
+    const u32 materialOffset = static_cast< u32 >(materialIndex);
+    const char* effectName = entry->mEffects[materialOffset];
+    if (effectName == nullptr) {
+        return nullptr;
+    }
+
+    if (entry->mFlag.mByte0 == 1) {
+        const char* current = entry->mCurrent;
+        if (current != nullptr && current == effectName) {
+            return entry->mEmitter;
+        }
+    }
+
+    MultiEmitter* emitter = MR::emitEffect(this, effectName);
+
+    const char* current = entry->mCurrent;
+    if (current != nullptr && current != entry->mEffects[materialOffset]) {
+        MR::deleteEffect(this, current);
+    }
+
+    entry->mCurrent = entry->mEffects[materialOffset];
+    entry->mEmitter = emitter;
+
+    if (emitter != nullptr) {
+        MarioEffect* marioEffect = mMarioEffect;
+        if (marioEffect->_18) {
+            emitter->setGlobalPrmColor(marioEffect->_1C.r, marioEffect->_1C.g, marioEffect->_1C.b, -1);
+            emitter->setGlobalEnvColor(marioEffect->_20.r, marioEffect->_20.g, marioEffect->_20.b, -1);
+        } else {
+            emitter->setGlobalPrmColor(0xFF, 0xFF, 0xFF, -1);
+            emitter->setGlobalEnvColor(0xFF, 0xFF, 0xFF, -1);
+        }
+    }
+
+    return emitter;
+}
+
+void MarioActor::stopMaterialEffect(const char* pName) {
+    MaterialEffectEntry* entry = nullptr;
+    _BA4->search(pName, reinterpret_cast< u32* >(&entry));
+
+    if (entry->mCurrent != nullptr) {
+        MR::deleteEffect(this, entry->mCurrent);
+        entry->mCurrent = nullptr;
+        entry->mEmitter = nullptr;
+    }
+}
+
+SmokeEffectEntry cSmokeTable[] = {{"\x8b\xa4\x92\xca\x92\x85\x92\x6e\x95\x81\x92\xca", 0x08000000, 1.0f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x92\x85\x92\x6e\x91\xe5", 0x03000000, 1.5f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x95\xc7\x83\x57\x83\x83\x83\x93\x83\x76", 0x03000000, 1.0f, 1.0f, 0x00000300, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x8d\xbb\x89\x8c\x83\x8c\x83\x78\x83\x8b", 0x07000000, 0.65f, 1.0f, 0x00000000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x95\xc7\x8e\xe8\x8e\x43\x82\xe8", 0x01000000, 0.35f, 1.0f, 0x02010000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x95\xc7\x8f\xe3\x8f\xb8", 0x01000000, 1.0f, 1.0f, 0x00000200, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x58\x83\x8a\x83\x62\x83\x76\x8d\xe2", 0x02000000, 0.35f, 1.0f, 0x00010000, 2, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x58\x83\x8a\x83\x62\x83\x76\x8b\xf3\x93\x5d", 0x00000000, 1.0f, 1.0f, 0x00000000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x58\x83\x8a\x83\x62\x83\x76\x8d\xe2\x90\xa7\x93\xae", 0x02000000, 0.5f, 1.0f, 0x00000000, 2, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x95\xc7\x83\x71\x83\x62\x83\x67\x92\x85\x92\x6e", 0x03000000, 1.0f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x5f\x83\x81\x81\x5b\x83\x57\x92\x85\x92\x6e", 0x03000000, 1.0f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x92\x6e\x8f\xe3\x83\x58\x83\x73\x83\x93", 0x03000000, 0.9f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x75\x83\x8c\x81\x5b\x83\x4c", 0x02000000, 0.65f, 1.0f, 0x00010000, 15, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x6e\x83\x43\x83\x57\x83\x83\x83\x93\x83\x76", 0x02000000, 0.65f, 1.0f, 0x00010000, 6, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x83\x75\x83\x89\x83\x62\x83\x4e\x83\x7a\x81\x5b\x83\x8b", 0x01000000, 0.65f, 1.0f, 0x03030000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x88\xf8\x82\xab\x96\xdf\x82\xb5\x92\x85\x92\x6e", 0x03000000, 1.2f, 1.0f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x90\x85\x92\xea\x90\xda\x90\x47", 0x01000000, 6.0f, 0.5f, 0x00000400, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x92\xb5\x96\xf4", 0x08000000, 1.0f, 1.0f, 0x00000C00, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x82\xd0\x82\xb1\x82\xa4\x82\xab\x89\x5f", 0x03000000, 0.3f, 0.2f, 0x00010000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {"\x8b\xa4\x92\xca\x82\xd0\x82\xb1\x82\xa4\x82\xab\x83\x75\x81\x5b\x83\x58\x83\x67", 0x00000000, 2.0f, 1.0f, 0x00000000, 0, 0, 0, nullptr, 0, {0, 0, 0}},
+                                  {nullptr, 0, 0.0f, 0.0f, 0, 0, 0, 0, nullptr, 0, {0, 0, 0}}};
+
+void MarioActor::initCommonEffect() {
+    _B9C = 0;
+    _B9E = 0;
+    _BA0 = new SmokeEffectEntry*[8];
+
+    SmokeEffectEntry* entry = cSmokeTable;
+    while (entry->mName != nullptr) {
+        const char* smokeEffects[] = {"SmokeSphere", "SmokeSphereLoop", "SmokeCircle", "SmokeCircleLoop"};
+        const char* waterEffects[] = {"WaterSphere", "WaterSphereLoop", "WaterCircle", "WaterCircleLoop"};
+        const char* flowerEffects[] = {"FlowerCircle", "FlowerSphereLoop", "FlowerCircle", "FlowerSphereLoop"};
+        const char* sandEffects[] = {"SandCircle", "SandSphereLoop", "SandCircle", "SandSphereLoop"};
+        const char* snowEffects[] = {"SnowSphere", "SnowSphereLoop", "SnowCircle", "SnowCircleLoop"};
+        const char* smokeFollowEffects[] = {"SmokeSphereFollow", "SmokeSphereFollow1Time", "SmokeCircleFollow", "SmokeCircleLoopFollow"};
+        const char* mudEffects[] = {"MudSphere", "MudSphereLoop", "MudCircle", "MudCircleLoop"};
+        const char* honeyEffects[] = {"HoneySphere", "HoneySphereLoop", "HoneyCircle", "HoneyCircleLoop"};
+
+        s32 variant = 0;
+        s32 useFollow = 0;
+
+        switch (entry->mType.mByte0) {
+        case 6:
+            useFollow = 1;
+        case 0:
+            variant = 0;
+            break;
+        case 7:
+            useFollow = 1;
+        case 1:
+        case 2:
+            variant = 1;
+            break;
+        case 8:
+            useFollow = 1;
+        case 3:
+            variant = 2;
+            break;
+        case 9:
+            useFollow = 1;
+        case 4:
+        case 5:
+            variant = 3;
+            break;
+        }
+
+        char name[0x80];
+        for (u32 materialIndex = 0; materialIndex < 7; materialIndex++) {
+            sprintf(name, "%s", entry->mName);
+
+            const u8 flag2 = entry->mFlags.mByte2;
+            if ((flag2 & 0x8) && materialIndex != 1) {
+                continue;
+            }
+
+            const char* const* effectList;
+            switch (materialIndex) {
+            case 0:
+                effectList = useFollow ? smokeFollowEffects : smokeEffects;
+                break;
+            case 1:
+                effectList = waterEffects;
+                break;
+            case 2:
+                effectList = flowerEffects;
+                break;
+            case 3:
+                effectList = sandEffects;
+                break;
+            case 4:
+                effectList = snowEffects;
+                break;
+            case 5:
+                effectList = mudEffects;
+                break;
+            case 6:
+                effectList = honeyEffects;
+                break;
+            }
+
+            if (flag2 != 0) {
+                const char* effectName = effectList[variant];
+                mEffectKeeper->registerEffectWithoutSRT(effectName, name + materialIndex);
+            } else {
+                const u8 flag0 = entry->mFlags.mByte0;
+                switch (flag0) {
+                case 0: {
+                    const char* effectName = effectList[variant];
+                    const char* hostName = name + materialIndex;
+                    mEffectKeeper->registerEffectWithoutSRT(effectName, hostName);
+                    const TVec3f* rot = &mRotation;
+                    const TVec3f* pos = &mPosition;
+                    MR::setEffectHostSRT(this, hostName != nullptr ? hostName : effectName, pos, rot, nullptr);
+                    break;
+                }
+
+                case 1:
+                    ::addMarioEffectAtJoint(this, effectList[variant], "FootR", name + materialIndex);
+                    break;
+                case 2:
+                    ::addMarioEffectAtJoint(this, effectList[variant], "HandR", name + materialIndex);
+                    break;
+                case 3:
+                    ::addMarioEffectAtJoint(this, effectList[variant], "Spine1", name + materialIndex);
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            if ((entry->mFlags.mByte1 & 0x1) != 0) {
+                MR::getEffect(this, name + materialIndex)->forceFollowOn();
+            }
+
+            if ((entry->mFlags.mByte1 & 0x2) != 0) {
+                MR::getEffect(this, name + materialIndex)->forceScaleOn();
+            }
+        }
+
+        entry->mTimer = 0;
+        switch (entry->mType.mByte0) {
+        case 2:
+        case 5: {
+            _BA0[_B9E] = entry;
+            _B9E++;
+            break;
+        }
+
+        default:
+            entry->mInterval = 0;
+            break;
+        }
+
+        entry->mHash = MR::getHashCode(entry->mName);
+        entry->mEmitter = nullptr;
+        entry->mMaterial = 0;
+        entry++;
+        _B9C++;
+    }
+}
+
+MultiEmitter* MarioActor::playCommonEffect(const char* pName) {
+    if (mPlayerMode == 3) {
+        return nullptr;
+    }
+
+    const u32 hash = MR::getHashCode(pName);
+    for (u32 i = 0; i < _B9C; i++) {
+        SmokeEffectEntry* entry = &cSmokeTable[i];
+        if (entry->mHash == hash) {
+            MultiEmitter* emitter = nullptr;
+            MarioEffect* marioEffect;
+            s32 materialIndex = getFloorMaterialIndex(0);
+
+            if (materialIndex == -1) {
+                return nullptr;
+            }
+
+            if ((entry->mFlags.mByte2 & 0x8) && materialIndex != 1) {
+                return nullptr;
+            }
+
+            switch (entry->mType.mByte0) {
+            case 1:
+            case 2:
+            case 4:
+            case 5:
+                emitter = entry->mEmitter;
+                break;
+            case 7:
+            case 9:
+                if (materialIndex != 0) {
+                    emitter = entry->mEmitter;
+                }
+
+                break;
+            default:
+                break;
+            }
+
+            if (emitter != nullptr && materialIndex != entry->mMaterial) {
+                emitter->deleteEmitter();
+                emitter = nullptr;
+            }
+
+            if (emitter == nullptr) {
+                s32 needsFollow = 0;
+                s32 needsSRT = 0;
+
+                if (materialIndex == 0) {
+                    if (entry->mType.mByte0 >= 6) {
+                        const Triangle* tri = mMario->getGroundPolygon();
+                        MtxPtr prevMtx = tri->getPrevBaseMtx()->toMtxPtr();
+                        MtxPtr baseMtx = mMario->getGroundPolygon()->getBaseMtx()->toMtxPtr();
+
+                        if (!MR::isSameMtx(baseMtx, prevMtx)) {
+                            needsFollow = 1;
+                        }
+
+                        needsSRT = 1;
+                    }
+                }
+
+                if (needsFollow) {
+                    const Triangle* tri = mMario->getGroundPolygon();
+                    JPABaseEmitter* baseEmitter = mMarioEffect->addRequest(pName + materialIndex, tri->getBaseMtx()->toMtxPtr());
+
+                    if (baseEmitter != nullptr) {
+                        baseEmitter->setGlobalScale(TVec3f(entry->mScale, entry->mScale, entry->mScale));
+                    }
+                } else {
+                    if (needsSRT) {
+                        const u8 hostFlag = entry->mFlags.mByte1;
+                        const TVec3f* hostPos = nullptr;
+                        const TVec3f* hostRot = nullptr;
+                        const TVec3f* hostScale = nullptr;
+
+                        if (hostFlag & 0x1) {
+                            hostPos = &mPosition;
+                        }
+
+                        if (hostFlag & 0x4) {
+                            hostRot = &mRotation;
+                        }
+
+                        if (hostFlag & 0x2) {
+                            hostScale = &mScale;
+                        }
+
+                        MR::setEffectHostSRT(this, pName + materialIndex, hostPos, hostRot, hostScale);
+                    }
+
+                    emitter = MR::emitEffect(this, pName + materialIndex);
+                }
+            }
+
+            if (!(entry->mFlags.mByte1 & 0x2)) {
+                if (emitter != nullptr) {
+                    emitter->setGlobalScale(entry->mScale, -1);
+                }
+            }
+
+            if (emitter != nullptr) {
+                emitter->setRate(entry->mRate, -1);
+            }
+
+            if (entry->mFlags.mByte2 & 0x1) {
+                TVec3f dir(mMario->getWallNorm());
+                TPos3f mtx;
+                TVec3f rot;
+                MR::makeMtxUpNoSupportPos(&mtx, dir, TVec3f(0.0f, 0.0f, 0.0f));
+                MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+                if (emitter != nullptr) {
+                    emitter->setGlobalRotationDegree(rot, -1);
+                }
+
+                if (emitter != nullptr) {
+                    emitter->setGlobalTranslation(mPosition, -1);
+                }
+            } else {
+                TVec3f dir(mMario->_368);
+                TPos3f mtx;
+                TVec3f rot;
+                MR::makeMtxUpNoSupportPos(&mtx, dir, TVec3f(0.0f, 0.0f, 0.0f));
+                MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+                PSMTXCopy(mtx.toMtxPtr(), mMarioEffect->_24.toMtxPtr());
+
+                if (emitter != nullptr) {
+                    emitter->setGlobalRotationDegree(rot, -1);
+                }
+
+                if (emitter != nullptr) {
+                    emitter->setGlobalTranslation(mPosition, -1);
+                }
+            }
+
+            if (entry->mFlags.mByte2 & 0x2) {
+                TVec3f trans(mMario->_4E8);
+                if (emitter != nullptr) {
+                    emitter->setGlobalTranslation(trans, -1);
+                }
+            }
+
+            if (entry->mInterval != 0) {
+                entry->mTimer = entry->mInterval;
+            }
+
+            switch (entry->mType.mByte0) {
+            case 1:
+            case 2:
+            case 4:
+            case 5:
+                entry->mEmitter = emitter;
+                entry->mMaterial = static_cast< u8 >(materialIndex);
+                break;
+            case 7:
+            case 9:
+                if (materialIndex != 0) {
+                    entry->mEmitter = emitter;
+                }
+
+                entry->mMaterial = static_cast< u8 >(materialIndex);
+                break;
+            default:
+                break;
+            }
+
+            if (emitter != nullptr) {
+                marioEffect = mMarioEffect;
+                if (marioEffect->_18) {
+                    emitter->setGlobalPrmColor(marioEffect->_1C.r, marioEffect->_1C.g, marioEffect->_1C.b, -1);
+                    emitter->setGlobalEnvColor(marioEffect->_20.r, marioEffect->_20.g, marioEffect->_20.b, -1);
+                } else {
+                    emitter->setGlobalPrmColor(0xFF, 0xFF, 0xFF, -1);
+                    emitter->setGlobalEnvColor(0xFF, 0xFF, 0xFF, -1);
+                }
+
+                if (materialIndex == 1) {
+                    emitter->setDrawOrder(3);
+                }
+            }
+
+            return emitter;
+        }
+    }
+
+    return nullptr;
+}
+
+void MarioActor::initEffect() {
+    _B98 = 0;
+    initEffectKeeper(0xB8, "Mario", true);
+    initCommonEffect();
+    initMaterialEffect();
+
+    MR::setEffectName(this, "SlipUp", "\x83\x58\x83\x8a\x83\x62\x83\x76\x83\x41\x83\x62\x83\x76");
+    MR::setEffectName(this, "WallSpark", "\x95\xc7\x83\x58\x83\x70\x81\x5b\x83\x4e");
+    MR::setEffectName(this, "Damage", "\x83\x5f\x83\x81\x81\x5b\x83\x57");
+    MR::setEffectName(this, "StepOn", "\x82\xd3\x82\xdd\x82\xc2\x82\xd4\x82\xb5");
+    MR::setEffectName(this, "SuperSpinDriverEnd", "\x83\x58\x81\x5b\x83\x70\x81\x5b\x83\x58\x83\x73\x83\x93\x83\x68\x83\x89\x83\x43\x83\x6f\x8f\x49\x97\xb9");
+    MR::setEffectName(this, "BringBubble", "\x88\xf8\x82\xab\x96\xdf\x82\xb5\x96\x41");
+    MR::setEffectName(this, "BringBubbleBreak", "\x88\xf8\x82\xab\x96\xdf\x82\xb5\x96\x41\x94\x6a\x97\xf4");
+    MR::setEffectName(this, "WaterSplashRight", "\x90\x85\x82\xcd\x82\xcb\x89\x45");
+    MR::setEffectName(this, "WaterSplashLeft", "\x90\x85\x82\xcd\x82\xcb\x8d\xb6");
+    MR::setEffectName(this, "WaterSplashSRight", "\x90\x85\x82\xcd\x82\xcb\x89\x45\x8e\xe3");
+    MR::setEffectName(this, "WaterSplashSLeft", "\x90\x85\x82\xcd\x82\xcb\x8d\xb6\x8e\xe3");
+    MR::setEffectName(this, "SpinLightBurst", "\x83\x58\x83\x73\x83\x93\x83\x89\x83\x43\x83\x67\x8f\xc1\x8b\x8e");
+    MR::setEffectName(this, "ElectricDamage", "\x83\x72\x83\x8a\x83\x72\x83\x8a");
+    MR::setEffectName(this, "FireDamageSmoke", "\x89\x8a\x83\x5f\x83\x81\x81\x5b\x83\x57\x89\x8c");
+    MR::setEffectName(this, "BlueFireDamageSmoke", "\x89\x8a\x83\x5f\x83\x81\x81\x5b\x83\x57\x90\xc2\x89\x8c");
+    MR::setEffectName(this, "SpinLight", "\x83\x58\x83\x73\x83\x93\x83\x89\x83\x43\x83\x67");
+    MR::setEffectName(this, "IceMarioSpinLight", "\x83\x41\x83\x43\x83\x58\x83\x58\x83\x73\x83\x93");
+    MR::setEffectName(this, "FireMarioSpinLight", "\x83\x74\x83\x40\x83\x43\x83\x41\x83\x58\x83\x73\x83\x93");
+    MR::setEffectName(this, "BeeMarioSpinLight", "\x83\x6e\x83\x60\x83\x58\x83\x73\x83\x93");
+    MR::setEffectName(this, "BeeLuigiSpinLight", "\x83\x6e\x83\x60\x83\x8b\x83\x43\x81\x5b\x83\x57\x83\x58\x83\x73\x83\x93");
+    MR::setEffectName(this, "Sweat", "\x82\xa2\x82\xa2\x8a\xbe");
+    MR::setEffectName(this, "CarryStartShort", "\x82\xd0\x82\xeb\x82\xa2\x83\x4e\x83\x43\x83\x62\x83\x4e");
+    MR::setEffectName(this, "AirRecover", "\x8e\x5f\x91\x66\x89\xf1\x95\x9c");
+    MR::setEffectName(this, "Invincible", "\x96\xb3\x93\x47\x92\x86");
+    MR::setEffectHostSRT(this, "\x96\xb3\x93\x47\x92\x86", &mPosition, nullptr, nullptr);
+    MR::setEffectName(this, "Ice", "\x83\x41\x83\x43\x83\x58\x92\x86");
+    MR::setEffectHostSRT(this, "\x83\x41\x83\x43\x83\x58\x92\x86", &mPosition, nullptr, nullptr);
+    MR::setEffectName(this, "FireBallThrow", "\x83\x74\x83\x40\x83\x43\x83\x41\x83\x7b\x81\x5b\x83\x8b\x93\x8a\x82\xb0");
+    MR::setEffectName(this, "Throw", "\x82\xb1\x82\xa4\x82\xe7\x93\x8a\x82\xb0");
+    MR::setEffectName(this, "DieBuryBody", "\x8d\xbb\x96\x84\x82\xdc\x82\xe8\x91\xcc");
+    MR::setEffectName(this, "DieBuryHand", "\x8d\xbb\x96\x84\x82\xdc\x82\xe8\x8e\xe8");
+    MR::setEffectName(this, "DieDeathMudBody", "\x93\x44\x96\x84\x82\xdc\x82\xe8\x91\xcc");
+    MR::setEffectName(this, "DieDeathMudHand", "\x93\x44\x96\x84\x82\xdc\x82\xe8\x8e\xe8");
+    MR::setEffectName(this, "SpinLightConcentrate", "\x83\x58\x83\x73\x83\x93\x8b\x96\x89\xc2");
+    MR::setEffectName(this, "FooMarioHandGlowL", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x83\x4f\x83\x8d\x81\x5b\x8d\xb6");
+    MR::setEffectName(this, "FooMarioHandGlowR", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x83\x4f\x83\x8d\x81\x5b\x89\x45");
+    MR::setEffectName(this, "FooMarioBrakeLampL", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x83\x75\x83\x8c\x81\x5b\x83\x4c\x8d\xb6");
+    MR::setEffectName(this, "FooMarioBrakeLampR", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x83\x75\x83\x8c\x81\x5b\x83\x4c\x89\x45");
+    MR::setEffectName(this, "FooMarioEndL", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x89\xf0\x8f\x9c\x8d\xb6");
+    MR::setEffectName(this, "FooMarioEndR", "\x83\x74\x81\x5b\x83\x7d\x83\x8a\x83\x49\x89\xf0\x8f\x9c\x89\x45");
+    MR::setEffectName(this, "WallHit", "\x95\xc7\x83\x71\x83\x62\x83\x67");
+    MR::setEffectName(this, "BarrierBound", "\x8c\x8b\x8a\x45\x83\x71\x83\x62\x83\x67");
+    MR::setEffectName(this, "WaterBound", "\x90\x85\x95\xc7\x83\x71\x83\x62\x83\x67");
+    MR::setEffectName(this, "IceWallJump", "\x95\x58\x95\xc7\x83\x57\x83\x83\x83\x93\x83\x76");
+    MR::setEffectHostSRT(this, "\x95\x58\x95\xc7\x83\x57\x83\x83\x83\x93\x83\x76", nullptr, nullptr, nullptr);
+    MR::setEffectName(this, "CeilingCrash", "\x93\x56\x88\xe4\x83\x71\x83\x62\x83\x67");
+    MR::setEffectName(this, "Coin", "\x83\x52\x83\x43\x83\x93");
+    MR::setEffectName(this, "PunchHit", "\x83\x70\x83\x93\x83\x60\x83\x71\x83\x62\x83\x67");
+    MR::setEffectName(this, "WaterRipple", "\x90\x85\x94\x67\x96\xe4");
+    MR::setEffectName(this, "SwimWaitRipple", "\x90\x85\x96\xca\x83\x45\x83\x47\x83\x43\x83\x67\x94\x67\x96\xe4");
+    MR::setEffectHostSRT(this, "\x90\x85\x96\xca\x83\x45\x83\x47\x83\x43\x83\x67\x94\x67\x96\xe4", &_BAC, &_BB8, nullptr);
+    MR::setEffectName(this, "SwimSpinLight", "\x90\x85\x89\x6a\x83\x58\x83\x73\x83\x93");
+    MR::setEffectName(this, "DiveBubble", "\x90\x85\x96\xca\x82\x79\x92\xbe\x8d\x7e");
+    MR::addEffect(this, "WaterColumnS");
+    MR::setEffectName(this, "WaterColumnS", "\x90\x85\x96\xca\x83\x57\x83\x83\x83\x93\x83\x76\x90\x85\x92\x8c");
+    MR::setEffectName(this, "SurfaceWave", "\x90\x85\x96\xca\x89\x6a\x82\xac");
+    MR::setEffectHostSRT(this, "\x90\x85\x96\xca\x89\x6a\x82\xac", &_BAC, &_BB8, nullptr);
+    MR::setEffectName(this, "BodyBubble", "\x90\x85\x92\x86\x90\x67\x91\xcc\x96\x41");
+    MR::setEffectName(this, "MouthBubble", "\x90\x85\x92\x86\x8c\xfb\x96\x41");
+    MR::setEffectName(this, "SeaSmoke", "\x90\x85\x92\xea\x90\xda\x90\x47");
+    MR::setEffectName(this, "Metamorphosis", "\x95\xcf\x90\x67");
+    MR::setEffectName(this, "MetamorphosisEnd", "\x95\xcf\x90\x67\x89\xf0\x8f\x9c");
+    MR::setEffectName(this, "BeeFlowerPollen", "\x83\x6e\x83\x60\x89\xd4\x82\xad\x82\xc1\x82\xc2\x82\xab");
+    MR::setEffectHostSRT(this, "\x83\x6e\x83\x60\x89\xd4\x82\xad\x82\xc1\x82\xc2\x82\xab", nullptr, nullptr, nullptr);
+    MR::setEffectName(this, "SkateL", "\x83\x58\x83\x50\x81\x5b\x83\x67\x8d\xb6");
+    MR::setEffectName(this, "SkateR", "\x83\x58\x83\x50\x81\x5b\x83\x67\x89\x45");
+    MR::setEffectName(this, "IceJumpLand", "\x83\x58\x83\x50\x81\x5b\x83\x67\x92\x85\x92\x6e");
+
+    MR::setEffectHostSRT(this, "\x93\x56\x88\xe4\x83\x71\x83\x62\x83\x67", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "\x95\xc7\x83\x71\x83\x62\x83\x67", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "\x83\x70\x83\x93\x83\x60\x83\x71\x83\x62\x83\x67", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "FlowerSpin", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "\x90\x85\x94\x67\x96\xe4", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "\x8c\x8b\x8a\x45\x83\x71\x83\x62\x83\x67", nullptr, nullptr, nullptr);
+    MR::setEffectHostSRT(this, "\x90\x85\x95\xc7\x83\x71\x83\x62\x83\x67", nullptr, nullptr, nullptr);
+
+    MR::setEffectName(this, "Blur", "\x83\x8f\x81\x5b\x83\x76\x83\x7c\x83\x62\x83\x68\x83\x75\x83\x89\x81\x5b");
+    MR::setEffectName(this, "SpinRing", "\x83\x58\x83\x73\x83\x93\x83\x8a\x83\x93\x83\x4f");
+    MR::setEffectName(this, "Vanish", "\x83\x75\x83\x89\x83\x62\x83\x4e\x83\x7a\x81\x5b\x83\x8b\x8f\xc1\x96\xc5");
+
+    {
+        const char* groupName = "\x90\xe1\x89\x8c\x83\x8c\x83\x78\x83\x8b";
+        mEffectKeeper->registerEffect("CrestGetFlyC", _D1C.toMtxPtr(), groupName, nullptr);
+    }
+
+    const TVec3f* scale = &mScale;
+    const TVec3f* rot = &mRotation;
+    const TVec3f* pos = &mPosition;
+
+    {
+        const char* groupName = "\x83\x58\x83\x43\x83\x93\x83\x4f\x83\x74\x83\x89\x83\x43";
+        mEffectKeeper->registerEffect("CommonPhotonDustCircle", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x89\x46\x92\x88\x97\x56\x89\x6a";
+        mEffectKeeper->registerEffect("MarioSpaceDust", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x83\x57\x83\x83\x83\x93\x83\x76\x83\x74\x83\x46\x83\x41\x83\x8a\x81\x5b";
+        mEffectKeeper->registerEffect("CrestGetFlyC", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "B\x83\x5f\x83\x62\x83\x56\x83\x85";
+        mEffectKeeper->registerEffect("MiniPandaSpinLoopLeg", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x83\x43\x83\x93\x83\x5f\x83\x43\x83\x8c\x83\x4e\x83\x67\x83\x65\x83\x58\x83\x67";
+        mEffectKeeper->registerEffect("IndTest", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x83\x89\x83\x50\x83\x62\x83\x67\x8f\xc1\x8b\x8e";
+        mEffectKeeper->registerEffect("TestMarioBaobabooPowerDown", _DAC.toMtxPtr(), groupName, nullptr);
+    }
+
+    {
+        const char* groupName = "\x83\x60\x83\x83\x81\x5b\x83\x57\x8a\xae\x97\xb9";
+        mEffectKeeper->registerEffect("TornadoChargeEnd", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x83\x60\x83\x83\x81\x5b\x83\x57\x92\x86";
+        mEffectKeeper->registerEffect("TornadoCharge", pos, rot, scale, groupName);
+    }
+
+    {
+        const char* groupName = "\x83\x60\x83\x83\x81\x5b\x83\x57\x90\xd8\x82\xea";
+        mEffectKeeper->registerEffect("AppleHit", pos, rot, scale, groupName);
+    }
+
+    MR::setEffectName(this, "LandRubber", "\x93\xc1\x8e\xea\x92\x85\x92\x6e");
+    MR::setEffectName(this, "DieDarkMatter", "\x83\x5f\x81\x5b\x83\x4e\x83\x7d\x83\x5e\x81\x5b\x8e\x80\x96\x53");
+    MR::setEffectName(this, "HopperMarioHipDropBlur", "\x83\x7a\x83\x62\x83\x70\x81\x5b\x90\x4b\x97\x8e");
+    MR::setEffectName(this, "HopperLuigiHipDropBlur", "\x83\x7a\x83\x62\x83\x70\x81\x5b\x90\x4b\x97\x8e\x83\x8b\x83\x43\x81\x5b\x83\x57");
+    MR::setEffectName(this, "HipDropBlur", "\x90\x4b\x97\x8e");
+    MR::setEffectName(this, "HipDropBlurLuigi", "\x90\x4b\x97\x8e\x83\x8b\x83\x43\x81\x5b\x83\x57");
+    MR::setEffectName(this, "GetAgain", "\x83\x41\x83\x43\x83\x65\x83\x80\x8d\xc4\x83\x51\x83\x62\x83\x67");
+
+    {
+        const char* groupName = "\x83\x70\x83\x93\x83\x60\x83\x75\x83\x89\x81\x5b\x8d\xb6";
+        mEffectKeeper->registerEffect("MarioPunchLBlur", pos, rot, scale, groupName);
+    }
+
+    MR::getEffect(this, "\x83\x70\x83\x93\x83\x60\x83\x75\x83\x89\x81\x5b\x8d\xb6")->forceFollowOn();
+    {
+        const char* groupName = "\x83\x70\x83\x93\x83\x60\x83\x75\x83\x89\x81\x5b\x89\x45";
+        mEffectKeeper->registerEffect("MarioPunchRBlur", pos, rot, scale, groupName);
+    }
+
+    MR::getEffect(this, "\x83\x70\x83\x93\x83\x60\x83\x75\x83\x89\x81\x5b\x89\x45")->forceFollowOn();
+
+    mEffectKeeper->finalizeSort();
+
+    ModelObj* obj = new ModelObj("WaterColumn", "WaterColumn", nullptr, -2, -2, -2, false);
+    _BA8 = obj;
+    obj->kill();
+}
+
+void MarioActor::emitEffectWaterColumn(const TVec3f& rDir, const TVec3f& rTrans) {
+    if (MR::isNearZero(rDir)) {
+        return;
+    }
+
+    _BA8->appear();
+    MR::startBck(_BA8, "WaterColumn");
+    MR::startBrk(_BA8, "WaterColumn");
+
+    TVec3f rot;
+    TPos3f mtx;
+    MR::makeMtxUpNoSupportPos(&mtx, rDir, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+    _BA8->mPosition = rTrans;
+    _BA8->mRotation = rot;
+    _BA8->calcAnim();
+
+    MR::emitEffect(_BA8, "WaterColumn");
+    Mario* player = mMario;
+    player->pushTask(&Mario::taskOnEffectCheck, 2);
+}
+
+bool MarioActor::isCommonEffect(const char* pName) const {
+    if (static_cast< u8 >(pName[0]) == 0x8B) {
+        if (static_cast< u8 >(pName[1]) == 0xA4) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool MarioActor::isMaterialEffect(const char* pName) const {
+    if (static_cast< u8 >(pName[0]) == 0x91) {
+        if (static_cast< u8 >(pName[1]) == 0xAE) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+MultiEmitter* MarioActor::playEffect(const char* pName) {
+    s32 isBlocked = 0;
+    if (_482 || _483) {
+        isBlocked = 1;
+    }
+
+    if (isBlocked) {
+        return nullptr;
+    }
+
+    if (isCommonEffect(pName)) {
+        return playCommonEffect(pName);
+    }
+
+    if (isMaterialEffect(pName)) {
+        return playMaterialEffect(pName);
+    }
+
+    return MR::emitEffect(this, pName);
+}
+
+void MarioActor::playEffectTrans(const char* pName, const TVec3f& rTrans) {
+    MultiEmitter* emitter = playEffect(pName);
+    if (emitter != nullptr) {
+        emitter->setGlobalTranslation(rTrans, -1);
+    }
+}
+
+void MarioActor::playEffectRT(const char* pName, const TVec3f& rDir, const TVec3f& rTrans) {
+    if (MR::isNearZero(rDir)) {
+        return;
+    }
+
+    TVec3f rot;
+    TPos3f mtx;
+    MR::makeMtxUpNoSupportPos(&mtx, rDir, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+    MultiEmitter* emitter = playEffect(pName);
+    if (emitter != nullptr) {
+        emitter->forceFollowOff();
+        emitter->setGlobalTranslation(rTrans, -1);
+        emitter->setGlobalRotationDegree(rot, -1);
+    }
+}
+
+void MarioActor::playEffectRTZ(const char* pName, const TVec3f& rDir, const TVec3f& rTrans) {
+    if (MR::isNearZero(rDir)) {
+        return;
+    }
+
+    TVec3f rot;
+    TPos3f mtx;
+    MR::makeMtxUpNoSupportPos(&mtx, rDir, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+    MultiEmitter* emitter = playEffect(pName);
+    if (emitter != nullptr) {
+        emitter->forceFollowOff();
+        emitter->setGlobalTranslation(rTrans, -1);
+        emitter->setGlobalRotationDegree(rot, -1);
+    }
+}
+
+void MarioActor::playEffectRTW(const char* pName, const TVec3f& rDir, const TVec3f& rTrans) {
+    if (MR::isNearZero(rDir)) {
+        return;
+    }
+
+    TVec3f rot;
+    TPos3f mtx;
+    MR::makeMtxUpNoSupportPos(&mtx, rDir, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+    _BB8 = rot;
+    _BAC = rTrans;
+    playEffect(pName);
+}
+
+void MarioActor::playEffectSRT(const char* pName, f32 scale, const TVec3f& rDir, const TVec3f& rTrans) {
+    if (MR::isNearZero(rDir)) {
+        return;
+    }
+
+    TVec3f rot;
+    TPos3f mtx;
+    MR::makeMtxUpNoSupportPos(&mtx, rDir, TVec3f(0.0f, 0.0f, 0.0f));
+    MR::makeRTFromMtxPtr(nullptr, &rot, mtx.toMtxPtr(), true);
+
+    MultiEmitter* emitter = playEffect(pName);
+    if (emitter != nullptr) {
+        emitter->setGlobalScale(scale, -1);
+    }
+
+    if (emitter != nullptr) {
+        emitter->setGlobalTranslation(rTrans, -1);
+    }
+
+    if (emitter != nullptr) {
+        emitter->setGlobalRotationDegree(rot, -1);
+    }
+}
+
+void MarioActor::stopCommonEffect(const char* pName) {
+    const u32 hash = MR::getHashCode(pName);
+    for (u32 i = 0; i < _B9C; i++) {
+        SmokeEffectEntry* entry = &cSmokeTable[i];
+        if (entry->mHash == hash) {
+            if (entry->mEmitter != nullptr) {
+                entry->mEmitter->deleteEmitter();
+                entry->mEmitter = nullptr;
+            }
+        }
+    }
+}
+
+void MarioActor::stopEffect(const char* pName) {
+    if (isCommonEffect(pName)) {
+        stopCommonEffect(pName);
+        return;
+    }
+
+    if (isMaterialEffect(pName)) {
+        stopMaterialEffect(pName);
+        return;
+    }
+
+    MR::deleteEffect(this, pName);
+}
+
+void MarioActor::stopEffectForce(const char* pName) {
+    if (isCommonEffect(pName)) {
+        stopCommonEffect(pName);
+        return;
+    }
+
+    if (isMaterialEffect(pName)) {
+        stopMaterialEffect(pName);
+        return;
+    }
+
+    MR::forceDeleteEffect(this, pName);
+}
+
+void MarioActor::updateEffect() {
+    s32 effectA = 0;
+    s32 effectB = 0;
+    s32 effectC = 0;
+
+    if (mMario->mMovementStates._4) {
+        effectA = 1;
+    }
+
+    if (mMario->mMovementStates._F && mMario->mMovementStates._1) {
+        effectA = 1;
+    }
+
+    if (mMario->mMovementStates._1 && mMario->_3F4 > 0.1f) {
+        effectA = 1;
+    }
+
+    if (mMario->isStatusActive(MarioStatus_Flip)) {
+        effectA = 1;
+    }
+
+    if (getMovementStates()._34 || getMovementStates()._35) {
+        if (mMario->mWalkSpeed > 0.1f) {
+            effectA = 1;
+        }
+
+        if (effectA != 0) {
+            effectB = 1;
+            effectA = 0;
+        }
+    }
+
+    if (_3C0 || mPlayerMode == 1 || mMario->isStatusActive(MarioStatus_Swim) || mMario->isStatusActive(MarioStatus_FpView) || _934) {
+        effectA = 0;
+        effectB = 0;
+        effectC = 0;
+    }
+
+    if (effectA) {
+        playEffect("\x8b\xa4\x92\xca\x8d\xbb\x89\x8c\x83\x8c\x83\x78\x83\x8b");
+    } else if (!effectA) {
+        if (mEffectFlags.mSmoke != 0) {
+            stopEffect("\x8b\xa4\x92\xca\x8d\xbb\x89\x8c\x83\x8c\x83\x78\x83\x8b");
+        }
+    }
+
+    if (effectB && mEffectFlags.mSnow == 0) {
+        playEffect("\x90\xe1\x89\x8c\x83\x8c\x83\x78\x83\x8b");
+    } else if (!effectB && mEffectFlags.mSnow != 0) {
+        stopEffect("\x90\xe1\x89\x8c\x83\x8c\x83\x78\x83\x8b");
+    }
+
+    mEffectFlags.mSmoke = effectA;
+    mEffectFlags.mSnow = effectB;
+    mEffectFlags._2 = effectC;
+
+    effectA = 0;
+    if (getMovementStates()._23 && !getMovementStates()._18 && getMovementStates()._1) {
+        effectA = 1;
+    }
+
+    if (effectA) {
+        playEffect("\x8b\xa4\x92\xca\x83\x58\x83\x8a\x83\x62\x83\x76\x8d\xe2");
+    } else if (!effectA) {
+        if (mEffectFlags.mSlopeSlip != 0) {
+            stopEffect("\x8b\xa4\x92\xca\x83\x58\x83\x8a\x83\x62\x83\x76\x8d\xe2");
+        }
+    }
+
+    mEffectFlags.mSlopeSlip = effectA;
+
+    if ((mHealth <= 1 || mWaterLife <= 1) && !MR::isDemoActive() && !MR::isPowerStarGetDemoActive() && !MR::isGalaxyDarkCometAppearInCurrentStage() &&
+        MR::isPermitSE() && isEnableNerveChange()) {
+        playSound("\x83\x89\x83\x43\x83\x74\x8c\x78\x8d\x90", -1);
+    }
+
+    s32 nearZero = 0;
+    if (MR::isNearZero(_240)) {
+        nearZero = 1;
+    }
+
+    if (!nearZero && mEffectFlags.mIsStationary) {
+        playEffect("\x89\x46\x92\x88\x97\x56\x89\x6a");
+    } else if (nearZero && !mEffectFlags.mIsStationary) {
+        stopEffect("\x89\x46\x92\x88\x97\x56\x89\x6a");
+    }
+
+    mEffectFlags.mIsStationary = nearZero;
+
+    if (!isJumping() && _934 == 0) {
+        MR::deleteEffect(this, "\x83\x57\x83\x83\x83\x93\x83\x76\x83\x74\x83\x46\x83\x41\x83\x8a\x81\x5b");
+    }
+
+    mMarioEffect->doCubeEffect();
+
+    effectC = 0;
+    if (getMovementStates().jumping) {
+        if (mPlayerMode == 4 && mMario->checkLvlA() && mMario->_402 != 0 && ((_37C & 3) == 0)) {
+            if (mMario->mVerticalSpeed < 300.0f) {
+                effectC = 1;
+            } else if (mMario->mSwim->_1B2 != 0) {
+                f32 swimSpeed = mMario->mSwim->_1B8;
+                if (swimSpeed < 300.0f) {
+                    effectC = 1;
+                }
+            }
+        }
+    }
+
+    if (effectC) {
+        playEffectRT("\x91\xae\x90\xab\x83\x6e\x83\x60\x95\x97", mMario->_368, mMario->mShadowPos);
+    } else {
+        if (mEffectFlags.mBeeWind) {
+            stopEffect("\x91\xae\x90\xab\x83\x6e\x83\x60\x95\x97");
+        }
+    }
+
+    mEffectFlags.mBeeWind = effectC;
+
+    u32 i = 0;
+    while (i < _B9E) {
+        SmokeEffectEntry* entry = _BA0[i];
+        if (entry->mTimer != 0) {
+            entry->mTimer--;
+            if (entry->mTimer == 0) {
+                stopEffect(entry->mName);
+            }
+        }
+
+        i++;
+    }
+}
+
+MarioEffect::MarioEffect(MarioActor* pActor) : MarioModule(pActor) {
+    _C = -1;
+    _10 = -1;
+    _14 = -1;
+    _18 = 0;
+    _1C.set(0, 0, 0, 0);
+    _20.set(0, 0, 0, 0);
+    PSMTXIdentity(_24.toMtxPtr());
+}
+
+void MarioEffect::playSwingEffect() {
+    if (_C == 1) {
+        switch (_10) {
+        default:
+            break;
+        case 0:
+            playEffectTrans("FlowerSpin", getShadowPos());
+            break;
+        }
+    }
+
+    Mario* mario = getPlayer();
+    playEffectRT("\x91\xae\x90\xab\x83\x58\x83\x73\x83\x93", mario->_368, getTrans());
+}
+
+void MarioEffect::doCubeEffect() {
+    Mario* mario = getPlayer();
+    if (mario->mMovementStates.debugMode) {
+        return;
+    }
+
+    s32 unsetArg = -1;
+    _10 = unsetArg;
+    _C = unsetArg;
+
+    AreaObj* area = MR::getAreaObj("EffectCylinder", mActor->mPosition);
+    if (area != nullptr) {
+        s32 arg0 = MR::getAreaObjArg(area, 0);
+        _10 = MR::getAreaObjArg(area, 1);
+        _C = arg0;
+    } else {
+        _14 = unsetArg;
+    }
+
+    AreaObj* colorArea = MR::getAreaObj("SmokeEffectColorArea", mActor->mPosition);
+    if (colorArea != nullptr) {
+        const s32 prmR = MR::getAreaObjArg(colorArea, 0);
+        const s32 prmG = MR::getAreaObjArg(colorArea, 1);
+        const s32 prmB = MR::getAreaObjArg(colorArea, 2);
+        _1C.set(prmR, prmG, prmB, 0);
+
+        const s32 envR = MR::getAreaObjArg(colorArea, 3);
+        const s32 envG = MR::getAreaObjArg(colorArea, 4);
+        const s32 envB = MR::getAreaObjArg(colorArea, 5);
+        _20.set(envR, envG, envB, 0);
+        _18 = 1;
+    } else {
+        _18 = 0;
+    }
+
+    if (getPlayer()->_10._1) {
+        playSwingEffect();
+        getPlayer()->_10._1 = 0;
+    }
+}
+
+bool Mario::taskOnEffectCheck(u32 flags) {
+    if (flags & 0x2) {
+        return mActor->checkEffectWaterColumn();
+    }
+
+    return true;
+}
+
+bool MarioActor::checkEffectWaterColumn() {
+    if (MR::isBckStopped(_BA8)) {
+        _BA8->kill();
+        return false;
+    }
+
+    return true;
+}
+
+void MarioActor::stopSpinTicoEffect(bool force) {
+    _948 = 0;
+    _94C = 0;
+    _94E = 0;
+    _946 = 0;
+
+    if (force) {
+        stopEffectForce("\x83\x58\x83\x73\x83\x93\x83\x8a\x83\x93\x83\x4f");
+    } else {
+        stopEffect("\x83\x58\x83\x73\x83\x93\x83\x8a\x83\x93\x83\x4f");
+    }
+}
+
+MarioEffect::~MarioEffect() {
+}
+
+void MultiEmitter::setGlobalScale(f32 scale, s32 a2) {
+    TVec3f scaleVec(scale, scale, scale);
+    setGlobalScale(scaleVec, a2);
+}

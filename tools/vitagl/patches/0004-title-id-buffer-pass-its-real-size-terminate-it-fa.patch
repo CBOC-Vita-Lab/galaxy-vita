@@ -1,0 +1,27 @@
+Title id buffer: pass its real size, terminate it, fall back when the call fails (Strikers a9c11e0)
+
+sceAppMgrAppParamGetString was told the 12-byte titleid buffer holds 256
+bytes, and a failing call left it uninitialised (it names the shader and
+texture cache folders).
+---
+ source/vgl.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/source/vgl.c b/source/vgl.c
+index 6545672..70bcd33 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -199,8 +199,11 @@ GLboolean vglInitWithCustomSizes(int pool_size, int width, int height, int ram_p
+ #endif
+ 
+ #if defined(HAVE_SHADER_CACHE) || defined(HAVE_TEX_CACHE)
+-	char titleid[12];
+-	sceAppMgrAppParamGetString(0, 12, titleid , 256);
++	// (Strikers port, a9c11e0) the buffer is 12 bytes: the call was told 256, and a failed call left it uninitialised
++	char titleid[12] = {0};
++	if (sceAppMgrAppParamGetString(0, 12, titleid, sizeof(titleid)) < 0 || !titleid[0])
++		strcpy(titleid, "UNKNOWN");
++	titleid[sizeof(titleid) - 1] = 0;
+ #endif
+ #ifdef HAVE_TEX_CACHE
+ 	sceIoMkdir("ux0:data/vgl_cache", 0777);
