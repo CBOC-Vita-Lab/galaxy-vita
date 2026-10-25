@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v1.0",
+  "release": "galaxy-v1.1",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -18960,7 +18960,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_hdtex.cpp",
-      "sha256": "d45fa4c74e7a4c83f55c75d07d623eb7bad44f6b52081141bfc1beac2141a745"
+      "sha256": "9a38d2febd502019e092819b2eaff4a92ea5c182d942942853f5b1bf2d29cdc5"
     },
     {
       "path": "platform/vgx/src/vgx_hdtex.h",
@@ -19256,7 +19256,7 @@
     },
     {
       "path": "tests/vgx_hdtex.cpp",
-      "sha256": "26ba27312b77495cc9a07406999f828b64a31d3cd0c3db0dec896f11c2ca37ca"
+      "sha256": "d4907002c0eada335427f35ce133b3a422488d35027f022a51bf50a613832345"
     },
     {
       "path": "tests/vgx_linear_texture.cpp",
@@ -19704,7 +19704,7 @@
     },
     {
       "path": "tools/hdtex/make_test_pack.py",
-      "sha256": "ee294c644500807a7a90ceb7d2762e13052ad2987b795b2122edf255164fed8b"
+      "sha256": "0339b6959ff032ce18dd7c3c4e73b6da4371e1715e7627f8c2d77d15cf0f7826"
     },
     {
       "path": "tools/hdtex/selection.txt",
@@ -19908,7 +19908,7 @@
     },
     {
       "path": "tools/test_vgx_hdtex.sh",
-      "sha256": "a9284b1ab47e4a4850cbdcb63d5556841639003b696b3d70ac05f6e4beecb958"
+      "sha256": "a105bee86afd30e9211038a85eadeaae9250cef064026439530bd9e284493e52"
     },
     {
       "path": "tools/test_vgx_linear_texture.sh",

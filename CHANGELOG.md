@@ -1,3 +1,12 @@
+# Version 1.1 — October 25, 2026
+
+A small fix for the HD textures.
+
+### Fixed
+- **Mario's eyes.** Some players with the optional HD textures saw Mario's eyes white, or his eyelids closed all the time. Eyes now always use the game's own pictures, so they show and blink normally. The rest of the HD pack still applies, and you don't need a new pack.
+
+Updating? Install the new VPK over the old one. Your saves and settings are kept.
+
 # Version 1.0 — October 2026
 
 Super Mario Galaxy, running natively on the PS Vita.

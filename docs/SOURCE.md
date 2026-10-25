@@ -1,5 +1,9 @@
 # Source Record
 
+## Version 1.1 (`galaxy-v1.1`)
+
+Version 1.0 plus one change: textures whose name contains "eye" keep the game's own image even when the optional HD textures pack has a replacement (`platform/vgx/src/vgx_hdtex.cpp`; `GXV_HDTEX_EYES=1` turns the pack's eyes back on for testing). Source: the port's development line at `b2138b85e555cb0058818f9814a12961b00e7594`; the player build flags are those of 1.0. The tables below describe 1.0.
+
 ## Version 1.0 (`galaxy-v1.0`)
 
 | Item | Value |

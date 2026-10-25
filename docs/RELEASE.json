@@ -1,16 +1,16 @@
 {
   "schemaVersion": 2,
-  "releaseId": "galaxy-v1.0",
-  "version": "1.0",
-  "date": "2026-10-24",
+  "releaseId": "galaxy-v1.1",
+  "version": "1.1",
+  "date": "2026-10-25",
   "titleId": "SMGV00001",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "07052caa40b897b6f5bda39145131b5e9662eef36a6674c75089cfd81802b846",
-    "runtimeSha256": "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b"
+    "sha256": "921ea432fc83e72dd459aff939c7743e6428dd806002e827c62d763dfeda4cf6",
+    "runtimeSha256": "7550b0c5a9c56835b0aa4ad9f03f7495b819e4a6cbb395f0fbe78331b6141339"
   },
   "source": {
-    "revision": "56e8263a393a0242e604e9778c467468f28a9aeb",
+    "revision": "b2138b85e555cb0058818f9814a12961b00e7594",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {
