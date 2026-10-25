@@ -9,7 +9,7 @@ it is never shipped, and it never goes in git. Keep it to yourself.
 
 On a Windows, Mac or Linux computer with Python 3 (about 2 GB of free space, roughly 10-30 minutes):
 
-1. Extract your disc with Dolphin ([how](../../PREPARE-GAME.md#1-extract-your-disc-with-dolphin)).
+1. Extract your disc with Dolphin ([how](../../MANUAL-PREPARE-GAME.md#1-extract-your-disc-with-dolphin)).
 2. Make a flat converted copy for the builder (no movies needed):
    `python3 tools/cook/cook.py "/path/to/extracted" cooked`
 3. Install the helpers and download the upscaling model (commands under **Rebuild** below).

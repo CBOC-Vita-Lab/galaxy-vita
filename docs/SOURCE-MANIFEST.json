@@ -19676,7 +19676,7 @@
     },
     {
       "path": "tools/hdtex/README.md",
-      "sha256": "b841f3de175bae07b4ea673fe7627ad7b66c50d589d1fe22cf35b6887b7f86cd"
+      "sha256": "bcdfc057c97dbd9c44ab2e2bb8a677e143aac4d19562b60c733f125740ce1145"
     },
     {
       "path": "tools/hdtex/build_pack.py",
@@ -20064,7 +20064,7 @@
     },
     {
       "path": "tools/update-checksums.py",
-      "sha256": "700c0cc6be6a5026c1054ed0724cb6ed821093608aa74290f204e95613c472c2"
+      "sha256": "590bf42aefed478ff73ff11c44c9dfa339ae1159aab1ce518463723a4c768556"
     },
     {
       "path": "tools/vgx_build/README.md",

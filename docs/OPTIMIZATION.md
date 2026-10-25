@@ -27,7 +27,7 @@ The nine movies are about 2.4 GB as they come off the disc. The installer
 re-encodes their pictures at JPEG quality 55 (1.37 GB, about half the size),
 keeping the 640x368 size, every frame, the frame rate and the sound. Smaller
 pictures also decode faster on the Vita. By hand, `tools/thp_transcode.cpp`
-does the same ([Prepare Your Game](../PREPARE-GAME.md#optional-smaller-movies)).
+does the same ([Prepare Your Game](../MANUAL-PREPARE-GAME.md#optional-smaller-movies)).
 
 ## Checks
 

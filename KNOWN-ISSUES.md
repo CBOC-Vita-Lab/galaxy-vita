@@ -13,8 +13,8 @@ Thanks for playing! If something here bothers you, or you find something new, op
 
 ## Install
 - The game needs your own `RMGE01` (Wii, USA) disc image. Other regions aren't supported yet.
-- `libshacccg.suprx` must be set up on the Vita once (the installer and [Install](INSTALL.md) explain how).
-- **Preparing the game by hand needs Python 3** on your computer, and shrinking the movies by hand needs a C++ compiler; full-size movies play less smoothly, so follow step 3 of [Prepare Your Game](PREPARE-GAME.md). The installer does both for you.
+- `libshacccg.suprx` must be set up on the Vita once (the installer and [Install](MANUAL-INSTALL.md) explain how).
+- **Preparing the game by hand needs Python 3** on your computer, and shrinking the movies by hand needs a C++ compiler; full-size movies play less smoothly, so follow step 3 of [Prepare Your Game](MANUAL-PREPARE-GAME.md). The installer does both for you.
 
 ## If Something Goes Wrong
 - **Something looks or runs wrong:** the game keeps a short log in `ux0:data/smg/log.txt` (and the session before it in `log.txt.prev`): the frame rate and any stutters every few seconds, picture changes, settings and errors. Attach it to your [issue](https://github.com/CBOC-Vita-Lab/galaxy-vita/issues).

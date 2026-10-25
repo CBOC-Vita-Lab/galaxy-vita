@@ -1,9 +1,11 @@
 # Manual Install: Windows, Mac Or Linux
 
+> **Most people should use [CBOC Vita Installer](EASY-INSTALL.md) instead.** It does every step below for you, with nothing to compile or install: pick Super Mario Galaxy, choose your disc, press Install. Use this guide only if you can't or don't want to use it.
+
 **You don't need CBOC Vita Installer to install or play this game.** The VPK
 runs on the Vita by itself, and any computer can prepare and copy the files.
 Once it's installed, no computer is needed. Prefer one click?
-See [Easy Install](DESKTOP-INSTALL.md).
+See [Easy Install](EASY-INSTALL.md).
 
 Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
 [Start Here](START-HERE.txt) is the short version.
@@ -14,7 +16,7 @@ Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
 - Your own Super Mario Galaxy disc image: **Wii, USA (`RMGE01`)**, the original release (revision 0).
 - `libshacccg.suprx` in `ur0:data/` (the shader compiler most vitaGL games need).
 - About 2.5 GB free on the Vita (about 3.5 GB if you keep the movies full size; see
-  [Prepare Your Game](PREPARE-GAME.md)).
+  [Prepare Your Game](MANUAL-PREPARE-GAME.md)).
 - Python 3 on your computer, for the game preparation, and a C++ compiler with
   libjpeg for shrinking the movies (the guide shows how to get them on Mac,
   Windows and Linux).
@@ -25,9 +27,9 @@ Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
    or the [complete install ZIP](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest/download/Galaxy-Vita-install.zip)
    for the VPK plus guides, tools and source. **Don't unzip the VPK.**
    [Download checks](docs/CHECK-DOWNLOAD.md) are optional.
-2. Prepare your game files on your computer with [Prepare Your Game](PREPARE-GAME.md):
+2. Prepare your game files on your computer with [Prepare Your Game](MANUAL-PREPARE-GAME.md):
    extract your disc, convert it, and **shrink the movies** so they play smoothly
-   ([step 3](PREPARE-GAME.md#3-shrink-the-movies-recommended)). You end up with a
+   ([step 3](MANUAL-PREPARE-GAME.md#3-shrink-the-movies-recommended)). You end up with a
    `prepared-game` folder holding `sys/` and `files/`.
 3. Use one of the transfer methods below. Copy `sys/` and `files/` into
    `ux0:data/smg/game/`, and copy `Galaxy-Vita.vpk` into `ux0:VPK/`. Create

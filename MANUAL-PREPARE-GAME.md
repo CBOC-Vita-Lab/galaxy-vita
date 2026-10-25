@@ -1,6 +1,8 @@
 # Prepare Your Game
 
-**This is the manual route.** [CBOC Vita Installer](DESKTOP-INSTALL.md) does
+> **Most people should use [CBOC Vita Installer](EASY-INSTALL.md) instead.** It does every step below for you, with nothing to compile or install: pick Super Mario Galaxy, choose your disc, press Install. Use this guide only if you can't or don't want to use it.
+
+**This is the manual route.** [CBOC Vita Installer](EASY-INSTALL.md) does
 all of this for you. By hand, it works on Windows, macOS or Linux and takes
 four steps: extract your disc, convert it, shrink the movies, copy it.
 
@@ -90,8 +92,8 @@ space on the Vita and play less smoothly.
 ## 4. Copy It To The Vita
 
 Copy `prepared-game/sys/` and `prepared-game/files/` into
-**`ux0:data/smg/game/`** using [USB, FTP or a card reader](INSTALL.md#choose-a-transfer-method),
-then go back to [Install](INSTALL.md). The final paths look like this:
+**`ux0:data/smg/game/`** using [USB, FTP or a card reader](MANUAL-INSTALL.md#choose-a-transfer-method),
+then go back to [Install](MANUAL-INSTALL.md). The final paths look like this:
 
 ```text
 ux0:data/smg/game/sys/fst.bin
