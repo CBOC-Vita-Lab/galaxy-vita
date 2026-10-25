@@ -23,5 +23,5 @@ for lv in range(5):
     levels.append(bytes([0x10 + lv]) * n)
     s //= 2
 hd = dict(fmt=build_pack.PACK_DXT1, w=16, h=16, levels=levels, opaque=True)
-build_pack.write_pack(sys.argv[1], [(key, dict(names=['Test:Synthetic'], t=T()), hd)])
+build_pack.write_pack(sys.argv[1], [(key, dict(names=[sys.argv[2] if len(sys.argv) > 2 else 'Test:Synthetic'], t=T()), hd)])
 print('%s: key %016x' % (sys.argv[1], key))
