@@ -173,7 +173,7 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             const double seconds = (now - sPerf.t0) / 1e9;
             int rw = 0, rh = 0, rs = 1;
             vgx::backend::QualityRungSize(rw, rh, rs);
-            // Shader compiles since the last line: a new graphics effect met in play is a hitch (the package ships 1,131 ready ones).
+            // Shaders prepared since the last line (loaded from the ready-made cache or compiled; the ms tell which: a real compile of a new effect is a hitch, the package ships 1,131 ready ones).
             static uint32_t lastCompiles = 0;
             static double lastShaderMs = 0;
             const vgx::backend::Stats bs = vgx::backend::GetStats();
@@ -182,7 +182,7 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             lastCompiles = bs.shaderCompiles;
             lastShaderMs = bs.shaderWorkMs;
             char compileNote[64] = "";
-            if (compiles) std::snprintf(compileNote, sizeof compileNote, "; %u shaders compiled (%.0f ms)", compiles, compileMs);
+            if (compiles) std::snprintf(compileNote, sizeof compileNote, "; %u shaders prepared (%.0f ms)", compiles, compileMs);
             port_log_summary("fps: %.1f s: shown %.1f fps; game %.1f turns/s; %u skipped; %u hitches over 100 ms (longest %.0f ms); picture %dx%d%s%s",
                              seconds, (w.shown - sPerf.shown) / seconds, (w.frames - sPerf.frames) / seconds, w.skipped - sPerf.skipped, hitches,
                              longest / 1e6, rw, rh, rs > 1 ? (rs > 2 ? " 4x" : " 2x") : "", compileNote);
