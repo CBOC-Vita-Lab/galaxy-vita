@@ -19,7 +19,8 @@ press Install. https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest
 
 Manual Install
 --------------
-1. Prepare your game files from your disc image (PREPARE-GAME.md).
+1. Prepare your game files from your disc image, and shrink the movies
+   so they play smoothly (PREPARE-GAME.md, steps 1 to 3).
 2. Copy them to ux0:data/smg/game/ on the Vita.
 3. Copy Galaxy-Vita.vpk to the Vita.
 4. Install it in VitaShell and launch the bubble.

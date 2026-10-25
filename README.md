@@ -89,7 +89,7 @@ Open [CBOC Vita Installer](https://github.com/CBOC-Vita-Lab/vita-installer/relea
 ### Manual way
 
 1. Download `Galaxy-Vita.vpk` from the [latest release](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest).
-2. Prepare your game files from your disc image ([Prepare your game](PREPARE-GAME.md)).
+2. Prepare your game files from your disc image, including shrinking the movies so they play smoothly ([Prepare your game](PREPARE-GAME.md)).
 3. Copy them to `ux0:data/smg/game/`, and copy the VPK to your Vita.
 4. Install the VPK in VitaShell and launch the bubble.
 
