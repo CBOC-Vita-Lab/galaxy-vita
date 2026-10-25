@@ -9,7 +9,7 @@ aim Star Bits, touch the screen where you used to point the Wii Remote, and tilt
 
 ![Mario in Good Egg Galaxy on the PS Vita](store/screenshots/01-good-egg.png)
 
-**[Download the latest version](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [Install guide](INSTALL.md) · [Controls](CONTROLS.md) · [What's in 1.0](CHANGELOG.md)
+**[Download the latest version](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [Install guide](MANUAL-INSTALL.md) · [Controls](CONTROLS.md) · [What's in 1.0](CHANGELOG.md)
 
 You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
@@ -84,12 +84,12 @@ First launch takes a little longer while the graphics are prepared. See [Known I
 
 ### Easy way: CBOC Vita Installer
 
-Open [CBOC Vita Installer](https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest), pick Super Mario Galaxy, choose your disc image, and press Install. It prepares the game files and sends everything to your Vita over Wi-Fi or USB. [Desktop guide](DESKTOP-INSTALL.md)
+Open [CBOC Vita Installer](https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest), pick Super Mario Galaxy, choose your disc image, and press Install. It prepares the game files and sends everything to your Vita over Wi-Fi or USB. [Desktop guide](EASY-INSTALL.md)
 
 ### Manual way
 
 1. Download `Galaxy-Vita.vpk` from the [latest release](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest).
-2. Prepare your game files from your disc image, including shrinking the movies so they play smoothly ([Prepare your game](PREPARE-GAME.md)).
+2. Prepare your game files from your disc image, including shrinking the movies so they play smoothly ([Prepare your game](MANUAL-PREPARE-GAME.md)).
 3. Copy them to `ux0:data/smg/game/`, and copy the VPK to your Vita.
 4. Install the VPK in VitaShell and launch the bubble.
 

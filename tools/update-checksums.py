@@ -30,8 +30,8 @@ SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "build", "build-vgx", "loca
              "hdtex-build", "node_modules"}
 SKIP_SUFFIXES = (".pyc", ".pyo")
 NOT_SOURCE = ("docs/", "store/", "licenses/", ".github/")
-NOT_SOURCE_FILES = {"SHA256SUMS", "cboc-release.json", VPK, "README.md", "START-HERE.txt", "INSTALL.md",
-                    "DESKTOP-INSTALL.md", "PREPARE-GAME.md", "CONTROLS.md", "CHANGELOG.md", "KNOWN-ISSUES.md",
+NOT_SOURCE_FILES = {"SHA256SUMS", "cboc-release.json", VPK, "README.md", "START-HERE.txt", "MANUAL-INSTALL.md",
+                    "EASY-INSTALL.md", "MANUAL-PREPARE-GAME.md", "CONTROLS.md", "CHANGELOG.md", "KNOWN-ISSUES.md",
                     "CREDITS.md"}
 
 
