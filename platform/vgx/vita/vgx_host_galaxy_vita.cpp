@@ -76,6 +76,7 @@
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __attribute__((weak)); // vitaGL built with DEPTH_HINT only
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak)); // (platform/src/os/os_alarm.cpp: the basic log in ux0:data/smg/log.txt)
 extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built with MASK_SKIP: full-target mask quads left out so far
 extern "C" unsigned long long port_game_frames(void); // vgx_galaxy.cpp: frames the game has finished
 extern "C" int port_boot_title_is_visible(void); // perf.cpp: the title screen has appeared (decomp/.../TitleSequenceProduct.cpp)
@@ -413,10 +414,24 @@ int TickerMain(SceSize, void*) {
     const uint64_t t0 = NowUs();
     float progress = 0.0f, progressAtTitle = 0.0f;
     char caption[128], footer[200];
+    int loggedStage = -1;
+    bool loggedStall = false, loggedTitle = false;
     for (;;) {
         const uint64_t f0 = NowUs();
         if (g_phase.load() == kDone) break;
         if (!g_titleSeen.load() && port_boot_title_is_visible()) NoteTitleVisible("title logo");
+        // The basic log (log.txt) gets the loading milestones, so that a start that never reaches the title can be read.
+        if (port_log_summary) {
+            const int now = g_stage.load();
+            if (now != loggedStage) {
+                loggedStage = now;
+                port_log_summary("loading: %s (%.1f s since start)", kCaption[now], (f0 - t0) / 1e6);
+            }
+            if (g_titleSeen.load() && !loggedTitle) {
+                loggedTitle = true;
+                port_log_summary("loading: title reached after %.1f s", (f0 - t0) / 1e6);
+            }
+        }
         loading::State st;
         const int stage = g_stage.load();
         st.tip = static_cast<int>((f0 - t0) / 4500000u);
@@ -443,6 +458,15 @@ int TickerMain(SceSize, void*) {
         } else {
             st.caption = kCaption[stage];
             progress = Progress(f0, progress);
+            // A stage that has gone on for far longer than it ever takes: say so, and say what to check.
+            const double inStage = (f0 - g_stageStartUs.load()) / 1e6;
+            if (!g_titleSeen.load() && inStage > 90.0 && stage >= kGame) {
+                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game, then see Known Issues on the project page.";
+                if (!loggedStall && port_log_summary) {
+                    loggedStall = true;
+                    port_log_summary("loading: still in \"%s\" after %.0f s without reaching the title (see KNOWN-ISSUES.md)", kCaption[stage], inStage);
+                }
+            }
         }
         if (g_titleSeen.load()) {
             const double since = (f0 - g_titleSeenUs.load()) / 1e6;
