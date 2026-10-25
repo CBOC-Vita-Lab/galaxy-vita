@@ -6,11 +6,11 @@
   "titleId": "SMGV00001",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "921ea432fc83e72dd459aff939c7743e6428dd806002e827c62d763dfeda4cf6",
-    "runtimeSha256": "7550b0c5a9c56835b0aa4ad9f03f7495b819e4a6cbb395f0fbe78331b6141339"
+    "sha256": "9195f5dbb99dd47569d1f2c3ba8616a6633b7517c59d67470d8bf63bb379e6e4",
+    "runtimeSha256": "ac3f6fb07b05bc26759fae52f752af085cd7cf84e3bbed9477db6ded328de8f4"
   },
   "source": {
-    "revision": "b2138b85e555cb0058818f9814a12961b00e7594",
+    "revision": "2869a6b17f3b381171c38877723a4e86f695c998",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {

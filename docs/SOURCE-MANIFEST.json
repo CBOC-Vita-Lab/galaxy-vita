@@ -18676,7 +18676,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "0a162aea018d9e91b8cb49dc0d429b42ef70ee1c5082f0e3ddec34bcd9bb4000"
+      "sha256": "04adfed3e42f24daffb47a7ec8a84251b115663c8acf57b8f6aec1fc4b6f2bbf"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
@@ -19048,7 +19048,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "316c9a7a87f1f5f64636064aa3c8eac5da2e3f4ae7d466c97f959218541aae32"
+      "sha256": "ea061b7b4a18a4cd7251daf7db894f1f4311a9a5b4be48b154f894eed1f9a7b7"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",

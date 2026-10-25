@@ -5,6 +5,10 @@ A small fix for the HD textures.
 ### Fixed
 - **Mario's eyes.** Some players with the optional HD textures saw Mario's eyes white, or his eyelids closed all the time. Eyes now always use the game's own pictures, so they show and blink normally. The rest of the HD pack still applies, and you don't need a new pack.
 
+### Easier to help with
+- **A slow start tells you.** If the loading screen is still going after 90 seconds, it says so and points you to the game files folder.
+- **A fuller log.** `log.txt` (in `ux0:data/smg`) now records each loading stage and when the title was reached, and each 5-second line shows how many shaders were prepared, so a stutter or a stuck start is much quicker to diagnose. Attach it when you report a problem.
+
 Updating? Install the new VPK over the old one. Your saves and settings are kept.
 
 # Version 1.0 — October 2026

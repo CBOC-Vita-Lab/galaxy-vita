@@ -2,7 +2,12 @@
 
 ## Version 1.1 (`galaxy-v1.1`)
 
-Version 1.0 plus one change: textures whose name contains "eye" keep the game's own image even when the optional HD textures pack has a replacement (`platform/vgx/src/vgx_hdtex.cpp`; `GXV_HDTEX_EYES=1` turns the pack's eyes back on for testing). Source: the port's development line at `b2138b85e555cb0058818f9814a12961b00e7594`; the player build flags are those of 1.0. The tables below describe 1.0.
+Version 1.0 plus three changes, built from this repository at `2869a6b17f3b381171c38877723a4e86f695c998` with the 1.0 player build flags:
+- `platform/vgx/src/vgx_hdtex.cpp`: textures whose name contains "eye" keep the game's own image even when the optional HD textures pack has a replacement (`GXV_HDTEX_EYES=1` turns the pack's eyes back on for testing).
+- `platform/vgx/vita/vgx_host_galaxy_vita.cpp`: the loading stages and the moment the title is reached go to the basic log; a start still loading after 90 s says so on screen.
+- `platform/src/gx/vgx_galaxy.cpp`: the five-second line of the basic log adds the shaders prepared in that time.
+
+The tables below describe 1.0.
 
 ## Version 1.0 (`galaxy-v1.0`)
 
