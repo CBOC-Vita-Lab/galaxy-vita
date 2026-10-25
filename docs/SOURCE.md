@@ -2,9 +2,10 @@
 
 ## Version 1.1 (`galaxy-v1.1`)
 
-Version 1.0 plus three changes, built from this repository at `2869a6b17f3b381171c38877723a4e86f695c998` with the 1.0 player build flags:
+Version 1.0 plus four changes, built from this repository at `95dbb73965f16ddb9854f1ad4e977e63c7251504` with the 1.0 player build flags:
 - `platform/vgx/src/vgx_hdtex.cpp`: textures whose name contains "eye" keep the game's own image even when the optional HD textures pack has a replacement (`GXV_HDTEX_EYES=1` turns the pack's eyes back on for testing).
 - `platform/vgx/vita/vgx_host_galaxy_vita.cpp`: the loading stages and the moment the title is reached go to the basic log; a start still loading after 90 s says so on screen.
+- `vita/vgx-game/fd_guard.cpp`: a seek on a file handle that is not open fails with EBADF instead of crashing in the C library (a start-up crash seen once in a few launches); the basic log notes it.
 - `platform/src/gx/vgx_galaxy.cpp`: the five-second line of the basic log adds the shaders prepared in that time.
 
 The tables below describe 1.0.

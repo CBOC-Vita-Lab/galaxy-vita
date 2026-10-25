@@ -19048,7 +19048,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "ea061b7b4a18a4cd7251daf7db894f1f4311a9a5b4be48b154f894eed1f9a7b7"
+      "sha256": "a2849e3f714482585a33a2ae787fc122caea2102d8e569e3a0088d49c2bfebd5"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",
@@ -20348,7 +20348,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "17e688f8cdbcd41b1e75dde15e0dedd164e4c4bd7021067c4eeabae950b9a330"
+      "sha256": "97d11c7ceb56fedb5dfb89e7889fc71467e0f2380f9cca5a8e6f74b65ec4badd"
     },
     {
       "path": "vita/vgx-game/coldtrace_export.cpp",
@@ -20361,6 +20361,10 @@
     {
       "path": "vita/vgx-game/entry.cpp",
       "sha256": "67973d8f19ed51d2416c91e6296195c591c70f41b77569888acc023178b74c52"
+    },
+    {
+      "path": "vita/vgx-game/fd_guard.cpp",
+      "sha256": "d757bc64d62e4edb706ec9a41636fb6432822585117a1de8bd75cffe2486ff34"
     },
     {
       "path": "vita/vgx-game/main.cpp",
