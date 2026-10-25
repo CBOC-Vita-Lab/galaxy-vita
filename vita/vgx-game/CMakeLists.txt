@@ -21,7 +21,8 @@ if(VGL_SHADER_READER_ARCHIVE)
     set(vgl_archive "${VGL_SHADER_READER_ARCHIVE}")
 endif()
 set(SMG_TITLE_ID "SMGV00001" CACHE STRING "Title ID")
-add_executable(galaxy_native main.cpp entry.cpp)
+add_executable(galaxy_native main.cpp entry.cpp fd_guard.cpp)
+target_link_options(galaxy_native PRIVATE "-Wl,--wrap=_lseek_r")
 if(VGL_SHADER_READER_ARCHIVE)
     # Both sides must be compiled in; an unchanged driver/runtime fails the link.
     target_link_options(galaxy_native PRIVATE "-Wl,--require-defined=port_vgx_shader_cache_reader_driver_v1"

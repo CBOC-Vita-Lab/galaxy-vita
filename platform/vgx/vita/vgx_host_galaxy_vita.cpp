@@ -460,7 +460,7 @@ int TickerMain(SceSize, void*) {
             progress = Progress(f0, progress);
             // A stage that has gone on for far longer than it ever takes: say so, and say what to check.
             const double inStage = (f0 - g_stageStartUs.load()) / 1e6;
-            if (!g_titleSeen.load() && inStage > 90.0 && stage >= kGame) {
+            if (!g_titleSeen.load() && inStage > 90.0 && stage != kUnpack) {
                 st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game, then see Known Issues on the project page.";
                 if (!loggedStall && port_log_summary) {
                     loggedStall = true;
