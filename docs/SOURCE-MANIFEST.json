@@ -18916,7 +18916,7 @@
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
-      "sha256": "d4f9095a7835c163cbd632a5cd2499c42c059946276a3214bf5264c2f80909a9"
+      "sha256": "9bee6f85627452819e74e8acd9bc5508fa31747fa29e0c9552965560854e5d8e"
     },
     {
       "path": "platform/src/settings/settings_store.cpp",
@@ -18928,7 +18928,7 @@
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
-      "sha256": "5d77ef23ef290f4d5b72d2961fbdbb20e7b2ad790ca192f6c0848d4823b88a11"
+      "sha256": "b307a47a5872343d7625d2cf18041b599a289931fbaeecae8c78ff49af2ce3fe"
     },
     {
       "path": "platform/src/vi/vi.cpp",
@@ -20060,11 +20060,11 @@
     },
     {
       "path": "tools/handheld/assets/settings_playstation.png",
-      "sha256": "ffb8294800d2bf8b23be0f115638adba249dc3703bd0467ff0ae537fae8d2891"
+      "sha256": "98a07b433ba2530dd4dc73836813b57d0f21a0d8d57b041fb3371475243eaa09"
     },
     {
       "path": "tools/handheld/assets/settings_vita.png",
-      "sha256": "3dfa992697cfcc0b3c9afb0c50da504c43ce9fb11d6bfbea2f7ec94895899ed1"
+      "sha256": "d4a5462f186099f3b9a2d066afdebae3d28605c8833b6dfe74d09b250e798923"
     },
     {
       "path": "tools/handheld/make_glyphs.py",
