@@ -210,15 +210,17 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
         const char* labels[]={"Picture rate","Dynamic quality","Game language","Reduced motion"};
         std::string lang=state.working.language.empty()?(session.languages.names.empty()?"Game data unavailable":"Disc default"):state.working.language;
         if(!state.working.language.empty()&&std::find(session.languages.names.begin(),session.languages.names.end(),state.working.language)==session.languages.names.end())lang+=" (unavailable)";
-        const std::string values[]={state.working.fpsLimit==30?"30 FPS":"Up to 60 FPS",state.working.autoQuality==AutoQuality::Default?"Default":state.working.autoQuality==AutoQuality::Enabled?"On":"Off",lang,state.working.reducedMotion?"On":"Off"};
+        const std::string values[]={state.working.fpsLimit==30?"30 FPS":state.working.fpsLimit==kSteady30?"Steady 30":"Up to 60 FPS",state.working.autoQuality==AutoQuality::Default?"Default":state.working.autoQuality==AutoQuality::Enabled?"On":"Off",lang,state.working.reducedMotion?"On":"Off"};
         for(unsigned i=0;i<4;++i) {
             const int y=186+static_cast<int>(i)*46;if(state.row==i)Focus(r,y,880,elapsed,state.working.reducedMotion);
             r.text(60,y+4,labels[i],white,288);
             if(i==0) {
-                r.rect(370,y+2,177,31,state.working.fpsLimit==30?RGB(73,64,34):RGB(22,35,42));
-                r.rect(553,y+2,339,31,state.working.fpsLimit==0?RGB(73,64,34):RGB(22,35,42));
-                r.text(385,y+4,"30 FPS",session.features.fixed30?gold:muted,156);
-                r.text(572,y+4,"Up to 60 FPS",gold,300);
+                r.rect(370,y+2,140,31,state.working.fpsLimit==30?RGB(73,64,34):RGB(22,35,42));
+                r.rect(516,y+2,170,31,state.working.fpsLimit==kSteady30?RGB(73,64,34):RGB(22,35,42));
+                r.rect(692,y+2,200,31,state.working.fpsLimit==0?RGB(73,64,34):RGB(22,35,42));
+                r.text(382,y+4,"30 FPS",session.features.fixed30?gold:muted,124);
+                r.text(528,y+4,"Steady 30",gold,150);
+                r.text(704,y+4,"Up to 60",gold,180);
             } else if(i==3) {
                 r.rect(373,y+4,26,26,muted);r.rect(375,y+6,22,22,RGB(14,28,35));
                 if(state.working.reducedMotion) {r.rect(379,y+14,5,9,cyan);r.rect(384,y+9,10,5,cyan);r.rect(384,y+13,5,10,cyan);}
@@ -227,6 +229,7 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
         }
         std::string note=session.mode==OpenMode::Running?"Current game keeps its active settings until restart.":"Saved choices apply on a fresh launch.";
         if(!session.features.fixed30&&state.working.fpsLimit==30)note="30 FPS saved; unavailable in this build. Current rate unchanged.";
+        else if(state.row==0&&state.working.fpsLimit==kSteady30)note="Steady 30: an even 30 FPS; lowers resolution and effects when needed.";
         if(!session.overrides.empty()) {
             r.asset(60,372,28,kButtonSquare);note="Developer Overrides ("+std::to_string(session.overrides.size())+")";r.text(100,377,note,muted,792,true);
         } else r.text(60,377,note,muted,832,true);

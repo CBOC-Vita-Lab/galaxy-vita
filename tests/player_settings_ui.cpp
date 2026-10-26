@@ -17,6 +17,7 @@ static void Arm(UiState& s) {Input(s);}
 int main() {
     auto session=Session();UiState s;Begin(s,session);
     Input(s,Accept,controls::Cross);assert(!s.armed&&s.working.fpsLimit==0);Input(s);Tap(s,Right);assert(s.working.fpsLimit==30&&session.active.fpsLimit==0);
+    Tap(s,Right);assert(s.working.fpsLimit==kSteady30);Tap(s,Right);assert(s.working.fpsLimit==0);Tap(s,Left);assert(s.working.fpsLimit==kSteady30);Tap(s,Left);assert(s.working.fpsLimit==30);
     Tap(s,Down);Tap(s,Right);assert(s.working.autoQuality==AutoQuality::Enabled&&s.working.fpsLimit==30);
     Tap(s,Down);Tap(s,Right);assert(s.working.language=="English");Tap(s,Down);Tap(s,Accept);assert(s.working.reducedMotion);
     Tap(s,Back);assert(s.modal==Modal::Discard&&s.modalChoice==0);Tap(s,Accept);assert(!s.done&&s.modal==Modal::None);Tap(s,Back);Tap(s,Right);Tap(s,Accept);assert(s.done&&!s.result.saved);

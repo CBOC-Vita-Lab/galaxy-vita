@@ -39,13 +39,13 @@ bool Managed(const std::string& key,const controls::ControlApi& api) {
 }
 StoreResult Error(StoreStatus s,const std::string& message) { return {s,message}; }
 bool ValidConfig(const Config& c,const controls::ControlApi& api,std::string& error) {
-    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1) {error="Invalid settings value";return false;}
+    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1) {error="Invalid settings value";return false;}
     if(c.language.size()>64 || std::any_of(c.language.begin(),c.language.end(),[](unsigned char ch){return ch<32||ch>126||ch=='=';})) {error="Invalid language name";return false;}
     for(unsigned i=0;i<2;++i) if(!api.validate(c.profiles[i],static_cast<controls::ProfileId>(i),controls::NominalCaps(static_cast<controls::ProfileId>(i)),error)) return false;
     return true;
 }
 std::map<std::string,std::string> Values(const Config& c) {
-    std::map<std::string,std::string> v{{"schema","1"},{"fps_limit",std::to_string(c.fpsLimit)},
+    std::map<std::string,std::string> v{{"schema","1"},{"fps_limit",c.fpsLimit==kSteady30?std::string("steady30"):std::to_string(c.fpsLimit)},
         {"auto_quality",c.autoQuality==AutoQuality::Default?"default":c.autoQuality==AutoQuality::Enabled?"on":"off"},
         {"profile",c.profile==controls::ProfileId::Handheld?"handheld":"playstation"},
         {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"}};
@@ -80,7 +80,7 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
-        if(k=="fps_limit") { if(v!="0"&&v!="30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=v=="30"?30:0; }
+        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=v=="30"?30:v=="steady30"?kSteady30:0; }
         else if(k=="auto_quality") { if(v!="default"&&v!="on"&&v!="off") return Error(StoreStatus::Malformed,"Invalid dynamic quality");d.config.autoQuality=v=="default"?AutoQuality::Default:v=="on"?AutoQuality::Enabled:AutoQuality::Disabled; }
         else if(k=="profile") { if(v!="handheld"&&v!="playstation")return Error(StoreStatus::Malformed,"Invalid control profile");d.config.profile=v=="handheld"?controls::ProfileId::Handheld:controls::ProfileId::PlayStation; }
         else if(k=="language") d.config.language=v;

@@ -64,7 +64,14 @@ void Change(UiState& s,int direction) {
         return;
     }
     switch(s.row) {
-        case 0: if(s.session->features.fixed30)s.working.fpsLimit=s.working.fpsLimit?0:30;else s.message="Fixed 30 FPS unavailable in this build";break;
+        case 0: {
+            // Right moves along the screen (30 FPS, Steady 30, Up to 60) and wraps; fixed 30 needs the driver capability.
+            if(!s.session->features.fixed30&&s.working.fpsLimit==30) {s.message="Fixed 30 FPS unavailable in this build";break;}
+            std::vector<int> rates{0};if(s.session->features.fixed30)rates.push_back(30);rates.push_back(kSteady30);
+            auto at=std::find(rates.begin(),rates.end(),s.working.fpsLimit);const int n=static_cast<int>(rates.size());
+            const int index=at==rates.end()?0:static_cast<int>(at-rates.begin());
+            s.working.fpsLimit=rates[static_cast<size_t>((index+direction+n)%n)];break;
+        }
         case 1: s.working.autoQuality=static_cast<AutoQuality>((static_cast<int>(s.working.autoQuality)+direction+3)%3);break;
         case 2: {
             if(s.session->languages.names.empty()) {s.message="Game language unavailable until game data is found";break;}

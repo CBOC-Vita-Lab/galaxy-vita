@@ -34,5 +34,8 @@ int main() {
     selected="";c.language="Italian";ApplyStartup(c,true);assert(selected.empty());
     for(auto key:keys)unsetenv(key);
     c.autoQuality=AutoQuality::Default;c.fpsLimit=0;ApplyStartup(c,true);assert(!getenv("GXV_AUTOQ")&&!getenv("GXV_FPS_LIMIT"));
+    assert(!getenv("GXV_PACE")&&!getenv("GXV_AUTOQ_TARGET")&&!getenv("GXV_FXHALF"));c.fpsLimit=kSteady30;ApplyStartup(c,true);
+    assert(getenv("GXV_PACE")&&std::string(getenv("GXV_PACE"))=="1"&&std::string(getenv("GXV_AUTOQ_TARGET"))=="30"&&std::string(getenv("GXV_FXHALF"))=="2"&&!getenv("GXV_FPS_LIMIT"));
+    unsetenv("GXV_PACE");unsetenv("GXV_AUTOQ_TARGET");unsetenv("GXV_FXHALF");
     std::cout<<"launch: exact dispatch, Play precedence, regional catalogs, gates and overrides passed\n";
 }

@@ -50,7 +50,7 @@ LanguageCatalog ReadLanguages() {
 }
 std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     std::vector<Override> overrides;if(!enabled)return overrides;
-    for(const auto* key:{"GXV_FPS_LIMIT","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP"}) {
+    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP"}) {
         if(const char* raw=std::getenv(key)) {
             std::string effective=raw;
             if(std::strcmp(key,"GXV_FPS_LIMIT")==0) effective=std::strcmp(raw,"30")==0?"30 FPS requested (driver capability required)":"Existing picture-rate path";
@@ -59,6 +59,9 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
         }
     }
     if(!std::getenv("GXV_FPS_LIMIT")&&config.fpsLimit==30)setenv("GXV_FPS_LIMIT","30",0);
+    // Steady 30, the aggressive opt-in mode: the adaptive 30/20 picture cadence, dynamic quality aimed at
+    // 30 and half-size effects (60 Hz game turns unchanged). env.txt values win over each part.
+    if(config.fpsLimit==kSteady30&&!std::getenv("GXV_FPS_LIMIT")) {setenv("GXV_PACE","1",0);setenv("GXV_AUTOQ_TARGET","30",0);setenv("GXV_FXHALF","2",0);}
     if(!std::getenv("GXV_AUTOQ")&&!std::getenv("GXV_AUTOQ_LEVEL")&&!std::getenv("GXV_AUTOQ_CYCLE")&&config.autoQuality!=AutoQuality::Default)
         setenv("GXV_AUTOQ",config.autoQuality==AutoQuality::Enabled?"1":"0",0);
     if(!std::getenv("PETARI_LANGUAGE")&&!config.language.empty()) {

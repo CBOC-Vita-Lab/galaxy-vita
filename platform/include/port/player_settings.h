@@ -7,6 +7,8 @@
 
 namespace port::settings {
 constexpr size_t kDocumentLimit = 16384;
+// Config::fpsLimit: 0 up to 60, 30 fixed 30, kSteady30 adaptive pacing with dynamic quality aimed at 30.
+constexpr int kSteady30 = -30;
 enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
 struct Config {
     uint32_t version = 1;

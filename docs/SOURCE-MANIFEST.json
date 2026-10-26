@@ -18512,7 +18512,7 @@
     },
     {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "fd65cff428177e02985aebfd33022cf9d01b812bdcac018cbded072eaccb7c02"
+      "sha256": "d07a068e33cc377c1ac52b6ced2567737762aa37d8236f9a189c5f9282d98322"
     },
     {
       "path": "platform/include/port/port.h",
@@ -18896,7 +18896,7 @@
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "b9bf960d14706a2f1b258ede85ffefa08c959c620441d3c5f55aca34af5bd803"
+      "sha256": "47be521ee7ab5782d1626e9f143322834c82f95b3a6102efe1720efefe88d070"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18904,7 +18904,7 @@
     },
     {
       "path": "platform/src/settings/settings_draw.cpp",
-      "sha256": "50375ed2b364c7998dc14bf1ca2ba730cb9fd6b59a4e28b7b1cb560ad32af481"
+      "sha256": "0dde034afc8478232ae1dd73703054ce2f2266d4c66d2851c09e145fd89ed86a"
     },
     {
       "path": "platform/src/settings/settings_font.cpp",
@@ -18912,7 +18912,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "e76870a1100f2c3870097c951fb4563e8fd00f3d9e6c32e432e06ac94eff05f2"
+      "sha256": "5b71b1383b9f52f6985a6e401121b91dce74765d9950b7537b514a336e70433a"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18924,7 +18924,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "baaacb91b3b34c8f06168fbe39cc8aff5e3c5137f09e9998e25a8947172a4d17"
+      "sha256": "2927a823e77ce49bb63299651642656bbc6639da11b4221c785594ea0f7f880e"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19340,7 +19340,7 @@
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "bd78b9d438e79b11b32eb84fb6887b81e2f8e5030f4b4a5e91b87c6433f3f2e0"
+      "sha256": "9733dae840e22dfbf3025b76699c6669d13c88971468ab4410c925cda9503582"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19356,7 +19356,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "95a58f48349429bf427c0a1ca91b3b6fd7168a98e759d34eb750155053c1ae0c"
+      "sha256": "a3f752ac70ed4b3e2d8e54c11eb05f6bc3c3712edcba8f900356f97e2369c0c8"
     },
     {
       "path": "tests/player_settings_store.cpp",
@@ -19364,7 +19364,7 @@
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "d8664f9a31844a574d91650be8f8ed0a2fe292185bc22f54f81fc6d1ed2eacc1"
+      "sha256": "d5c0783174ea9da604e02746d70e870ff9a8abe83b5c47b0f415fec3015c59a5"
     },
     {
       "path": "tests/settings_audio.cpp",
@@ -20952,7 +20952,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "93556e7b1278416db3c46ffd8654dd8cb16fe576fb20b800a59891c54b48b1e1"
+      "sha256": "9a8e17bc91a9d1c8c4791c3afaa75621ddbacc0d8e8ea2e6d968ae631cda2fa6"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
