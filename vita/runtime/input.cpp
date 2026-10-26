@@ -357,11 +357,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     PortVitaRawInput sampled;
     const bool remap = port::controls::RemapEnabled();
     const bool ok = remap ? selectRaw(control, sampled) : sceCtrlPeekBufferPositive(0, &control, 1) > 0;
-    if (!ok) {
-        // Remapping off: a failed read returns as before (tilt calibration and held buttons kept).
-        if (remap) { resetTransient(); gameSource = -1; gameType = 0; mappingAvailable.store(false); }
-        return;
-    }
+    if (!ok) { resetTransient(); gameSource = -1; gameType = 0; mappingAvailable.store(false); return; }
     if (remap && (sampled.source != gameSource || sampled.controllerType != gameType)) resetTransient();
     gameSource = remap ? sampled.source : 0; gameType = remap ? sampled.controllerType : SCE_CTRL_TYPE_PHY;
     blockedButtons &= control.buttons;

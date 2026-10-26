@@ -19596,7 +19596,7 @@
     },
     {
       "path": "tests/vgx_position_defaults.cpp",
-      "sha256": "f4039b7ff14216c55f4610997bf034fdf28c68240801d29b77f4997d84d4a0b5"
+      "sha256": "ea2f36dd991735b38fa64924f4f2673a1474b6425b6abfa1281b0ca1f554cb97"
     },
     {
       "path": "tests/vgx_position_defaults_arm.cpp",
@@ -20908,7 +20908,7 @@
     },
     {
       "path": "vita/runtime/input.cpp",
-      "sha256": "287e822f6ab860014e09a72aeace2cc68810dee23a3042c31d5eaf375fdc688f"
+      "sha256": "0bd6e2dd084010f5c6c82452bf26671c8382bfc51069da58794b61a482762860"
     },
     {
       "path": "vita/runtime/input.h",

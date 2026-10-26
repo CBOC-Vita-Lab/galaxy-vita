@@ -1,5 +1,6 @@
 // Exercise the real planner and decoders, including untouched general-loop oracle.
 #include "../platform/vgx/src/vgx_state.cpp"
+#include <algorithm>
 #include <chrono>
 #include <string>
 
