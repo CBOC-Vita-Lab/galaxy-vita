@@ -268,6 +268,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
                          __DATE__, __TIME__);
     port_log("kind=native_galaxy_vgx; build %s %s", __DATE__, __TIME__);
     LoadEnvFile(SMG_DATA "/env.txt");
+    // Version 1.1 player defaults: Mario's eyes (final TEV byte wrap), the Settings menu and button
+    // remapping, and the truthful loading bar. Set only when env.txt has not: NAME=0 there turns one off.
+    // Every performance experiment stays off unless env.txt asks for it.
+    for (const char* name : {"GXV_TEVWRAP", "GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD"}) setenv(name, "1", 0);
     LoadInputScript(SMG_DATA "/input.txt");
     {
         // The console starts an application at 333 MHz with the GPU at half speed: ask for the
