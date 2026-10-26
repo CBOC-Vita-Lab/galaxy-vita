@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Original bitmap console diagrams and LiveArea Settings tile, no external assets.
 
-Uses only the Python standard library. Regeneration changes only the owned atlas
-and settings.png, never the game's existing launcher artwork.
+Uses only the Python standard library. Every picture is drawn here from simple
+shapes: no photographs, product renders, logos or game artwork are read.
+Regeneration changes only the owned atlas, the two diagram tables and
+settings.png, never the game's existing launcher artwork.
 """
 import pathlib
 import struct
@@ -158,46 +160,19 @@ def chunk(kind, data):
     return struct.pack('>I', len(data))+kind+data+struct.pack('>I', zlib.crc32(kind+data) & 0xffffffff)
 
 
-def rgba_png(path, expected=(300, 129)):
-    """Decode the owned 8-bit RGBA PNG for lossless C++ embedding, not image editing."""
-    data = path.read_bytes()
-    assert data[:8] == b'\x89PNG\r\n\x1a\n'
-    at, packed = 8, bytearray()
-    width = height = 0
-    while at < len(data):
-        count = struct.unpack_from('>I', data, at)[0]
-        kind, payload = data[at+4:at+8], data[at+8:at+8+count]
-        if kind == b'IHDR':
-            width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', payload)
-            assert (depth, color, compression, filtering, interlace) == (8, 6, 0, 0, 0)
-        elif kind == b'IDAT':
-            packed.extend(payload)
-        at += count+12
-    assert (width, height) == expected
-    raw = zlib.decompress(packed)
-    stride, pixels, previous = width*4, bytearray(), bytearray(width*4)
-    assert len(raw) == height*(stride+1)
-    for y in range(height):
-        method = raw[y*(stride+1)]
-        row = bytearray(raw[y*(stride+1)+1:(y+1)*(stride+1)])
-        assert method < 5
-        for x in range(stride):
-            left, above, diagonal = row[x-4] if x >= 4 else 0, previous[x], previous[x-4] if x >= 4 else 0
-            if method == 1:
-                prediction = left
-            elif method == 2:
-                prediction = above
-            elif method == 3:
-                prediction = (left+above)//2
-            elif method == 4:
-                base = left+above-diagonal
-                distances = abs(base-left), abs(base-above), abs(base-diagonal)
-                prediction = (left, above, diagonal)[distances.index(min(distances))]
-            else:
-                prediction = 0
-            row[x] = (row[x]+prediction) & 255
-        pixels.extend(row)
-        previous = row
+def fitted_rgba(im, size):
+    """The palette diagram scaled uniformly (nearest pixel) into size, centred on transparency."""
+    width, height = size
+    scale = min(width/im.width, height/im.height)
+    w, h = max(1, int(im.width*scale)), max(1, int(im.height*scale))
+    ox, oy = (width-w)//2, (height-h)//2
+    pixels = bytearray(width*height*4)
+    for y in range(h):
+        sy = min(im.height-1, int(y/scale))
+        for x in range(w):
+            r, g, b, a = PALETTE[im.pixels[sy*im.width+min(im.width-1, int(x/scale))]]
+            at = ((oy+y)*width+ox+x)*4
+            pixels[at:at+4] = bytes((r, g, b, a))
     return pixels
 
 
@@ -227,8 +202,9 @@ def main():
         lines.extend('    '+','.join('{%d,%d}' % tuple(run) for run in runs[i:i+12])+',' for i in range(0, len(runs), 12))
         lines.append('};')
     (ROOT/'platform/src/settings/settings_assets.inc').write_text('\n'.join(lines)+'\n')
+    diagrams = {'vita': handheld(), 'playstation': playstation()}
     for filename, name, size in [('vita', 'Vita', (300, 129)), ('playstation', 'PlayStation', (250, 167))]:
-        rgba = rgba_png(pathlib.Path(__file__).resolve().parent/f'assets/settings_{filename}.png', size)
+        rgba = fitted_rgba(diagrams[filename], size)
         runs = []
         for red, green, blue, alpha in zip(rgba[0::4], rgba[1::4], rgba[2::4], rgba[3::4]):
             pixel = alpha << 24 | blue << 16 | green << 8 | red
@@ -236,8 +212,8 @@ def main():
                 runs[-1][0] += 1
             else:
                 runs.append([1, pixel])
-        real = [f'// Original generated console illustration, lossless {size[0]} x {size[1]} RGBA.',
-                '// Encoded by tools/handheld/make_settings_assets.py from the owned PNG.']
+        real = [f'// Original generated console diagram, {size[0]} x {size[1]} RGBA.',
+                '// Drawn from shapes by tools/handheld/make_settings_assets.py (no photographs or logos).']
         if filename == 'vita':
             real.append('struct RgbaRun { unsigned short count; uint32_t pixel; };')
         real.append(f'static constexpr RgbaRun k{name}Illustration[] = {{')

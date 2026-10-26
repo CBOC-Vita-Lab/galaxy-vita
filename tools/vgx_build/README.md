@@ -42,7 +42,7 @@ The default is the player build: diagnostics are compiled out and only a basic l
 (`PORT_RUNTIME_DIAGNOSTICS=0`, `PORT_LOGGING=1`, `PORT_SILENT_STDIO=ON`): `ux0:data/smg/log.txt` gets the frame rate
 and hitches every 5 s, picture-size changes, settings and errors. `--logging` makes a test
 build with the full diagnostic log (much more detail; never publish one). `--no-lto` links the plain game archive.
-`--label` sets the build label the renderer reports (default `1.0`).
+`--label` sets the build label the renderer reports (default `1.1`).
 
 ## Result
 

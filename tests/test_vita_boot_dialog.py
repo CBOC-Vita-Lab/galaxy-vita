@@ -31,6 +31,7 @@ HARNESS = r'''
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include "vgx_common.h"
 #if !defined(LEGACY) && __has_include("port/boot_dialog.h")
 #include "port/boot_dialog.h"

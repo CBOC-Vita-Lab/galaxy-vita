@@ -97,7 +97,7 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 # Bubble and LiveArea are original drawings; the preserved title background is documented in docs/ASSETS.md.
 set(sys "${CMAKE_CURRENT_SOURCE_DIR}/sce_sys")
 include("${CMAKE_CURRENT_LIST_DIR}/loading_artwork.cmake")
-vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 01.00 NAME "Super Mario Galaxy"
+vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 01.10 NAME "Super Mario Galaxy"
     ${smg_loading_picture}
     FILE "${sys}/icon0.png" sce_sys/icon0.png
     FILE "${sys}/pic0.png" sce_sys/pic0.png

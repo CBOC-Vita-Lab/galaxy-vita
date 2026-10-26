@@ -23,7 +23,7 @@ ROOT = HERE.parents[1]
 QUIET_FLAGS = "-DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1"
 # The renderer is compiled at -O3 (3 % fewer instructions per picture than -O2 in the ARM harness).
 VGX_FLAGS = "-O3"
-DEFAULT_LABEL = "1.0"
+DEFAULT_LABEL = "1.1"
 ARTIFACTS = {
     "gameArchive": "vita-source/libgalaxy_vita_sources.a",
     "gameArchiveLto": "vita-source-lto/libgalaxy_vita_sources.a",
@@ -174,7 +174,7 @@ def main():
     parser.add_argument("--no-lto", action="store_true", help="link the plain game archive instead of the ThinLTO one")
     parser.add_argument("--logging", action="store_true",
                         help="a test build that keeps the port's log (ux0:data/smg/log.txt); never for a release")
-    parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.0)")
+    parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.1)")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 32:
         raise ValueError("--jobs must be between 1 and 32")

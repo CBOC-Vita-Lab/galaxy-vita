@@ -395,11 +395,20 @@ extern "C" void port_settings_game_boundary(int safe) {
     Hooks hooks{&context, RuntimeLease::Acquire, RuntimeLease::Release};
     Lease lease;
     sActive.store(true, std::memory_order_release);
+    static unsigned failedOpens = 0;
     if (!lease.Acquire(hooks, 250)) {
         sActive.store(false, std::memory_order_release);
         sRetryAfter = Now() + 1000000;
+        // Each attempt briefly holds input, audio and the renderer: give up after three in a row
+        // (for example no memory for the menu screen) instead of stuttering once a second.
+        if (++failedOpens >= 3) {
+            failedOpens = 0;
+            sRequested.store(false, std::memory_order_release);
+            port_log_summary("settings: the menu could not open (3 attempts); request dropped");
+        }
         return;
     }
+    failedOpens = 0;
     sRequested.store(false, std::memory_order_release);
     const uint64_t opened = Now();
     port_log_summary("settings: gameplay held; menu time is not gameplay performance");
