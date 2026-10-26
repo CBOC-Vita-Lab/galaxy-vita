@@ -232,11 +232,17 @@ bool GameSystem::isPreparedReset() const {
 #ifdef TARGET_PC
 extern "C" int port_frameskip_turn(int allowed);
 extern "C" void port_turn_skipped_set(int v);
+#if defined(__vita__)
+extern "C" void port_settings_game_boundary(int safe);
+#endif
 #endif
 
 void GameSystem::frameLoop() {
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_BEGIN);
 #ifdef TARGET_PC
+#if defined(__vita__)
+    port_settings_game_boundary(!mSceneController->isChangingScene() && !port_skip_fast_forwarding());
+#endif
     port_perf_frame_begin();
     if (port_skip_fast_forwarding()) {
         // A cutscene being skipped: nothing is drawn (the headset view is

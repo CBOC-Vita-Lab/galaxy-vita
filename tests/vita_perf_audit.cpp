@@ -10,6 +10,7 @@
 
 static int64_t wallNs = 1000000000, cpuUs = 100000, publishedPlayerCpuUs;
 static unsigned pendingFrames;
+static int paceDecision = -1;
 static std::string lastSlowLog;
 static unsigned checks;
 static unsigned wallReads, cpuReads, playerReads, logCalls;
@@ -22,7 +23,15 @@ extern "C" int64_t port_host_time_ns() { ++wallReads; return wallNs; }
 extern "C" int64_t port_thread_cpu_us() { ++cpuReads; return cpuUs; }
 extern "C" int64_t port_vgx_player_cpu_us() { ++playerReads; return publishedPlayerCpuUs; }
 extern "C" unsigned port_vgx_backend_pending() { return pendingFrames; }
+extern "C" int port_vgx_pace_turn(int allowed) { return paceDecision < 0 ? -1 : allowed ? paceDecision : 0; }
 extern "C" int port_handheld() { return 1; }
+// Standalone host bindings, including optional hooks supplied by peer packages.
+extern "C" void port_log_summary(const char*, ...) {}
+extern "C" void port_autoq_game_begin() {}
+extern "C" void port_autoq_game_work_done() {}
+extern "C" void port_settings_panel_turn(int) {}
+extern "C" void port_vgx_diagnostic_csv_pause(int) {}
+namespace MR { const char* getCurrentStageName() { return ""; } }
 extern "C" void port_log(const char* format, ...) {
     ++logCalls;
     char line[2048]; va_list args; va_start(args, format);
@@ -350,9 +359,23 @@ static void disabledCosts() {
     require(costRow("draw-selected").turns == 1 && costRow("required-draw").turns == 1,
             "disabled and transition early returns remain classified without inventing skips");
 }
+static void pacedPolicy() {
+    paceDecision = 1;
+    require(port_frameskip_turn(1) == 1, "paced skip takes its retrace and does not accelerate simulation");
+    require(port_frameskip_count() == 1, "paced skip is included in skipped-picture telemetry");
+    paceDecision = 2;
+    require(port_frameskip_turn(1) == 2, "late paced turn can catch up through the established skip path");
+    require(port_frameskip_count() == 2, "late paced skip is counted once");
+    require(port_frameskip_turn(0) == 0, "pacing cannot suppress required scene-transition drawing");
+    paceDecision = 0;
+    require(port_frameskip_turn(1) == 0, "scheduled paced drawing is retained");
+    paceDecision = -1;
+    require(port_frameskip_turn(1) == 0, "disabled hook falls through to unchanged legacy selection");
+}
 int main(int argc, char** argv) {
     require(argc >= 2, "scenario supplied");
-    if (!std::strcmp(argv[1], "quiet")) quietDiagnostics();
+    if (!std::strcmp(argv[1], "paced")) pacedPolicy();
+    else if (!std::strcmp(argv[1], "quiet")) quietDiagnostics();
     else if (!std::strcmp(argv[1], "cpu-scope")) cpuScope();
     else if (!std::strcmp(argv[1], "cpu-failure")) cpuSampleFailure();
     else if (!std::strcmp(argv[1], "stale-player")) stalePlayer();

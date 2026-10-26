@@ -106,10 +106,88 @@ const char* CompareExpr(uint32_t c, const char* ref, char* buf, size_t n) {
     return buf;
 }
 
+// Only exact copies of an explicitly clamped register (or a unit literal).
+// Do not infer bounds from uniforms, textures, raster colours, or general mix math.
+int UnitCopyArg(uint32_t r, bool color) {
+    if (bits(r, 16, 3) || bits(r, 20, 2)) return -1;
+    const unsigned z = color ? 15 : 7;
+    const unsigned a = color ? bits(r, 12, 4) : bits(r, 13, 3);
+    const unsigned b = color ? bits(r, 8, 4) : bits(r, 10, 3);
+    const unsigned c = color ? bits(r, 4, 4) : bits(r, 7, 3);
+    const unsigned d = color ? bits(r, 0, 4) : bits(r, 4, 3);
+    if (b == z && c == z && d == z) return static_cast<int>(a);
+    if (a == z && b == z && c == z) return static_cast<int>(d);
+    return -1;
+}
+
+// Independent verifier: walk definitions backwards instead of propagating flags.
+// Every link moves to an earlier stage, including cross-component RGB <- alpha.
+bool VerifyUnitFinal(const FsKey& k, bool color) {
+    int stage = k.numStages - 1;
+    while (stage >= 0) {
+        const uint32_t r = color ? k.stage[stage].color : k.stage[stage].alpha;
+        if (r & (1u << 19)) return true;
+        if (r & ((7u << 16) | (3u << 20))) return false;
+        int arg = -1;
+        if (color) {
+            if ((r & 0xfffu) == 0xfffu) arg = (r >> 12) & 15;
+            else if ((r & 0xfff0u) == 0xfff0u) arg = r & 15;
+            if (arg == 12 || arg == 13 || arg == 15) return true;
+            if (arg < 0 || arg >= 8) return false;
+            color = !(arg & 1);
+            arg /= 2;
+        } else {
+            if ((r & 0x1ff0u) == 0x1ff0u) arg = (r >> 13) & 7;
+            else if ((r & 0xff80u) == 0xff80u) arg = (r >> 4) & 7;
+            if (arg == 7) return true;
+            if (arg < 0 || arg >= 4) return false;
+        }
+        --stage;
+        while (stage >= 0 && static_cast<int>(bits(color ? k.stage[stage].color : k.stage[stage].alpha, 22, 2)) != arg) --stage;
+    }
+    return false;
+}
+
+void UnitFinal(const FsKey& k, bool verify, bool& color, bool& alpha) {
+    bool unit[4][2] = {};
+    auto bounded = [&](uint32_t r, bool rgb) {
+        if (bits(r, 19, 1)) return true;
+        const int arg = UnitCopyArg(r, rgb);
+        if (arg < 0) return false;
+        if (rgb) return arg == 12 || arg == 13 || arg == 15 || (arg < 8 && unit[arg / 2][arg & 1]);
+        return arg == 7 || (arg < 4 && unit[arg][1]);
+    };
+    for (int i = 0; i < k.numStages; ++i) {
+        const auto& st = k.stage[i];
+        color = bounded(st.color, true);
+        alpha = bounded(st.alpha, false);
+        // TEV reads both source components before either destination is updated.
+        unit[bits(st.color, 22, 2)][0] = color;
+        unit[bits(st.alpha, 22, 2)][1] = alpha;
+    }
+    if (verify) {
+        const bool vc = VerifyUnitFinal(k, true), va = VerifyUnitFinal(k, false);
+        if (color != vc || alpha != va) VGX_LOG_N(1, "final-wrap range verifier disagreement; retaining conversion\n");
+        color = color && vc;
+        alpha = alpha && va;
+    }
+}
+
 } // namespace
 
 void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     Out o;
+    // GXV_TEVWRAP=1 repairs out-of-range final TEV bytes before alpha testing.
+    // Read once: shader code and its source-hashed compiled cache stay stable per process.
+    static const bool wrapFinal = EnvInt("GXV_TEVWRAP", 0) == 1;
+    // GXV_TEVWRAP_ELIDE is read once: 0/default keeps the original source; 1 elides only
+    // proven unit-range copies; 2 independently verifies the proof with fallback.
+    static const long elide = EnvInt("GXV_TEVWRAP_ELIDE", 0);
+    bool unitColor = false, unitAlpha = false;
+    if (wrapFinal && (elide == 1 || elide == 2)) UnitFinal(k, elide == 2, unitColor, unitAlpha);
+    const FsKey::Stage& last = k.stage[k.numStages - 1];
+    const bool wrapColor = wrapFinal && !bits(last.color, 19, 1) && !unitColor;
+    const bool wrapAlpha = wrapFinal && !bits(last.alpha, 19, 1) && !unitAlpha;
     uint8_t texMask = 0;
     bool usesCol[2] = {false, false};
     for (int s = 0; s < k.numStages; ++s) {
@@ -119,6 +197,14 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     for (int i = 0; i < k.numIndStages; ++i) texMask |= static_cast<uint8_t>(1u << k.ind[i].texMap);
 
     o("#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n");
+    if (wrapColor || wrapAlpha) {
+        // Keep in-range fractions unchanged. This repairs final conversion only, not
+        // the existing normalized-float approximation of intermediate GX arithmetic.
+        o("float vgx_wrap_final(float value) {\n"
+          "  if (value >= 0.0 && value <= 1.0) return value;\n"
+          "  float byteValue = floor(value * 255.0 + 0.5);\n"
+          "  return (byteValue - 256.0 * floor(byteValue / 256.0)) / 255.0;\n}\n");
+    }
     for (int m = 0; m < 8; ++m)
         if (texMask & (1u << m)) o("uniform sampler2D u_tex%d;\n", m);
     o("uniform vec4 u_tev[%d];\n", FsTevCount(k));
@@ -244,8 +330,14 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
         Combine(ta, false);
         o("    %s.rgb = rc;\n    %s.a = ra;\n  }\n", RegName(bits(tc, 22, 2)), RegName(bits(ta, 22, 2)));
     }
-    const FsKey::Stage& last = k.stage[k.numStages - 1];
-    o("  vec4 fin = clamp(vec4(%s.rgb, %s.a), 0.0, 1.0);\n", RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)));
+    if (wrapColor || wrapAlpha) {
+        o("  vec4 fin = vec4(%s.rgb, %s.a);\n", RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)));
+        if (wrapColor) o("  fin.rgb = vec3(vgx_wrap_final(fin.r), vgx_wrap_final(fin.g), vgx_wrap_final(fin.b));\n");
+        if (wrapAlpha) o("  fin.a = vgx_wrap_final(fin.a);\n");
+        o("  fin = clamp(fin, 0.0, 1.0);\n");
+    } else {
+        o("  vec4 fin = clamp(vec4(%s.rgb, %s.a), 0.0, 1.0);\n", RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)));
+    }
     if (k.alphaTestOn) {
         char b0[96], b1[96], r0[32], r1[32];
         std::snprintf(r0, sizeof r0, "u_tev[%d].x", V_MISC);

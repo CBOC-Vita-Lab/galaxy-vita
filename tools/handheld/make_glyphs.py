@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H, S = 34, 35, 8          # cell size, supersampling
 CX, CY, R = 16.0, 16.5, 14.0   # button centre and radius, in cell pixels
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT = os.environ.get("GLYPH_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
 
 def canvas():
     im = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
@@ -115,6 +115,10 @@ TEXTURES = [("Cross48", 48, face_texture("cross", 48)), ("Cross40", 40, face_tex
 GLYPHS = [
     ("Cross", face("cross")), ("Circle", face("circle")), ("Triangle", face("triangle")), ("Square", face("square")),
     ("L", shoulder("L")), ("R", shoulder("R")), ("Start", pill("START")), ("Select", pill("SELECT")), ("Console", handheld()),
+    ("L1", shoulder("L1")), ("R1", shoulder("R1")), ("L2", shoulder("L2")), ("R2", shoulder("R2")),
+    ("L3", shoulder("L3")), ("R3", shoulder("R3")),
+    ("Up", pill("UP")), ("Down", pill("DOWN")), ("Left", pill("LEFT")), ("Right", pill("RIGHT")),
+    ("Stick", pill("STICK")),
 ]
 
 def main():

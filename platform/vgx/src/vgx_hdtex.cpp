@@ -63,6 +63,7 @@ std::vector<char> g_names;
 std::vector<uint8_t> g_preload; // the whole pack, when GXV_HDTEX_PRELOAD allows
 uint64_t g_budget = 16ull << 20;
 uint8_t g_mipFilter = FILT_LIN_MIP_NEAR;
+bool g_keepEyes = true; // GXV_HDTEX_EYES=0 (default): eye textures keep the game's own images (players saw white or closed eyes with the pack's)
 long g_logLeft = 48;
 std::atomic<uint64_t> g_hashed{0}, g_hits{0}, g_refused{0}, g_bytesRead{0}, g_lookupNs{0}, g_readNs{0}, g_readMaxNs{0}, g_peakLive{0};
 
@@ -121,6 +122,13 @@ bool Replace(const TexReplaceQuery& q, TexUpload& up) {
     if (q.inPack) *q.inPack = true; // (GXV_CHARAA: one of the characters' and key items' textures, replaced or not)
     if (g_mode == 3) return false;   // (identification only)
     const PackEntry& e = *it;
+    // Eye textures (iris and eyelids of Mario, Luigi, Peach, Rosalina...): with the pack's replacements players
+    // reported missing (white) eyes and eyelids stuck closed. They are small and alpha-keyed and gain little from
+    // 2x, so the game's own images are used unless GXV_HDTEX_EYES=1.
+    if (g_keepEyes) {
+        for (const char* n = NameOf(e); *n; ++n)
+            if ((n[0] | 32) == 'e' && (n[1] | 32) == 'y' && (n[2] | 32) == 'e') return false;
+    }
     // The levels to hand over: all of them, or (a back end that cannot take compressed levels
     // below one block: Caps::mipClamp, the Vita) down to the last level of at least 4x4.
     uint32_t levels = 1, bytes = LevelBytes(e.format, e.w, e.h);
@@ -232,6 +240,7 @@ void Install(void (*log)(const char* fmt, ...)) {
     g_budget = static_cast<uint64_t>(EnvInt("GXV_HDTEX_BUDGET", 16)) << 20;
     g_mipFilter = EnvInt("GXV_HDTEX_TRILINEAR", 0) ? FILT_LIN_MIP_LIN : FILT_LIN_MIP_NEAR;
     g_logLeft = EnvInt("GXV_HDTEX_LOG", 48);
+    g_keepEyes = EnvInt("GXV_HDTEX_EYES", 0) == 0;
     // (default: the whole pack, 4.5 MiB today, is read here, so that no texture's first use
     // during play waits on the memory card: a first Bee Mushroom would otherwise read 100 KiB)
     const uint64_t preload = g_mode == 3 ? 0 : static_cast<uint64_t>(EnvInt("GXV_HDTEX_PRELOAD", 8)) << 20;

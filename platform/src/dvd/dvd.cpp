@@ -35,6 +35,7 @@
 extern "C" void port_gpu_memory_written(void* addr, uint32_t size);
 #include "port/qemu_hooks.h"
 #include "port/vclock.h"
+#include "../../vgx/src/vgx_common.h"
 #include "revolution/dvd.h"
 #include "revolution/os.h"
 #include "revolution/sc.h"
@@ -61,6 +62,71 @@ struct FstEntry {
 static std::vector<FstEntry> sFst;
 static std::string sDataRoot;
 static u32 sCurrentDir = 0;
+
+// GXV_DVDERRORS=1 opts into basic-log file errors (read once; default off). Error paths only:
+// no repair, altered DVD result or successful-read observer. Each failure reports cumulative attempts
+// 1, 8 and 64, with a process-wide 24-line ceiling even when the failing path keeps changing.
+enum class DvdError { Stat, Open, Read };
+static void reportDvdError(DvdError operation, u32 entry, int result, int error) {
+    const int savedErrno = errno;
+    static const bool enabled = vgx::EnvInt("GXV_DVDERRORS", 0) != 0;
+    if (!enabled) { errno = savedErrno; return; }
+    struct Record { DvdError operation{}; u32 entry = 0, count = 0; int error = 0; };
+    constexpr unsigned maxReports = 24;
+    static Record records[maxReports];
+    static unsigned reports = 0;
+    static std::mutex lock;
+    {
+        // The guest can fail stat while the host DVD worker fails open/read. Do not take the DVD queue lock.
+        std::lock_guard<std::mutex> guard(lock);
+        if (reports < maxReports) {
+            Record* record = nullptr;
+            for (auto& r : records) {
+                if (!r.count || (r.entry == entry && r.operation == operation && r.error == error)) { record = &r; break; }
+            }
+            u32 repeat = 1;
+            if (record) {
+                if (!record->count) *record = {operation, entry, 0, error};
+                if (record->count != UINT32_MAX) ++record->count;
+                repeat = record->count;
+            }
+            if (repeat == 1 || repeat == 8 || repeat == 64) {
+                const char* name = operation == DvdError::Stat ? "stat" : operation == DvdError::Open ? "open" : "read";
+                ++reports;
+                port_log_summary("dvd-error: operation=%s entry=%u result=%d errno=%d repeat=%u path=\"%s\"%s", name, entry, result,
+                                 error, repeat, sFst[entry].hostPath.c_str(), reports == maxReports ? "; further errors suppressed" : "");
+            }
+        }
+    }
+    errno = savedErrno;
+}
+
+// Opt-in startup guard, not a replacement for the game's audio preparation. The known
+// title basename is shared by the supported data layout; regional sound-table mapping
+// remains a validation prerequisite before enabling this by default.
+static constexpr const char* kBootTitle = "AudioRes/Stream/SMG_title_strm.ast";
+static u32 sBootTitleEntry = ~0u, sBootTitleBytes = 0;
+namespace AudParams { extern const int streamBlockSize, numStreamChannels; }
+extern "C" int port_boot_data_error(const char*) __attribute__((weak));
+
+extern "C" int port_boot_data_enabled(void) {
+    // GXV_BOOTDATA=1 checks only critical title audio before the game starts. Read once; default off.
+    static const bool enabled = vgx::EnvInt("GXV_BOOTDATA", 0) != 0;
+    return enabled;
+}
+
+extern "C" int port_boot_data_report(const char* message) {
+    if (!port_boot_data_enabled()) return 0;
+    port_log_summary("boot-data: %s", message);
+    return port_boot_data_error && port_boot_data_error(message);
+}
+
+extern "C" [[noreturn]] void port_boot_data_park(void) {
+    // Only the first DVDInit boot guest calls this, after visible error publication and
+    // after validation releases its file. The host/render threads remain independent.
+    // An unexpected resume must not let the game continue with invalid title data.
+    for (;;) OSSuspendThread(OSGetCurrentThread());
+}
 
 static u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 
@@ -618,6 +684,8 @@ static bool loadFst() {
     }
 
     u32 count = be32(&data[8]);
+    sBootTitleEntry = ~0u;
+    sBootTitleBytes = 0;
     const u8* strings = &data[count * 12];
     sFst.resize(count);
     // Directory path of each directory entry, built as we walk.
@@ -646,6 +714,10 @@ static bool loadFst() {
             stack.push_back(i);
         } else {
             fe.hostPath = sDataRoot + "/files/" + full;
+            if (strcasecmp(full.c_str(), kBootTitle) == 0) {
+                sBootTitleEntry = i;
+                sBootTitleBytes = be32(e + 8);  // AST cooking swaps fields without changing file length.
+            }
         }
     }
     port_log("dvd: fst loaded, %u entries, root %s", count, sDataRoot.c_str());
@@ -662,12 +734,48 @@ static bool loadFst() {
     return true;
 }
 
+static const char* validateBootTitle() {
+    if (!port_boot_data_enabled()) return nullptr;
+    if (sBootTitleEntry >= sFst.size()) {
+        port_log_summary("boot-data: missing title entry in sys/fst.bin: %s", kBootTitle);
+        return "missing from file list";
+    }
+    const char* path = sFst[sBootTitleEntry].hostPath.c_str();
+    const auto fail = [&](const char* reason, int error = 0, s64 actual = -1) {
+        port_log_summary("boot-data: %s: path=\"%s\" errno=%d expected=%u actual=%lld", reason, path, error,
+                         sBootTitleBytes, static_cast<long long>(actual));
+        return reason;
+    };
+    // Nonblocking only affects special files; it lets fstat reject a FIFO without waiting for a writer.
+    struct File { int fd; ~File() { if (fd >= 0) close(fd); } } file{open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)};
+    if (file.fd < 0) return fail(errno == ENOENT ? "missing file" : "unreadable file", errno);
+    struct stat st;
+    if (fstat(file.fd, &st) != 0) return fail("unreadable file", errno);
+    if (!S_ISREG(st.st_mode)) return fail("not a regular file");
+    if (st.st_size != sBootTitleBytes) return fail("size mismatch", 0, st.st_size);
+    u8 header[64];
+    const ssize_t got = pread(file.fd, header, sizeof(header), 0);
+    if (got < 0) return fail("unreadable header", errno);
+    if (got != sizeof(header)) return fail("short header", 0, got);
+    if (memcmp(header, "STRM", 4) != 0) return fail("invalid header");
+    const auto le16 = [&](unsigned at) { return static_cast<u32>(header[at]) | (static_cast<u32>(header[at + 1]) << 8); };
+    const auto le32 = [&](unsigned at) { return le16(at) | (le16(at + 2) << 16); };
+    if (header[9] > 1) return fail("invalid format");  // JASAramStream::channelStart supports only ADPCM and PCM16.
+    if (!le16(12) || le16(12) > static_cast<u32>(AudParams::numStreamChannels)) return fail("invalid channels");
+    if (le32(32) != static_cast<u32>(AudParams::streamBlockSize)) return fail("invalid block size");
+    const s32 loopStart = static_cast<s32>(le32(24)), loopEnd = static_cast<s32>(le32(28));
+    if (loopEnd <= 0 || (le16(14) && (loopStart < 0 || loopStart >= loopEnd))) return fail("invalid loop bounds");
+    // No payload scan or stride-modulus test: the last AST block may be rounded past EOF.
+    return nullptr;
+}
+
 static s64 entrySize(u32 entry) {
     FstEntry& fe = sFst[entry];
     if (fe.size < 0) {
         struct stat st;
         const int64_t statStart = port_host_time_ns();
         const bool found = stat(fe.hostPath.c_str(), &st) == 0;
+        if (!found) reportDvdError(DvdError::Stat, entry, -1, errno);
         const int64_t statNs = port_host_time_ns() - statStart;
         static unsigned sSlowStats;
         if (statNs >= 5000000 && sSlowStats < 100) {  // 5 ms
@@ -801,6 +909,7 @@ static int openEntry(u32 entry) {
     const auto& path = sFst[entry].hostPath;
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
+        reportDvdError(DvdError::Open, entry, fd, errno);
         port_log("dvd: open %s failed: %s (errno=%d)", path.c_str(), strerror(errno), errno);
         return -1;
     }
@@ -1007,10 +1116,14 @@ static void workerMain() {
                     ++sMovieMisses;
                 }
             }
-            const int64_t readEnd = port_host_time_ns();
+            int64_t readEnd;
             if (got < 0) {
+                const int error = errno;
+                readEnd = port_host_time_ns();
                 result = -1;
+                reportDvdError(DvdError::Read, req.entry, result, error);
             } else {
+                readEnd = port_host_time_ns();
                 if ((size_t)got < want) {
                     memset(dst + got, 0, want - (size_t)got);  // past EOF the drive returns adjacent data
                 }
@@ -1360,7 +1473,15 @@ void DVDInit(void) {
     inited = true;
     OSInitThreadQueue(&sSyncQueue);
     if (!loadFst()) {
+        if (port_boot_data_report("Game file list is unreadable. Restore converted game data and relaunch; saves unchanged."))
+            port_boot_data_park();
         port_fatal("dvd: game data not found under %s (expected sys/fst.bin and files/)", sDataRoot.c_str());
+    }
+    if (const char* error = validateBootTitle()) {
+        char message[180];
+        snprintf(message, sizeof(message), "SMG_title_strm.ast: %s. Restore converted game data and relaunch; saves unchanged.", error);
+        if (port_boot_data_report(message)) port_boot_data_park();
+        port_fatal("%s", message);  // No visible splash: exit explicitly, never park invisibly.
     }
     benchDrive();
     openBench();

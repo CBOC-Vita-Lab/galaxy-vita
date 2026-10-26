@@ -196,6 +196,9 @@ static void WriteMTXPS3x3from3x4(void* mtx, volatile void* dest) {
 static void WriteMTXPS4x3(const f32 src[3][4], volatile void* dst) {
     int r, c;
     (void)dst;
+#if defined(TARGET_PC) && defined(__ARM_NEON)
+    if (__PortGXFifoXfBurst12(&src[0][0])) return;
+#endif
     for (r = 0; r < 3; r++) {
         for (c = 0; c < 4; c++) {
             GX_WRITE_F32(src[r][c]);

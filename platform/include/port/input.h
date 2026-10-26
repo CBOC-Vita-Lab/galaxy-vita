@@ -29,6 +29,8 @@ typedef struct PortPadState {
 
 // Called by the input layer (any thread).
 void port_input_set(int chan, const PortPadState* state);
+// Caller holds the host input HOLD acknowledgement and has parked the guest.
+void port_input_settings_rearm(void);
 
 // Rumble requested by the game (0/1) for a channel; read by the input layer.
 int port_input_rumble(int chan);

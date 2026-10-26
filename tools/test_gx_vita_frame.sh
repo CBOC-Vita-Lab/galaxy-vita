@@ -71,7 +71,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
         -o "/tmp/gx_live_$mode" -l:libasan.so.8 -l:libubsan.so.1
       if ! "/tmp/gx_live_$mode"; then routing_status=1; fi
     done
-    clang -std=c11 -O1 -g -DTARGET_PC=1 -DNDEBUG=1 -fms-extensions \
+    clang -std=c11 -O1 -g -DTARGET_PC=1 -DNDEBUG=1 -DPORT_RUNTIME_DIAGNOSTICS=0 -fms-extensions \
       -ffunction-sections -fdata-sections -Iplatform/include -Idecomp/libs/RVL_SDK/include \
       -include platform/desktop/c_compat.h -include platform/include/port/compat.h \
       -fsanitize=address,undefined -fno-omit-frame-pointer \

@@ -97,7 +97,7 @@ void CheckTex(uint32_t tex, int ew, int eh, int rung, int r, int g, int b, const
     int w = 0, h = 0;
     uint8_t px[4] = {};
     const bool there = Centre(tex, w, h, px);
-    const int xw = Scaled(ew, autoq::kLadder[rung].w, autoq::kBaseW), xh = Scaled(eh, autoq::kLadder[rung].h, autoq::kBaseH);
+    const int xw = Scaled(ew, autoq::RungAt(rung).w, autoq::kBaseW), xh = Scaled(eh, autoq::RungAt(rung).h, autoq::kBaseH);
     char line[300];
     std::snprintf(line, sizeof line, "%s: %dx%d (expected %dx%d), centre %02X%02X%02X (expected %02X%02X%02X)", what, w, h, xw, xh, px[0], px[1], px[2], r, g, b);
     Check(there && w == xw && h == xh && (r < 0 || Near(px, r, g, b)), line); // (r < 0: the size only)
@@ -229,6 +229,32 @@ int main() {
     // ---- stress: the rung changes before every frame, 28 frames, all rungs up and down (the Strikers port found dark
     // frames with a test that resized every 7 frames). Every frame copies atlas 20's red cell out again and takes a display
     // copy; checked: the display copy shows the EFB's grey (no dark or lost picture) and the red picture survives.
+    {
+        const bool target = std::getenv("GXV_AUTOQ_TARGET") && std::atoi(std::getenv("GXV_AUTOQ_TARGET")) == 30;
+        const int rung = target ? -1 : 0;
+        backend::ForceQualityRung(-1);
+        CmdBuf b;
+        b.frame = 4;
+        CopyCellsOut(b, 43);
+        Present(b, false);
+        backend::RequestCapture(true);
+        backend::Execute(b);
+        backend::RequestCapture(false);
+        const int expectedW = target ? 480 : 544, expectedH = target ? 340 : 388;
+        int w = 0, h = 0;
+        const auto& pixels = backend::LastDisplayCopy(w, h);
+        Check(w == expectedW && h == expectedH,
+              target ? "target 30 enables the 480x340 emergency rung" : "target off preserves the 544x388 floor");
+        const uint8_t* centre = w > 0 && h > 0 && pixels.size() == static_cast<size_t>(w) * h * 4 ?
+            &pixels[(static_cast<size_t>(h / 2) * w + w / 2) * 4] : nullptr;
+        Check(centre && Near(centre, 128, 128, 128), "emergency-floor request preserves the EFB picture");
+        CheckTex(43, 64, 32, rung, 255, 0, 0, "red atlas cell at the requested floor");
+        CheckTex(44, 64, 32, rung, 0, 255, 0, "green atlas cell at the requested floor");
+        CheckTex(45, 40, 20, rung, 0, 0, 255, "blue pass cell at the requested floor");
+        CheckEdges(43, 255, 0, 0, "red atlas cell at the requested floor");
+        CheckEdges(44, 0, 255, 0, "green atlas cell at the requested floor");
+        CheckEdges(45, 0, 0, 255, "blue pass cell at the requested floor");
+    }
     {
         std::printf("stress: a new rung before each of 28 frames:\n");
         int dark = 0, lost = 0, wrongSize = 0;

@@ -1,11 +1,15 @@
 // Automatic picture quality: the controller and the GPU clock (see vgx_autoq.h for the rules).
 #include "vgx_autoq.h"
+#include "vgx_common.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+
+extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));
+extern "C" unsigned port_vgx_pace_divisor(void) __attribute__((weak));
 
 #ifdef __VGX_VITA__
 #include <psp2/gxm.h>
@@ -18,7 +22,6 @@
 // done. Weak: a vitaGL without it leaves the address null and there is no GPU clock.
 extern "C" {
 extern SceGxmNotification query_fence __attribute__((weak));
-int64_t port_thread_cpu_us(void) __attribute__((weak)); // vita/runtime/memory.cpp: the calling thread's CPU time
 void port_log(const char* fmt, ...) __attribute__((weak));
 void port_log_summary(const char* fmt, ...) __attribute__((weak)); // (platform/src/os/os_alarm.cpp: the basic log)
 // GPU timers of a vitaGL built with GPU_TIMERS (tools/vitagl/gpu_timers.py; the build's include/vitaGL.h does not declare
@@ -35,6 +38,75 @@ constexpr uint32_t kVglRtGpuTimers = 0x8; // VGL_RT_GPU_TIMERS
 #endif
 
 namespace vgx::autoq {
+
+bool Target30Enabled() {
+    // GXV_AUTOQ_TARGET=30 targets whole-picture throughput; 0 (default) keeps the old GPU-only policy and sampling off.
+    static const bool enabled = EnvInt("GXV_AUTOQ_TARGET", 0) == 30;
+    return enabled;
+}
+
+namespace {
+// One writer (the game thread), bounded snapshot retries on the renderer. Keep
+// the publication 32-bit so this does not need a 64-bit atomic lock on ARMv7.
+std::atomic<uint32_t> g_gameSeq{0}, g_gameCpu{0}, g_gameTurns{0}, g_gameValid{0}, g_gameFaults{0};
+std::atomic<uint32_t> g_pictureWorkUs{0}, g_pictureFaults{0};
+int64_t g_gameCpuStart = 0;
+static_assert(std::atomic<uint32_t>::is_always_lock_free);
+}
+
+extern "C" void port_autoq_game_begin() {
+    if (!Target30Enabled()) return;
+    g_gameCpuStart = port_thread_cpu_us ? port_thread_cpu_us() : 0;
+}
+
+extern "C" void port_autoq_game_work_done() {
+    if (!Target30Enabled()) return;
+    const int64_t end = port_thread_cpu_us ? port_thread_cpu_us() : 0;
+    const bool valid = g_gameCpuStart > 0 && end >= g_gameCpuStart;
+    g_gameSeq.fetch_add(1, std::memory_order_acq_rel);
+    // A reader observing a new relaxed payload synchronizes its acquire fence with this fence before checking seq again.
+    std::atomic_thread_fence(std::memory_order_release);
+    if (valid) {
+        g_gameCpu.store(g_gameCpu.load(std::memory_order_relaxed) + static_cast<uint32_t>(end - g_gameCpuStart), std::memory_order_relaxed);
+        g_gameTurns.store(g_gameTurns.load(std::memory_order_relaxed) + 1u, std::memory_order_relaxed);
+    } else {
+        g_gameFaults.fetch_add(1, std::memory_order_release);
+        g_pictureWorkUs.store(0, std::memory_order_release);
+    }
+    g_gameValid.store(valid, std::memory_order_relaxed);
+    g_gameSeq.fetch_add(1, std::memory_order_release);
+    g_gameCpuStart = 0;
+}
+
+extern "C" int port_autoq_game_cpu_totals(uint32_t* cpu, uint32_t* turns, uint32_t* faults) {
+    if (!Target30Enabled()) return 0;
+    for (unsigned attempt = 0; attempt < 4; ++attempt) {
+        const uint32_t seq = g_gameSeq.load(std::memory_order_acquire);
+        if (seq & 1u) continue;
+        const uint32_t c = g_gameCpu.load(std::memory_order_relaxed), t = g_gameTurns.load(std::memory_order_relaxed);
+        const uint32_t valid = g_gameValid.load(std::memory_order_relaxed);
+        const uint32_t failed = g_gameFaults.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (seq != g_gameSeq.load(std::memory_order_relaxed)) continue;
+        *cpu = c;
+        *turns = t;
+        *faults = failed;
+        return valid != 0;
+    }
+    return 0;
+}
+
+// Optional pacing hint: the 30 Hz feasibility cost, not the cost of three turns
+// in a deliberately paced 20 Hz picture. Zero means this signal is unavailable.
+extern "C" uint64_t port_autoq_picture_work_us() {
+    if (!Target30Enabled()) return 0;
+    const uint32_t faults = g_gameFaults.load(std::memory_order_acquire);
+    const uint32_t stamp = g_pictureFaults.load(std::memory_order_acquire);
+    const uint32_t work = g_pictureWorkUs.load(std::memory_order_acquire);
+    // Reject a publication crossing a game-clock failure, including an older renderer window published after it.
+    return faults == stamp && stamp == g_pictureFaults.load(std::memory_order_acquire) &&
+        faults == g_gameFaults.load(std::memory_order_acquire) ? work : 0;
+}
 
 void Log(const char* fmt, ...) {
     char line[512];
@@ -73,9 +145,9 @@ const char* WhyText(Why w) {
 }
 
 Controller::Controller(const Config& c) : cfg_(c) {
-    cfg_.minRung = std::clamp(cfg_.minRung, 0, kRungs - 1);
-    cfg_.maxRung = std::clamp(cfg_.maxRung, cfg_.minRung, kRungs - 1);
-    cfg_.startRung = std::clamp(cfg_.startRung, cfg_.minRung, cfg_.maxRung);
+    cfg_.minRung = std::clamp(cfg_.minRung, cfg_.targetFps == 30 ? kEmergency : 0, kRungs - 1);
+    cfg_.maxRung = std::clamp(cfg_.maxRung, std::max(0, cfg_.minRung), kRungs - 1);
+    cfg_.startRung = std::clamp(cfg_.startRung, std::max(0, cfg_.minRung), cfg_.maxRung);
     if (cfg_.windowFrames < 2) cfg_.windowFrames = 2;
     rung_ = cfg_.startRung;
     last_.from = last_.to = rung_;
@@ -85,6 +157,9 @@ void Controller::ResetWindow() {
     busy_ = span_ = present_ = run_ = 0;
     frames_ = busyN_ = 0;
     runKnown_ = true;
+    gameRun_ = gameTurns_ = 0;
+    gameKnown_ = true;
+    hintKnown_ = true;
 }
 
 void Controller::ResetHolds() {
@@ -95,9 +170,9 @@ void Controller::ResetHolds() {
 }
 
 void Controller::Block(int rung, uint64_t now) {
-    double& len = blockLen_[rung];
+    double& len = blockLen_[rung + 1];
     len = len > 0 ? std::min(len * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
-    blockUntil_[rung] = now + static_cast<uint64_t>(len * 1e6);
+    blockUntil_[rung + 1] = now + static_cast<uint64_t>(len * 1e6);
 }
 
 void Controller::SetRung(int to, Why why, uint64_t now) {
@@ -125,10 +200,10 @@ void Controller::Remember(uint32_t key, int rung) {
 }
 
 int Controller::Recall(uint32_t key) const {
-    if (key == 0) return -1;
+    if (key == 0) return kNoRung;
     for (const SceneRung& m : sceneMem_)
         if (m.key == key) return m.rung;
-    return -1;
+    return kNoRung;
 }
 
 void Controller::Limit(int highest, uint64_t now) {
@@ -164,20 +239,65 @@ void Controller::Refused(int back, int failed, uint64_t now) {
 
 bool Controller::Add(const FrameTimes& f) {
     if (!havePrev_) {
+        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_release);
         havePrev_ = true;
         prevDone_ = f.gpuDoneUs;
         prevPresent_ = f.presentUs;
         prevRun_ = f.backendRunUs;
+        prevGameRun_ = f.gameRunUs;
+        prevGameTurns_ = f.gameTurns;
+        prevGameFaults_ = f.gameFaults;
+        prevGameKnown_ = f.gameKnown;
         return false;
     }
     const uint64_t interval = f.presentUs > prevPresent_ ? f.presentUs - prevPresent_ : 0;
     const uint64_t prevDone = prevDone_, prevRun = prevRun_;
     if (sinceChange_ < (1u << 30)) ++sinceChange_;
-    const bool mayChange = sinceChange_ >= static_cast<unsigned>(cfg_.minChangeFrames);
+    const bool mayChange = sinceChange_ >= static_cast<unsigned>(cfg_.minChangeFrames) &&
+        (cfg_.targetFps != 30 || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u);
+    const uint32_t gameRun = f.gameRunUs - prevGameRun_, gameTurns = f.gameTurns - prevGameTurns_;
+    const bool gameKnown = f.gameKnown && prevGameKnown_ && f.gameFaults == prevGameFaults_;
+    if (cfg_.targetFps == 30) {
+        bool currentRoom = false;
+        const bool backendKnown = f.backendRunUs > 0 && prevRun > 0 && f.backendRunUs >= prevRun &&
+            f.backendRunUs <= INT64_MAX && prevRun <= INT64_MAX;
+        const bool gpuKnown = f.timers ? f.busyKnown : !f.paced && f.gpuDoneUs != 0 && prevDone != 0;
+        if (!gameKnown || !gameTurns || !backendKnown || !gpuKnown) {
+            hintKnown_ = false;
+            currentWorkUs_ = 0;
+            g_pictureWorkUs.store(0, std::memory_order_release);
+        } else {
+            const uint64_t doneSpan = f.gpuDoneUs > prevDone ? f.gpuDoneUs - prevDone : 0;
+            const uint64_t from = std::max(prevDone, f.startUs);
+            const uint64_t fenceBusy = f.gpuDoneUs > from ? std::min(f.gpuDoneUs - from, doneSpan) : 0;
+            const uint64_t gpu = f.timers ? f.gpuBusyUs : fenceBusy;
+            const uint64_t game = uint64_t(gameRun) * 2 / gameTurns;
+            const uint64_t backend = f.backendRunUs - prevRun;
+            currentWorkUs_ = static_cast<uint32_t>(std::min<uint64_t>(1000000,
+                std::max({gpu, backend, game})));
+            // A known slow current picture must invalidate old headroom even when a quiet return skips evaluation.
+            const uint32_t published = g_pictureWorkUs.load(std::memory_order_relaxed);
+            if (published && currentWorkUs_ > published) g_pictureWorkUs.store(currentWorkUs_, std::memory_order_release);
+            const int candidate = std::min(rung_ + std::max(1, pendingUp_), cfg_.maxRung);
+            currentRoom = interval <= cfg_.budgetMs * 1030.0 &&
+                std::max({double(game), double(backend), gpu * Cost(candidate) / Cost(rung_)}) <= cfg_.upTarget * cfg_.budgetMs * 1000.0;
+        }
+        if (!currentRoom) {
+            pendingUp_ = 0;
+            roomAt_ = 0;
+            roomT_ = 0;
+            minUp_ = 0;
+        }
+    }
     prevDone_ = f.gpuDoneUs;
     prevPresent_ = f.presentUs;
     prevRun_ = f.backendRunUs;
+    prevGameRun_ = f.gameRunUs;
+    prevGameTurns_ = f.gameTurns;
+    prevGameFaults_ = f.gameFaults;
+    prevGameKnown_ = f.gameKnown;
     if (static_cast<double>(interval) > cfg_.gapResetMs * 1000.0) {
+        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_relaxed);
         // A load or a shader compile: what came before says nothing about what comes next.
         ResetWindow();
         ResetHolds();
@@ -190,11 +310,11 @@ bool Controller::Add(const FrameTimes& f) {
             Remember(from, rung_);
             scene_ = to;
             if (to != 0 && to == from) return false;
-            for (int i = 0; i < kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
+            for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
             int want = Recall(to);
-            if (want < 0) want = cfg_.startRung;
+            if (want == kNoRung) want = cfg_.startRung;
             want = std::clamp(want, cfg_.minRung, cfg_.maxRung);
             if (want != rung_) {
                 SetRung(want, Why::NewScene, f.presentUs);
@@ -205,7 +325,7 @@ bool Controller::Add(const FrameTimes& f) {
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0) {
             // A new scene: nothing learnt about the old one holds, and its rung may be wrong for this one. Back to the
             // start rung (today's picture), from where the next windows decide again.
-            for (int i = 0; i < kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
+            for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
             if (rung_ != cfg_.startRung) {
@@ -222,7 +342,7 @@ bool Controller::Add(const FrameTimes& f) {
         Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_);
         scene_ = f.scene;
         const int want = Recall(f.scene);
-        if (last_.why == Why::NewScene && sinceChange_ <= 60 && want >= 0 && want != rung_) {
+        if (last_.why == Why::NewScene && sinceChange_ <= 60 && want != kNoRung && want != rung_) {
             SetRung(std::clamp(want, cfg_.minRung, cfg_.maxRung), Why::NewScene, f.presentUs);
             return true;
         }
@@ -262,6 +382,17 @@ bool Controller::Add(const FrameTimes& f) {
         return false;
     }
     if (!f.timers && (f.gpuDoneUs == 0 || prevDone == 0)) return false;          // no GPU clock for this pair
+    if (cfg_.targetFps == 30 && f.paced && !f.timers) {
+        // The fence is sampled only after swap returns. A paced callback can
+        // delay that observation beyond GPU completion: without exact timers,
+        // keep the rung rather than mistake a deliberate wait for GPU work.
+        ResetWindow();
+        ResetHolds();
+        pendingUp_ = 0;
+        pendingBelow_ = false;
+        g_pictureWorkUs.store(0, std::memory_order_relaxed);
+        return false;
+    }
     if (f.presentUs < settleUntil_) return false;                                // a change is settling
     if (static_cast<double>(interval) > cfg_.outlierMs * 1000.0) return false;   // one slow frame (a hitch): not counted
     double frameLoad = -1.0;
@@ -283,10 +414,14 @@ bool Controller::Add(const FrameTimes& f) {
     }
     present_ += interval;
     ++frames_;
+    if (cfg_.targetFps == 30) {
+        if (gameKnown) { gameRun_ += gameRun; gameTurns_ += gameTurns; }
+        else gameKnown_ = false;
+    }
     // Fast path: above today, a few frames in a row near the GPU's limit step down now.
     const int floorUp = std::max(kToday, cfg_.minRung);
     if (frameLoad >= 0.0) overFrames_ = frameLoad >= cfg_.saturated ? overFrames_ + 1 : 0;
-    if (rung_ > floorUp && overFrames_ >= static_cast<unsigned>(cfg_.fastFrames) && mayChange) {
+    if (cfg_.targetFps != 30 && rung_ > floorUp && overFrames_ >= static_cast<unsigned>(cfg_.fastFrames) && mayChange) {
         // One step (a short spike costs one rung); when the step before was one of these and did not help (the overload
         // lasts), as far down as this frame's load says. Changes are spaced (minChangeFrames), so one rung at a time would
         // take a second or more for each.
@@ -309,7 +444,10 @@ bool Controller::Add(const FrameTimes& f) {
 }
 
 bool Controller::Evaluate(uint64_t now, bool mayChange) {
-    if (present_ == 0 || busyN_ == 0) return false;
+    if (present_ == 0 || busyN_ == 0) {
+        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_release);
+        return false;
+    }
     double load;
     if (span_ == 0) {
         // GPU timers: mean busy time / mean frame interval (frames the watcher had not finished by a present have no busy time)
@@ -323,11 +461,31 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     winLoad_ = load;
     winCpu_ = cpu;
     winIntervalMs_ = static_cast<double>(present_) / 1000.0 / frames_;
+    const bool target = cfg_.targetFps == 30;
+    const double gpuMs = target ? static_cast<double>(busy_) / busyN_ / 1000.0 : 0.0;
+    const double backendMs = target && runKnown_ ? static_cast<double>(run_) / frames_ / 1000.0 : -1.0;
+    // Two 60 Hz game turns are required per 30 Hz picture. Use CPU work, not
+    // retrace/pacing waits, and a maximum: all three pipeline stages overlap.
+    const double gameMs = target && gameKnown_ && gameTurns_ ? static_cast<double>(gameRun_) * 2.0 / gameTurns_ / 1000.0 : -1.0;
+    const bool wholeKnown = gameMs >= 0.0 && backendMs >= 0.0;
+    winGameMs_ = gameMs;
+    winBackendMs_ = backendMs;
+    winWorkMs_ = std::max({gpuMs, gameMs, backendMs});
+    if (target) {
+        const uint32_t work = wholeKnown && hintKnown_ ? std::max(currentWorkUs_,
+            static_cast<uint32_t>(std::min(winWorkMs_ * 1000.0, 1000000.0))) : 0;
+        // Invalidate before changing stamp. The getter brackets work with stamp/fault reads, so it cannot pair old work with a new fault generation.
+        g_pictureWorkUs.store(0, std::memory_order_release);
+        g_pictureFaults.store(prevGameFaults_, std::memory_order_release);
+        g_pictureWorkUs.store(work, std::memory_order_release);
+    }
+    const double measureMs = target ? winWorkMs_ : winIntervalMs_;
+    if (target) winLoad_ = gpuMs / cfg_.budgetMs;
     ++windows_;
 
     if (checking_) {
         // A step below today's size is kept only if the frames got shorter.
-        checkSpan_ += static_cast<double>(present_);
+        checkSpan_ += target ? measureMs * 1000.0 * frames_ : static_cast<double>(present_);
         checkFrames_ += frames_;
         if (checkSpan_ >= cfg_.checkSec * 1e6) {
             checking_ = false;
@@ -347,28 +505,37 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         }
     }
 
-    const bool over = load >= cfg_.downAbove;
-    const bool bound = load >= cfg_.downBelow && cpu >= 0.0 && cpu <= cfg_.cpuMax;
+    // A paced 50 ms interval is not 50 ms of GPU work. Missed cadence is useful
+    // only alongside actual GPU work near the 30 Hz budget and a CPU margin.
+    const bool gpuBound = target && wholeKnown && gpuMs >= cfg_.budgetMs * cfg_.downBelow &&
+        gpuMs >= std::max(gameMs, backendMs) * 1.05 &&
+        (winIntervalMs_ > cfg_.budgetMs * 1.03 || winWorkMs_ > cfg_.budgetMs);
+    const bool over = target ? gpuBound : load >= cfg_.downAbove;
+    const bool bound = target ? gpuBound : load >= cfg_.downBelow && cpu >= 0.0 && cpu <= cfg_.cpuMax;
     // How far up the prediction allows (at most maxUpStep rungs at once, never past a blocked rung, and onto a rung that
     // has failed before but not past it: such a rung is tried again on its own).
     // (Calm mode: the GPU's busy time against the frame budget as well, so a frame the CPU made long does not hide it.)
     double upLoad = load;
-    if (cfg_.calm && winIntervalMs_ > 0.0) {
+    if (!target && cfg_.calm && winIntervalMs_ > 0.0) {
         const double busyMs = std::min(load, 1.2) * winIntervalMs_;
         upLoad = std::max(load, busyMs / std::min(winIntervalMs_, cfg_.budgetMs));
     }
     int up = 0;
+    // Unknown front-end/shared-core work may also miss the target. Do not add
+    // GPU quality until actual cadence fits, even if measured stages look cheap.
     while (up < cfg_.maxUpStep && rung_ + up + 1 <= cfg_.maxRung && !Blocked(rung_ + up + 1, now) &&
-           upLoad * Cost(rung_ + up + 1) / Cost(rung_) <= cfg_.upTarget) {
+           (target ? wholeKnown && hintKnown_ && winIntervalMs_ <= cfg_.budgetMs * 1.03 &&
+            std::max({gameMs, backendMs, gpuMs * Cost(rung_ + up + 1) / Cost(rung_)}) <= cfg_.upTarget * cfg_.budgetMs :
+            upLoad * Cost(rung_ + up + 1) / Cost(rung_) <= cfg_.upTarget)) {
         ++up;
-        if (blockLen_[rung_ + up] > 0) break;
+        if (blockLen_[rung_ + up + 1] > 0) break;
     }
     const bool room = up > 0;
     overT_ = over ? overT_ + dt : 0.0;
     roomT_ = room ? roomT_ + dt : 0.0;
     if (bound) {
         boundT_ += dt;
-        boundSpan_ += static_cast<double>(present_);
+        boundSpan_ += target ? measureMs * 1000.0 * frames_ : static_cast<double>(present_);
         boundFrames_ += frames_;
     } else {
         boundT_ = 0;
@@ -394,10 +561,10 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     const int floorUp = std::max(kToday, cfg_.minRung); // the lowest rung an overload above today goes to
     if (rung_ > floorUp && overT_ >= cfg_.downHoldSec) {
         int to = rung_ - 1;
-        const bool saturated = load >= cfg_.saturated;
+        const bool saturated = target ? gpuMs >= cfg_.budgetMs : load >= cfg_.saturated;
         if (saturated && !cfg_.calm) to = floorUp; // (calm: as far as the load says, not straight to today)
         else
-            while (to > floorUp && load * Cost(to) / Cost(rung_) > cfg_.upTarget) --to;
+            while (to > floorUp && (target ? gpuMs / cfg_.budgetMs : load) * Cost(to) / Cost(rung_) > cfg_.upTarget) --to;
         Block(rung_, now);
         checking_ = false;
         SetRung(to, saturated ? Why::Saturated : Why::Overload, now);
@@ -406,13 +573,15 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     if (!checking_ && rung_ <= kToday && rung_ > cfg_.minRung && boundT_ >= cfg_.belowHoldSec && now >= belowBlockedUntil_ && pendingUndo_ < 0) {
         const int from = rung_;
         const double before = boundFrames_ ? boundSpan_ / 1000.0 / boundFrames_ : winIntervalMs_;
-        if (cfg_.calm) {
+        if (cfg_.calm && (!target || boundT_ < 8.0)) {
             // (calm: a step below today only buys a little speed, so it waits for a quiet moment as a step up does)
             pendingBelow_ = true;
             belowAt_ = now;
             belowBefore_ = before;
             return false;
         }
+        // Target mode prefers a quiet downstep too, but a persistent GPU miss
+        // for 8 s may lower resolution in play rather than skip indefinitely.
         SetRung(rung_ - 1, Why::GpuBound, now);
         checking_ = true;
         checkFrom_ = from;
@@ -442,6 +611,9 @@ struct Entry {
     std::atomic<uint64_t> done{0};
     bool timers = false, known = false; // GPU timers clock: the busy time of the frame the GPU finished last (if a new one)
     uint32_t busy = 0;
+    uint32_t gameCpu = 0, gameTurns = 0, gameFaults = 0;
+    bool gameKnown = false;
+    bool paced = false;
 };
 constexpr unsigned kRing = 64;
 Entry g_ring[kRing];
@@ -529,6 +701,8 @@ void FramePresented() {
     e.start = g_start;
     e.present = NowUs();
     e.run = port_thread_cpu_us ? static_cast<uint64_t>(port_thread_cpu_us()) : 0;
+    e.gameKnown = port_autoq_game_cpu_totals(&e.gameCpu, &e.gameTurns, &e.gameFaults) != 0;
+    e.paced = port_vgx_pace_divisor && port_vgx_pace_divisor() != 0;
     e.timers = g_timers;
     e.known = false;
     e.busy = 0;
@@ -539,8 +713,12 @@ void FramePresented() {
         const uint32_t n = vglRtLastGpuFrame(&g);
         if (n != 0 && n != g_rtHead) {
             g_rtHead = n;
-            e.known = true;
-            e.busy = g.busy_us;
+            // Target30 must not mistake dropped scene timings for GPU headroom.
+            // Consume incomplete publications once, but leave their cost unknown.
+            if (!Target30Enabled() || (g.scenes != 0 && g.timed == g.scenes)) {
+                e.known = true;
+                e.busy = g.busy_us;
+            }
         }
         e.done.store(e.present, std::memory_order_relaxed);
         g_head.store(h + 1, std::memory_order_release);
@@ -571,6 +749,11 @@ bool NextDone(FrameTimes& out) {
     out.presentUs = e.present;
     out.gpuDoneUs = e.timers ? 0 : done;
     out.backendRunUs = e.run;
+    out.gameRunUs = e.gameCpu;
+    out.gameTurns = e.gameTurns;
+    out.gameFaults = e.gameFaults;
+    out.gameKnown = e.gameKnown;
+    out.paced = e.paced;
     out.timers = e.timers;
     out.busyKnown = e.known;
     out.gpuBusyUs = e.busy;

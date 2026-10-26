@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "../runtime/input.h"
+#include "settings_runtime.h"
 #include "port/game_progress.h"
 #include "port/input_script.h"
 #include "port/port.h"
@@ -257,7 +258,7 @@ static unsigned MeasureArmMHz() {
 
 extern "C" int port_thp_bench(const char* path);  // (platform/src/sdk/thp_video.cpp)
 
-extern "C" int port_vita_game_entry() {
+extern "C" int port_vita_game_entry(int argc, char** argv) {
     sceIoMkdir("ux0:data", 0777);
     sceIoMkdir(SMG_DATA, 0777);
     sceIoMkdir(SMG_DATA "/saves", 0777);
@@ -267,6 +268,13 @@ extern "C" int port_vita_game_entry() {
                          __DATE__, __TIME__);
     port_log("kind=native_galaxy_vgx; build %s %s", __DATE__, __TIME__);
     LoadEnvFile(SMG_DATA "/env.txt");
+    // Version 1.1 player defaults: Mario's eyes (final TEV byte wrap), the Settings menu and button
+    // remapping, the truthful loading bar, and the NEON audio mixing kernels (bit-identical PCM to the
+    // scalar code; they run on the game thread). Set only when env.txt has not: NAME=0 turns one off.
+    // Steady 30 (pacing, dynamic quality aimed at 30, half-size effects) is a Settings choice; the other
+    // performance experiments stay off unless env.txt asks for them.
+    for (const char* name : {"GXV_TEVWRAP", "GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD", "GXV_DSPNEON", "GXV_DSPFIR", "GXV_DSPRAMP"})
+        setenv(name, "1", 0);
     LoadInputScript(SMG_DATA "/input.txt");
     {
         // The console starts an application at 333 MHz with the GPU at half speed: ask for the
@@ -321,6 +329,7 @@ extern "C" int port_vita_game_entry() {
         sceKernelExitProcess(0);
         return 0;
     }
+    if (port_settings_startup(argc, argv)) return 0;
     port_splash_begin();
     if (const char* e = std::getenv("GXV_STDERR_FILE"); PORT_RUNTIME_DIAGNOSTICS && e && *e == '1') { std::freopen(SMG_DATA "/stderr.txt", "w", stderr); std::setvbuf(stderr, nullptr, _IOFBF, 16384); /* (written in batches, see port_log_file: a line-buffered file costs 12-15 ms per line on the card) */ }
     port_vgx_vita_log_memory("at process start");
@@ -341,6 +350,10 @@ extern "C" int port_vita_game_entry() {
     const int64_t start = previous;
     int64_t lastReport = previous;
     for (;;) {
+        if (port_settings_input_service()) {
+            previous = lastReport = port_host_time_ns();
+            continue;
+        }
         const int64_t now = port_host_time_ns();
         PortPadState pad{};
         port_vita_input_poll(std::clamp(float(now - previous) / 1000000000.0f, 0.0f, 0.1f), &pad);

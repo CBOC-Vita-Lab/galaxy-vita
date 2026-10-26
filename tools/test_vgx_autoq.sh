@@ -11,3 +11,6 @@ cxx=${CXX:-g++}
 nice -n 10 "$cxx" -std=c++17 -O1 -g -Wall -Wextra -fsanitize=address,undefined -fno-omit-frame-pointer \
   "$root/tests/vgx_autoq_test.cpp" "$root/platform/vgx/src/vgx_autoq.cpp" -o "$out/vgx_autoq_test"
 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test"
+env -u GXV_AUTOQ_TARGET UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock
+GXV_AUTOQ_TARGET=15 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock
+GXV_AUTOQ_TARGET=30 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock

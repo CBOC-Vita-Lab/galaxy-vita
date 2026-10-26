@@ -51,6 +51,7 @@
 // as that can be told from here (scenes, scissor updates, bytes copied into
 // the uniform ring).
 #include "vgx_cmd.h"
+#include "vgx_workload.h"
 #include "vgx_diagnostic_csv.h"
 #include "vgx_shadergen.h"
 #include "vgx_validate.h"
@@ -70,6 +71,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <deque>
 #include <cstdlib>
 #include <cstring>
@@ -2679,15 +2681,15 @@ bool g_autoqLog = false;
 uint64_t g_autoqStatusUs = 0;
 uint64_t g_poolEvicted = 0;   // pooled objects deleted by EvictIdlePool (status line)
 unsigned g_autoqTimed = 0;    // frames the GPU clock has timed (status line)
-int g_forceRung = -1;         // ForceQualityRung
+int g_forceRung = autoq::kNoRung; // ForceQualityRung (-1 is the target-only emergency rung)
 long g_cycleSec = 0;          // GXV_AUTOQ_CYCLE
 uint64_t g_cycleAt = 0;
 int g_cycleDir = 1;
 
 void SetRungFactors(int rung) {
     g_rung = rung;
-    g_rungSX = static_cast<float>(autoq::kLadder[rung].w) / static_cast<float>(autoq::kBaseW);
-    g_rungSY = static_cast<float>(autoq::kLadder[rung].h) / static_cast<float>(autoq::kBaseH);
+    g_rungSX = static_cast<float>(autoq::RungAt(rung).w) / static_cast<float>(autoq::kBaseW);
+    g_rungSY = static_cast<float>(autoq::RungAt(rung).h) / static_cast<float>(autoq::kBaseH);
 }
 
 // ---- the EFB's multisampling (see g_efbSamples at the top)
@@ -2720,7 +2722,7 @@ int MsaaProbe(const char*& why) {
 }
 
 int RungSamples(int rung) {
-    const int s = autoq::kLadder[rung].samples;
+    const int s = autoq::RungAt(rung).samples;
     return s < g_msaaTop ? s : g_msaaTop;
 }
 // The highest rung this platform can show (the multisampling rungs only with multisampling).
@@ -2728,8 +2730,8 @@ int TopRung() { return g_msaaTop >= 4 ? autoq::kRungs - 1 : (g_msaaTop >= 2 ? au
 
 void RungText(int rung, char* out, size_t n) {
     const int smp = RungSamples(rung);
-    if (smp > 1) std::snprintf(out, n, "%ux%u %dx", autoq::kLadder[rung].w, autoq::kLadder[rung].h, smp);
-    else std::snprintf(out, n, "%ux%u", autoq::kLadder[rung].w, autoq::kLadder[rung].h);
+    if (smp > 1) std::snprintf(out, n, "%ux%u %dx", autoq::RungAt(rung).w, autoq::RungAt(rung).h, smp);
+    else std::snprintf(out, n, "%ux%u", autoq::RungAt(rung).w, autoq::RungAt(rung).h);
 }
 
 #if !defined(__VGX_VITA__)
@@ -3139,13 +3141,13 @@ bool FreeVram(double& freeMiB) {
 // The render targets' memory at rung `want`: everything but the EFB's depth scales with the pixels; the EFB's depth at the
 // rung's size and samples.
 double ProjectedBytes(int want) {
-    const double pix = static_cast<double>(autoq::kLadder[want].w) * autoq::kLadder[want].h /
-                       (static_cast<double>(autoq::kLadder[g_rung].w) * autoq::kLadder[g_rung].h);
+    const double pix = static_cast<double>(autoq::RungAt(want).w) * autoq::RungAt(want).h /
+                       (static_cast<double>(autoq::RungAt(g_rung).w) * autoq::RungAt(g_rung).h);
     int ww = 0, wh = 0;
     {
         const float sx = g_rungSX, sy = g_rungSY;
-        g_rungSX = static_cast<float>(autoq::kLadder[want].w) / static_cast<float>(autoq::kBaseW);
-        g_rungSY = static_cast<float>(autoq::kLadder[want].h) / static_cast<float>(autoq::kBaseH);
+        g_rungSX = static_cast<float>(autoq::RungAt(want).w) / static_cast<float>(autoq::kBaseW);
+        g_rungSY = static_cast<float>(autoq::RungAt(want).h) / static_cast<float>(autoq::kBaseH);
         TargetSize(g_efbW, g_efbH, ww, wh);
         g_rungSX = sx;
         g_rungSY = sy;
@@ -3217,6 +3219,7 @@ void AutoQualityInit() {
     const long onByDefault = 0; // (no GPU clock: the controller would never move)
 #endif
     g_autoqLog = EnvInt("GXV_AUTOQ_LOG", 0) != 0;
+    const bool target30 = autoq::Target30Enabled();
     const char* noMsaa = "";
     g_msaaTop = MsaaProbe(noMsaa);
     if (g_msaaTop > 1) autoq::Log("[autoq] the EFB can be multisampled (up to %dx): rungs 7 and 8", g_msaaTop);
@@ -3248,6 +3251,11 @@ void AutoQualityInit() {
     const bool calm = EnvInt("GXV_AUTOQ_CALM", 1) != 0;
     autoq::Config cfg = calm ? autoq::Config() : autoq::Config::Legacy();
     if (const long b = EnvInt("GXV_AUTOQ_BUDGET_MS", 0); calm && b > 0) cfg.budgetMs = static_cast<double>(std::clamp<long>(b, 8, 100));
+    if (target30) {
+        cfg.targetFps = 30;
+        cfg.budgetMs = 1000.0 / 30.0;
+        cfg.minRung = autoq::kEmergency;
+    }
     cfg.minRung = static_cast<int>(EnvInt("GXV_AUTOQ_MIN", cfg.minRung));
     cfg.maxRung = std::min(static_cast<int>(EnvInt("GXV_AUTOQ_MAX", cfg.maxRung)), TopRung());
     cfg.upTarget = static_cast<double>(EnvInt("GXV_AUTOQ_UP", calm ? 70 : 78)) / 100.0;
@@ -3265,6 +3273,7 @@ void AutoQualityInit() {
     g_autoq = std::make_unique<autoq::Controller>(cfg);
     const autoq::Config& c = g_autoq->Cfg();
     SetRungFactors(g_autoq->Current());
+    if (target30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
     char lo[32], hi[32], st[32];
     RungText(c.minRung, lo, sizeof lo);
     RungText(c.maxRung, hi, sizeof hi);
@@ -3294,6 +3303,10 @@ void AutoQualityStatus() {
     else
         autoq::Log("[autoq] status: rung %d (%dx%d, %d samples, for EFB %dx%d), render targets %.1f MiB in %u pooled objects (no controller)", g_rung, g_rtW, g_rtH,
                    g_efbSamples, g_efbW, g_efbH, static_cast<double>(RenderTargetBytes()) / 1048576.0, static_cast<unsigned>(g_pool.size()));
+    if (g_autoq && g_autoq->Cfg().targetFps == 30)
+        autoq::Log("[autoq] target 30 work: game two turns %.1f ms, renderer CPU %.1f ms, GPU %.1f ms; overlapping maximum %.1f ms against %.3f ms",
+                   g_autoq->WindowGameMs(), g_autoq->WindowBackendMs(), g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs,
+                   g_autoq->WindowWorkMs(), g_autoq->Cfg().budgetMs);
     double freeMiB = 0;
     if (FreeVram(freeMiB))
         autoq::Log("[autoq] status: video memory free %.1f MiB (vitaGL's pool); %u retired render textures kept as spares (GXV_KEEP_RT)", freeMiB,
@@ -3302,11 +3315,11 @@ void AutoQualityStatus() {
 
 void AutoQualityFrame() {
     AutoQualityStatus();
-    if (g_forceRung >= 0) {
+    if (g_forceRung != autoq::kNoRung) {
         g_autoq.reset();
         g_cycleSec = 0;
         if (!ApplyRung(g_forceRung, "ForceQualityRung")) autoq::Log("[autoq] ForceQualityRung(%d) refused: no memory", g_forceRung);
-        g_forceRung = -1;
+        g_forceRung = autoq::kNoRung;
         return;
     }
     if (g_cycleSec > 0) {
@@ -3322,7 +3335,7 @@ void AutoQualityFrame() {
     if (!g_autoq) return;
     autoq::clock::FrameBegin();
     autoq::FrameTimes f;
-    int want = -1;
+    int want = autoq::kNoRung;
     // (calm mode: the game's quiet moments and stage, as they are now; the frames handed over are a frame or two older)
     const bool quiet = port_screen_quiet && port_screen_quiet() != 0;
     const uint32_t scene = port_scene_key ? port_scene_key() : 0;
@@ -3346,8 +3359,8 @@ void AutoQualityFrame() {
         int ww = 0, wh = 0;
         {
             const float sx = g_rungSX, sy = g_rungSY;
-            g_rungSX = static_cast<float>(autoq::kLadder[want].w) / static_cast<float>(autoq::kBaseW);
-            g_rungSY = static_cast<float>(autoq::kLadder[want].h) / static_cast<float>(autoq::kBaseH);
+            g_rungSX = static_cast<float>(autoq::RungAt(want).w) / static_cast<float>(autoq::kBaseW);
+            g_rungSY = static_cast<float>(autoq::RungAt(want).h) / static_cast<float>(autoq::kBaseH);
             TargetSize(g_efbW, g_efbH, ww, wh);
             g_rungSX = sx;
             g_rungSY = sy;
@@ -3367,7 +3380,7 @@ void AutoQualityFrame() {
         g_autoq->Limit(best, autoq::clock::NowUs());
         want = g_autoq->Current();
     }
-    if (want >= 0 && want != g_rung) {
+    if (want != autoq::kNoRung && want != g_rung) {
         const autoq::Change& ch = g_autoq->LastChange();
         char why[200];
         if (ch.why == autoq::Why::NewScene) std::snprintf(why, sizeof why, "%s", autoq::WhyText(ch.why));
@@ -3388,7 +3401,7 @@ void AutoQualitySwapped() {
     if (g_autoq) autoq::clock::FramePresented();
 }
 
-void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, 0, TopRung()); }
+void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, autoq::Target30Enabled() ? autoq::kEmergency : 0, TopRung()); }
 void DebugFailAllocation(int nth) { g_simFailAt = nth; g_simChecks = 0; }
 void DebugLastChange(unsigned& resampled, unsigned& plain) { resampled = g_lastResampled; plain = g_lastPlain; }
 int QualityRung() { return g_rung; }
@@ -4464,11 +4477,29 @@ void FxDecide(const CmdBuf& buf) {
     // the programs available)
     if (on && (g_efbSamples > 1 || VramFree() < kFxVramMin || !FxDepthTexture() || !EnsureFxDepthProgram() || !EnsureCopyProgram())) on = false;
     static const uint32_t minVerts = static_cast<uint32_t>(EnvInt("GXV_FXHALF_MIN", 400));
+    static const int scanFast = [] {
+        const int savedErrno = errno;
+        // GXV_FXSCANFAST: default 0 keeps the scan, 1 skips unobserved inactive FX, 2 checks its empty-mask decision against the scan.
+        const long mode = EnvInt("GXV_FXSCANFAST", 0);
+        errno = savedErrno;
+        return mode == 1 || mode == 2 ? static_cast<int>(mode) : 0;
+    }();
+    bool emptyDecision = false;
+    if (scanFast && div == 0 && !kBackendDiagnostics && !g_verify.read && !g_verify.shadow && !g_verify.refRun && buf.passes.empty()) {
+        static const bool unobserved = [] {
+            // Unusual spellings stay on the scan: moving a first overflowing workload parse would change its conditional errno side effect.
+            const char* setting = std::getenv("GXV_WORKLOAD_PROBE");
+            return (!setting || std::strcmp(setting, "0") == 0) && !workload::Enabled();
+        }();
+        emptyDecision = unobserved;
+        if (emptyDecision && scanFast == 1) return;
+    }
     const size_t n = buf.cmds.size();
     bool inPass = false, any = false;
     size_t runStart = ~static_cast<size_t>(0);
     uint32_t runVerts = 0;
     auto close = [&](size_t end) {
+        if (runStart != ~static_cast<size_t>(0) && !g_verify.shadow) workload::CandidateRun(runVerts);
         if (runStart != ~static_cast<size_t>(0) && on && runVerts >= minVerts) {
             if (g_fxCmd.empty()) g_fxCmd.assign(n, 0);
             for (size_t k = runStart; k < end; ++k)
@@ -4500,6 +4531,10 @@ void FxDecide(const CmdBuf& buf) {
     if (any && !FxDepthTexture()) { // (the console: no DEPTH_SAMPLE vitaGL, or no EFB depth buffer yet)
         g_fxCmd.clear();
         GPUPASS_NOTE(2, "GXV_FXHALF: frame %llu: no depth texture of the EFB: effects at full size\n", static_cast<unsigned long long>(g_progFrame));
+    }
+    if (emptyDecision && !g_fxCmd.empty()) {
+        // Verification always keeps the actual slow result, including a nonempty mask if this eligibility rule ever becomes stale.
+        GPUPASS_NOTE(3, "GXV_FXSCANFAST: empty-mask mismatch; retaining the scanned mask\n");
     }
 }
 void BeginFx(const CmdBuf& buf, size_t i) {
@@ -5503,6 +5538,16 @@ static void ExecuteFrame(const CmdBuf& buf) {
     if (g_verify.read) g_verify.counts = C;
     if (!g_verify.shadow) GpupassMemReport(buf.frame);
     g_lastScenes = C.scenes;
+    if (workload::Enabled() && !g_verify.shadow) {
+        uint32_t draws = 0, copies = 0, displays = 0, passes = 0;
+        for (const Cmd& c : buf.cmds) {
+            draws += c.type == CMD_DRAW;
+            copies += c.type == CMD_COPY_TEX;
+            displays += c.type == CMD_COPY_DISP;
+            passes += c.type == CMD_PASS_BEGIN;
+        }
+        workload::Picture(draws, copies, displays, passes, C.scenes, C.copyQuads, C.fxCandidates, C.fxRuns);
+    }
     C = Counts{};
     // The host presents (and swaps) between frames: whatever is drawn next starts a scene.
     g_inUseFbo = ~0u;

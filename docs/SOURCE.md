@@ -1,5 +1,18 @@
 # Source Record
 
+## Version 1.1 (`galaxy-v1.1`)
+
+Version 1.0 plus the changes below, built from this repository (the release commit) with the 1.0 player build flags and vitaGL `nhustd` with patch `0008-no-present-submit.patch` (8 patches):
+- `platform/vgx/src/vgx_hdtex.cpp`: textures whose name contains "eye" keep the game's own image even when the optional HD textures pack has one (`GXV_HDTEX_EYES=1` turns the pack's eyes back on for testing).
+- `platform/vgx/src/vgx_shadergen.cpp`: final TEV colour and alpha wrap to a byte as on the Wii instead of clamping (`GXV_TEVWRAP`, on by default in 1.1); shader generator version 3.
+- `platform/src/settings/`, `vita/vgx-game/settings_runtime.cpp`, `platform/src/input/control_bindings.cpp`: the Settings menu (LiveArea tile, in-game hold and return, restart), control remapping, fixed 30 FPS, language choice (`GXV_SETTINGS`, `GXV_REMAP`, on by default in 1.1).
+- `platform/vgx/vita/`: truthful loading progress (`GXV_BOOTGUARD`, on by default in 1.1) and the title-screen loading picture (`vita/vgx-game/sce_sys/loading-title.rgba`, see [ASSETS.md](ASSETS.md)).
+- `vita/vgx-game/fd_guard.cpp`: a seek on a file handle that is not open fails with EBADF instead of crashing.
+- Basic log: loading stages, time to title, and shaders prepared per five-second line.
+- Off by default, for testing only (`env.txt`): `GXV_PACE`, `GXV_AUTOQ_TARGET=30`, `GXV_DSPNEON`, `GXV_DSPFIR`, `GXV_DSPRAMP`, `GXV_FXSCANFAST`, `GXV_XFBURST`, `GXV_POSDEFAULT`, `GXV_TEVWRAP_ELIDE`, `GXV_BOOTDIALOG`, `GXV_BOOTDATA`, `GXV_CORE3_PROBE`.
+
+The tables below describe 1.0.
+
 ## Version 1.0 (`galaxy-v1.0`)
 
 | Item | Value |

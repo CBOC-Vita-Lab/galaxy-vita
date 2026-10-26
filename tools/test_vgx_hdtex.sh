@@ -8,6 +8,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 out=${1:-/tmp/vgx-hdtex-test}
 mkdir -p "$out"
 python3 -E -P "$root/tools/hdtex/make_test_pack.py" "$out/test.pack"
+python3 -E -P "$root/tools/hdtex/make_test_pack.py" "$out/test-eye.pack" Test:SyntheticEye
 ${CXX:-g++} -std=c++20 -O1 -g -fsanitize=address,undefined -DVGX_NO_NEON -I"$root/platform/vgx/src" -I"$root/platform/vgx/third_party" \
   "$root/tests/vgx_hdtex.cpp" "$root/platform/vgx/src/vgx_hdtex.cpp" "$root/platform/vgx/src/vgx_state.cpp" "$root/platform/vgx/src/vgx_draw.cpp" "$root/platform/vgx/src/vgx_fesplit.cpp" \
   "$root/platform/vgx/src/vgx_dlcache.cpp" "$root/platform/vgx/src/vgx_guestmem.cpp" "$root/platform/vgx/src/vgx_bpsync.cpp" \
@@ -17,4 +18,8 @@ export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1
 for mode in replace clamp budget dryrun copy changed; do
   "$out/vgx_hdtex" "$out/test.pack" "$mode"
 done
-echo "PASS: 6 HD texture replacement scenarios"
+# eye textures (name contains "eye") keep the game's own image unless GXV_HDTEX_EYES=1
+for mode in eyes eyeson; do
+  "$out/vgx_hdtex" "$out/test-eye.pack" "$mode"
+done
+echo "PASS: 8 HD texture replacement scenarios"

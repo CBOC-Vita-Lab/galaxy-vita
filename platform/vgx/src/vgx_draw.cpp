@@ -2370,6 +2370,9 @@ void CharaMarker(uint32_t kind) {
     if (kind == 1) ++g_cha.hudDepth;                                   // PORT_GX_MARK_HUD_BEGIN
     else if (kind == 2 && g_cha.hudDepth > 0) --g_cha.hudDepth;         // PORT_GX_MARK_HUD_END
 }
+void PresentationMarker(uint32_t kind) {
+    g_buf.presentAllowed = kind != kPresentSuppressedMarker;
+}
 void CharaCounters(uint64_t out[11]) { std::memcpy(out, g_chaCtr, sizeof g_chaCtr); }
 
 // Register folding on a run of particles: every one of them used to lay its vertices out again with two colour

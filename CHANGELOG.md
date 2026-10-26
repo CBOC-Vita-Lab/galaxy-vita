@@ -1,3 +1,31 @@
+# Version 1.1 — October 26, 2026
+
+Mario's eyes, a Settings menu, and a steadier start.
+
+### New
+- **Settings menu.** Tap **Settings** on the game's LiveArea screen, before launching or while playing. It is drawn in the game's own fonts. Choose:
+  - **Controls.** Remap every button for the Vita or for a PlayStation controller on a PS TV, with a picture of the controller.
+  - **Picture rate.** Up to 60 FPS, a fixed 30, or **Steady 30**: an even 30 FPS that lowers the resolution and effects quality when needed. For players who prefer a steady picture to the highest frame rate.
+  - **Dynamic quality** and **reduced motion.**
+  - **Game language,** from the languages your game files include.
+  
+  Choices are saved in `ux0:data/smg/player-settings.cfg`. Some apply after a restart, which the menu offers. Your saves are never touched.
+- **Title-screen loading picture,** with a loading bar that shows real progress.
+
+### Fixed
+- **Mario's eyes.** Players with the optional HD textures saw his eyes white, or his eyelids closed all the time. Eyes now keep the game's own pictures, so they show and blink normally. The rest of the HD pack still applies.
+- **Blue eyes without the HD pack too.** A colour calculation that the Wii wraps around was being clipped, which could leave his irises white. It now matches the Wii.
+- **Start-up crash guarded.** A rare crash in the first seconds of a launch came from a file seek on a handle that was not open. That seek now fails safely.
+
+### Faster
+- **Quicker sound mixing.** The game's audio is now mixed with the Vita's vector unit, which frees a little time on the game's busiest thread. The sound is bit-for-bit the same.
+
+### Easier to help with
+- **A slow start tells you.** If loading takes more than 90 seconds, the screen says so and points you to the game files folder.
+- **A fuller log.** `log.txt` (in `ux0:data/smg`) records each loading stage and when the title was reached. Each 5-second line shows how many shaders were prepared.
+
+Updating? Install the new VPK over the old one. Your saves are kept. The first start after updating takes a little longer while the game prepares its updated shaders.
+
 # Version 1.0 — October 2026
 
 Super Mario Galaxy, running natively on the PS Vita.

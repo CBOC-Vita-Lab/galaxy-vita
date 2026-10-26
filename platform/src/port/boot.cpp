@@ -8,6 +8,7 @@ extern "C" void port_dvd_set_root(const char* root);
 extern "C" void port_dvd_load_dol_data(const char* root);
 extern "C" void port_nand_set_root(const char* root);
 extern "C" void port_zoom_set_root(const char* saveRoot);  // perf.cpp: where the camera zoom setting is kept
+extern "C" int port_boot_data_report(const char* message);
 
 // GameSystem.cpp's main(), renamed for the port.
 void port_game_main(void);
@@ -21,6 +22,8 @@ extern "C" void port_boot(const char* dataRoot, const char* saveRoot) {
     port_dvd_set_root(dataRoot);
     const PortDisc* disc = port_dvd_disc();
     if (!disc) {
+        if (port_boot_data_report("Game file list or language data is missing or unreadable. Restore converted game data and relaunch; saves unchanged."))
+            return;  // The direct splash remains live; no guest was started.
         port_fatal("%s: not the files of a Super Mario Galaxy disc the port knows (no EuEnglish, UsEnglish, JpJapanese or KrKorean "
                    "folder with the game's texts in sys/fst.bin and files/)",
                    dataRoot);

@@ -35,6 +35,7 @@
 #if defined(__vita__)
 
 #define VGX_VITA_NO_GL_ROUTING
+#include "port/boot_dialog.h"
 #include "port/diagnostics.h"
 #include <GLES2/gl2.h>
 
@@ -49,10 +50,12 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include "loading_screen.h"
+#include "vgx_common.h"
 #include "vgx_display_rect.h"
 #include "vgx_shadergen.h"
 #include "vgx_coldtrace.h"
 #include "port/vgx_coldtrace_control.h"
+#include "port/frame_pace.h"
 #include "vgx_state.h"
 #if defined(GXV_SHADER_CACHE_PACK) && GXV_SHADER_CACHE_PACK
 #include "vgx_shader_pack.h"
@@ -76,7 +79,14 @@
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __attribute__((weak)); // vitaGL built with DEPTH_HINT only
+extern "C" GLboolean vglFinishUniformPoolScene(void) __attribute__((weak));
+extern "C" void vglResumeUniformPoolScene(GLboolean resume) __attribute__((weak));
+extern "C" void vglSubmitWithoutSwap(void) __attribute__((weak));
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak)); // (platform/src/os/os_alarm.cpp: the basic log in ux0:data/smg/log.txt)
+extern "C" unsigned port_vgx_pace_divisor(void);
+extern "C" void port_vgx_pace_waited(uint64_t us);
 extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built with MASK_SKIP: full-target mask quads left out so far
+#include "vgx_core3_probe_vita.h"
 extern "C" unsigned long long port_game_frames(void); // vgx_galaxy.cpp: frames the game has finished
 extern "C" int port_boot_title_is_visible(void); // perf.cpp: the title screen has appeared (decomp/.../TitleSequenceProduct.cpp)
 extern "C" void vglSetAnisotropicFilter(uint32_t sceFilter) __attribute__((weak)); // vitaGL with ANISO_SWITCH (GXV_ANISO)
@@ -138,6 +148,10 @@ vgx::backend::Stats g_lastStats;
 uint64_t g_frames = 0, g_fpsT0 = 0, g_fpsFrames = 0;
 std::atomic<unsigned long long> g_richFrame{0}; // game frame of the first picture with >= g_richDraws draw calls (0: none yet)
 unsigned g_richDraws = 0;
+bool g_presentAllowed = true, g_jobSwapped = false, g_wasSplash = true, g_fixedJob = false;
+GLboolean g_settingsSceneResume = GL_FALSE;
+std::atomic<unsigned long long> g_gameSwaps{0};
+std::atomic<unsigned> g_presentSlotEpoch{0};
 
 uint64_t NowUs() { return sceKernelGetProcessTimeWide(); }
 unsigned NowMs() { return static_cast<unsigned>(NowUs() / 1000u); }
@@ -219,6 +233,7 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
 }
 
 void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
+void PaceDisplay(void*);
 
 // =============================================================================================
 // The loading screen (loading_screen.h draws it). This part knows what the start-up is doing.
@@ -233,6 +248,7 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
 //            nothing happens, every 20 ms from the wait of the render loop), so the game's own black
 //            first pictures never reach the display;
 //   kDone    the picture has faded out after the title appeared; the game's pictures take over.
+//   kYielded an actionable startup dialog was drawn: game pictures remain visible until the real title arrives.
 // The bar follows the stages of the start-up, weighted by how long each took on the last start
 // (ux0:data/smg/loadtimes.txt); a stage that knows its progress (unpacking the shaders, the warm-up
 // list) reports it, the others advance with time.
@@ -240,7 +256,7 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
 namespace splash {
 
 enum Stage { kStart, kUnpack, kGraphics, kGame, kShaders, kTitle, kStageCount };
-enum Phase { kOff = 0, kDirect, kGl, kDone };
+enum Phase { kOff = 0, kDirect, kGl, kDone, kYielded };
 
 const char* const kCaption[kStageCount] = {"Starting up", "Unpacking shaders", "Starting the graphics", "Loading the game", "Preparing shaders",
                                            "Almost there"};
@@ -261,6 +277,7 @@ std::atomic<uint64_t> g_titleSeenUs{0};
 std::atomic<bool> g_faded{false};          // the picture has gone dark
 std::atomic<bool> g_directBusy{false};
 std::atomic<bool> g_failed{false};
+std::mutex g_failLock;
 char g_failText[200] = "";
 double g_expect[kStageCount];
 uint64_t g_durUs[kStageCount] = {};
@@ -278,6 +295,14 @@ unsigned g_frames = 0;                     // ticker only, for the closing line
 uint64_t g_renderUsSum = 0, g_renderUsWorst = 0;
 
 inline bool Active() { return g_phase.load(std::memory_order_acquire) == kGl; }
+
+void ConfigureDialog() {
+    // GXV_BOOTDIALOG=1 yields to a drawn, actionable startup dialog; read once, default off.
+    static const bool enabled = vgx::EnvInt("GXV_BOOTDIALOG", 0) != 0;
+    port::bootdialog::Enable(enabled);
+}
+
+bool HandleDialog();  // Render thread only: owns the handoff back to game presentation.
 
 void LoadTimes() {
     for (int i = 0; i < kStageCount; ++i) g_expect[i] = kDefaultSeconds[i];
@@ -346,7 +371,7 @@ void TaskProgress(const char* label, int done, int total, bool counts = true) {
 bool g_heldForShaders = false;
 bool g_warmAfterTitle = false;  // the warm-up's slices have not begun: they wait for the title
 void NoteTitleVisible(const char* how) {
-    if (g_phase.load() == kOff || g_titleSeen.load()) return;
+    if (g_phase.load() == kOff || g_failed.load() || g_titleSeen.load()) return;
     // The shader warm-up goes on behind the loading of the game (SetShaderWarmupDeferred); the screen stays up until it is done.
     const unsigned left = vgx::backend::WarmPending(), all = vgx::backend::WarmTotal();
     // The warm-up's compiles read the shader cache from the card, the same card the game loads from, so it is still a third done
@@ -380,7 +405,10 @@ void NoteTitleVisible(const char* how) {
 }
 void Fail(const char* what) {
     if (g_phase.load() == kOff) return;
+    std::lock_guard<std::mutex> lock(g_failLock);
+    if (g_failed.load()) return;
     std::snprintf(g_failText, sizeof(g_failText), "%s", what);
+    g_faded.store(false);
     g_failed.store(true);
 }
 
@@ -413,10 +441,24 @@ int TickerMain(SceSize, void*) {
     const uint64_t t0 = NowUs();
     float progress = 0.0f, progressAtTitle = 0.0f;
     char caption[128], footer[200];
+    int loggedStage = -1;
+    bool loggedStall = false, loggedTitle = false;
     for (;;) {
         const uint64_t f0 = NowUs();
         if (g_phase.load() == kDone) break;
         if (!g_titleSeen.load() && port_boot_title_is_visible()) NoteTitleVisible("title logo");
+        // The basic log (log.txt) gets the loading milestones, so that a start that never reaches the title can be read.
+        if (port_log_summary) {
+            const int now = g_stage.load();
+            if (now != loggedStage) {
+                loggedStage = now;
+                port_log_summary("loading: %s (%.1f s since start)", kCaption[now], (f0 - t0) / 1e6);
+            }
+            if (g_titleSeen.load() && !loggedTitle) {
+                loggedTitle = true;
+                port_log_summary("loading: title reached after %.1f s", (f0 - t0) / 1e6);
+            }
+        }
         loading::State st;
         const int stage = g_stage.load();
         st.tip = static_cast<int>((f0 - t0) / 4500000u);
@@ -443,8 +485,18 @@ int TickerMain(SceSize, void*) {
         } else {
             st.caption = kCaption[stage];
             progress = Progress(f0, progress);
+            // A stage that has gone on for far longer than it ever takes: say so, and say what to check.
+            const double inStage = (f0 - g_stageStartUs.load()) / 1e6;
+            if (!g_titleSeen.load() && inStage > 90.0 && stage != kUnpack) {
+                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game, then see Known Issues on the project page.";
+                if (!loggedStall && port_log_summary) {
+                    loggedStall = true;
+                    port_log_summary("loading: still in \"%s\" after %.0f s without reaching the title (see KNOWN-ISSUES.md)", kCaption[stage], inStage);
+                }
+            }
         }
-        if (g_titleSeen.load()) {
+        if (g_titleSeen.load() && !g_failed.load()) {
+            st.titleReady = true;
             const double since = (f0 - g_titleSeenUs.load()) / 1e6;
             if (progressAtTitle == 0.0f) progressAtTitle = progress;
             const float k = since >= 0.20 ? 1.0f : static_cast<float>(since / 0.20);
@@ -477,7 +529,8 @@ int TickerMain(SceSize, void*) {
         // thread has other things to do (the shader warm-up above all: the first console run with a picture every 33 ms made
         // it take 15 s instead of 6): 7 a second, 4 during the warm-up, 30 again for the fade at the end.
         uint32_t periodUs = 33000u;
-        if (g_phase.load() == kGl && !g_titleSeen.load()) periodUs = g_stage.load() == kShaders ? 250000u : 150000u;
+        const int phase = g_phase.load();
+        if ((phase == kGl || phase == kYielded) && !g_titleSeen.load()) periodUs = g_stage.load() == kShaders ? 250000u : 150000u;
         const uint64_t used = NowUs() - f0;
         sceKernelDelayThread(used < periodUs ? static_cast<SceUInt>(periodUs - used) : 2000u);
     }
@@ -487,6 +540,7 @@ int TickerMain(SceSize, void*) {
 // Render thread: puts the latest finished picture on the display (a swap) when it is a new one.
 uint64_t g_upUs = 0, g_drawUs = 0, g_swapUs = 0, g_presented = 0;  // (render thread only)
 bool PresentFrame(bool force) {
+    if (HandleDialog()) return false;
     const uint64_t a = NowUs();
     {
         std::lock_guard<std::mutex> lk(g_picLock);
@@ -509,6 +563,7 @@ bool PresentFrame(bool force) {
 
 void Finish() {
     g_phase.store(kDone);
+    port::bootdialog::Enable(false);
     if (g_thread >= 0) {
         SceUInt timeout = 2000000u;
         int status = 0;
@@ -535,9 +590,31 @@ void Finish() {
              static_cast<unsigned>(g_durUs[kShaders] / 1000u), static_cast<unsigned>(g_durUs[kTitle] / 1000u));
 }
 
+bool HandleDialog() {
+    if (!port::bootdialog::Enabled()) return false;
+    const int phase = g_phase.load();
+    if (phase != kGl && phase != kYielded) return false;
+    if (g_failed.load()) {
+        if (phase == kYielded) g_phase.store(kGl);
+        return false;
+    }
+    if (phase == kGl) {
+        if (!port::bootdialog::Requested() || g_titleSeen.load()) return false;
+        g_phase.store(kYielded);
+    }
+    // Stay out of the way across modal transitions; only the real title completes startup.
+    if (g_freeBlockAtUs && NowUs() >= g_freeBlockAtUs) {
+        loading::direct::Close();
+        g_freeBlockAtUs = 0;
+    }
+    if (g_titleSeen.load()) Finish();
+    return true;
+}
+
 // Render thread, wherever it is at a moment when the display can be refreshed. `minGapUs`: not sooner than that after the last
 // picture (the shader warm-up asks for 80 ms: showing a picture costs the render thread about 10 ms, and the warm-up is its work).
 void Service(uint64_t minGapUs = 0) {
+    if (HandleDialog()) return;
     if (!Active()) return;
     const uint64_t now = NowUs();
     if (minGapUs && now - g_lastPresentUs < minGapUs) return;
@@ -547,7 +624,7 @@ void Service(uint64_t minGapUs = 0) {
         loading::direct::Close();
         g_freeBlockAtUs = 0;
     }
-    if (shown && g_faded.load() && ++g_blackPresents >= 3) Finish();  // (every buffer of the swap chain has been shown dark)
+    if (shown && !g_failed.load() && g_faded.load() && ++g_blackPresents >= 3) Finish();  // (every buffer of the swap chain has been shown dark)
 }
 
 } // namespace splash
@@ -603,6 +680,7 @@ void PrepareShaderPack(const char* folder) {
 // The back end's progress hook: a bar has been drawn into the display's back buffer in the
 // middle of a frame while shaders compile; show it.
 void ShowProgressBar(uint32_t done, uint32_t total) {
+    if (splash::HandleDialog()) return;
     static uint32_t shown = 0;
     if (shown++ == 0) port_log("[vgx-vita] shaders are being compiled: progress bar on screen (%u of %u units)", done, total);
     if (splash::Active()) {  // (the loading screen shows the warm-up as one of its stages)
@@ -1097,6 +1175,8 @@ void PrepareFrontEnd() {
         EnvLong("GXV_WARM_DEFER", defer, 0, 1);
         EnvLong("GXV_WARM_MS", budgetMs, 1, 1000);
         EnvLong("GXV_WARM_AFTER_TITLE", afterTitle, 0, 1);
+        // HOLD cannot wait for a warm-up whose zero budget is only released after that same wait.
+        if (vgx::bootguard::Enabled() && std::getenv("GXV_WARM_HOLD") && std::getenv("GXV_WARM_HOLD")[0] == '1') afterTitle = 0;
         if (defer && splash::g_phase.load() != splash::kOff && !std::getenv("GXV_NO_SHADERLIST")) {
             vgx::SetShaderWarmupDeferred(true);
             splash::g_warmAfterTitle = afterTitle != 0;
@@ -1211,6 +1291,7 @@ bool StartGl(char* error, size_t errorSize) {
     // The game paces itself to its own 60 Hz retrace clock; a second wait for vertical blank in
     // the swap would make the two beat against each other.
     vglWaitVblankStart(GL_FALSE);
+    if (port_vgx_pace_divisor()) vglSetDisplayCallback(PaceDisplay);
 
     // vglInitWithCustomSizes returns GL_TRUE only when the display could not take the requested
     // size and vitaGL fell back to a smaller one (source/vgl.c: `return res_fallback`): GL_FALSE
@@ -1337,11 +1418,62 @@ bool StartGl(char* error, size_t errorSize) {
     return true;
 }
 
+// Runs after the GPU fence, just before vitaGL's SetFrameBuf(NEXTFRAME), like the Strikers gate.
+void PaceDisplay(void*) {
+    if (splash::Active()) return;
+    const unsigned interval = port_vgx_pace_divisor();
+    if (!interval) return;
+    static port::pace::PresentationSlots slots;
+    static uint32_t lastShown = 0;
+    static uint64_t windowAt = 0, pictures = 0, held[5] = {};
+    static unsigned slotEpoch = 0;
+    const unsigned requestedEpoch = g_presentSlotEpoch.load(std::memory_order_acquire);
+    if (slotEpoch != requestedEpoch) {
+        slots = {};
+        lastShown = 0;
+        windowAt = pictures = 0;
+        for (uint64_t& n : held) n = 0;
+        slotEpoch = requestedEpoch;
+    }
+    uint32_t shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
+    const uint32_t due = slots.Next(shown, interval);
+    const uint64_t before = NowUs();
+    unsigned guard = 0;
+    while (static_cast<int32_t>(due - shown) > 0 && guard++ < 8) {
+        if (sceDisplayWaitVblankStart() < 0) break;
+        shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
+    }
+    if (guard) port_vgx_pace_waited(NowUs() - before);
+    slots.Shown(shown);
+    if (lastShown) {
+        const uint32_t n = shown - lastShown;
+        ++held[n < 4 ? n : 4];
+        ++pictures;
+    }
+    lastShown = shown;
+    const uint64_t now = NowUs();
+    if (!windowAt) windowAt = now;
+    if (now - windowAt >= 5000000) {
+        if (port_log_summary)
+            port_log_summary("pace: %u-vblank mode, %llu pictures in %.2f s; holds 0/1/2/3/4+ vblanks %llu/%llu/%llu/%llu/%llu",
+                             interval, static_cast<unsigned long long>(pictures), (now - windowAt) / 1e6,
+                             static_cast<unsigned long long>(held[0]), static_cast<unsigned long long>(held[1]),
+                             static_cast<unsigned long long>(held[2]), static_cast<unsigned long long>(held[3]),
+                             static_cast<unsigned long long>(held[4]));
+        windowAt = now;
+        pictures = 0;
+        for (uint64_t& n : held) n = 0;
+    }
+}
+
 // The back end's present hook: a display copy, on the render thread, with the EFB framebuffer
 // object `efb` bound and the finished picture in it. (x, y, w, h) is the copy rectangle in
 // framebuffer pixels; the EFB is stored top row first (its projection flips Y), so the
 // picture's top row is the framebuffer's y. The back end binds the EFB again and re-applies
 // its render state after this returns.
+bool GamePresentAllowed(unsigned efb, int w, int h) {
+    return efb != 0 && w > 0 && h > 0 && (g_presentAllowed || (g_fixedJob && g_wasSplash));
+}
 void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     ++g_presented;
     const uint64_t now = NowUs();
@@ -1378,6 +1510,7 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     g_lastPresentUs = now;
     g_lastStats = stats;
 
+    splash::HandleDialog();
     if (splash::Active()) {
         // The loading screen is up: the game's pictures stay out of sight. (A game that never shows its title, e.g. started
         // straight into a stage by PETARI_STAGE, ends the screen after 300 pictures of real content in a row.)
@@ -1385,9 +1518,16 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         richInARow = stats.drawCallsThisFrame >= 150 ? richInARow + 1 : 0;
         if (richInARow >= 300) splash::NoteTitleVisible("300 pictures with 150 or more draw calls");
         splash::Service();
+        if (g_fixedJob) g_wasSplash = true;
         return;
     }
-    if (efb == 0 || w <= 0 || h <= 0) return;
+    if (!GamePresentAllowed(efb, w, h)) return;
+    if (g_fixedJob && g_wasSplash) {
+        // The first real picture is eligible even if its producing turn began
+        // while the loading overlay still owned presentation.
+        g_presentAllowed = true;
+        g_presentSlotEpoch.fetch_add(1, std::memory_order_release);
+    }
     const auto display = vgxvita::GetDisplayRect(g_stretch.load(std::memory_order_relaxed));
     const int dx0 = display.x * kScreenW / 960, dx1 = (display.x + display.width) * kScreenW / 960; // (the rectangle is in panel pixels)
     // Source rows are given bottom-up so the picture comes out upright.
@@ -1410,6 +1550,11 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // in this same scene (nothing is drawn in a frame without them, nor on a multisampled EFB).
     vgx::backend::PresentCharaAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpened ? sharpen : 0.0f, true);
     vglSwapBuffers(GL_FALSE);
+    if (g_fixedJob) {
+        g_wasSplash = false;
+        g_jobSwapped = true;
+        g_gameSwaps.fetch_add(1, std::memory_order_relaxed);
+    }
     vgx::backend::AutoQualitySwapped(); // (automatic quality: the GPU clock times this frame's completion)
     // Back to what the back end had: it clears the EFB next.
     glBindFramebuffer(GL_FRAMEBUFFER, efb);
@@ -1419,12 +1564,40 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
 } // namespace
 
 // ---------------------------------------------------------------- what vgx_galaxy.cpp calls
+extern "C" void port_vgx_vita_reset_present_slots(void) {
+    g_presentSlotEpoch.fetch_add(1, std::memory_order_release);
+}
+extern "C" int port_vgx_vita_fixed_cap_supported(void) { return vglSubmitWithoutSwap != nullptr; }
+extern "C" void port_vgx_vita_set_present_allowed(int allowed) {
+    g_fixedJob = true;
+    g_presentAllowed = allowed != 0;
+    g_jobSwapped = false;
+}
+extern "C" void port_vgx_vita_finish_unpresented_frame(void) {
+    if (!g_jobSwapped && vglSubmitWithoutSwap) vglSubmitWithoutSwap();
+}
+extern "C" unsigned long long port_vgx_vita_game_swaps(void) {
+    return g_gameSwaps.load(std::memory_order_relaxed);
+}
+extern "C" int port_vgx_vita_settings_finish(unsigned) {
+    if (splash::Active() || !vglFinishUniformPoolScene || !vglResumeUniformPoolScene) return 0;
+    g_settingsSceneResume = vglFinishUniformPoolScene();
+    if (sceGxmTransferFinish() < 0 || sceGxmDisplayQueueFinish() < 0) {
+        vglResumeUniformPoolScene(g_settingsSceneResume);
+        return 0;
+    }
+    return 1;
+}
+extern "C" void port_vgx_vita_settings_resume(void) {
+    port_vgx_vita_reset_present_slots();
+    g_wasSplash = true;
+    vglResumeUniformPoolScene(g_settingsSceneResume);
+}
 // (on the render thread, which has a 4 MiB stack: the shader compiler runs on it)
-namespace { void StartCore3Probe(); }
 extern "C" void port_vgx_vita_prepare(void) { PrepareFrontEnd(); }
 extern "C" int port_vgx_vita_start(void) {
     PinCurrentThread(kCoreRender);
-    if (PORT_RUNTIME_DIAGNOSTICS) StartCore3Probe();
+    vgx::core3probe::Start();
     // The game draws for a 16:9 television (the console setting the port reports: SCGetAspectRatio),
     // anamorphically into its 640-wide EFB, so the picture belongs on the whole 960x544 screen.
     // GXV_VITA_WIDE=0 shows the EFB unstretched between side bars (everything a quarter too narrow).
@@ -1450,6 +1623,17 @@ extern "C" int port_vgx_vita_start(void) {
 }
 
 // ---- the loading screen, as the rest of the program sees it
+extern "C" int port_boot_data_enabled(void) __attribute__((weak));
+extern "C" int port_boot_data_error(const char* message) {
+    using namespace splash;
+    if (!port_boot_data_enabled || !port_boot_data_enabled()) return 0;
+    const int phase = g_phase.load();
+    if (phase == kOff || phase == kDone || g_thread < 0 || !g_pic[0] || !g_pic[1] ||
+        (phase == kDirect && !loading::direct::g_base)) return 0;
+    Fail(message);
+    return 1;
+}
+
 // vita/vgx-game/entry.cpp, once, first thing after the environment file and the clocks.
 extern "C" void port_splash_begin(void) {
     using namespace splash;
@@ -1482,6 +1666,7 @@ extern "C" void port_splash_begin(void) {
         loading::direct::Close();
         return;
     }
+    ConfigureDialog();
     port_log("[vgx-vita] t=%u ms loading screen up (%s); expected stage times (s): start %.1f, unpack %.1f, graphics %.1f, game %.1f, shaders %.1f, title %.1f", NowMs(),
              direct ? "on the display directly" : "no video memory block: it waits for the renderer", g_expect[0], g_expect[1], g_expect[2], g_expect[3], g_expect[4],
              g_expect[5]);
@@ -1507,85 +1692,15 @@ extern "C" void port_vgx_vita_ready(void) {
     g_freeBlockAtUs = NowUs() + 500000u;  // (the display needs a moment to move over before the direct block can go)
     port_log("[vgx-vita] t=%u ms loading screen moved to the renderer", NowMs());
 }
-extern "C" int port_vgx_vita_splash_active(void) { return splash::Active() ? 1 : 0; }
+extern "C" int port_vgx_vita_splash_active(void) {
+    // Keep idle lifecycle service alive after yielding, for real title completion or a later boot failure.
+    return splash::Active() || splash::g_phase.load() == splash::kYielded ? 1 : 0;
+}
 extern "C" void port_vgx_vita_idle(void) { splash::Service(); }
 // (the same while the shader warm-up is being worked off between frames: a picture costs the render thread about 10 ms, so not sooner than `gapUs` after the last)
 extern "C" void port_vgx_vita_idle_gap(unsigned gapUs) { splash::Service(gapUs); }
 // dvd.cpp: a long job at start-up (moving the game's files into bucket folders) reports its progress here.
 extern "C" void port_boot_progress(const char* what, int done, int total) { splash::TaskProgress(what, done, total); }
-
-// ---- GXV_CORE3_PROBE=<duty %, 1..100>: how much of the Vita's fourth core a helper thread would get.
-// The system core (SCE_KERNEL_CPU_MASK_SYSTEM, 0x80000) is where the OS keeps its own tasks; the
-// Strikers port of another author runs a "quota controlled" helper there (at most half the core)
-// but publishes no figure. This thread measures what a busy-loop gets on it: iterations per
-// microsecond in 20 ms slices, against the same loop on a nearly idle game core measured at
-// start-up. Every 10 s one log line: the average and the worst slice (percent of the idle
-// rate) and the slice count. The loop is pure ALU (no memory traffic), so it says nothing about
-// bus contention, only about scheduling. Nothing else depends on this thread.
-namespace {
-constexpr int kCoreSystem = 0x80000; // SCE_KERNEL_CPU_MASK_SYSTEM
-int g_core3Duty = 0;
-
-// Iterations of a one-cycle loop done in `us` microseconds of wall time, as iterations per microsecond.
-double SpinRate(uint32_t us) {
-    const uint64_t t0 = NowUs();
-    uint64_t n = 0;
-    uint64_t t1;
-    do {
-        uint32_t i = 20000;
-        __asm__ volatile("1: subs %0, %0, #1\n\tbne 1b" : "+r"(i) : : "cc");
-        n += 20000;
-        t1 = NowUs();
-    } while (t1 - t0 < us);
-    return static_cast<double>(n) / static_cast<double>(t1 - t0);
-}
-
-int Core3ProbeMain(SceSize, void*) {
-    int res = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kCoreAux);
-    double ref = 0.0;
-    for (int i = 0; i < 3; ++i) { const double r = SpinRate(100000); if (r > ref) ref = r; }
-    res = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kCoreSystem);
-    if (res < 0) {
-        port_log("[vgx-vita] core3 probe: the system core refused this thread (0x%X); nothing to measure", static_cast<unsigned>(res));
-        return 0;
-    }
-    double idle3 = 0.0;
-    for (int i = 0; i < 3; ++i) { const double r = SpinRate(100000); if (r > idle3) idle3 = r; }
-    port_log("[vgx-vita] core3 probe: a nearly idle game core runs the loop at %.1f M/s, the system core at %.1f M/s (%.0f %%), duty %d %%", ref, idle3,
-             ref > 0.0 ? 100.0 * idle3 / ref : 0.0, g_core3Duty);
-    const uint32_t busyUs = 20000, periodUs = static_cast<uint32_t>(busyUs * 100u / static_cast<uint32_t>(g_core3Duty));
-    double sum = 0.0, worst = 1e30;
-    unsigned slices = 0;
-    uint64_t lastLog = NowUs();
-    for (;;) {
-        const uint64_t t0 = NowUs();
-        const double r = SpinRate(busyUs);
-        const double share = ref > 0.0 ? 100.0 * r / ref : 0.0;
-        sum += share;
-        if (share < worst) worst = share;
-        ++slices;
-        const uint64_t now = NowUs();
-        if (now - lastLog >= 10000000u) {
-            port_log("[vgx-vita] t=%u ms core3 probe: the system core gave a busy loop %.0f %% of a free game core on average, %.0f %% in the worst of %u slices", NowMs(),
-                     sum / slices, worst, slices);
-            sum = 0.0; worst = 1e30; slices = 0; lastLog = now;
-        }
-        if (now - t0 < periodUs) sceKernelDelayThread(static_cast<SceUInt>(periodUs - (now - t0)));
-    }
-    return 0;
-}
-
-void StartCore3Probe() {
-    const char* e = std::getenv("GXV_CORE3_PROBE");
-    if (!e || !*e) return;
-    g_core3Duty = std::atoi(e);
-    if (g_core3Duty < 1) return;
-    if (g_core3Duty > 100) g_core3Duty = 100;
-    const SceUID uid = sceKernelCreateThread("smg_core3_probe", &Core3ProbeMain, 0x10000100, 64 * 1024, 0, kCoreAux, nullptr);
-    if (uid < 0) { port_log("[vgx-vita] core3 probe: thread not created (0x%X)", static_cast<unsigned>(uid)); return; }
-    sceKernelStartThread(uid, 0, nullptr);
-}
-} // namespace
 
 // The game's frame clock: the console's video retrace, here the display's own vertical blank
 // (GXV_VITA_VBLANK_CLOCK=0: the platform layer's free-running 59.94 Hz timer instead, which

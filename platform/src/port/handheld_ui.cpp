@@ -24,6 +24,7 @@
 
 #include "port/heap_routing.h"
 #include "port/port.h"
+#include "port/control_bindings.h"
 
 #include "handheld_art.inc"
 
@@ -31,6 +32,46 @@ extern "C" int port_handheld(void);
 
 namespace {
 #include "handheld_glyphs.inc"
+using port::controls::Action;
+
+const unsigned char* ButtonGlyph(Action action) {
+    using namespace port::controls;
+    const auto* button = PrimaryButton(ActiveMapping(), action);
+    if (!button) return kGlyphCross;
+    const struct { const char* id; const unsigned char* glyph; } symbols[] = {
+        {"cross", kGlyphCross}, {"circle", kGlyphCircle}, {"square", kGlyphSquare}, {"triangle", kGlyphTriangle},
+        {"l1", ActiveMapping().profile == ProfileId::Handheld ? kGlyphL : kGlyphL1},
+        {"r1", ActiveMapping().profile == ProfileId::Handheld ? kGlyphR : kGlyphR1},
+        {"l2", kGlyphL2}, {"r2", kGlyphR2}, {"l3", kGlyphL3}, {"r3", kGlyphR3},
+        {"start", kGlyphStart}, {"select", kGlyphSelect}, {"up", kGlyphUp}, {"down", kGlyphDown},
+        {"left", kGlyphLeft}, {"right", kGlyphRight}
+    };
+    for (auto s : symbols) if (!strcmp(s.id, button->id)) return s.glyph;
+    return kGlyphCross;
+}
+bool HasTouch() { return !port::controls::RemapEnabled() || port::controls::ActiveCapabilities().frontTouch; }
+bool HasMotion() { return !port::controls::RemapEnabled() || port::controls::ActiveCapabilities().motion; }
+const unsigned char* ResolveGlyph(int glyph, const unsigned char* original) {
+    if (!port::controls::RemapEnabled()) return original;
+    switch (glyph) {
+        case 1: return ButtonGlyph(Action::Jump);
+        case 2: return ButtonGlyph(Action::StarBits);
+        case 3: return ButtonGlyph(Action::CameraCentre);
+        case 4: case 5: return HasMotion() ? kGlyphConsole : kGlyphStick;
+        case 6: return ButtonGlyph(Action::Spin);
+        case 24: return ButtonGlyph(Action::Minus);
+        case 25: return ButtonGlyph(Action::Pause);
+        case 26: return ButtonGlyph(Action::Crouch);
+        default: return original;
+    }
+}
+void BlitGlyph(uint8_t* rgba, unsigned width, unsigned height, const unsigned char* glyph) {
+    // Same symbol atlas for standalone textures and embedded message sheets.
+    for (unsigned y = 0; y < height; ++y) for (unsigned x = 0; x < width; ++x) {
+        const unsigned sx = x * kGlyphW / width, sy = y * kGlyphH / height;
+        memcpy(rgba + (static_cast<size_t>(y) * width + x)*4, glyph + (sy*kGlyphW+sx)*4, 4);
+    }
+}
 
 // ------------------------------------------------------------------ pictures
 // The picture font of the game's Font.arc (all regions' discs seen so far share it): six
@@ -182,9 +223,11 @@ bool ApplyRules(std::vector<Tok>& t) {
             const int pa = Next(t, b0), an = Next(t, pa), pb = Next(t, an);
             if (!(IsPic(t, pa, kPicA) && Is(t, an, "and") && IsPic(t, pb, kPicB))) continue;
             t.erase(t.begin() + b0, t.begin() + pb + 1);
-            const char* words[] = {"START", "or", "touch", "the", "screen"};
+            const char* pause = "START";
+            if (port::controls::RemapEnabled()) pause = port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Pause)->label;
+            const char* words[] = {pause, "or", "touch", "the", "screen"};
             int at = b0;
-            for (int w = 0; w < 5; ++w) {
+            for (int w = 0; w < (HasTouch() ? 5 : 1); ++w) {
                 if (w) t.insert(t.begin() + at++, Tok{Tok::Sep, u" ", 0});
                 Tok k{Tok::Word, u"", 0};
                 for (const char* c = words[w]; *c; ++c) k.text.push_back(static_cast<char16_t>(*c));
@@ -197,6 +240,12 @@ bool ApplyRules(std::vector<Tok>& t) {
                 // "point at the screen with (remote)" -> "touch the screen"
                 const int a = Next(t, j), b = Next(t, a), c = Next(t, b), d = Next(t, c);
                 if (!(Is(t, a, "the") && Is(t, b, "screen") && Is(t, c, "with") && IsPic(t, d, kPicRemote))) continue;
+                if (!HasTouch()) {
+                    SetWord(t, i, "use the right stick", true);
+                    t.erase(t.begin()+i+1, t.begin()+d+1);
+                    changed = true;
+                    continue;
+                }
                 SetWord(t, i, "touch", true);
                 Drop(t, d);
                 Drop(t, c);
@@ -208,6 +257,13 @@ bool ApplyRules(std::vector<Tok>& t) {
                 const int k = article ? Next(t, j) : j;
                 if (!IsPic(t, k, kPicRemote)) continue;
                 const int a = Next(t, k), b = Next(t, a), c = Next(t, b);
+                if (!HasTouch()) {
+                    const int last = Is(t,a,"at") && Is(t,b,"the") && Is(t,c,"screen") ? c : k;
+                    SetWord(t, i, "use the right stick", true);
+                    t.erase(t.begin()+i+1, t.begin()+last+1);
+                    changed = true;
+                    continue;
+                }
                 SetWord(t, i, "touch", true);
                 if (Is(t, a, "at") && Is(t, b, "the") && Is(t, c, "screen")) {
                     Drop(t, a);
@@ -229,6 +285,24 @@ bool ApplyRules(std::vector<Tok>& t) {
                 }
                 changed = true;
             }
+        } else if (!HasMotion() && Is(t, i, "hold")) {
+            const int j = Next(t,i), k = (Is(t,j,"your") || Is(t,j,"the")) ? Next(t,j) : j;
+            const int posture = Next(t,k);
+            if (IsPic(t,k,kPicRemote) && (Is(t,posture,"upright") || Is(t,posture,"level"))) {
+                SetWord(t,i,"keep the left stick centred",true);
+                t.erase(t.begin()+i+1,t.begin()+posture+1);
+                changed = true;
+            }
+        } else if (!HasMotion() && (Is(t, i, "tilt") || Is(t, i, "twist") || Is(t, i, "lean") ||
+                   Is(t, i, "tilting") || Is(t, i, "twisting"))) {
+            const int j = Next(t, i);
+            const int k = (Is(t, j, "your") || Is(t, j, "the")) ? Next(t, j) : j;
+            if (!IsPic(t, k, kPicRemote)) continue;
+            const bool continuous = Is(t, i, "tilting") || Is(t, i, "twisting");
+            SetWord(t, i, continuous ? "moving" : "move", true);
+            SetWord(t, k, "left stick", false);
+            if (k != j) SetWord(t, j, "the", false);
+            changed = true;
         }
     }
     return changed;
@@ -254,11 +328,21 @@ bool port_handheld_texture_needs_rgba(uint64_t hash, uint32_t width, uint32_t he
 void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8_t* rgba) {
     const TexturePatch patch = FindTexturePatch(hash, width, height);
     if (patch.texture) {
+        if (port::controls::RemapEnabled() && strcmp(port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Jump)->id, "cross")) {
+            BlitGlyph(rgba, width, height, ButtonGlyph(Action::Jump));
+            return;
+        }
         memcpy(rgba, patch.texture->picture, static_cast<size_t>(width) * height * 4);
         return;
     }
     // the three "how to hold the controller" animations: a drawing of the handheld instead
     if (patch.animation) {
+        if (port::controls::RemapEnabled() &&
+            ((!HasMotion() && !patch.animation->pose.square) ||
+             (patch.animation->pose.square && (!HasMotion() || strcmp(port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Spin)->id, "square"))))) {
+            BlitGlyph(rgba, width, height, patch.animation->pose.square ? ButtonGlyph(Action::Spin) : kGlyphStick);
+            return;
+        }
         handheld_art::Draw(rgba, 128, patch.animation->pose);
         return;
     }
@@ -267,7 +351,8 @@ void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8
             const int k = c.glyph - patch.sheet->first;
             if (k < 0 || k >= 9) continue;
             const int x0 = (k % 3) * (kGlyphW + 1) + 1, y0 = (k / 3) * (kGlyphH + 1) + 1;
-            for (int y = 0; y < kGlyphH; ++y) memcpy(rgba + (static_cast<size_t>(y0 + y) * 128 + x0) * 4, c.picture + static_cast<size_t>(y) * kGlyphW * 4, kGlyphW * 4);
+            const auto* picture = ResolveGlyph(c.glyph, c.picture);
+            for (int y = 0; y < kGlyphH; ++y) memcpy(rgba + (static_cast<size_t>(y0 + y) * 128 + x0) * 4, picture + static_cast<size_t>(y) * kGlyphW * 4, kGlyphW * 4);
         }
     }
 }

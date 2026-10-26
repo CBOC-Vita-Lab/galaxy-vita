@@ -79,6 +79,19 @@ extern "C" int port_input_take_pause_request(void) {
 
 extern "C" void port_input_discard_pause_request(void) { sPauseRequestAt.store(0); }
 
+extern "C" void port_input_settings_rearm(void) {
+    std::lock_guard<std::mutex> lk(sInputMutex);
+    const int connected = sPad[0].connected;
+    sPad[0] = {};
+    sPad[0].connected = connected;
+    sPressedSinceRead[0] = 0;
+    sPrevHold[0] = 0;
+    sPauseRequestAt.store(0);
+    sLatPollNs.store(0);
+    sLatReadNs.store(0);
+    sLatFrame.store(0);
+}
+
 // The camera's turns swapped (the invert_camera setting), see compat.h.
 static std::atomic<int> sCameraInverted{0};
 

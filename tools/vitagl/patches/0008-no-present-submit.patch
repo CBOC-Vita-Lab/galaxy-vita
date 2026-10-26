@@ -1,0 +1,60 @@
+diff --git a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -1040,16 +1040,34 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ #endif
+ }
+-
++
++void vglSubmitWithoutSwap(void) {
++	THREAD_SAFE()
++
++	// Retire the full job even when glFinish's flush flag is already clear.
++	// Keep the displayed surfaces and all frame/circular/GC ownership unchanged.
++	if (needs_end_scene) {
++		scene_end(); // Keep GPU_TIMERS and query-fence accounting intact.
++		needs_end_scene = GL_FALSE;
++	}
++	sceGxmFinish(gxm_context);
++	needs_scene_reset = GL_TRUE;
++	scene_not_flushed = GL_FALSE;
++	dirty_frag_unifs = 0xFFFFFFFF;
++	dirty_vert_unifs = 0xFFFF;
++	dirty_shader_frag_unifs = GL_TRUE;
++	dirty_shader_vert_unifs = GL_TRUE;
++}
++
+ void glFinish(void) {
+-	THREAD_SAFE()
++	THREAD_SAFE()
+-
++
+-	// Waiting for GPU to finish drawing jobs
++	// Waiting for GPU to finish drawing jobs
+-	if (scene_not_flushed) {
++	if (scene_not_flushed) {
+-		dirty_framebuffer = GL_TRUE;
++		dirty_framebuffer = GL_TRUE;
+-		scene_reset();
++		scene_reset();
+-		sceGxmFinish(gxm_context);
++		sceGxmFinish(gxm_context);
+-		scene_not_flushed = GL_FALSE;
++		scene_not_flushed = GL_FALSE;
+-	}
++	}
+ }
+-
++
+ void glReleaseShaderCompiler(void) {
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1314,4 +1314,6 @@
+ // Perform a display buffer swap. Equivalent of eglSwapBuffers but allows support with Common Dialog.
+ void vglSwapBuffers(GLboolean has_commondialog);
+-
++
++void vglSubmitWithoutSwap(void); // Retire GPU work without display/pool rotation.
++
+ // Enqueue a request for display resolution change that will happen at next vglSwapBuffers call.

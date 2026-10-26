@@ -17,7 +17,9 @@ extern "C" void port_game_progress_cpu_checkpoint(uint32_t) __attribute__((weak)
 extern "C" const char* port_game_progress_gpu_name(uint32_t) __attribute__((weak));
 extern "C" int64_t port_host_time_ns() { return 0; }
 extern "C" int port_handheld() { return 0; }
+extern "C" int port_is_game_thread() { return 0; }
 extern "C" void port_log(const char*,...) {}
+extern "C" void port_log_summary(const char*,...) {}
 
 static unsigned checks;
 static void require(bool ok,const char* message) {

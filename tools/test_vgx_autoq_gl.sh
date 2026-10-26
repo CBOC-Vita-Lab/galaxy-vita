@@ -17,4 +17,7 @@ status=0
 # (The first pass also simulates 24 MiB of free video memory for the step-up check; the second has no figure.)
 GXV_AUTOQ_VRAM_KIB=24576 GXV_KEEP_RT=0 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_autoq_gl_test" || status=1
 GXV_KEEP_RT=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_autoq_gl_test" || status=1
+# The emergency floor must preserve the same textures/atlas cells/EFB in both lifetimes.
+GXV_AUTOQ_TARGET=30 GXV_AUTOQ_VRAM_KIB=24576 GXV_KEEP_RT=0 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_autoq_gl_test" || status=1
+GXV_AUTOQ_TARGET=30 GXV_KEEP_RT=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_autoq_gl_test" || status=1
 exit $status

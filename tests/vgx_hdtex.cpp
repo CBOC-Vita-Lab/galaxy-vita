@@ -1,14 +1,30 @@
 // HD texture replacement through the real texture cache (tools/test_vgx_hdtex.sh).
-//   vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed
+//   vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson
 // The pack is tools/hdtex/make_test_pack.py's: one 8x8 CMPR original, a 16x16 DXT1 replacement
 // with levels 16..1 whose bytes are 0x10 + level.
 #include "vgx_hdtex.h"
 #include "vgx_state.h"
 
+#include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
+
+// Standalone host hooks: Mach-O does not resolve the split frontend's optional
+// weak declarations without definitions. These do not enter the game build.
+extern "C" int64_t port_host_time_ns(void) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+extern "C" int64_t port_thread_cpu_us(void) { return 0; } // CPU timing unavailable in this texture-only fixture.
+extern "C" void port_log(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+    std::fputc('\n', stderr);
+}
 
 namespace vgx {
 bool LogEnabled() { return false; }
@@ -22,7 +38,7 @@ void Require(bool ok, const char* message) {
 }
 
 int main(int argc, char** argv) {
-    Require(argc == 3, "usage: vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed");
+    Require(argc == 3, "usage: vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson");
     const std::string mode = argv[2];
     setenv("GXV_HDTEX_PATH", argv[1], 1);
     setenv("GXV_MIPCLAMP", mode == "clamp" ? "1" : "0", 1);
@@ -30,6 +46,7 @@ int main(int argc, char** argv) {
     if (mode == "budget") setenv("GXV_HDTEX_BUDGET", "0", 1);
     if (mode == "clamp") setenv("GXV_HDTEX_PRELOAD", "0", 1); // (the others read from the preloaded pack)
     if (mode == "dryrun") setenv("GXV_HDTEX", "2", 1);
+    if (mode == "eyeson") setenv("GXV_HDTEX_EYES", "1", 1); // (the pack here names its texture Test:SyntheticEye)
     vgx::hdtex::Install(nullptr);
     vgx::hdtex::Counters c0;
     vgx::hdtex::GetCounters(c0);
@@ -63,7 +80,7 @@ int main(int argc, char** argv) {
     }
     Require(pending.uploads.size() == 1, "one upload");
     const auto& up = pending.uploads.front();
-    const bool replaced = mode == "replace" || mode == "clamp" || mode == "changed";
+    const bool replaced = mode == "replace" || mode == "clamp" || mode == "changed" || mode == "eyeson";
     vgx::hdtex::Counters c;
     vgx::hdtex::GetCounters(c);
     Require(c.hashed == 1, "the texture's shape is in the pack: hashed once");
@@ -72,7 +89,7 @@ int main(int argc, char** argv) {
         Require(up.width == 8 && up.height == 8 && up.format != vgx::TF_DXT5, "original uploaded (budget / dry run)");
         Require(bind.minFilter == vgx::FILT_LINEAR, "original keeps its filter");
         Require(vgx::ReplacedTextureBytes() == 0, "no replacement bytes alive");
-        Require(mode == "budget" ? (c.refused == 1 && c.hits == 0) : (c.hits == 1 && c.refused == 0), "counted as refused / dry-run hit");
+        Require(mode == "budget" ? (c.refused == 1 && c.hits == 0) : mode == "eyes" ? (c.refused == 0 && c.hits == 0) : (c.hits == 1 && c.refused == 0), "counted as refused / dry-run hit / eye texture kept");
         std::printf("PASS: hdtex mode=%s\n", argv[2]);
         return 0;
     }

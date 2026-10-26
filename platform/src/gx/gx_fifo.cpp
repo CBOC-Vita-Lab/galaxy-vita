@@ -16,11 +16,113 @@
 #include "revolution/gx/GXFifo.h"
 #include "revolution/gx/GXPerf.h"
 #include "revolution/os/OSInterrupt.h"
+#if defined(TARGET_PC)
+#include <errno.h>
+#include <fenv.h>
+#include "port/diagnostics.h"
+#include "../../vgx/src/vgx_common.h"
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+#endif
 
 extern "C" {
 uint8_t* __PortGXFifoPtr;
 uint8_t* __PortGXFifoLimit;
 }
+
+#if defined(TARGET_PC)
+namespace {
+int xfBurstMode() {
+    static const int mode = [] {
+        const int saved = errno;
+        // Default-off exact XF payload batching: 1 fast, 2 original-write oracle.
+        // Cache once; preserve errno even when EnvInt rejects an overflow value.
+        const long value = vgx::EnvInt("GXV_XFBURST", 0);
+        errno = saved;
+        return value == 1 || value == 2 ? int(value) : 0;
+    }();
+    return mode;
+}
+
+bool overlaps(uintptr_t a, size_t an, uintptr_t b, size_t bn) {
+    // Callers establish non-wrapping ranges before these unsigned differences.
+    return a - b < bn || b - a < an;
+}
+
+void xfPayload12(uint8_t* __restrict out, const uint8_t* __restrict source) {
+#if defined(__ARM_NEON)
+    vst1q_u8(out, vrev32q_u8(vld1q_u8(source)));
+    vst1q_u8(out + 16, vrev32q_u8(vld1q_u8(source + 16)));
+    vst1q_u8(out + 32, vrev32q_u8(vld1q_u8(source + 32)));
+#else
+    for (unsigned i = 0; i < 12; ++i) {
+        uint32_t word;
+        memcpy(&word, source + i * 4, 4);
+        word = __builtin_bswap32(word);
+        memcpy(out + i * 4, &word, 4);
+    }
+#endif
+}
+
+#if PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING
+void xfOracleReport(unsigned words, uint64_t checked, uint64_t mismatches, bool mismatch) {
+    if (!(mismatch ? mismatches <= 4 : (checked & (checked - 1)) == 0)) return;
+    const int saved = errno;
+    fenv_t environment;
+    if (fegetenv(&environment) == 0) {
+        port_log(mismatch ? "xfburst mismatch words=%u checked=%llu mismatches=%llu" :
+                            "xfburst oracle words=%u checked=%llu mismatches=%llu", words,
+                 static_cast<unsigned long long>(checked), static_cast<unsigned long long>(mismatches));
+        fesetenv(&environment);
+    }
+    errno = saved;
+}
+#endif
+int xfBurst12(const float* source) {
+    const int mode = xfBurstMode();
+    if (!mode) return 0;
+#if !(PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING)
+    if (mode == 2) return 0; // No verification claims from a quiet build.
+#endif
+    const size_t bytes = 48, sourceBytes = 48;
+    const uintptr_t p = reinterpret_cast<uintptr_t>(__PortGXFifoPtr);
+    const uintptr_t limit = reinterpret_cast<uintptr_t>(__PortGXFifoLimit);
+    const uintptr_t src = reinterpret_cast<uintptr_t>(source);
+    // Equality would publish/overflow after the last scalar write. Keep that
+    // path, all aliasing and malformed ranges exactly as the original loop.
+    if (!p || !src || p >= limit || bytes >= limit - p || sourceBytes > UINTPTR_MAX - src ||
+        overlaps(p, bytes, src, sourceBytes) ||
+        overlaps(p, bytes, reinterpret_cast<uintptr_t>(&__PortGXFifoPtr), sizeof __PortGXFifoPtr) ||
+        overlaps(p, bytes, reinterpret_cast<uintptr_t>(&__PortGXFifoLimit), sizeof __PortGXFifoLimit) ||
+        overlaps(src, sourceBytes, reinterpret_cast<uintptr_t>(&__PortGXFifoPtr), sizeof __PortGXFifoPtr) ||
+        overlaps(src, sourceBytes, reinterpret_cast<uintptr_t>(&__PortGXFifoLimit), sizeof __PortGXFifoLimit)) return 0;
+    uint8_t* const start = __PortGXFifoPtr;
+    if (mode == 1) {
+        xfPayload12(start, reinterpret_cast<const uint8_t*>(source));
+        __PortGXFifoPtr = start + bytes;
+        return 1;
+    }
+#if PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING
+    uint8_t candidate[48];
+    xfPayload12(candidate, reinterpret_cast<const uint8_t*>(source));
+    const float (*matrix)[4] = reinterpret_cast<const float (*)[4]>(source);
+    for (unsigned i = 0; i < 12; ++i)
+        __PortGXFifo_f32(matrix[i / 4][i % 4]);
+    const bool mismatch = memcmp(candidate, start, bytes) != 0;
+    // The FIFO is already a serialized single-producer path. No fast-mode
+    // counters, additional submissions or callbacks are introduced here.
+    static uint64_t checked = 0, mismatches = 0;
+    ++checked;
+    if (mismatch) ++mismatches;
+    xfOracleReport(12, checked, mismatches, mismatch);
+#endif
+    return 1;
+}
+} // namespace
+
+extern "C" int __PortGXFifoXfBurst12(const float* source) { return xfBurst12(source); }
+#endif
 
 static __GXFifoObj sCPUFifo;
 static __GXFifoObj sGPFifo;

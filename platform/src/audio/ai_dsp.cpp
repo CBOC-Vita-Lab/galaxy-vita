@@ -23,6 +23,7 @@
 #include "port/port.h"
 #include "port/diagnostics.h"
 #include "port/qemu_hooks.h"
+#include "../../vgx/src/vgx_workload.h"
 #include "revolution/ai.h"
 #include "revolution/dsp.h"
 #include "revolution/os.h"
@@ -117,7 +118,10 @@ static void executePacket() {
         if (((w0 >> 16) & 0xFF) == 3 && sFrame.done < sFrame.subFrames) {
             if (sFrame.outL && sFrame.outR) {
                 const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
-                port_dsp_mix_frame(1, sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel);
+                {
+                    vgx::workload::Scope observation(vgx::workload::Dsp);
+                    port_dsp_mix_frame(1, sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel);
+                }
                 const int64_t dt = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - t0 : 0;
                 sMixNs.fetch_add(dt, std::memory_order_relaxed);
                 sMixCalls.fetch_add(1, std::memory_order_relaxed);

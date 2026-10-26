@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "vgx_boot_guard.h"
+
 #if defined(__vita__)
 #include <psp2/display.h>
 #include <psp2/kernel/sysmem.h>
@@ -30,6 +32,7 @@ struct State {
     const char* footer = nullptr;
     bool alert = false;
     float fade = 0;
+    bool titleReady = false;
 };
 
 namespace detail {
@@ -128,7 +131,8 @@ inline void Render(uint32_t* frame, double, const State& st) {
     using namespace detail;
     if (!g_bg || !frame) return;
     memcpy(frame, g_bg, kBackgroundBytes);
-    const float progress = !(st.progress >= 0.0f) ? 0.0f : (st.progress > 1.0f ? 1.0f : st.progress);
+    float progress = !(st.progress >= 0.0f) ? 0.0f : (st.progress > 1.0f ? 1.0f : st.progress);
+    if (vgx::bootguard::Enabled() && !st.titleReady && progress > 0.99f) progress = 0.99f;
     const int bx = 220, by = 426, bw = 520, bh = 14;
     const int fill = static_cast<int>((bw - 4) * progress + 0.5f);
     for (int y = by; y < by + bh; ++y) {

@@ -64,7 +64,7 @@ struct VsKey {
 uint64_t HashKey(const void* key, size_t size);
 // Bump when the key structs or what is generated from them change: shader
 // warm-up lists written by an older generator are then discarded.
-constexpr uint32_t kShaderGenVersion = 2;
+constexpr uint32_t kShaderGenVersion = 3;
 // Uniform arrays are declared (and their blocks built) only as long as the shader needs
 // them: u_tev[9 / 11 / 28], u_lt[4 + 5 per light], u_pal[60 / 96], u_tm per texgen. On the
 // console every draw copies the program's whole uniform buffers once more.

@@ -228,9 +228,13 @@ void WriteBP(uint32_t rv) {
         g.bp[reg] = nv;
         BpTlutLoad();
         return;
-    case 0xFF: // (not a register of the console's GPU) the port's in-band marker: PORT_GX_MARK_* in the low bits (vgx_galaxy.cpp,
-               // port_vgx_marker; written only with GXV_CHARAA on). Never stored: every one is seen.
-        CharaMarker(val & 0xFFu);
+    case 0xFF: // Port-only ordered metadata (presentation eligibility or PORT_GX_MARK_*).
+               // Never stored or deduplicated: every marker must reach the pending buffer.
+        {
+            const uint32_t kind = val & 0xFFu;
+            if (kind == kPresentAllowedMarker || kind == kPresentSuppressedMarker) PresentationMarker(kind);
+            else CharaMarker(kind);
+        }
         return;
     default:
         if (reg >= 0x80 && reg <= 0xBB) {
@@ -816,7 +820,7 @@ template <int TYPE, bool LE> inline __attribute__((always_inline)) uint32_t Attr
     default: return f2u(static_cast<float>(e[c]) * scale);
     }
 }
-template <int IDX, int TYPE, int N, bool PAD, bool LE>
+template <int IDX, int TYPE, int N, bool PAD, bool LE, bool POS_DEFAULTS = false>
 __attribute__((noinline)) uint32_t DecodeAttr(const uint8_t* s, uint8_t* o, uint32_t count, uint32_t ss, uint32_t os, const uint8_t* adata,
                                               uint32_t astride, uint32_t maxOff, float scale) {
     uint32_t oob = 0;
@@ -828,6 +832,10 @@ __attribute__((noinline)) uint32_t DecodeAttr(const uint8_t* s, uint8_t* o, uint
         if (N > 1) { const uint32_t w1 = AttrComp<TYPE, LE>(e, 1, scale, lut); std::memcpy(o + 4, &w1, 4); }
         if (N > 2) { const uint32_t w2 = AttrComp<TYPE, LE>(e, 2, scale, lut); std::memcpy(o + 8, &w2, 4); }
         if (PAD) std::memset(o + 4, 0, 4);
+        if (POS_DEFAULTS) {
+            if (N == 2) std::memset(o + 8, 0, 4);
+            std::memset(o + 12, 0, 4);
+        }
     }
     return oob;
 }
@@ -874,6 +882,48 @@ inline int DecodeMode() {
     return mode;
 }
 inline bool SpecialisedDecode() { return DecodeMode() != 0; }
+
+// GXV_POSDEFAULT: 0 (default) retains the old pass; 1 fuses eligible position
+// defaults; 2 also compares all 16 position bytes with the old kernel.
+// Selected only when making a plan. No environment read or mode branch per vertex/draw.
+inline int PositionDefaultsMode() {
+    static const int mode = [] {
+        const long value = EnvInt("GXV_POSDEFAULT", 0);
+        return value == 1 || value == 2 ? static_cast<int>(value) : 0;
+    }();
+    return mode;
+}
+// Like ByteLut and g_lastPosMtxMax, owned by the frontend player thread.
+// The finishing thread transforms decoded vertices; it never decodes streams.
+uint64_t g_posDefaultDraws = 0, g_posDefaultChecked = 0, g_posDefaultBad = 0;
+template <int TYPE, int N>
+uint32_t DecodePositionVerify(const uint8_t* s, uint8_t* o, uint32_t count, uint32_t ss, uint32_t os,
+                             const uint8_t* adata, uint32_t astride, uint32_t maxOff, float scale) {
+    DecodeAttr<0, TYPE, N, false, false, true>(s, o, count, ss, os, adata, astride, maxOff, scale);
+    const uint64_t before = g_posDefaultChecked;
+    ++g_posDefaultDraws;
+    for (uint32_t v = 0; v < count; ++v, s += ss, o += os) {
+        uint8_t ref[16] = {};
+        DecodeAttr<0, TYPE, N, false, false>(s, ref, 1, ss, 16, adata, astride, maxOff, scale);
+        ++g_posDefaultChecked;
+        if (std::memcmp(o, ref, sizeof ref) != 0) {
+            ++g_posDefaultBad;
+            if (g_posDefaultBad <= 8) std::fprintf(stderr, "[vgx] posdefault: MISMATCH type=%d components=%d\n", TYPE, N);
+            std::memcpy(o, ref, sizeof ref);
+        }
+    }
+    if (count && (before == 0 || (g_posDefaultDraws & 0xFFFu) == 0 || (before >> 20) != (g_posDefaultChecked >> 20)))
+        std::fprintf(stderr, "[vgx] posdefault: %llu eligible decodes, %llu vertices checked, %llu mismatching\n",
+                     static_cast<unsigned long long>(g_posDefaultDraws), static_cast<unsigned long long>(g_posDefaultChecked),
+                     static_cast<unsigned long long>(g_posDefaultBad));
+    return 0;
+}
+#define VGX_POS_ROW(T) {&DecodeAttr<0, T, 2, false, false, true>, &DecodeAttr<0, T, 3, false, false, true>}
+const AttrFn kPositionFn[5][2] = {VGX_POS_ROW(C_U8), VGX_POS_ROW(C_S8), VGX_POS_ROW(C_U16), VGX_POS_ROW(C_S16), VGX_POS_ROW(C_F32)};
+#undef VGX_POS_ROW
+#define VGX_POS_ROW(T) {&DecodePositionVerify<T, 2>, &DecodePositionVerify<T, 3>}
+const AttrFn kPositionVerifyFn[5][2] = {VGX_POS_ROW(C_U8), VGX_POS_ROW(C_S8), VGX_POS_ROW(C_U16), VGX_POS_ROW(C_S16), VGX_POS_ROW(C_F32)};
+#undef VGX_POS_ROW
 } // namespace
 
 // Picks, for a plan whose attributes all come from the stream, the decode loop of each (the choice the general path makes per draw).
@@ -908,6 +958,20 @@ static void FinishDirectPlan(Plan& p) {
     }
     p.direct = direct;
     p.defaults = static_cast<uint8_t>((needZ ? 1u : 0u) | (needW ? 2u : 0u));
+    p.directDefaults = p.defaults;
+    // Without a matrix-index attribute, direct POS2/POS3 can supply all defaults
+    // in their existing traversal. TMI still needs its own clearing pass.
+    const int positionMode = PositionDefaultsMode();
+    if (positionMode && direct && needW && !(p.layoutMask & VL_TMI)) {
+        for (int i = 0; i < p.n; ++i) {
+            AttrPlan& a = p.a[i];
+            if (a.attr == A_POS && a.type <= C_F32 && (a.comps == 2 || a.comps == 3)) {
+                a.fn = positionMode == 2 ? kPositionVerifyFn[a.type][a.comps - 2] : kPositionFn[a.type][a.comps - 2];
+                p.directDefaults = 0;
+                break;
+            }
+        }
+    }
 }
 
 // Inspect indices without reading the array bytes, so caches can snapshot them before decoding.
@@ -1105,7 +1169,7 @@ static void DecodeVerticesDirect(const Plan& p, const uint8_t* src, uint32_t cou
     g_lastPosMtxMax = 0;
     const uint32_t ss = p.streamSize, os = L.stride;
     // Defaults: z = 0 for two-component positions, matrix row 0 (no PNMTXIDX), texture-matrix indices 0.
-    const bool needZ = (p.defaults & 1u) != 0, needW = (p.defaults & 2u) != 0;
+    const bool needZ = (p.directDefaults & 1u) != 0, needW = (p.directDefaults & 2u) != 0;
     if ((L.mask & VL_TMI) != 0) {
         uint8_t* o = out;
         for (uint32_t v = 0; v < count; ++v, o += os) {

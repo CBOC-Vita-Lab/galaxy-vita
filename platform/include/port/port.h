@@ -101,6 +101,7 @@ const PortDisc* port_dvd_disc(void);
 // started in (-1 before it has).  port_language_start is the game's read:
 // the console's setting (SC_LANG_*) for the language asked for.
 int port_language_count(void);
+void port_dvd_set_root(const char* root);
 const char* port_language_name(int index);
 void port_language_set(const char* name);
 int port_language_wanted(void);

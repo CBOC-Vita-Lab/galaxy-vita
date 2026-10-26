@@ -88,6 +88,19 @@
 //           (or the start rung): the change falls in the load, not in play. A long gap within the same scene keeps
 //           the rung. Up to 32 scenes are remembered.
 //   Quiet frames are not measured (a black screen or a still menu says nothing about play).
+//
+// Opt-in 30 Hz target (GXV_AUTOQ_TARGET=30, default 0): the throughput estimate
+// is max(two game turns' CPU work, back-end CPU per picture, GPU busy/picture),
+// never the sum of overlapping stages or a deliberate present wait. A step up
+// must leave room in that whole-picture budget AND measured cadence must fit:
+// unmeasured front-end/shared-core work is not permission to raise quality.
+// A GPU-limited miss can step down
+// at quiet moments after the usual hold, or after 8 s without one. Target-only
+// rung -1 is 480x340, tried only after the old 544x388 floor itself misses.
+// Below-today trials are judged on throughput work, so deliberate 20 Hz pacing
+// does not undo a real GPU saving. Changes are at least 3 s apart (except scene
+// restores). Paced presentation needs exact GPU timers; a late frame fence
+// cannot distinguish callback waiting from GPU work, so it holds the rung.
 #pragma once
 #include <cstdint>
 
@@ -103,12 +116,18 @@ inline constexpr int kRungs = static_cast<int>(sizeof kLadder / sizeof kLadder[0
 inline constexpr int kToday = 2;      // 640x456: the size of every build before automatic quality
 inline constexpr int kTopSingle = 6;  // 960x544, the highest rung without multisampling
 inline constexpr int kBaseW = 640, kBaseH = 456;
+inline constexpr int kEmergency = -1, kNoRung = -2;
+inline constexpr Rung kEmergencySize{480, 340, 1};
+// Keep the public 0..8 rung IDs unchanged; the extra floor exists only in target mode.
+inline const Rung& RungAt(int rung) { return rung == kEmergency ? kEmergencySize : kLadder[rung]; }
 inline double MsaaCost(int samples) { return samples >= 4 ? 1.9 : (samples >= 2 ? 1.3 : 1.0); }
 inline double Cost(int rung) {
-    return static_cast<double>(kLadder[rung].w) * kLadder[rung].h / (static_cast<double>(kBaseW) * kBaseH) * MsaaCost(kLadder[rung].samples);
+    const Rung& r = RungAt(rung);
+    return static_cast<double>(r.w) * r.h / (static_cast<double>(kBaseW) * kBaseH) * MsaaCost(r.samples);
 }
 
 struct Config {
+    int targetFps = 0;        // 30: whole-picture throughput target; 0: the old GPU-only controller
     int minRung = 0, maxRung = kRungs - 1, startRung = kToday;
     double upTarget = 0.78;    // predicted load after a step up must stay at or below this
     double downAbove = 0.90;   // above today: step down when the load reaches this ...
@@ -161,6 +180,10 @@ struct FrameTimes {
     uint64_t presentUs = 0;    // its present (swap) returned: all of its GPU work has been submitted
     uint64_t gpuDoneUs = 0;    // frame fence clock: the GPU had finished all of it (0: not known)
     uint64_t backendRunUs = 0; // the back-end thread's CPU time so far (0: not known)
+    uint32_t gameRunUs = 0, gameTurns = 0; // target mode: cumulative CPU time/turns, unsigned wrap is intentional
+    uint32_t gameFaults = 0;   // cumulative failed game-clock samples; a later valid turn must not hide one
+    bool gameKnown = false;
+    bool paced = false;        // paced display callback: the late frame fence alone cannot measure GPU busy time
     bool timers = false;       // GPU timers clock: gpuBusyUs is used, gpuDoneUs is not
     bool busyKnown = false;    // ... a frame finished on the GPU since the previous present, and this is its busy time
     uint32_t gpuBusyUs = 0;
@@ -198,6 +221,9 @@ public:
     double WindowLoad() const { return winLoad_; }
     double WindowCpu() const { return winCpu_; }
     double WindowIntervalMs() const { return winIntervalMs_; }
+    double WindowWorkMs() const { return winWorkMs_; }
+    double WindowGameMs() const { return winGameMs_; }
+    double WindowBackendMs() const { return winBackendMs_; }
     unsigned Windows() const { return windows_; }
     unsigned Changes() const { return changes_; }
     const Config& Cfg() const { return cfg_; }
@@ -207,7 +233,7 @@ private:
     void ResetHolds();
     bool Evaluate(uint64_t now, bool mayChange);
     void SetRung(int to, Why why, uint64_t now);
-    bool Blocked(int rung, uint64_t now) const { return now < blockUntil_[rung]; }
+    bool Blocked(int rung, uint64_t now) const { return now < blockUntil_[rung + 1]; }
     void Block(int rung, uint64_t now);
 
     Config cfg_;
@@ -216,11 +242,17 @@ private:
     // previous frame
     bool havePrev_ = false;
     uint64_t prevDone_ = 0, prevPresent_ = 0, prevRun_ = 0;
+    uint32_t prevGameRun_ = 0, prevGameTurns_ = 0, prevGameFaults_ = 0;
+    bool prevGameKnown_ = false;
     // window accumulators
     uint64_t busy_ = 0, span_ = 0, present_ = 0, run_ = 0;
     unsigned frames_ = 0, busyN_ = 0;
     unsigned overFrames_ = 0; // frames in a row over downAbove (fast path)
     bool runKnown_ = true;
+    uint64_t gameRun_ = 0, gameTurns_ = 0;
+    bool gameKnown_ = true;
+    bool hintKnown_ = true;
+    uint32_t currentWorkUs_ = 0;
     // holds (seconds the condition has lasted)
     double overT_ = 0, boundT_ = 0, roomT_ = 0;
     double boundSpan_ = 0;
@@ -233,12 +265,14 @@ private:
     double checkBefore_ = 0, checkSpan_ = 0;
     unsigned checkFrames_ = 0;
     // blocks
-    uint64_t blockUntil_[kRungs] = {};
-    double blockLen_[kRungs] = {};
+    uint64_t blockUntil_[kRungs + 1] = {};
+    double blockLen_[kRungs + 1] = {};
     uint64_t belowBlockedUntil_ = 0;
     double belowBlockLen_ = 0;
     // diagnostics
     double winLoad_ = 0, winCpu_ = -1, winIntervalMs_ = 0;
+    double winWorkMs_ = 0;
+    double winGameMs_ = -1, winBackendMs_ = -1;
     unsigned windows_ = 0, changes_ = 0;
     // calm mode
     int pendingUp_ = 0;              // rungs the stretch of room allowed (the smallest step of its windows)
@@ -253,7 +287,7 @@ private:
     SceneRung sceneMem_[32] = {};
     unsigned sceneNext_ = 0;
     void Remember(uint32_t key, int rung);
-    int Recall(uint32_t key) const;  // -1: unknown
+    int Recall(uint32_t key) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
 public:
     unsigned QuietUps() const { return quietUps_; }
 private:
@@ -263,6 +297,7 @@ private:
 // The log of automatic quality: the Vita's port_log (the console's log file; the back end's stderr goes nowhere there),
 // stderr elsewhere. One line, no newline needed.
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+bool Target30Enabled(); // GXV_AUTOQ_TARGET, read once for both the controller and game CPU sampling
 
 // ---- the GPU clock (the Vita: a watcher thread that time-stamps the GPU's completion of every presented
 // frame through vitaGL's scene-end notification). Elsewhere it reports nothing and the controller never

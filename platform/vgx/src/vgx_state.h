@@ -98,6 +98,7 @@ struct Plan {
     bool valid = false;
     bool direct = false;      // every attribute has an fn: DecodeVertices needs no array and no index (the fast path)
     uint8_t defaults = 0;     // bit 0: z must be zeroed (two-component position), bit 1: the matrix row (no PNMTXIDX)
+    uint8_t directDefaults = 0; // defaults not supplied by the direct position loop (uses existing alignment padding)
     int n = 0;
     AttrPlan a[21];
     uint32_t streamSize = 0;
@@ -361,6 +362,9 @@ struct RowBox {
 void SetPendingBounds(const RowBox* boxes, uint32_t n);
 void RowBoxesOf(const uint8_t* verts, uint32_t count, uint32_t stride, std::vector<RowBox>& out); // (appends; out[0] = all)
 void CharaMarker(uint32_t kind); // PORT_GX_MARK_* arriving in the stream (BP 0xFF, see WriteBP)
+constexpr uint32_t kPresentAllowedMarker = 0x10;
+constexpr uint32_t kPresentSuppressedMarker = 0x11;
+void PresentationMarker(uint32_t kind);
 // Totals since the start: display copies, of them with rectangles, character draws, of them without usable bounds, HUD draws
 // measured, rectangles handed to the back end, their EFB pixels, frames over GXV_CHARAA_AREA, rectangles dropped by clearing
 // copies, pieces lost to HUD cuts, rectangles too small to smooth (GXV_CHARAA_MIN).
