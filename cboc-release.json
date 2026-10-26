@@ -10,8 +10,8 @@
   "recipeId": "galaxy",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "1e682677c0640827f123a9ec35d6d6bfb62b9bf789fb66af71e8ff57af606c2b",
-    "runtimeSha256": "dc7a1e51f873ed8eaf1829eee07be814e023aa36c504609e85491b352d93326a"
+    "sha256": "67602312a92c1a39dba04a386c8bf8332cebd1c981ed444e62b169a098868366",
+    "runtimeSha256": "067b848e63da5d02315f3832b7f2fc242cba9e482c272a876141c72397b99822"
   },
   "requiredInputs": [
     {
@@ -50,6 +50,7 @@
     "maxTotalBytes": 34359738368
   },
   "appUpdateFrom": [
-    "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b"
+    "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b",
+    "dc7a1e51f873ed8eaf1829eee07be814e023aa36c504609e85491b352d93326a"
   ]
 }
