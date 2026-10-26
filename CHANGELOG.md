@@ -1,17 +1,27 @@
-# Version 1.1 — October 25, 2026
+# Version 1.1 — October 26, 2026
 
-A small fix for the HD textures.
+Mario's eyes, a Settings menu, and a steadier start.
+
+### New
+- **Settings menu.** Tap **Settings** on the game's LiveArea screen, before launching or while playing. It is drawn in the game's own fonts. Choose:
+  - **Controls.** Remap every button for the Vita or for a PlayStation controller on a PS TV, with a picture of the controller.
+  - **Picture rate.** Up to 60 FPS, or a fixed 30.
+  - **Dynamic quality** and **reduced motion.**
+  - **Game language,** from the languages your game files include.
+  
+  Choices are saved in `ux0:data/smg/player-settings.cfg`. Some apply after a restart, which the menu offers. Your saves are never touched.
+- **Title-screen loading picture,** with a loading bar that shows real progress.
 
 ### Fixed
-- **Mario's eyes.** Some players with the optional HD textures saw Mario's eyes white, or his eyelids closed all the time. Eyes now always use the game's own pictures, so they show and blink normally. The rest of the HD pack still applies, and you don't need a new pack.
-
-- **Start-up crash guarded.** A rare crash in the first seconds of a launch (the loading bar stuck early, and relaunching worked) came from a file seek on a handle that was not open. That seek now fails safely instead of crashing the game.
+- **Mario's eyes.** Players with the optional HD textures saw his eyes white, or his eyelids closed all the time. Eyes now keep the game's own pictures, so they show and blink normally. The rest of the HD pack still applies.
+- **Blue eyes without the HD pack too.** A colour calculation that the Wii wraps around was being clipped, which could leave his irises white. It now matches the Wii.
+- **Start-up crash guarded.** A rare crash in the first seconds of a launch came from a file seek on a handle that was not open. That seek now fails safely.
 
 ### Easier to help with
-- **A slow start tells you.** If the loading screen is still going after 90 seconds, it says so and points you to the game files folder.
-- **A fuller log.** `log.txt` (in `ux0:data/smg`) now records each loading stage and when the title was reached, and each 5-second line shows how many shaders were prepared, so a stutter or a stuck start is much quicker to diagnose. Attach it when you report a problem.
+- **A slow start tells you.** If loading takes more than 90 seconds, the screen says so and points you to the game files folder.
+- **A fuller log.** `log.txt` (in `ux0:data/smg`) records each loading stage and when the title was reached. Each 5-second line shows how many shaders were prepared.
 
-Updating? Install the new VPK over the old one. Your saves and settings are kept.
+Updating? Install the new VPK over the old one. Your saves are kept. The first play after updating prepares the game's shaders again, so expect a few brief pauses the first time you visit each area.
 
 # Version 1.0 — October 2026
 
