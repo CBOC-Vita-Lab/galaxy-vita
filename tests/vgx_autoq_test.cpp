@@ -14,12 +14,21 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <random>
 #include <vector>
 
 using namespace vgx::autoq;
+
+extern "C" void port_autoq_game_begin(void) __attribute__((weak));
+extern "C" void port_autoq_game_work_done(void) __attribute__((weak));
+extern "C" int port_autoq_game_cpu_totals(uint32_t*, uint32_t*, uint32_t*) __attribute__((weak));
+extern "C" uint64_t port_autoq_picture_work_us(void) __attribute__((weak));
+static int64_t g_fakeCpuUs = 100;
+static unsigned g_cpuReads = 0;
+extern "C" int64_t port_thread_cpu_us(void) { ++g_cpuReads; return g_fakeCpuUs; }
 
 namespace {
 bool g_timers = false; // feed the controller as the GPU timers clock does (exact busy time per frame) instead of the frame fence
@@ -541,7 +550,362 @@ int CalmScenarios() {
     return 0;
 }
 
-int main() {
+// Target mode measures throughput work, not deliberate pacing sleeps. Game CPU
+// is normalized to two 60 Hz turns even when only every third turn is shown.
+int TargetScenarios() {
+    Config cfg;
+    cfg.targetFps = 30;
+    cfg.minRung = -1;
+    cfg.budgetMs = 1000.0 / 30.0;
+    struct Clock {
+        uint64_t now = 1, backend = 1;
+        uint32_t game = 1, turns = 1;
+        void Feed(Controller& c, int frames, uint32_t turnCpu, double fixedGpuMs, double pixelGpuMs,
+                  uint32_t interval = 33333, bool quiet = false) {
+            for (int i = 0; i < frames; ++i) {
+                const unsigned n = interval >= 45000 ? 3 : 2;
+                game += turnCpu * n;
+                turns += n;
+                backend += 3000;
+                FrameTimes f;
+                f.startUs = now;
+                now += interval;
+                f.presentUs = now;
+                f.backendRunUs = backend;
+                f.gameRunUs = game;
+                f.gameTurns = turns;
+                f.gameKnown = true;
+                f.timers = f.busyKnown = true;
+                f.gpuBusyUs = static_cast<uint32_t>((fixedGpuMs + pixelGpuMs * Cost(c.Current())) * 1000.0);
+                f.quiet = quiet;
+                c.Add(f);
+            }
+        }
+    };
+    {
+        Config off = cfg;
+        off.targetFps = 0;
+        Controller c(off);
+        Check(c.Cfg().minRung == 0, "target off: a negative floor is clamped to the old rung 0");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 390, 22000, 0, 8);
+        clock.Feed(c, 1, 22000, 0, 8, 33333, true);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: 44 ms of game CPU prevents quality growth despite an idle GPU");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 900, 26000, 0, 46, 66666);
+        clock.Feed(c, 1, 26000, 0, 46, 66666, true);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: a CPU bottleneck is not treated by sacrificing resolution");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 390, 14000, 0, 7, 50000);
+        clock.Feed(c, 1, 14000, 0, 7, 50000, true);
+        Check(c.Current() == kToday && c.Changes() == 0 && std::abs(c.WindowWorkMs() - 28.0) < 0.01,
+              "target 30: 20 fps pacing still measures two game turns, not three or a 50 ms sleep");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.game = UINT32_MAX - 1000;
+        clock.turns = UINT32_MAX - 3;
+        clock.Feed(c, 390, 14000, 0, 7, 50000);
+        Check(c.Current() == kToday && std::abs(c.WindowWorkMs() - 28.0) < 0.01,
+              "target 30: cumulative game CPU and turn counters remain correct across unsigned wrap");
+    }
+    {
+        Controller c(cfg);
+        for (unsigned i = 0; i < 500; ++i) {
+            FrameTimes f;
+            f.startUs = 1 + i * 50000ull;
+            f.presentUs = f.startUs + 40000;
+            f.gpuDoneUs = f.presentUs + 1000;
+            f.backendRunUs = 1 + i * 3000ull;
+            f.gameRunUs = 1 + i * 18000u;
+            f.gameTurns = 1 + i * 3u;
+            f.gameKnown = true;
+            f.paced = true;
+            f.quiet = (i % 100) == 99;
+            c.Add(f);
+        }
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: a late frame fence during paced waits is not mistaken for GPU busy time");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 390, 4000, 0, 5);
+        clock.Feed(c, 1, 4000, 0, 5, 33333, true);
+        Check(c.Current() > kToday, "target 30: whole-picture headroom still permits a quiet quality increase");
+    }
+    for (unsigned scenario = 0; scenario < 4; ++scenario) {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 390, 4000, 0, 5);
+        FrameTimes f;
+        f.startUs = clock.now;
+        f.presentUs = clock.now + 33333;
+        f.backendRunUs = clock.backend + 3000;
+        f.gameRunUs = clock.game + 8000;
+        f.gameTurns = clock.turns + 2;
+        f.gameKnown = true;
+        f.timers = f.busyKnown = true;
+        f.gpuBusyUs = 5000;
+        f.quiet = true;
+        if (scenario == 0) f.busyKnown = false;
+        else if (scenario == 1) f.gpuBusyUs = 40000;
+        else if (scenario == 2) f.gameRunUs += 36000;
+        else f.gpuBusyUs = 20000; // today's rung fits, but the remembered larger rung does not
+        c.Add(f);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: a quiet unknown/slow current picture cannot consume a stale pending quality increase");
+        f.presentUs += 33333;
+        f.backendRunUs += 3000;
+        f.gameRunUs += 8000;
+        f.gameTurns += 2;
+        f.busyKnown = true;
+        f.gpuBusyUs = 5000;
+        c.Add(f);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: one newly good quiet picture cannot resurrect a canceled quality increase");
+    }
+    {
+        Config shortHold = cfg;
+        shortHold.windowFrames = 2;
+        shortHold.upQuietHoldSec = 0.05;
+        Controller c(shortHold);
+        Clock clock;
+        clock.Feed(c, 1, 4000, 0, 5);
+        FrameTimes f;
+        f.startUs = clock.now;
+        f.presentUs = clock.now + 33333;
+        f.backendRunUs = clock.backend + 3000;
+        f.gameRunUs = clock.game + 8000;
+        f.gameTurns = clock.turns + 2;
+        f.gameKnown = true;
+        f.timers = true;
+        f.gpuBusyUs = 5000;
+        c.Add(f); // first window sample has no completed GPU timer
+        f.presentUs += 33333;
+        f.backendRunUs += 3000;
+        f.gameRunUs += 8000;
+        f.gameTurns += 2;
+        f.busyKnown = true;
+        c.Add(f);
+        f.presentUs += 33333;
+        f.backendRunUs += 3000;
+        f.gameRunUs += 8000;
+        f.gameTurns += 2;
+        f.quiet = true;
+        c.Add(f);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: an incomplete GPU window cannot reseed a quality increase at its known last sample");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 390, 4000, 0, 5, 50000);
+        clock.Feed(c, 1, 4000, 0, 5, 50000, true);
+        Check(c.Current() == kToday && c.Changes() == 0,
+              "target 30: missed cadence from an unmeasured front end or deliberate 20 Hz pacing cannot raise quality");
+        clock.Feed(c, 300, 4000, 0, 5);
+        clock.Feed(c, 1, 4000, 0, 5, 33333, true);
+        Check(c.Current() > kToday,
+              "target 30: after actual cadence recovers to 30 Hz, whole-picture headroom can raise quality quietly");
+    }
+    {
+        Config floor = cfg;
+        floor.startRung = floor.maxRung = 0;
+        Controller c(floor);
+        Clock clock;
+        clock.Feed(c, 300, 6000, 0, 30, 50000);
+        clock.Feed(c, 1, 6000, 0, 30, 50000, true);
+        Check(c.Current() == 0 && c.Changes() == 0,
+              "target 30: 544x388 is kept when its GPU work fits, even if presentation is paced at 20");
+    }
+    {
+        Config floor = cfg;
+        floor.startRung = floor.maxRung = 0;
+        Controller c(floor);
+        Clock clock;
+        clock.Feed(c, 25, 6000, 0, 59, 50000);
+        Check(c.Current() == 0, "target 30: the emergency rung is not taken for a short floor miss");
+        clock.Feed(c, 100, 6000, 0, 59, 50000);
+        clock.Feed(c, 1, 6000, 0, 59, 50000, true);
+        Check(c.Current() == -1 && c.LastChange().from == 0,
+              "target 30: a sustained GPU miss at 544x388 unlocks only the 480x340 rung");
+        clock.Feed(c, 180, 6000, 0, 59, 50000);
+        clock.Feed(c, 1, 6000, 0, 59, 50000, true);
+        Check(c.Current() == -1, "target 30: measured GPU-work gain is kept even before 20 fps pacing recovers");
+    }
+    {
+        Config floor = cfg;
+        floor.startRung = floor.maxRung = 0;
+        Controller c(floor);
+        Clock clock;
+        clock.Feed(c, 125, 6000, 43, 0, 50000);
+        clock.Feed(c, 1, 6000, 43, 0, 50000, true);
+        Check(c.Current() == -1, "target 30: the emergency trial also covers unpredicted fixed GPU work");
+        clock.Feed(c, 100, 6000, 43, 0, 50000);
+        clock.Feed(c, 1, 6000, 43, 0, 50000, true);
+        Check(c.Current() == 0 && c.LastChange().why == Why::NoGain,
+              "target 30: an emergency trial that saves no GPU work is rolled back in a quiet moment");
+    }
+    {
+        Controller c(cfg);
+        Clock clock;
+        clock.Feed(c, 1000, 6000, 0, 59, 50000);
+        Check(c.Current() == -1 && c.Changes() <= 3,
+              "target 30: persistent GPU overload prefers lower sizes to permanent skipped pictures, without oscillation");
+        clock.Feed(c, 300, 6000, 0, 5);
+        clock.Feed(c, 1, 6000, 0, 5, 33333, true);
+        Check(c.Current() >= 0, "target 30: recovery leaves the emergency rung during a quiet moment");
+    }
+    return 0;
+}
+
+int main(int argc, char**) {
+    if (argc > 1) {
+        const bool expected = std::getenv("GXV_AUTOQ_TARGET") && std::atoi(std::getenv("GXV_AUTOQ_TARGET")) == 30;
+        Check(Target30Enabled() == expected, "target switch accepts only 30; default/unsupported values stay off");
+        setenv("GXV_AUTOQ_TARGET", expected ? "0" : "30", 1);
+        Check(Target30Enabled() == expected, "target switch is read once even when the environment later changes");
+        const bool hooks = port_autoq_game_begin && port_autoq_game_work_done && port_autoq_game_cpu_totals && port_autoq_picture_work_us;
+        Check(hooks, "game CPU sampling hooks are linked");
+        if (hooks) {
+            uint32_t run = 0, turns = 0, faults = 0;
+            port_autoq_game_begin();
+            g_fakeCpuUs += 14000;
+            port_autoq_game_work_done();
+            const bool known = port_autoq_game_cpu_totals(&run, &turns, &faults) != 0;
+            Check(expected ? known && run == 14000 && turns == 1 && g_cpuReads == 2 : !known && g_cpuReads == 0,
+                  "game CPU sampling measures only work when enabled and queries no clocks when disabled");
+            if (expected) {
+                g_fakeCpuUs = 0;
+                port_autoq_game_begin();
+                g_fakeCpuUs = 20000;
+                port_autoq_game_work_done();
+                Check(!port_autoq_game_cpu_totals(&run, &turns, &faults) && faults == 1,
+                      "a failed CPU-clock start invalidates the sample and records a fault generation");
+                g_fakeCpuUs = 30000;
+                port_autoq_game_begin();
+                g_fakeCpuUs += 12000;
+                port_autoq_game_work_done();
+                Check(port_autoq_game_cpu_totals(&run, &turns, &faults) && run == 26000 && turns == 2 && faults == 1,
+                      "game CPU sampling recovers without hiding the intervening fault generation");
+            }
+            Config cfg;
+            cfg.targetFps = 30;
+            cfg.windowFrames = 2;
+            cfg.budgetMs = 1000.0 / 30.0;
+            Controller c(cfg);
+            for (unsigned i = 0; i < 3; ++i) {
+                FrameTimes f;
+                f.presentUs = 1 + i * 50000ull;
+                f.backendRunUs = 1 + i * 3000ull;
+                f.gameRunUs = 1 + i * 42000u;
+                f.gameTurns = 1 + i * 3u;
+                f.gameFaults = faults;
+                f.gameKnown = true;
+                f.timers = f.busyKnown = true;
+                f.gpuBusyUs = 8000;
+                c.Add(f);
+            }
+            Check(port_autoq_picture_work_us() == (expected ? 28000u : 0u),
+                  "optional pacing hint is off by default and normalizes three paced game turns to two");
+            if (expected) {
+                for (unsigned scenario = 0; scenario < 9; ++scenario) {
+                    Controller hint(cfg);
+                    auto frame = [faults](unsigned i) {
+                        FrameTimes f;
+                        f.startUs = 1 + i * 50000ull;
+                        f.presentUs = f.startUs + 3000;
+                        f.backendRunUs = 1 + i * 3000ull;
+                        f.gameRunUs = 1 + i * 24000u;
+                        f.gameTurns = 1 + i * 3u;
+                        f.gameFaults = faults;
+                        f.gameKnown = true;
+                        f.timers = f.busyKnown = true;
+                        f.gpuBusyUs = 8000;
+                        return f;
+                    };
+                    for (unsigned i = 0; i < 3; ++i) hint.Add(frame(i));
+                    Check(port_autoq_picture_work_us() == 16000,
+                          "hint regression starts with a valid low-work window");
+                    FrameTimes bad = frame(3);
+                    bad.quiet = scenario < 5;
+                    if (scenario == 0 || scenario == 5 || scenario == 8) bad.busyKnown = false;
+                    else if (scenario == 1) bad.gpuBusyUs = 40000;
+                    else if (scenario == 2 || scenario == 6) bad.gameKnown = false;
+                    else if (scenario == 3 || scenario == 7) bad.backendRunUs = 0;
+                    else bad.gameRunUs += 60000;
+                    hint.Add(bad);
+                    const uint64_t current = port_autoq_picture_work_us();
+                    Check(current == 0 || current >= 28000,
+                          "a current unknown/slow sample cannot retain a recovery hint, including a quiet sample");
+                    if (scenario == 0 || scenario >= 5) {
+                        FrameTimes next = frame(4);
+                        if (scenario == 8) next.busyKnown = false;
+                        hint.Add(next);
+                        Check(port_autoq_picture_work_us() == 0,
+                              "one good partial sample or an unknown window cannot republish old headroom");
+                        hint.Add(frame(5));
+                        hint.Add(frame(6));
+                        Check(port_autoq_picture_work_us() == 16000,
+                              "a complete clean window can establish a fresh recovery hint");
+                    }
+                }
+                g_fakeCpuUs = 0;
+                port_autoq_game_begin();
+                g_fakeCpuUs = 90000;
+                port_autoq_game_work_done();
+                Check(port_autoq_picture_work_us() == 0,
+                      "a failed real game-clock turn invalidates the published hint immediately");
+                g_fakeCpuUs = 100000;
+                port_autoq_game_begin();
+                g_fakeCpuUs += 1000;
+                port_autoq_game_work_done();
+                Check(port_autoq_picture_work_us() == 0,
+                      "a valid game turn after a clock fault cannot resurrect an old hint");
+                const uint32_t previousFaults = faults;
+                Check(port_autoq_game_cpu_totals(&run, &turns, &faults) && faults == previousFaults + 1,
+                      "a valid reader snapshot retains a failure hidden between two renderer observations");
+                auto afterFault = [](unsigned i, uint32_t stamp) {
+                    FrameTimes f;
+                    f.presentUs = 1 + i * 50000ull;
+                    f.backendRunUs = 1 + i * 3000ull;
+                    f.gameRunUs = 1 + i * 24000u;
+                    f.gameTurns = 1 + i * 3u;
+                    f.gameFaults = stamp;
+                    f.gameKnown = true;
+                    f.timers = f.busyKnown = true;
+                    f.gpuBusyUs = 8000;
+                    return f;
+                };
+                Controller oldWindow(cfg);
+                for (unsigned i = 0; i < 3; ++i) oldWindow.Add(afterFault(i, previousFaults));
+                Check(port_autoq_picture_work_us() == 0,
+                      "a delayed pre-fault renderer window cannot republish headroom after a real clock fault");
+                c.Add(afterFault(3, faults));
+                c.Add(afterFault(4, faults));
+                Check(port_autoq_picture_work_us() == 0,
+                      "a window crossing a hidden game-clock fault cannot establish headroom");
+                c.Add(afterFault(5, faults));
+                c.Add(afterFault(6, faults));
+                Check(port_autoq_picture_work_us() == 16000,
+                      "a complete clean post-fault window reestablishes headroom");
+            }
+        }
+        return g_failures ? 1 : 0;
+    }
     g_base = Config::Legacy();
     std::printf("==== legacy rules (GXV_AUTOQ_CALM=0), the frame fence clock (any vitaGL)\n");
     g_timers = false;
@@ -556,6 +920,8 @@ int main() {
     std::printf("==== calm mode, the GPU timers clock\n");
     g_timers = true;
     CalmScenarios();
+    std::printf("==== whole-picture 30 fps target (GXV_AUTOQ_TARGET=30)\n");
+    TargetScenarios();
     std::printf("%s (%d failed)\n", g_failures ? "FAILED" : "all checks passed", g_failures);
     return g_failures ? 1 : 0;
 }

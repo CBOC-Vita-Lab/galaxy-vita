@@ -86,7 +86,7 @@ static void initTimeBase() {
     sBootTicks = (localNow - kEpoch2000) * kTimerClock;
 }
 
-static inline OSTime rawTime() {
+static inline OSTime unpausedTime() {
 #if defined(__vita__)
     if (!port_vclock_enabled()) {
         const int64_t elapsedUs = static_cast<int64_t>(sceKernelGetProcessTimeWide()) - sBootUs;
@@ -95,6 +95,25 @@ static inline OSTime rawTime() {
     }
 #endif
     return sBootTicks + nsToTicks(port_host_time_ns() - sBootNs);
+}
+
+// Never activated on the default path. Atomic snapshot fields avoid a mutex in
+// guest time reads after the first settings visit, including alarm-thread reads.
+static std::atomic<bool> sSettingsClockUsed{false}, sSettingsClockFrozen{false};
+static std::atomic<unsigned> sSettingsClockVersion{0};
+static std::atomic<int64_t> sSettingsClockOffset{0}, sSettingsClockAt{0};
+static std::mutex sSettingsClockMutex;
+static inline OSTime rawTime() {
+    if (!sSettingsClockUsed.load(std::memory_order_acquire)) return unpausedTime();
+    for (;;) {
+        const unsigned before = sSettingsClockVersion.load();
+        if (before & 1) continue;
+        const bool frozen = sSettingsClockFrozen.load();
+        const auto at = sSettingsClockAt.load();
+        const auto offset = sSettingsClockOffset.load();
+        const auto now = frozen ? at : unpausedTime();
+        if (before == sSettingsClockVersion.load()) return now - offset;
+    }
 }
 
 extern "C" {
@@ -148,6 +167,28 @@ static int64_t sTimerDeadline = INT64_MAX;  // in OSTime ticks, guarded by sTime
 
 static std::atomic<void*> sTimerSleeper{nullptr};  // virtual clock: the timer thread's sleeper
 
+extern "C" int port_settings_time_pause(int pause) {
+    int previous;
+    {
+        std::lock_guard<std::mutex> lock(sSettingsClockMutex);
+        previous = sSettingsClockFrozen.load() ? 1 : 0;
+        if (previous == (pause ? 1 : 0)) return previous;
+        sSettingsClockVersion.fetch_add(1);
+        const auto now = unpausedTime();
+        if (pause) sSettingsClockAt.store(now);
+        else sSettingsClockOffset.fetch_add(now - sSettingsClockAt.load());
+        sSettingsClockFrozen.store(pause != 0);
+        sSettingsClockVersion.fetch_add(1);
+        sSettingsClockUsed.store(true, std::memory_order_release);
+    }
+    {
+        std::lock_guard<std::mutex> lock(sTimerMutex);
+        sTimerCv.notify_all();
+    }
+    if (void* sleeper = sTimerSleeper.load()) port_vclock_poke(sleeper);
+    return previous;
+}
+
 static void rearmTimer() {
     {
         std::lock_guard<std::mutex> lk(sTimerMutex);
@@ -167,7 +208,7 @@ static void timerThreadVirtual() {
             std::lock_guard<std::mutex> lk(sTimerMutex);
             deadline = sTimerDeadline;
         }
-        if (deadline == INT64_MAX) {
+        if (deadline == INT64_MAX || sSettingsClockFrozen.load()) {
             port_vclock_sleep_until(INT64_MAX, seq);
             continue;
         }
@@ -190,7 +231,7 @@ static void timerThread() {
     if (port_vclock_enabled()) timerThreadVirtual();
     std::unique_lock<std::mutex> lk(sTimerMutex);
     for (;;) {
-        if (sTimerDeadline == INT64_MAX) {
+        if (sTimerDeadline == INT64_MAX || sSettingsClockFrozen.load()) {
             sTimerCv.wait(lk);
             continue;
         }

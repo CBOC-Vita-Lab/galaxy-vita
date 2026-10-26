@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 #include <psp2/ctrl.h>
 #include <psp2/motion.h>
 #include <psp2/touch.h>
@@ -33,6 +34,62 @@ float tapA; // seconds of A still to give after a tap
 // shoot a Star Bit at the pointer) is held, when the right stick aims it. With no pointer the
 // game's menus ask to "touch the screen" (the "point at the screen" text, platform/src/port/handheld_ui.cpp).
 bool menuPointer; // the left stick is moving the pointer (a 2D menu is up)
+std::atomic<bool> pendingReset{false}, mappingAvailable{true};
+bool tiltWasActive;
+bool zoomArmed, rearToggleArmed;
+int zoomHeldDir;
+float zoomRepeat;
+unsigned blockedButtons;
+bool blockLeftStick, blockRightStick, blockFront, blockRear;
+int gameSource = -1;
+unsigned gameType;
+uint64_t rawPrevious;
+int rawSource = -1;
+unsigned rawType;
+
+void resetTransient();
+
+bool settingsEnabled() {
+    static const bool on = [] { const char* e = getenv("GXV_SETTINGS"); return e && strcmp(e, "1") == 0; }();
+    return on;
+}
+
+uint64_t normalizeButtons(unsigned b, bool positive2) {
+    using namespace port::controls;
+    uint64_t out = 0;
+    const struct { unsigned raw; uint64_t bit; } pairs[] = {
+        {SCE_CTRL_CROSS, Cross}, {SCE_CTRL_CIRCLE, Circle}, {SCE_CTRL_SQUARE, Square}, {SCE_CTRL_TRIANGLE, Triangle},
+        {positive2 ? SCE_CTRL_L1 : SCE_CTRL_LTRIGGER, L1}, {positive2 ? SCE_CTRL_R1 : SCE_CTRL_RTRIGGER, R1},
+        {SCE_CTRL_L3, L3}, {SCE_CTRL_R3, R3}, {SCE_CTRL_START, Start}, {SCE_CTRL_SELECT, Select},
+        {SCE_CTRL_UP, Up}, {SCE_CTRL_DOWN, Down}, {SCE_CTRL_LEFT, Left}, {SCE_CTRL_RIGHT, Right}
+    };
+    for (auto p : pairs) if (b & p.raw) out |= p.bit;
+    if (positive2 && (b & SCE_CTRL_L2)) out |= L2;
+    if (positive2 && (b & SCE_CTRL_R2)) out |= R2;
+    return out;
+}
+
+bool selectRaw(SceCtrlData& data, PortVitaRawInput& out) {
+    using namespace port::controls;
+    SceCtrlPortInfo info{};
+    if (sceCtrlGetControllerPortInfo(&info) < 0) return false;
+    int source = -1;
+    // PSTV port 0 is a virtual alias of the first paired controller. Select exactly
+    // one real port; never merge that alias or two controllers' buttons.
+    if (info.port[0] == SCE_CTRL_TYPE_PHY) source = 0;
+    else for (int i = 1; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) { source = i; break; }
+    if (source < 0 || sceCtrlPeekBufferPositive2(source, &data, 1) <= 0) return false;
+    out.source = source; out.controllerType = info.port[source]; out.timestamp = data.timeStamp;
+    const bool physical = info.port[source] == SCE_CTRL_TYPE_PHY;
+    out.caps = NominalCaps(physical ? ProfileId::Handheld : ProfileId::PlayStation);
+    out.caps.frontTouch = physical && touchStarted;
+    out.caps.rearTouch = physical && rearStarted;
+    out.caps.motion = physical && motionStarted;
+    out.caps.tiltFallback = !out.caps.motion;
+    out.held = normalizeButtons(data.buttons, true) & out.caps.availableButtons;
+    return true;
+}
 
 // Rear touch aiming (an option: pause menu, Triangle; platform/src/port/perf.cpp keeps it in settings.ini). The rear pad works like a
 // laptop's track pad: a finger sliding on it moves the pointer by how far it slides, it never jumps the pointer to where the finger is,
@@ -56,10 +113,26 @@ constexpr float kRearArm = 40.0f;     // panel units (the rear pad is about 1920
 constexpr float kRearNoise = 1.5f;    // panel units per sample
 constexpr float kRearGain = 2.0f / 1100.0f;  // pointer units (-1..1 across the picture) per panel unit: 1100 units = the whole width
 
+void resetTransient() {
+    calibrated = pointerValid = touching = touchMoved = menuPointer = tiltWasActive = false;
+    neutral = right = forward = {};
+    pointerX = pointerY = pointerLife = tapA = touchTime = touchX0 = touchY0 = 0;
+    rearId = -1; rearSeenCount = 0;
+    memset(rearSeen, 0, sizeof rearSeen);
+    rearLastX = rearLastY = rearVelX = rearVelY = 0;
+    zoomArmed = rearToggleArmed = false;
+    zoomHeldDir = 0; zoomRepeat = 0;
+    blockedButtons = ~0u;
+    blockLeftStick = blockRightStick = blockFront = blockRear = true;
+}
+
 void rearAim(bool frontDown) {
     if (!rearStarted) return;
     SceTouchData rear{};
-    const bool any = !frontDown && port_rear_aim_enabled() && sceTouchPeek(SCE_TOUCH_PORT_BACK, &rear, 1) > 0 && rear.reportNum > 0;
+    const bool contact = ((!frontDown && port_rear_aim_enabled()) || blockRear) &&
+        sceTouchPeek(SCE_TOUCH_PORT_BACK, &rear, 1) > 0 && rear.reportNum > 0;
+    if (blockRear && !contact) blockRear = false;
+    const bool any = !blockRear && !frontDown && port_rear_aim_enabled() && contact;
     if (!any) {
         rearId = -1;
         rearSeenCount = 0;
@@ -175,9 +248,9 @@ extern "C" int port_zoom_adjust(int steps);
 // In the pause menu L lowers the camera zoom and R raises it, a step (0.1) per press and, held, one more every 0.1 s after
 // 0.4 s. A shoulder button that was already down when the menu opened does nothing until it has been let go.
 static void zoomButtons(unsigned buttons, float dt) {
-    static bool armed = false;
-    static int heldDir = 0;
-    static float repeat = 0;
+    bool& armed = zoomArmed;
+    int& heldDir = zoomHeldDir;
+    float& repeat = zoomRepeat;
     if (!port_zoom_menu_active()) {
         armed = false;
         heldDir = 0;
@@ -202,7 +275,7 @@ static void zoomButtons(unsigned buttons, float dt) {
 
 // In the pause menu Triangle turns rear touch aiming on or off (a press; held, nothing more happens).
 static void rearToggleButton(unsigned buttons) {
-    static bool armed = false;
+    bool& armed = rearToggleArmed;
     if (!port_zoom_menu_active()) {
         armed = false;
         return;
@@ -237,15 +310,95 @@ extern "C" int port_vita_input_init(void) {
         sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START) >= 0;
     rearId = -1;
     rearSeenCount = 0;
+    (void)settingsEnabled();
+    (void)port::controls::RemapEnabled();
+    if (port::controls::RemapEnabled()) {
+        (void)port::controls::ActiveMapping();
+        PortVitaRawInput launch;
+        SceCtrlData sample{};
+        selectRaw(sample, launch);
+        port::controls::FreezeActiveCapabilities(launch.caps);
+    }
     return 1;
 }
+
+extern "C" int port_vita_input_raw_init(void) {
+    (void)settingsEnabled();
+    (void)port::controls::RemapEnabled();
+    return sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG) >= 0;
+}
+
+bool port_vita_input_raw_poll(PortVitaRawInput& out) {
+    out = {};
+    SceCtrlData data{};
+    if (!selectRaw(data, out)) {
+        out.released = rawPrevious;
+        rawPrevious = 0; rawSource = -1; rawType = 0;
+        return false;
+    }
+    if (out.source != rawSource || out.controllerType != rawType) rawPrevious = out.held;
+    out.pressed = out.held & ~rawPrevious; out.released = rawPrevious & ~out.held;
+    rawPrevious = out.held; rawSource = out.source; rawType = out.controllerType;
+    stick(data.lx, data.ly, out.leftX, out.leftY);
+    stick(data.rx, data.ry, out.rightX, out.rightY);
+    return true;
+}
+
+bool port_vita_input_mapping_available(void) { return mappingAvailable.load(std::memory_order_acquire); }
+extern "C" void port_vita_input_settings_rearm(void) { pendingReset.store(true, std::memory_order_release); }
 
 extern "C" void port_vita_input_recenter(void) { calibrated = false; }
 
 extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
+    // The UI cannot consume this flag. Reset before even the first resumed SDK read.
+    if (pendingReset.exchange(false, std::memory_order_acq_rel)) resetTransient();
     *pad = {};
     SceCtrlData control{};
-    if (sceCtrlPeekBufferPositive(0, &control, 1) <= 0) return;
+    PortVitaRawInput sampled;
+    const bool remap = port::controls::RemapEnabled();
+    const bool ok = remap ? selectRaw(control, sampled) : sceCtrlPeekBufferPositive(0, &control, 1) > 0;
+    if (!ok) { resetTransient(); gameSource = -1; gameType = 0; mappingAvailable.store(false); return; }
+    if (remap && (sampled.source != gameSource || sampled.controllerType != gameType)) resetTransient();
+    gameSource = remap ? sampled.source : 0; gameType = remap ? sampled.controllerType : SCE_CTRL_TYPE_PHY;
+    blockedButtons &= control.buttons;
+    control.buttons &= ~blockedButtons;
+    float gateX, gateY;
+    stick(control.lx, control.ly, gateX, gateY);
+    if (blockLeftStick && gateX == 0 && gateY == 0) blockLeftStick = false;
+    if (blockLeftStick) control.lx = control.ly = 128;
+    stick(control.rx, control.ry, gateX, gateY);
+    if (blockRightStick && gateX == 0 && gateY == 0) blockRightStick = false;
+    if (blockRightStick) control.rx = control.ry = 128;
+    unsigned commandButtons = control.buttons;
+    bool mappedSpin = false;
+    if (remap) {
+        using namespace port::controls;
+        const auto& active = ActiveMapping();
+        uint64_t normalized = normalizeButtons(control.buttons, true) & sampled.caps.availableButtons;
+        commandButtons = 0;
+        if (normalized & L1) commandButtons |= SCE_CTRL_LTRIGGER;
+        if (normalized & R1) commandButtons |= SCE_CTRL_RTRIGGER;
+        if (normalized & Triangle) commandButtons |= SCE_CTRL_TRIANGLE;
+        if (port_zoom_menu_active()) normalized &= ~(L1 | R1 | Triangle);
+        uint64_t required = 0;
+        for (auto mask : active.masks) required |= mask;
+        const auto& promptCaps = ActiveCapabilities();
+        const bool available = (required & ~sampled.caps.availableButtons) == 0 &&
+            (!promptCaps.frontTouch || sampled.caps.frontTouch) &&
+            (!promptCaps.rearTouch || sampled.caps.rearTouch) &&
+            (!promptCaps.motion || sampled.caps.motion);
+        mappingAvailable.store(available, std::memory_order_release);
+        if (!available) { pad->connected = 1; return; }
+        const auto translated = available ? Translate(active, normalized) : Translation{};
+        mappedSpin = translated.spin;
+        control.buttons = 0;
+        const struct { uint32_t wii; unsigned vita; } legacy[] = {
+            {0x800, SCE_CTRL_CROSS}, {0x400, SCE_CTRL_CIRCLE}, {0x2000, SCE_CTRL_LTRIGGER},
+            {0x4000, SCE_CTRL_TRIANGLE}, {0x10, SCE_CTRL_START}, {0x1000, SCE_CTRL_SELECT},
+            {1, SCE_CTRL_LEFT}, {2, SCE_CTRL_RIGHT}, {4, SCE_CTRL_DOWN}, {8, SCE_CTRL_UP}
+        };
+        for (auto p : legacy) if (translated.buttons & p.wii) control.buttons |= p.vita;
+    } else mappingAvailable.store(true, std::memory_order_release);
     pad->connected = 1;
     const struct { unsigned vita, wii; } buttons[] = {
         // Cross = A (jump), Circle = B (star bits), L = Z (crouch), Triangle = C (camera behind
@@ -259,7 +412,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     // (In the pause menu the shoulder buttons set the camera zoom: the game does not get them.)
     const bool zoomMenu = port_zoom_menu_active() != 0;
     for (auto button : buttons) {
-        if (zoomMenu && (button.vita == SCE_CTRL_LTRIGGER || button.vita == SCE_CTRL_TRIANGLE)) continue;
+        if (!remap && zoomMenu && (button.vita == SCE_CTRL_LTRIGGER || button.vita == SCE_CTRL_TRIANGLE)) continue;
         if (control.buttons & button.vita) pad->buttons |= button.wii;
     }
     stick(control.lx, control.ly, pad->stickX, pad->stickY);
@@ -267,8 +420,8 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     stick(control.rx, control.ry, rx, ry);
     if (!isfinite(elapsedSeconds)) elapsedSeconds = 0;
     float dt = clamp(elapsedSeconds, 0, 0.05f);
-    zoomButtons(control.buttons, dt);
-    rearToggleButton(control.buttons);
+    zoomButtons(commandButtons, dt);
+    rearToggleButton(commandButtons);
     const bool aiming = (control.buttons & SCE_CTRL_CIRCLE) != 0;
     if (rstickPointer || aiming) {
         if (aiming && pointerLife <= 0) pointerX = pointerY = 0; // (a fresh aim starts from the middle)
@@ -302,7 +455,9 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         menuPointer = false;
     }
     SceTouchData touch{};
-    const bool down = touchStarted && sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0 && touch.reportNum;
+    const bool contact = touchStarted && (!remap || sampled.caps.frontTouch) && sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0 && touch.reportNum;
+    if (blockFront && !contact) blockFront = false;
+    const bool down = contact && !blockFront;
     pad->touched = down ? 1 : 0;
     if (down) {
         // The pointer's -1..1 spans the game's picture: the middle 4:3 part of the screen unless
@@ -328,7 +483,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         if (touchA && !touchMoved && touchTime < 0.20f) tapA = 0.10f; // a tap: A where it landed
     }
     // the rear pad (if chosen): in play only, never with a finger on the front screen
-    rearAim(down || menuPointer);
+    rearAim(contact || menuPointer || (remap && !sampled.caps.rearTouch));
     if (tapA > 0) {
         pad->buttons |= 0x0800;
         tapA -= dt;
@@ -342,17 +497,23 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     // Tilt-steered levels: "level" is how the console is held when the game starts to steer
     // by tilt, and again whenever Select is pressed there (it has no other use in those levels).
     {
-        static bool tiltWasActive = false;
         const bool tiltActive = port_input_tilt_active() != 0;
         if (tiltActive && (!tiltWasActive || (control.buttons & SCE_CTRL_SELECT))) calibrated = false;
         tiltWasActive = tiltActive;
     }
-    if (control.buttons & (zoomMenu ? SCE_CTRL_SQUARE : (SCE_CTRL_RTRIGGER | SCE_CTRL_SQUARE))) {
+    if (remap ? mappedSpin : (control.buttons & (zoomMenu ? SCE_CTRL_SQUARE : (SCE_CTRL_RTRIGGER | SCE_CTRL_SQUARE)))) {
         // A held shoulder produces shake samples; the game owns spin cooldown.
         float shake = (control.timeStamp / 16000) & 1 ? 2.5f : -2.5f;
         pad->accX = pad->accY = shake;
     }
-    motion(pad);
+    if (!remap || sampled.caps.motion) motion(pad);
+    else if (sampled.caps.tiltFallback && port_input_tilt_active()) {
+        // Same gravity interface as motion; WPAD retains the level's neutral pitch.
+        const float x = pad->stickX * 0.65f, z = pad->stickY * 0.65f;
+        pad->tilted = 1; pad->downX = x; pad->downZ = z;
+        pad->downY = -sqrtf(fmaxf(0, 1.0f - x*x - z*z));
+        pad->stickX = pad->stickY = 0;
+    }
 }
 
 extern "C" void port_vita_input_shutdown(void) {

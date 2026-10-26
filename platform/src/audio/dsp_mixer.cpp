@@ -16,11 +16,17 @@
 // output buffers here are native-endian (the CPU side is our code too);
 // sample data and the coefficient tables keep their big-endian layout.
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+#include <atomic>
 
-#include "JSystem/JAudio2/JASDSPInterface.hpp"
+#include "JSystem/JAudio2/JASDspInterface.hpp"
 #include "port/port.h"
+#include "port/diagnostics.h"
+#include "dsp_mix_kernels.h"
+#include "dsp_fir_kernel.h"
+#include "dsp_ramp_kernel.h"
 
 extern "C" u32 port_dsp_varam_base(void);
 
@@ -87,13 +93,30 @@ const u8* aram(u32 offset, u32 size) {
     return (const u8*)(uintptr_t)(base + offset);
 }
 
+void noteDspKernelVerify(bool match, const char* kernel) {
+    static std::atomic<uint64_t> checked{0}, mismatches{0};
+    const uint64_t count = checked.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!match) {
+        const uint64_t errors = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (errors <= 8 || (errors & (errors - 1)) == 0)
+            port_log_summary("dspneon oracle mismatch: %s; original PCM restored (total=%llu)", kernel,
+                             static_cast<unsigned long long>(errors));
+    }
+    if ((count & 65535u) == 0)
+        port_log_summary("dspneon oracle: checks=%llu mismatches=%llu", static_cast<unsigned long long>(count),
+                         static_cast<unsigned long long>(mismatches.load(std::memory_order_relaxed)));
+}
+
 void addWithVolume(s16* dst, const s16* src, int count, u16 vol) {  // 1.15
-    for (int i = 0; i < count; i++) dst[i] = clamp16(dst[i] + clamp16(((s32)src[i] * (s32)vol) >> 15));
+    const int mode = port::dspmix::Mode();
+    if (mode == 2) noteDspKernelVerify(port::dspmix::AddChecked(dst, src, count, vol), "add");
+    else if (mode == 1) port::dspmix::AddFast(dst, src, count, vol);
+    else port::dspmix::AddScalar(dst, src, count, vol);
 }
 
 // Mixes src into dst with a volume ramp (1.31 volume, per-sample step);
 // returns the final volume.
-s32 addWithRamp(s16* dst, const s16* src, s32 vol, s32 step) {
+s32 addWithRampScalar(s16* dst, const s16* src, s32 vol, s32 step) {
     if (!vol && !step) return vol;
     for (int i = 0; i < N; i++) {
         dst[i] = clamp16(dst[i] + ((((s32)(vol >> 16)) * src[i]) >> 16));
@@ -102,8 +125,47 @@ s32 addWithRamp(s16* dst, const s16* src, s32 vol, s32 step) {
     return vol;
 }
 
+s32 addWithRampFast(s16* dst, const s16* src, s32 vol, s32 step) {
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(PORT_DSPRAMP_NO_NEON)
+    return port::dspramp::AddNeon(dst, src, vol, step);
+#else
+    return addWithRampScalar(dst, src, vol, step);
+#endif
+}
+
+// Keep the oracle's scratch storage and instrumentation out of the off/on stack frame.
+__attribute__((noinline)) s32 addWithRampChecked(s16* dst, const s16* src, s32 vol, s32 step) {
+    s16 reference[N];
+    memcpy(reference, dst, sizeof reference);
+    const s32 referenceVolume = addWithRampScalar(reference, src, vol, step);
+    const s32 result = addWithRampFast(dst, src, vol, step);
+    const bool same = result == referenceVolume && !memcmp(reference, dst, sizeof reference);
+    static std::atomic<uint32_t> calls{0}, mismatches{0};
+    const uint32_t call = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!same) {
+        const uint32_t failures = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (failures <= 4) port_log_summary("[DSPRAMP] mismatch: call=%u volume=%d step=%d; scalar restored", call, vol, step);
+        memcpy(dst, reference, sizeof reference);
+    }
+    if (call == 1 || !(call & 65535u))
+        port_log_summary("[DSPRAMP] oracle calls=%u mismatches=%u neon=%d", call,
+                         mismatches.load(std::memory_order_relaxed), int(port::dspramp::kHasNeon));
+    return same ? result : referenceVolume;
+}
+
+s32 addWithRamp(s16* dst, const s16* src, s32 vol, s32 step) {
+    if (!vol && !step) return vol;
+    const int mode = port::dspramp::Mode();
+    // Forward partial aliases have sample-to-sample dependencies; keep the original ordering.
+    if (!mode || port::dspramp::PartialOverlap(dst, src)) return addWithRampScalar(dst, src, vol, step);
+    return mode == 1 ? addWithRampFast(dst, src, vol, step) : addWithRampChecked(dst, src, vol, step);
+}
+
 void scaleInPlace(s16* buf, u16 vol, int fracBits) {  // 1.15 (fracBits 15) or 4.12 (12)
-    for (int i = 0; i < N; i++) buf[i] = clamp16(((s32)buf[i] * (s32)vol) >> fracBits);
+    const int mode = port::dspmix::Mode();
+    if (mode == 2) noteDspKernelVerify(port::dspmix::ScaleChecked(buf, N, vol, fracBits), "scale");
+    else if (mode == 1) port::dspmix::ScaleFast(buf, N, vol, fracBits);
+    else port::dspmix::ScaleScalar(buf, N, vol, fracBits);
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +446,7 @@ void lowPass(Voice* v, s16* buf) {
 
 // Variable-length FIR over the input, with the previous 20 inputs kept in
 // the voice block.
-void fir(Voice* v, s16* buf, int taps) {
+void firScalar(Voice* v, s16* buf, int taps) {
     if (taps > 24) taps = 24;
     const s16* coeff = v->fir_filter_params;  // runs on into the biquad area past 20 taps
     s16 x[20 + N];
@@ -399,6 +461,29 @@ void fir(Voice* v, s16* buf, int taps) {
         buf[i] = clamp16((s32)(acc >> 15));
     }
     memcpy(v->_80, x + N, 40);
+}
+
+void fir(Voice* v, s16* buf, int taps) {
+    const int mode = port::dspfir::Mode();
+    if (!mode) { firScalar(v, buf, taps); return; }
+    s16 coefficients[24];
+    // The legacy table intentionally crosses the declared 8-element member into following voice words.
+    memcpy(coefficients, reinterpret_cast<const unsigned char*>(v) + offsetof(Voice, fir_filter_params), sizeof coefficients);
+    if (mode == 1) { port::dspfir::Filter(v->_80, coefficients, buf, taps); return; }
+    Voice reference = *v;
+    Buffer pcm;
+    memcpy(pcm, buf, sizeof pcm);
+    firScalar(&reference, pcm, taps);
+    port::dspfir::Filter(v->_80, coefficients, buf, taps);
+    static std::atomic<unsigned> calls{0}, mismatches{0};
+    if (memcmp(pcm, buf, sizeof pcm) || memcmp(reference._80, v->_80, sizeof v->_80)) {
+        const unsigned errors = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        memcpy(buf, pcm, sizeof pcm);
+        memcpy(v->_80, reference._80, sizeof v->_80);
+        if (errors <= 4) port_log_summary("[DSPFIR] mismatch: taps=%d; restored scalar PCM/history\n", taps);
+    }
+    const unsigned count = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((count & 65535u) == 1) port_log_summary("[DSPFIR] verify calls=%u mismatches=%u\n", count, mismatches.load(std::memory_order_relaxed));
 }
 
 void biquad(Voice* v, s16* buf) {

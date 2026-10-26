@@ -1,6 +1,13 @@
 #pragma once
 
 #include <stdint.h>
+#include "port/diagnostics.h"
+
+#if !defined(__vita__) && !defined(PORT_ARMHF_HARNESS) && PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING
+#define PORT_PHASE_CPU_COMPILED 1
+#else
+#define PORT_PHASE_CPU_COMPILED 0
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -127,9 +134,17 @@ void port_game_progress_gpu_checkpoint(uint32_t phase);
 void port_game_progress_cpu_checkpoint(uint32_t owner);
 const char* port_game_progress_gpu_name(uint32_t phase);
 
+#if PORT_PHASE_CPU_COMPILED
+// Native, same-thread work intervals only; independent of the global progress lanes.
+void port_native_phase_cpu_checkpoint(uint32_t phase);
+#endif
+
 #if defined(__vita__) || defined(PORT_ARMHF_HARNESS)
 #define PORT_GAME_PROGRESS(phase) port_game_progress_checkpoint(phase)
 #define PORT_GAME_GPU_PROGRESS(phase) port_game_progress_gpu_checkpoint(phase)
+#elif PORT_PHASE_CPU_COMPILED
+#define PORT_GAME_PROGRESS(phase) port_native_phase_cpu_checkpoint(phase)
+#define PORT_GAME_GPU_PROGRESS(phase) ((void)0)
 #else
 #define PORT_GAME_PROGRESS(phase) ((void)0)
 #define PORT_GAME_GPU_PROGRESS(phase) ((void)0)

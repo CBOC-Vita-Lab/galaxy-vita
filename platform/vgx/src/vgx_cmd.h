@@ -340,6 +340,7 @@ struct CmdBuf {
     std::vector<uint32_t> vtxChunks;
     std::vector<VariantCmd> variants;
     uint64_t frame = 0; // presented-frame number this buffer belongs to (diagnostics)
+    bool presentAllowed = true; // immutable while this buffer is owned by the backend
     // The shader warm-up list's replay (CMD_SHADER / CMD_PROGRAM / CMD_VARIANT only) when the host has asked for it to be done in
     // slices over the frames that follow instead of in this one (SetShaderWarmupDeferred). They are kept apart from `cmds` so that
     // the passes that insert and remove commands there cannot move them.
@@ -359,6 +360,7 @@ struct CmdBuf {
         return n;
     }
     void clear() {
+        presentAllowed = true;
         cmds.clear(); draws.clear(); uploads.clear(); shaders.clear(); copyTex.clear();
         copyDisp.clear(); targets.clear(); bufUploads.clear(); passes.clear(); vtx.clear(); idx.clear(); uni.clear();
         vtxChunks.clear(); variants.clear();

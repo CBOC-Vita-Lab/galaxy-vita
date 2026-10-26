@@ -12,6 +12,8 @@ typedef void (*PortVitaAudioDrain)(void* stereoS16, int32_t frames);
 int port_vita_audio_open(PortVitaAudioDrain drain);
 void port_vita_audio_close(void);
 int port_vita_audio_failed(void);
+int port_vita_audio_hold(int hold, unsigned timeoutMs);
+int port_vita_audio_is_held(void);
 int port_vita_audio_take_peak(unsigned* outputCalls, unsigned* errors);
 
 #ifdef __cplusplus

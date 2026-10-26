@@ -21,6 +21,7 @@ extern "C" int host_nanosleep_probe(const timespec*, timespec*);
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+extern "C" int port_settings_time_pause(int pause);
 
 namespace {
 uint64_t processUs = 0;
@@ -202,6 +203,30 @@ int main(int argc, char** argv) {
     removeAlarm(&periodic);
     rearmTimer();
     Require(sAlarmHead == nullptr && sTimerDeadline == INT64_MAX, "empty alarm queue remains disarmed");
+    initTimeBase();
+    sBootTicks = 0;
+    SetElapsed(0);
+    periodic = {};
+    periodic.handler = AlarmFired;
+    periodic.fire = 243;
+    periodic.period = 243;
+    insertAlarm(&periodic);
+    Require(port_settings_time_pause(1) == 0, "settings captures previous unfrozen time state");
+    SetElapsed(1000000000);
+    Require(OSGetTime() == 0, "menu duration does not advance guest time");
+    const auto hostDuringMenu = port_host_time_ns();
+    Require(hostDuringMenu == sBootNs + 1000000000, "host deadlines continue while guest clock is frozen");
+    alarmIrq();
+    Require(firedCount == 4, "alarms retain their remaining delay while menu is open");
+    Require(port_settings_time_pause(1) == 1, "nested hold preserves prior frozen state");
+    Require(port_settings_time_pause(0) == 1, "resume reports the state it restored");
+    Require(OSGetTime() == 0, "resume cannot catch up elapsed menu time");
+    SetElapsed(1000004000);
+    Require(OSGetTime() == 243, "guest clock resumes at its original rate");
+    alarmIrq();
+    Require(firedCount == 5 && periodic.fire == 486, "one remaining alarm fires without a burst");
+    Require(port_settings_time_pause(0) == 0, "unheld resume is an idempotent no-op");
+    removeAlarm(&periodic);
     std::printf("PASS: host elapsed clock %s native=%d diagnostics=%d; clock domains, 64-bit values, ticks and sleeps\n", argv[1],
 #if defined(__vita__)
         1,

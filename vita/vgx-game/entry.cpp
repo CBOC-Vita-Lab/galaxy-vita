@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "../runtime/input.h"
+#include "settings_runtime.h"
 #include "port/game_progress.h"
 #include "port/input_script.h"
 #include "port/port.h"
@@ -257,7 +258,7 @@ static unsigned MeasureArmMHz() {
 
 extern "C" int port_thp_bench(const char* path);  // (platform/src/sdk/thp_video.cpp)
 
-extern "C" int port_vita_game_entry() {
+extern "C" int port_vita_game_entry(int argc, char** argv) {
     sceIoMkdir("ux0:data", 0777);
     sceIoMkdir(SMG_DATA, 0777);
     sceIoMkdir(SMG_DATA "/saves", 0777);
@@ -321,6 +322,7 @@ extern "C" int port_vita_game_entry() {
         sceKernelExitProcess(0);
         return 0;
     }
+    if (port_settings_startup(argc, argv)) return 0;
     port_splash_begin();
     if (const char* e = std::getenv("GXV_STDERR_FILE"); PORT_RUNTIME_DIAGNOSTICS && e && *e == '1') { std::freopen(SMG_DATA "/stderr.txt", "w", stderr); std::setvbuf(stderr, nullptr, _IOFBF, 16384); /* (written in batches, see port_log_file: a line-buffered file costs 12-15 ms per line on the card) */ }
     port_vgx_vita_log_memory("at process start");
@@ -341,6 +343,10 @@ extern "C" int port_vita_game_entry() {
     const int64_t start = previous;
     int64_t lastReport = previous;
     for (;;) {
+        if (port_settings_input_service()) {
+            previous = lastReport = port_host_time_ns();
+            continue;
+        }
         const int64_t now = port_host_time_ns();
         PortPadState pad{};
         port_vita_input_poll(std::clamp(float(now - previous) / 1000000000.0f, 0.0f, 0.1f), &pad);

@@ -14,16 +14,19 @@
 #include <vector>
 
 #include "port/gx_fifo.h"
+#include "port/frame_pace.h"
 #include "port/heap_routing.h"
 #include "port/port.h"
 #include "port/diagnostics.h"
 #include "port/qemu_hooks.h"
 #include "port/vclock.h"
+#include "port/settings_lifecycle.h"
 #include "vgx_fesplit.h"
 #include "vgx_guestmem.h"
 #include "vgx_hdtex.h"
 #include "vgx_hle.h"
 #include "vgx_state.h"
+#include "vgx_workload.h"
 
 extern "C" volatile uint32_t __PortGXPERegs[0x400];
 extern "C" void port_headless_write_png(const char* path, const unsigned char* rgba, int w, int h);
@@ -36,17 +39,27 @@ extern "C" int port_memory_region(unsigned index, void** base, void** alias, uin
 extern "C" int64_t port_thread_cpu_us(void); // CPU time of the calling thread
 extern "C" void port_perf_game_totals(int64_t* workNs, uint32_t* frames, int64_t* cpuUs, int64_t* maxWorkNs); // port/perf.cpp
 extern "C" uint32_t port_frameskip_count(void);
+extern "C" int port_screen_quiet(void) __attribute__((weak));
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));
+extern "C" uint64_t port_autoq_picture_work_us(void) __attribute__((weak));  // optional 30 fps feasibility estimate (WP-B)
 extern "C" void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8_t* rgba); // port/handheld_ui.cpp
 extern "C" bool port_handheld_texture_needs_rgba(uint64_t hash, uint32_t width, uint32_t height);
 #if defined(__vita__)
 extern "C" int port_vita_pin_core(int core); // vita/runtime/memory.cpp
 extern "C" int port_vgx_vita_start(void); // vita/runtime: vitaGL, on the calling (render) thread
+extern "C" int port_vgx_vita_fixed_cap_supported(void) __attribute__((weak));
+extern "C" void port_vgx_vita_set_present_allowed(int allowed);
+extern "C" void port_vgx_vita_finish_unpresented_frame(void);
+extern "C" unsigned long long port_vgx_vita_game_swaps(void);
+extern "C" void port_vgx_vita_reset_present_slots(void);
 extern "C" void port_vgx_vita_frame_done(void);
 extern "C" void port_vgx_vita_ready(void);          // the back end exists: the loading screen moves over to it
 extern "C" int port_vgx_vita_splash_active(void);   // 1 while the loading screen is up
 extern "C" void port_vgx_vita_idle(void);           // keep the loading screen moving when no frame arrives
 extern "C" void port_vgx_vita_idle_gap(unsigned gapUs);  // (the same, not sooner than gapUs after the last picture)
 extern "C" void port_vgx_vita_prepare(void);       // the host's file work and settings for the front end, before the render thread starts
+extern "C" int port_vgx_vita_settings_finish(unsigned timeoutMs);
+extern "C" void port_vgx_vita_settings_resume(void);
 #endif
 
 namespace vgx {
@@ -64,6 +77,31 @@ namespace {
 
 std::atomic<bool> sActive{false};
 std::atomic<unsigned long long> sFramesQueued{0}, sFramesShown{0};
+std::atomic<unsigned> sPaceDivisor{2};
+std::atomic<uint64_t> sPaceBackendUs{0}, sPaceWaitUs{0};
+int PaceMode() {
+    // GXV_PACE=1: 30/20 display cadence with 60 Hz simulation; =2 also checks its countdown oracle. Default off.
+    static const int mode = [] {
+        // GXV_FPS_LIMIT=30 requests fixed 30-picture presentation, not slower simulation; default off.
+        const int requested = static_cast<int>(vgx::EnvInt("GXV_FPS_LIMIT", 0));
+        bool supported = false;
+#if defined(__vita__)
+        supported = port_vgx_vita_fixed_cap_supported && port_vgx_vita_fixed_cap_supported();
+#endif
+        if (requested == 30 && !supported) {
+            if (port_log_summary) port_log_summary("fps cap: requested 30 unavailable; no no-present driver capability; retaining old pacing");
+            else port_log("fps cap: requested 30 unavailable; no no-present driver capability; retaining old pacing");
+        }
+        return port::pace::ResolveMode(requested, static_cast<int>(vgx::EnvInt("GXV_PACE", 0)), supported);
+    }();
+    return mode;
+}
+unsigned long long GameSwapCount() {
+#if defined(__vita__)
+    if (PaceMode() == 3) return port_vgx_vita_game_swaps();
+#endif
+    return 0;
+}
 
 // ------------------------------------------------------------------ "perf:" line
 // Every GXV_PERF seconds (default 5 on handhelds, 0 = off elsewhere), on the render thread: how
@@ -75,7 +113,7 @@ std::atomic<uint64_t> sPlRecords{0}, sPlPrims{0}; // draw records / GX primitive
 struct PerfWindow {
     int64_t t0 = 0, work = 0, gameCpu = 0, plCpu = 0, beCpu = 0, beWall = 0, wait = 0;
     uint32_t frames = 0;
-    unsigned long long queued = 0, shown = 0;
+    unsigned long long queued = 0, shown = 0, swaps = 0;
     uint64_t draws = 0, records = 0, prims = 0;
     uint32_t skipped = 0;
 } sPerf;
@@ -109,6 +147,7 @@ void CharaPerfLine() {
 // fast-forward runs the game's turns without pictures on purpose (a few seconds for the prologue).
 extern "C" void port_log_flush(void);
 extern "C" int port_skip_fast_forwarding(void) __attribute__((weak));
+extern "C" int port_settings_active(void) __attribute__((weak));
 void StartFreezeWatch() {
     if (!PORT_LOGGING || vgx::EnvInt("GXV_FREEZE_WATCH", 1) == 0) return;
     std::thread([] {
@@ -122,7 +161,7 @@ void StartFreezeWatch() {
             int64_t work = 0, cpu = 0, maxWork = 0;
             uint32_t turns = 0;
             port_perf_game_totals(&work, &turns, &cpu, &maxWork);
-            if (port_skip_fast_forwarding && port_skip_fast_forwarding()) {
+            if ((port_settings_active && port_settings_active()) || (port_skip_fast_forwarding && port_skip_fast_forwarding())) {
                 still = 0;  // (a skip, not a freeze)
                 reported = false;
                 lastShown = shown;
@@ -168,6 +207,7 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
         port_perf_game_totals(&w.work, &w.frames, &w.gameCpu, &unusedMax);
         w.t0 = now;
         w.shown = sFramesShown.load(std::memory_order_relaxed);
+        w.swaps = GameSwapCount();
         w.skipped = port_frameskip_count();
         if (sPerf.t0) {
             const double seconds = (now - sPerf.t0) / 1e9;
@@ -183,7 +223,12 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             lastShaderMs = bs.shaderWorkMs;
             char compileNote[64] = "";
             if (compiles) std::snprintf(compileNote, sizeof compileNote, "; %u shaders prepared (%.0f ms)", compiles, compileMs);
-            port_log_summary("fps: %.1f s: shown %.1f fps; game %.1f turns/s; %u skipped; %u hitches over 100 ms (longest %.0f ms); picture %dx%d%s%s",
+            if (PaceMode() == 3) {
+                port_log_summary("fps: %.1f s: swap FPS %.1f; game %.1f turns/s; %u skipped; %u completed jobs; picture %dx%d%s%s",
+                                 seconds, (w.swaps - sPerf.swaps) / seconds, (w.frames - sPerf.frames) / seconds,
+                                 w.skipped - sPerf.skipped, static_cast<unsigned>(w.shown - sPerf.shown), rw, rh,
+                                 rs > 1 ? (rs > 2 ? " 4x" : " 2x") : "", compileNote);
+            } else port_log_summary("fps: %.1f s: shown %.1f fps; game %.1f turns/s; %u skipped; %u hitches over 100 ms (longest %.0f ms); picture %dx%d%s%s",
                              seconds, (w.shown - sPerf.shown) / seconds, (w.frames - sPerf.frames) / seconds, w.skipped - sPerf.skipped, hitches,
                              longest / 1e6, rw, rh, rs > 1 ? (rs > 2 ? " 4x" : " 2x") : "", compileNote);
             hitches = 0;
@@ -356,6 +401,45 @@ std::string sCapPath;
 bool sCapWanted = false, sCapDone = false;
 unsigned long long sCapFrame = 0;
 
+#if defined(__vita__)
+port::settings::HoldGate sSettingsRenderHold;
+void ServiceSettingsHold(std::unique_lock<std::mutex>& lock) {
+    const unsigned generation = sSettingsRenderHold.Requested();
+    if (!generation || !sJobs.empty()) return;
+    lock.unlock();
+    const bool finished = port_vgx_vita_settings_finish(0) != 0;
+    if (finished) {
+        // GPU waits cannot be cancelled. A timed-out request must resume its
+        // scene, not park later while the guest has already returned to play.
+        if (sSettingsRenderHold.Acknowledge(generation)) {
+            lock.lock();
+            while (sSettingsRenderHold.Requested() == generation)
+                sCv.wait_for(lock, std::chrono::milliseconds(2));
+            lock.unlock();
+        }
+        port_vgx_vita_settings_resume();
+    } else {
+        sSettingsRenderHold.Cancel(generation);
+    }
+    lock.lock();
+}
+#endif
+void ExecuteJob(const vgx::CmdBuf& job, bool fixed) {
+#if defined(__vita__)
+    if (fixed) port_vgx_vita_set_present_allowed(job.presentAllowed);
+#endif
+    vgx::backend::Execute(job);
+#if defined(__vita__)
+    // CopyDisp may be deferred/invalid or splash-owned. Only the host knows if this job swapped.
+    if (fixed) port_vgx_vita_finish_unpresented_frame();
+#endif
+}
+unsigned long long CompleteJob() {
+    const unsigned long long shown = sFramesShown.fetch_add(1) + 1;
+    port_input_latency_frame_done(shown);
+    return shown;
+}
+
 void RenderMain() {
     PORT_QEMU_THREAD("vgx-render");
     port_thread_class(3);
@@ -390,6 +474,7 @@ void RenderMain() {
         // (26 s against 24-27 s), so by default only the slice at the start of each frame is done.
         static const bool warmIdleOn = getenv("GXV_WARM_IDLE") && getenv("GXV_WARM_IDLE")[0] == '1';
         while (sJobs.empty()) {
+            ServiceSettingsHold(lk);
             const bool warm = warmIdleOn && vgx::backend::WarmPending() > 0;
             if (!port_vgx_vita_splash_active()) {
                 // (a time limit, not an endless wait: Vita3K's emulation of the kernel's condition variables sometimes loses a
@@ -428,11 +513,21 @@ void RenderMain() {
         vgx::backend::RequestCapture(cap);
         const int64_t tExec = PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0 ? port_host_time_ns() : 0;
         const int64_t tAdapt = sAdaptDepth ? port_host_time_ns() : 0;
+        const int64_t tPace = PaceMode() ? port_host_time_ns() : 0;
+        const int64_t paceCpuBefore = tPace ? port_thread_cpu_us() : 0;
         if (PORT_RUNTIME_DIAGNOSTICS) {
             sBackSince.store(port_host_time_ns(), std::memory_order_relaxed);
             sBackStage.store(1, std::memory_order_relaxed);
         }
-        vgx::backend::Execute(*job);
+        ExecuteJob(*job, PaceMode() == 3);
+        if (tPace) {
+            const int64_t cpuNow = port_thread_cpu_us();
+            const uint64_t elapsed = static_cast<uint64_t>(port_host_time_ns() - tPace) / 1000;
+            // Display-callback waiting runs on another thread and can overlap this work; never subtract it.
+            sPaceBackendUs.store(paceCpuBefore > 0 && cpuNow >= paceCpuBefore ? static_cast<uint64_t>(cpuNow - paceCpuBefore) : elapsed,
+                                 std::memory_order_relaxed);
+        }
+        vgx::workload::Report();
         if (PORT_RUNTIME_DIAGNOSTICS) {
             sBackSince.store(port_host_time_ns(), std::memory_order_relaxed);
             sBackStage.store(2, std::memory_order_relaxed);
@@ -463,8 +558,7 @@ void RenderMain() {
                 }
             }
         }
-        const unsigned long long shown = sFramesShown.fetch_add(1) + 1;
-        port_input_latency_frame_done(shown);
+        const unsigned long long shown = CompleteJob();
         if (sPerfSeconds > 0) {
             const int64_t execNs = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - tExec : 0;
             const vgx::backend::Stats st = vgx::backend::GetStats();
@@ -543,9 +637,12 @@ bool EnsureThread(bool wait = true) {
 // The front end finished a frame: swap its buffer for an empty one and queue it.
 void FrameSink(vgx::CmdBuf& buf) {
     std::unique_lock<std::mutex> lk(sMtx);
-    while (!sCv.wait_for(lk, std::chrono::milliseconds(20), [] { return !sFree.empty() && sJobs.size() < sQueueLimit; })) {
-        // (time limit: see RenderMain)
-        if (sStarted && !sStartOk) port_fatal("vgx: no graphics context for the renderer's back end");
+    {
+        vgx::workload::Scope observation(vgx::workload::FrontQueue);
+        while (!sCv.wait_for(lk, std::chrono::milliseconds(20), [] { return !sFree.empty() && sJobs.size() < sQueueLimit; })) {
+            // (time limit: see RenderMain)
+            if (sStarted && !sStartOk) port_fatal("vgx: no graphics context for the renderer's back end");
+        }
     }
     vgx::CmdBuf* b = sFree.back();
     sFree.pop_back();
@@ -561,6 +658,7 @@ void DisplayCopy() {
     vgx::split::FinishFrame(vgx::Pending()); // (front-end split: the frame's records join it, and count in the statistics read here)
     const vgx::stats::Frame fs = vgx::stats::Cur();  // (FrontPresent resets it)
     vgx::FrontPresent(false, nullptr);
+    vgx::workload::FrontPicture();
     if (PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0) {
         sPlCpuUs.store(port_thread_cpu_us(), std::memory_order_relaxed);
         sPlRecords.fetch_add(fs.drawCalls, std::memory_order_relaxed);
@@ -653,6 +751,39 @@ extern "C" int port_vgx_active(void) { return sActive.load(std::memory_order_rel
 extern "C" unsigned port_vgx_backend_pending(void) {
     const unsigned long long queued = sFramesQueued.load(std::memory_order_relaxed), shown = sFramesShown.load(std::memory_order_relaxed);
     return queued > shown ? static_cast<unsigned>(queued - shown) : 0u;
+}
+extern "C" unsigned port_vgx_pace_divisor(void) {
+    return PaceMode() ? sPaceDivisor.load(std::memory_order_relaxed) : 0;
+}
+extern "C" uint64_t port_vgx_pace_wait_total_us(void) { return sPaceWaitUs.load(std::memory_order_relaxed); }
+extern "C" void port_vgx_pace_waited(uint64_t us) { sPaceWaitUs.fetch_add(us, std::memory_order_relaxed); }
+extern "C" int port_vgx_pace_turn(int allowed) {
+    const int mode = PaceMode();
+    if (!mode) return -1;
+    static port::pace::Controller pace(mode == 2, mode == 3 ? port::pace::Policy::Fixed30 : port::pace::Policy::Adaptive);
+    const unsigned before = pace.Divisor();
+    const uint64_t backendUs = sPaceBackendUs.load(std::memory_order_relaxed);
+    const uint64_t wholeUs = port_autoq_picture_work_us ? port_autoq_picture_work_us() : 0;
+    const int decision = pace.Turn(static_cast<uint64_t>(port_host_time_ns() / 1000), allowed != 0,
+                                   port_screen_quiet && port_screen_quiet() != 0, port_vgx_backend_pending(),
+                                   backendUs, wholeUs);
+    sPaceDivisor.store(pace.Divisor(), std::memory_order_relaxed);
+    if (mode == 3 && decision == 0) {
+        // Same producer FIFO as the draw commands, never the CharaAA-filtered HUD hook.
+        __PortGXFifo_u8(0x61);
+        __PortGXFifo_u32((0xFFu << 24) | (pace.PresentAllowed() ? vgx::kPresentAllowedMarker : vgx::kPresentSuppressedMarker));
+    }
+    if (before != pace.Divisor()) {
+        if (port_log_summary) port_log_summary("pace: quiet transition to %u vblanks per picture (simulation remains 60 Hz)", pace.Divisor());
+        else port_log("pace: quiet transition to %u vblanks per picture (simulation remains 60 Hz)", pace.Divisor());
+    }
+    static uint64_t reported = 0;
+    if (pace.Mismatches() != reported) {
+        reported = pace.Mismatches();
+        if (port_log_summary) port_log_summary("pace: cadence oracle mismatches %llu", static_cast<unsigned long long>(reported));
+        else port_log("pace: cadence oracle mismatches %llu", static_cast<unsigned long long>(reported));
+    }
+    return decision;
 }
 // Frames the game has finished (display copies), whichever renderer is selected.
 #if defined(PORT_GX_VGX_ONLY)
@@ -770,7 +901,10 @@ void* PlayerMain(void*) {
             continue;
         }
         seen = pub;
-        rd += vgx::ProcessStream(sSegBase[epoch & 1] + rd, static_cast<uint32_t>(pub - rd), false);
+        {
+            vgx::workload::Scope observation(vgx::workload::FrontSample, vgx::workload::SampleProcess());
+            rd += vgx::ProcessStream(sSegBase[epoch & 1] + rd, static_cast<uint32_t>(pub - rd), false);
+        }
     }
     return nullptr;
 }
@@ -787,6 +921,36 @@ inline void WakePlayer() {
 } // namespace
 
 extern "C" int port_vgx_player(void) { return sPlayerOn.load(std::memory_order_relaxed) ? 1 : 0; }
+
+#if defined(__vita__)
+extern "C" void __PortGXFifoFlush(void);
+extern "C" void port_vgx_settings_release(unsigned generation) {
+    sSettingsRenderHold.Cancel(generation);
+    sCv.notify_all();
+}
+
+extern "C" int port_vgx_settings_hold(unsigned generation, unsigned timeoutMs) {
+    if (!generation) return 0;
+    const int64_t deadline = port_host_time_ns() + int64_t(timeoutMs) * 1000000;
+    __PortGXFifoFlush();
+    const uint64_t published = sPubState.load(std::memory_order_acquire);
+    while (sPlayerOn.load() && sPlDone.load(std::memory_order_acquire) != published) {
+        if (port_host_time_ns() >= deadline) return 0;
+        WakePlayer();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    if (!sSettingsRenderHold.Begin(generation)) return 0;
+    sCv.notify_all();
+    while (!sSettingsRenderHold.Acknowledged(generation)) {
+        if (sSettingsRenderHold.Requested() != generation || port_host_time_ns() >= deadline) {
+            port_vgx_settings_release(generation);
+            return 0;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return 1;
+}
+#endif
 
 extern "C" void port_vgx_stream_setup(uint8_t* seg0, uint8_t* seg1, size_t size) {
     sSegBase[0] = seg0;
@@ -811,6 +975,7 @@ extern "C" uint8_t* port_vgx_publish(uint8_t* wr, int flags) {
         // Wait until the player has done everything published (what it leaves is a command
         // that is not complete yet).
         const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0 ? port_host_time_ns() : 0;
+        vgx::workload::Scope observation(vgx::workload::PublishInTurn);
         while (sPlDone.load(std::memory_order_acquire) != state) {
             WakePlayer();
             // (real time, not port_host_sleep_ns: under the ARM harness's virtual clock that one
@@ -888,6 +1053,7 @@ extern "C" void port_vgx_debug_dump(void) {
 
 extern "C" size_t port_vgx_consume(const uint8_t* data, size_t len) {
     // (the caller holds a PortHostAllocScope: the front end allocates from the host heap)
+    vgx::workload::Scope observation(vgx::workload::FrontSample, vgx::workload::SampleProcess());
     return vgx::ProcessStream(data, static_cast<uint32_t>(len), false);
 }
 

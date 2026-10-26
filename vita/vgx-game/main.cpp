@@ -38,10 +38,10 @@ extern "C" int __wrap_pte_osSemaphoreCancellablePend(SceUID semaphore, unsigned 
     return result == static_cast<int>(0x80028005) ? 3 : 2; // SCE_KERNEL_ERROR_WAIT_TIMEOUT
 }
 
-extern "C" int port_vita_game_entry();
+extern "C" int port_vita_game_entry(int argc, char** argv);
 extern "C" void port_log_flush(void);
-int main() {
-    const int result = port_vita_game_entry();
+int main(int argc, char** argv) {
+    const int result = port_vita_game_entry(argc, argv);
     port_log_flush();  // (the log is written in batches: what is still waiting goes to the card before the process ends)
     sceKernelExitProcess(result);
     return result;

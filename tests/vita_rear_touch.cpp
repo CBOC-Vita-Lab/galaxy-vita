@@ -22,6 +22,8 @@ static int gRearAim = 1, gZoomMenu = 0, gMenus = 0, gToggles = 0;
 extern "C" {
 int sceCtrlSetSamplingMode(SceCtrlPadInputMode) { return 0; }
 int sceCtrlPeekBufferPositive(int, SceCtrlData* d, int) { *d = gCtrl; return 1; }
+int sceCtrlPeekBufferPositive2(int, SceCtrlData* d, int) { *d = gCtrl; return 1; }
+int sceCtrlGetControllerPortInfo(SceCtrlPortInfo* info) { *info = {}; info->port[0] = SCE_CTRL_TYPE_PHY; return 0; }
 int sceMotionStartSampling(void) { return -1; }
 int sceMotionStopSampling(void) { return 0; }
 int sceMotionGetState(SceMotionState*) { return -1; }

@@ -58,7 +58,11 @@ class ReleaseMetadataTests(unittest.TestCase):
             names = set(vpk.namelist())
             self.assertEqual(sha(vpk.read("eboot.bin")), self.manifest["package"]["runtimeSha256"])
             self.assertIn("sce_sys/param.sfo", names)
-            self.assertNotIn("sce_sys/loading-title.rgba", names)   # a capture of the game: never shipped
+            # The frozen 1.0 package predates the requested loading-art exception.
+            # When present, permit only the exact preserved source resource.
+            if "sce_sys/loading-title.rgba" in names:
+                self.assertEqual(vpk.read("sce_sys/loading-title.rgba"),
+                                 (ROOT / "vita/vgx-game/sce_sys/loading-title.rgba").read_bytes())
             self.assertFalse(any(n.endswith(("hdtex.pack", "libshacccg.suprx", ".thp", ".arc")) for n in names))
 
     def test_checksums_cover_the_repository(self):

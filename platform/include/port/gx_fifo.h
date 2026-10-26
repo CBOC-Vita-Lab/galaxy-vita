@@ -16,6 +16,10 @@ extern "C" {
 extern uint8_t* __PortGXFifoPtr;
 extern uint8_t* __PortGXFifoLimit;  // write position that triggers a flush (leaves slack)
 void __PortGXFifoOverflow(void);
+#if defined(TARGET_PC)
+// Returns nonzero only when the complete XF payload was written.
+int __PortGXFifoXfBurst12(const float* source);
+#endif
 
 static inline void __PortGXFifoCheck(void) {
     if (__PortGXFifoPtr >= __PortGXFifoLimit) {

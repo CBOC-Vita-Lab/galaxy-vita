@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 #include "revolution/mtx.h"
+#include "port/mtx_profile.h"
 
 void C_VECNormalize(const Vec* src, Vec* unit);
 void C_VECCrossProduct(const Vec* a, const Vec* b, Vec* axb);
@@ -86,9 +87,15 @@ void C_MTXTranspose(const Mtx src, Mtx xPose) {
 void PSMTXTranspose(const Mtx src, Mtx xPose) { C_MTXTranspose(src, xPose); }
 
 u32 C_MTXInverse(const Mtx src, Mtx inv) {
+#if PORT_MTX_PROFILE_COMPILED
+    const unsigned profile = port_mtx_profile_begin(src);
+#endif
     f32 det = src[0][0] * src[1][1] * src[2][2] + src[0][1] * src[1][2] * src[2][0] + src[0][2] * src[1][0] * src[2][1] -
               src[2][0] * src[1][1] * src[0][2] - src[1][0] * src[0][1] * src[2][2] - src[0][0] * src[2][1] * src[1][2];
     if (det == 0.0f) {
+#if PORT_MTX_PROFILE_COMPILED
+        if (profile) port_mtx_profile_end(profile, 0);
+#endif
         return 0;
     }
     f32 d = 1.0f / det;
@@ -106,6 +113,9 @@ u32 C_MTXInverse(const Mtx src, Mtx inv) {
     t[1][3] = -t[1][0] * src[0][3] - t[1][1] * src[1][3] - t[1][2] * src[2][3];
     t[2][3] = -t[2][0] * src[0][3] - t[2][1] * src[1][3] - t[2][2] * src[2][3];
     memcpy(inv, t, sizeof(Mtx));
+#if PORT_MTX_PROFILE_COMPILED
+    if (profile) port_mtx_profile_end(profile, 1);
+#endif
     return 1;
 }
 u32 PSMTXInverse(const Mtx src, Mtx inv) { return C_MTXInverse(src, inv); }

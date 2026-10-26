@@ -14,6 +14,9 @@
 #include "Game/Util/StringUtil.hpp"
 #include <JSystem/JKernel/JKRHeap.hpp>
 #include <cstdio>
+#ifdef TARGET_PC
+#include "port/boot_dialog.h"
+#endif
 
 namespace {
     NEW_NERVE(SaveDataHandleSequenceNoOperation, SaveDataHandleSequence, NoOperation);
@@ -93,6 +96,12 @@ void SaveDataHandleSequence::update() {
 void SaveDataHandleSequence::draw() const {
     if (mSysInfoWindowConfirm != nullptr) {
         mSysInfoWindowConfirm->draw();
+#ifdef TARGET_PC
+        if (port::bootdialog::Enabled() && MR::isExecuteDrawLayout(mSysInfoWindowConfirm) && mSysInfoWindowConfirm->isWait() &&
+            (mSysInfoWindowConfirm->mType == SysInfoWindow::Type_Key || mSysInfoWindowConfirm->mType == SysInfoWindow::Type_YesNo)) {
+            port::bootdialog::Drawn();
+        }
+#endif
     }
 
     if (mSysInfoWindowSave != nullptr) {

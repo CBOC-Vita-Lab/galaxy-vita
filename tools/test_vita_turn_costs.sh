@@ -3,6 +3,20 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 sdk=${VITASDK:-/opt/vitasdk}
 part=${1:-all}
+if test "$part" = host-perf; then
+  out=${2:-$(mktemp -d)}
+  mkdir -p "$out"
+  common=(-std=c++20 -O1 -g -D__vita__ -DPORT_LOGGING=1 -I"$root/platform/include"
+    -fsanitize=address,undefined -fno-omit-frame-pointer)
+  "${CXX:-clang++}" "${common[@]}" "$root/tests/vita_perf_audit.cpp" -pthread -o "$out/perf"
+  for scenario in cpu-scope cpu-failure stale-player forced-count cheap-skips backlog turn-costs forced-costs fast-skip-costs double-done disabled-costs paced; do
+    GXV_WORKLOAD_PROBE=0 "$out/perf" "$scenario"
+  done
+  "${CXX:-clang++}" "${common[@]}" -DPORT_RUNTIME_DIAGNOSTICS=0 -UPORT_LOGGING -DPORT_LOGGING=0 \
+    "$root/tests/vita_perf_audit.cpp" -pthread -o "$out/quiet-perf"
+  GXV_WORKLOAD_PROBE=0 "$out/quiet-perf" quiet
+  exit
+fi
 [[ $part == all || $part == perf || $part == worker ]]
 mounts=(--mount "type=bind,source=$root,target=/work,readonly"
         --mount "type=bind,source=$sdk,target=/sdk,readonly")
@@ -28,7 +42,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
     fi
     if test "$TURN_TEST_PART" != worker; then
       clang++ "${common[@]}" tests/vita_perf_audit.cpp -o /tmp/perf -l:libasan.so.8 -l:libubsan.so.1
-      for scenario in turn-costs forced-costs fast-skip-costs double-done disabled-costs; do
+      for scenario in turn-costs forced-costs fast-skip-costs double-done disabled-costs paced; do
         if test -z "$TURN_TEST_SCENARIO" || test "$TURN_TEST_SCENARIO" = "$scenario"; then
           timeout 10s /tmp/perf "$scenario"
         fi

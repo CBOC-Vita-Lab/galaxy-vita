@@ -5,10 +5,26 @@
 #include "vgx_hdtex.h"
 #include "vgx_state.h"
 
+#include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
+
+// Standalone host hooks: Mach-O does not resolve the split frontend's optional
+// weak declarations without definitions. These do not enter the game build.
+extern "C" int64_t port_host_time_ns(void) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+extern "C" int64_t port_thread_cpu_us(void) { return 0; } // CPU timing unavailable in this texture-only fixture.
+extern "C" void port_log(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    va_end(args);
+    std::fputc('\n', stderr);
+}
 
 namespace vgx {
 bool LogEnabled() { return false; }

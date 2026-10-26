@@ -14,6 +14,8 @@
 #include "port/diagnostics.h"
 #include "port/game_progress.h"
 #include "port/vgx_coldtrace_control.h"
+#include "../../vgx/src/vgx_workload.h"
+#include "mtx_profile.h"
 
 // (declared here and in the vgx glue rather than in port/port.h, which everything includes)
 extern "C" int64_t port_thread_cpu_us(void);
@@ -23,9 +25,14 @@ extern "C" int port_handheld(void);
 extern "C" int port_frameskip_turn(int allowed);
 extern "C" uint32_t port_frameskip_count(void);
 extern "C" unsigned port_vgx_backend_pending(void) __attribute__((weak));  // vgx_galaxy.cpp
+extern "C" int port_vgx_pace_turn(int allowed) __attribute__((weak));  // -1: legacy cadence
 
 extern "C" int64_t port_vgx_player_cpu_us(void) __attribute__((weak));
 extern "C" void port_vgx_diagnostic_csv_pause(int selecting) __attribute__((weak));
+extern "C" void port_autoq_game_begin(void) __attribute__((weak));
+extern "C" void port_autoq_game_work_done(void) __attribute__((weak));
+
+#include "phase_cpu.h"
 
 namespace {
 
@@ -84,8 +91,8 @@ bool alwaysLog() {
 
 // Where the game thread's time went in the loop turn in progress (handhelds log a turn that took
 // 45 ms or more with its three longest phases: the main loop's own checkpoints delimit them).
-enum class TurnKind { Unclassified, DrawSelected, LateSkip, BacklogSkip, ForcedSkip, RequiredDraw, Count };
-constexpr const char* turnKinds[] = {"unclassified", "draw-selected", "late-skip", "backlog-skip", "forced-skip", "required-draw"};
+enum class TurnKind { Unclassified, DrawSelected, LateSkip, BacklogSkip, ForcedSkip, RequiredDraw, PacedSkip, Count };
+constexpr const char* turnKinds[] = {"unclassified", "draw-selected", "late-skip", "backlog-skip", "forced-skip", "required-draw", "paced-skip"};
 static_assert(sizeof(turnKinds) / sizeof(*turnKinds) == static_cast<unsigned>(TurnKind::Count));
 struct TurnCost {
     unsigned turns = 0, cpuSamples = 0, bothReasons = 0, phaseTurns = 0;
@@ -123,6 +130,7 @@ void report(int64_t now) {
     }
     const bool skipped = sTurnCosts[static_cast<unsigned>(TurnKind::LateSkip)].turns ||
                          sTurnCosts[static_cast<unsigned>(TurnKind::BacklogSkip)].turns ||
+                         sTurnCosts[static_cast<unsigned>(TurnKind::PacedSkip)].turns ||
                          sTurnCosts[static_cast<unsigned>(TurnKind::ForcedSkip)].turns;
     if (verbose || skipped) {
         // Policy-selected turns, not displayed pictures. Only sampledWork - cpu
@@ -149,7 +157,15 @@ void report(int64_t now) {
 
 extern "C" {
 
+#if PORT_PHASE_CPU_COMPILED
+void port_native_phase_cpu_checkpoint(uint32_t phase) {
+    port::phasecpu::Checkpoint(phase);
+}
+#endif
+
 void port_game_progress_checkpoint(uint32_t phase) {
+    const bool mainLane = !(phase >= PORT_GAME_PHASE_AUDIO_RESOURCES && phase <= PORT_GAME_PHASE_AUDIO_MESSAGE_WAIT);
+    if (mainLane) vgx::workload::FinishWait(phase == PORT_GAME_PHASE_GX_FINISH_WAIT);
     if (!PORT_RUNTIME_DIAGNOSTICS) return;
     if (!phase || phase>=PORT_GAME_PHASE_COUNT) return;
     auto& lane=phase>=PORT_GAME_PHASE_AUDIO_RESOURCES && phase<=PORT_GAME_PHASE_AUDIO_READY ? sAudioProgress :
@@ -217,6 +233,11 @@ const char* port_game_progress_name(uint32_t phase) {
 }
 
 void port_perf_frame_begin(void) {
+    if (port_autoq_game_begin) port_autoq_game_begin(); // target-only CPU sample, also in the quiet player build
+    vgx::workload::BeginTurn();
+#if PORT_MTX_PROFILE_COMPILED
+    port_mtx_profile_work_begin();
+#endif
     if (!PORT_RUNTIME_DIAGNOSTICS) return;
     std::lock_guard<std::mutex> lock(sLock);
     int64_t now = port_host_time_ns();
@@ -230,9 +251,20 @@ void port_perf_frame_begin(void) {
     sTurn.kind = TurnKind::Unclassified;
     sTurn.bothSkipReasons = false;
     for (int64_t& v : sTurn.ns) v = 0;
+#if PORT_PHASE_CPU_COMPILED
+    port::phasecpu::Begin();
+#endif
 }
 
 void port_perf_frame_work_done(void) {
+#if PORT_PHASE_CPU_COMPILED
+    port::phasecpu::End();
+#endif
+    if (port_autoq_game_work_done) port_autoq_game_work_done(); // ends before the retrace wait
+    vgx::workload::EndTurn();
+#if PORT_MTX_PROFILE_COMPILED
+    port_mtx_profile_work_done();
+#endif
     if (!PORT_RUNTIME_DIAGNOSTICS) {
         sTotFrames.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -562,6 +594,16 @@ int port_frameskip_turn(int allowed) {
         sSkippedTurns.fetch_add(1, std::memory_order_relaxed);
         if (PORT_RUNTIME_DIAGNOSTICS) sTurn.kind = TurnKind::ForcedSkip;
         return 2;
+    }
+    if (port_vgx_pace_turn) {
+        const int paced = port_vgx_pace_turn(allowed);
+        if (paced >= 0) {
+            if (paced != 0) {
+                sSkippedTurns.fetch_add(1, std::memory_order_relaxed);
+                if (PORT_RUNTIME_DIAGNOSTICS) sTurn.kind = paced == 2 ? TurnKind::LateSkip : TurnKind::PacedSkip;
+            }
+            return paced;
+        }
     }
     static const int maxRun = [] {
         const char* e = getenv("PETARI_FRAMESKIP");
