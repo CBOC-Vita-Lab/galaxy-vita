@@ -295,6 +295,15 @@ RunResult MenuAndRetire(Screen& screen, OpenMode mode) {
 LaunchRequest TakeLaunch(int argc = 0, char** argv = nullptr) {
     char parameter[1024] = {};
     const int rc = sceAppMgrGetAppParam(parameter);
+    // The system may keep returning the same LiveArea parameter after it was read. Act on a
+    // Settings parameter once: the same text again (the next poll, or after a -play restart) is
+    // not a new request until a different parameter has been seen in between.
+    static char consumed[1024] = {};
+    const LaunchRequest fromParameter = rc >= 0 ? ParseLaunch(0, nullptr, parameter, sizeof(parameter)) : LaunchRequest::Play;
+    const bool repeat = rc >= 0 && consumed[0] && std::strncmp(consumed, parameter, sizeof(consumed)) == 0;
+    if (rc < 0 || fromParameter != LaunchRequest::Settings) consumed[0] = 0;
+    else std::memcpy(consumed, parameter, sizeof(consumed));
+    if (repeat && !argc) return LaunchRequest::Play;
     return ParseLaunch(argc, argv, rc >= 0 ? parameter : nullptr, rc >= 0 ? sizeof(parameter) : 0);
 }
 bool Relaunch() {
