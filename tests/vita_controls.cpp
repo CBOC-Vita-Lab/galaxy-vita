@@ -66,6 +66,23 @@ int main(int argc, char** argv) {
     const bool defaults = std::strcmp(argv[1], "default") == 0;
     setenv("GXV_REMAP", off ? "0" : "1", 1);
     neutral(); motionState.acceleration.y = -1;
+    if (std::strcmp(argv[1], "escape") == 0) {
+        // Jump, Star Bits and Pause moved onto the zoom/rear-aim buttons must still reach the game in
+        // the pause menu (confirm, back, unpause); an unbound zoom button still does not.
+        auto map = GetControlApi().defaults(ProfileId::Handheld);
+        std::string error, conflict;
+        assert(GetControlApi().bind(map,"jump",0,"r1",true,NominalCaps(ProfileId::Handheld),conflict) == BindResult::Applied);
+        assert(GetControlApi().bind(map,"star_bits",0,"l1",true,NominalCaps(ProfileId::Handheld),conflict) == BindResult::Applied);
+        assert(GetControlApi().bind(map,"pause",0,"triangle",true,NominalCaps(ProfileId::Handheld),conflict) == BindResult::Applied);
+        assert(SetActiveMapping(map,ProfileId::Handheld,NominalCaps(ProfileId::Handheld),error));
+        assert(port_vita_input_init()); zoom = 1; poll();
+        raw.buttons=SCE_CTRL_RTRIGGER; assert(poll().buttons & 0x800); neutral(); poll();
+        raw.buttons=SCE_CTRL_LTRIGGER; assert(poll().buttons & 0x400); neutral(); poll();
+        raw.buttons=SCE_CTRL_TRIANGLE; assert(poll().buttons & 0x0010); neutral(); poll();
+        zoom = 0;
+        std::puts("PASS: remapped confirm, back and pause pass through the pause menu");
+        return 0;
+    }
     if (std::strcmp(argv[1], "calibration") == 0) {
         auto map = GetControlApi().defaults(ProfileId::Handheld);
         std::string error, conflict;
@@ -77,10 +94,11 @@ int main(int argc, char** argv) {
         raw.buttons=SCE_CTRL_SELECT; assert(std::fabs(poll().downX-.6f)<1e-5f);
         raw.buttons=SCE_CTRL_TRIANGLE; const auto calibrated=poll();
         assert(std::fabs(calibrated.downX)<1e-5f && (calibrated.buttons&0x1000));
-        // A hotplug cannot keep a touch/motion prompt cache while silently
-        // switching to a no-touch/no-motion source. Fixed settings still works.
+        // A hotplug to a source the saved profile cannot serve (no touch/motion) is reported as
+        // unavailable, but the game keeps the connected controller's default buttons instead of
+        // losing all input. Fixed settings still works.
         type=SCE_CTRL_TYPE_DS4; neutral(); poll(); raw.buttons=SCE_CTRL_CROSS;
-        assert(!poll().buttons && !port_vita_input_mapping_available());
+        assert((poll().buttons & 0x800) && !port_vita_input_mapping_available());
         PortVitaRawInput ui; assert(port_vita_input_raw_poll(ui) && ui.held==Cross);
         std::puts("PASS: remapped Minus calibrates; old physical Select does not");
         return 0;

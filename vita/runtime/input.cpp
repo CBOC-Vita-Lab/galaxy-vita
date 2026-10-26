@@ -379,7 +379,6 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         if (normalized & L1) commandButtons |= SCE_CTRL_LTRIGGER;
         if (normalized & R1) commandButtons |= SCE_CTRL_RTRIGGER;
         if (normalized & Triangle) commandButtons |= SCE_CTRL_TRIANGLE;
-        if (port_zoom_menu_active()) normalized &= ~(L1 | R1 | Triangle);
         uint64_t required = 0;
         for (auto mask : active.masks) required |= mask;
         const auto& promptCaps = ActiveCapabilities();
@@ -388,8 +387,33 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
             (!promptCaps.rearTouch || sampled.caps.rearTouch) &&
             (!promptCaps.motion || sampled.caps.motion);
         mappingAvailable.store(available, std::memory_order_release);
-        if (!available) { pad->connected = 1; return; }
-        const auto translated = available ? Translate(active, normalized) : Translation{};
+        // A saved profile that needs buttons this controller lacks (a PlayStation profile with L2 on a
+        // handheld Vita, say) falls back to the default buttons of the connected controller, so the
+        // game never loses all input.
+        const CompiledMapping* mapping = &active;
+        if (!available) {
+            static CompiledMapping fallback[2];
+            static int fallbackState[2] = {0, 0};  // 0 not built, 1 usable, -1 unusable
+            const ProfileId kind = sampled.controllerType == SCE_CTRL_TYPE_PHY ? ProfileId::Handheld : ProfileId::PlayStation;
+            int& state = fallbackState[static_cast<unsigned>(kind)];
+            if (!state) {
+                std::string error;
+                state = Compile(GetControlApi().defaults(kind), kind, sampled.caps, fallback[static_cast<unsigned>(kind)], error) ? 1 : -1;
+            }
+            if (state < 0) { pad->connected = 1; return; }
+            mapping = &fallback[static_cast<unsigned>(kind)];
+        }
+        // In the pause menu L1/R1/Triangle drive zoom and rear aiming, so the game does not get them,
+        // except a button the player bound to confirm, back, pause or menu movement: those always pass,
+        // so a custom layout can never trap the player in the menu.
+        if (port_zoom_menu_active()) {
+            uint64_t menuKeys = 0;
+            for (Action a : {Action::Jump, Action::StarBits, Action::Pause, Action::CameraUp, Action::CameraDown,
+                             Action::CameraLeft, Action::CameraRight})
+                menuKeys |= mapping->masks[static_cast<size_t>(a)];
+            normalized &= ~((L1 | R1 | Triangle) & ~menuKeys);
+        }
+        const auto translated = Translate(*mapping, normalized);
         mappedSpin = translated.spin;
         control.buttons = 0;
         const struct { uint32_t wii; unsigned vita; } legacy[] = {

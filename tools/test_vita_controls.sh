@@ -19,3 +19,4 @@ GXV_SETTINGS=1 "$out/test" off
 "$out/test" default
 "$out/test" on
 "$out/test" calibration
+"$out/test" escape

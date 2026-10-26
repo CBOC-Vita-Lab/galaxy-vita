@@ -5,9 +5,9 @@
   "driver": "python3 -I tools/vgx_build/build.py all",
   "note": "SHA-256 of the release build's artifacts. tools/update-checksums.py fills `runtime` from the VPK's eboot.bin; the others are recorded from the build directory. A value that is not a SHA-256 is not checked by `build.py verify`.",
   "sha256": {
-    "runtimeArchive": "e30162b68cdc154f62659e1c9667f5f9143f8ad70bab800e93f1613b8eaa86d3",
-    "elf": "9da9fb1a757b1a761ea831fb086b0b4ba6afb8122dea2b29d03e00e9f79325dc",
-    "velf": "717869ae6c23b9df43f0277e4530347e20dee9a92a95138c44133bdce8718f94",
-    "runtime": "067b848e63da5d02315f3832b7f2fc242cba9e482c272a876141c72397b99822"
+    "runtimeArchive": "344d6c294b8c874224d8b338a0ec803527a8418b383bafc8e6aec0658ae2002b",
+    "elf": "e84fb557464293f408bae1b2c66062b510a265e09c1c7947594049da173de862",
+    "velf": "1660b21712d19be9711c25d35f214df5b76ff3e30aaf40bb6f6cae742914dff8",
+    "runtime": "a0cf11ab2427ff510306e846601c02a4405265f70e81fe66c8901e0673e0cfb9"
   }
 }

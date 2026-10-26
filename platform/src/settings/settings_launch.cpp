@@ -52,9 +52,11 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     std::vector<Override> overrides;if(!enabled)return overrides;
     for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP"}) {
         if(const char* raw=std::getenv(key)) {
+            // Remapping is on by default (the start-up default sets GXV_REMAP=1); only turning it off is an override.
+            if(std::strcmp(key,"GXV_REMAP")==0&&std::strcmp(raw,"1")==0)continue;
             std::string effective=raw;
             if(std::strcmp(key,"GXV_FPS_LIMIT")==0) effective=std::strcmp(raw,"30")==0?"30 FPS requested (driver capability required)":"Existing picture-rate path";
-            if(std::strcmp(key,"GXV_REMAP")==0) effective=std::strcmp(raw,"0")==0?"Remapping disabled":"Developer remapping gate";
+            if(std::strcmp(key,"GXV_REMAP")==0) effective=std::strcmp(raw,"0")==0?"Remapping disabled":"Remapping off (unknown value)";
             overrides.push_back({key,raw,effective});
         }
     }

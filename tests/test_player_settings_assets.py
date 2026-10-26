@@ -32,13 +32,16 @@ class PlayerSettingsAssets(unittest.TestCase):
         png = (ROOT / 'vita/vgx-game/sce_sys/livearea/contents/settings.png').read_bytes()
         self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
         self.assertEqual(struct.unpack('>IIBBBBB', png[16:29]), (280, 64, 8, 3, 0, 0, 0))
-        for size, diagram in [((300, 129), module.handheld()), ((250, 167), module.playstation())]:
-            pixels = module.fitted_rgba(diagram, size)
-            self.assertEqual(len(pixels), size[0]*size[1]*4)
-            self.assertIn(0, pixels[3::4])
-            self.assertIn(255, pixels[3::4])
-        # No product images or photographs: the diagrams are drawn from shapes in the script.
-        self.assertFalse((ROOT / 'tools/handheld/assets').exists())
+        pixels = module.rgba_png(ROOT / 'tools/handheld/assets/settings_vita.png')
+        self.assertEqual(len(pixels), 300*129*4)
+        self.assertGreater(len(set(zip(pixels[0::4], pixels[1::4], pixels[2::4], pixels[3::4]))), 256)
+        self.assertIn(0, pixels[3::4])
+        self.assertTrue(any(0 < alpha < 255 for alpha in pixels[3::4]))
+        controller = module.rgba_png(ROOT / 'tools/handheld/assets/settings_playstation.png', (250, 167))
+        self.assertEqual(len(controller), 250*167*4)
+        self.assertGreater(len(set(zip(controller[0::4], controller[1::4], controller[2::4], controller[3::4]))), 256)
+        self.assertIn(0, controller[3::4])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18912,11 +18912,11 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "5b71b1383b9f52f6985a6e401121b91dce74765d9950b7537b514a336e70433a"
+      "sha256": "5e40e2dc35653ea6e6174b2149e095e41c67bef6dd4b90d972629fa789091701"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
-      "sha256": "71271866f9835ffb09e1262f4ef083faa09b49ce5f1d5e73e373c55f6c7cebc6"
+      "sha256": "d4f9095a7835c163cbd632a5cd2499c42c059946276a3214bf5264c2f80909a9"
     },
     {
       "path": "platform/src/settings/settings_store.cpp",
@@ -18928,7 +18928,7 @@
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
-      "sha256": "82c370eccb6bb39a5a6d8b5ee85e845a81860b953844f4d176ccc452675aee06"
+      "sha256": "5d77ef23ef290f4d5b72d2961fbdbb20e7b2ad790ca192f6c0848d4823b88a11"
     },
     {
       "path": "platform/src/vi/vi.cpp",
@@ -19420,7 +19420,7 @@
     },
     {
       "path": "tests/test_player_settings_assets.py",
-      "sha256": "75f1d008208411decbd5eb21984005c0232461ef4f536d4940e250eb2f04118f"
+      "sha256": "152c4d6b0531b9ae38d5b99ae06c5b3f4b25e8d6a265beee1caa319827a38d01"
     },
     {
       "path": "tests/test_release_metadata.py",
@@ -19704,7 +19704,7 @@
     },
     {
       "path": "tests/vita_controls.cpp",
-      "sha256": "4ef60fe8c4355ef9d9c295bb69c44dd523aa4507dca48378899bab62984d643e"
+      "sha256": "0379613e40d196fc1a8c9eb844e7f2f0e661b6702216a67da10fe3ad42540f31"
     },
     {
       "path": "tests/vita_csv_status.cpp",
@@ -20055,6 +20055,18 @@
       "sha256": "39e3f64bee9fff403c2a2b05cd64a8cd06540960ecbcaa5e9f72c5aa1aff1ed9"
     },
     {
+      "path": "tools/handheld/assets/README.md",
+      "sha256": "8ad8d3d1046406f1fec5b898b7f87a8434156717465005e032d95e54a24a889c"
+    },
+    {
+      "path": "tools/handheld/assets/settings_playstation.png",
+      "sha256": "ffb8294800d2bf8b23be0f115638adba249dc3703bd0467ff0ae537fae8d2891"
+    },
+    {
+      "path": "tools/handheld/assets/settings_vita.png",
+      "sha256": "3dfa992697cfcc0b3c9afb0c50da504c43ce9fb11d6bfbea2f7ec94895899ed1"
+    },
+    {
       "path": "tools/handheld/make_glyphs.py",
       "sha256": "3ed1b26dfa8b06bb4ebb3d1661130bd1fa72e2e645d03ab5763c0b61655c68f5"
     },
@@ -20064,7 +20076,7 @@
     },
     {
       "path": "tools/handheld/make_settings_assets.py",
-      "sha256": "ea265acad053beb88eccbf0ffe3f91e59ddaf1ec9250b1f74132dcb3443ccb3b"
+      "sha256": "875f3c6fb57dd79a9e5d8c12879341edf34c614bf6f8e04653d4590314abf9f0"
     },
     {
       "path": "tools/handheld/settings_preview_png.py",
@@ -20548,7 +20560,7 @@
     },
     {
       "path": "tools/test_vita_controls.sh",
-      "sha256": "66b9b817fb941d94df8f78fb749d84e6c4801a98216fcfaf321c3860346eaa0d"
+      "sha256": "58cda3db3ac291836d314081f2ea7d3365cabc06220ab4e38fec4775a74e9ae4"
     },
     {
       "path": "tools/test_vita_csv_status.sh",
@@ -20908,7 +20920,7 @@
     },
     {
       "path": "vita/runtime/input.cpp",
-      "sha256": "0bd6e2dd084010f5c6c82452bf26671c8382bfc51069da58794b61a482762860"
+      "sha256": "82a6ec25cfa745f90377a2a74c7140e7e981441a212b4c54aee034d8a4cca92a"
     },
     {
       "path": "vita/runtime/input.h",
