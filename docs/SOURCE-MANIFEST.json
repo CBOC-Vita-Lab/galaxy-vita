@@ -21256,7 +21256,7 @@
     },
     {
       "path": "tools/vitagl/build-release.sh",
-      "sha256": "475a86ab956e741bc9734140f546283af3c3043b7fbb7b93b0794013f3ba5120"
+      "sha256": "5d2f6845df5b8e83663486529c42fb9aca65b02caceb6e6fff39fd724c876b13"
     },
     {
       "path": "tools/vitagl/build-vitagl.sh",
