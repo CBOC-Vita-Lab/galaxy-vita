@@ -12,9 +12,20 @@
 #   VGL_UPSTREAM=<a vitaGL git clone> VGL_LIBS=<lib/ + include/ of the other libraries> tools/vitagl/build-release.sh [name]
 #       -> build/vitagl/<name>/ (default name nhustd), a complete VGL_DEPS folder for tools/vgx_build/build.py.
 # The clone is only read (git archive); nothing is downloaded.
+#
+# Variant "nhustdx" (name nhustdx, or FAST=1, which also makes it the default name): the same library with three upstream
+# speed options on, DRAW_SPEEDHACK INDICES_SPEEDHACK SAMPLERS_SPEEDHACK. Each was checked against how the Galaxy back end
+# calls vitaGL and gives the same draws for it (tools/vitagl/README.md has the reasons). STRICT_DRAW_COMPLIANCE stays on:
+# without it the Vita build's relative vertex offsets overflow vitaGL's 16-bit attribute offset. Not part of nhustd.
+# VGL_EXTRA="OPT1 OPT2" adds more options to either variant (for A/B builds; the README lists which are not safe).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-name=${1:-nhustd}
+fast=${FAST:-0}
+if [ -n "${1:-}" ]; then name=$1; elif [ "$fast" = 1 ]; then name=nhustdx; else name=nhustd; fi
+[ "$name" = nhustdx ] && fast=1
+options="DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP"
+[ "$fast" = 1 ] && options="$options DRAW_SPEEDHACK INDICES_SPEEDHACK SAMPLERS_SPEEDHACK"
+options="$options ${VGL_EXTRA:-}"
 upstream=${VGL_UPSTREAM:?set VGL_UPSTREAM to a git clone of https://github.com/Rinnegatamante/vitaGL}
 base=9a14d17808bdeb5c74648e8e1221093df3bfc83f
 work=$(mktemp -d)
@@ -25,5 +36,4 @@ for p in "$here"/patches/*.patch; do
 done
 python3 -I "$here/gpu_timers.py" "$work"
 python3 -I "$here/fbo_msaa.py" "$work"
-VGL_SRC="$work/source" "$here/build-vitagl.sh" "$name" \
-  "DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP"
+VGL_SRC="$work/source" "$here/build-vitagl.sh" "$name" "$options"
