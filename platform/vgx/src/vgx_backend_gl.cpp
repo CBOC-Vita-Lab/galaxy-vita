@@ -1648,10 +1648,11 @@ inline double DNow() { return NowMs(); }
 bool g_dprofOn = false;
 double g_dprof[8] = {};
 double g_dprofT = 0;
-#define DP(i) do { if (g_dprofOn) { const double n_ = DNow(); g_dprof[i] += n_ - g_dprofT; g_dprofT = n_; } } while (0)
+// (kBackendDiagnostics is a constant: in the player build the stage marks of a draw (seven per draw) compile away instead of testing g_dprofOn each time)
+#define DP(i) do { if (kBackendDiagnostics && g_dprofOn) { const double n_ = DNow(); g_dprof[i] += n_ - g_dprofT; g_dprofT = n_; } } while (0)
 void Draw(const CmdBuf& buf, const DrawRec& r) {
     if (g_skipDraws) return;
-    if (g_dprofOn) g_dprofT = DNow();
+    if (kBackendDiagnostics && g_dprofOn) g_dprofT = DNow();
     Program& p = GetProgram(r.vsId, r.fsId);
     DP(0);
     if (!p.ok || r.idxCount == 0) {

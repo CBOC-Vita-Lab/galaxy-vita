@@ -1707,8 +1707,14 @@ extern "C" void port_boot_progress(const char* what, int done, int total) { spla
 // (GXV_VITA_VBLANK_CLOCK=0: the platform layer's free-running 59.94 Hz timer instead, which
 // drifts against the display and drops or repeats a picture every few seconds).
 extern "C" void port_vi_retrace(void);
+extern "C" int port_vita_thread_class(int cls) __attribute__((weak)); // vita/runtime/memory.cpp
 namespace {
 void* VblankMain(void*) {
+    // GXV_VBLANK_PRIO=1: the frame clock runs at the clocks' priority (0x50, cores 1-2) like the timer and retrace threads. Left to the
+    // thread library it starts at the lowest user priority, 0xBF, on any core, and can be held up by the game thread (0x9F) or the
+    // back end when it shares a core with them; it does a few microseconds of work per vertical blank. Default 0: as before.
+    static const bool raise = std::getenv("GXV_VBLANK_PRIO") && std::atoi(std::getenv("GXV_VBLANK_PRIO")) == 1;
+    if (raise && port_vita_thread_class) port_vita_thread_class(1);
     for (;;) {
         sceDisplayWaitVblankStart();
         port_vi_retrace();

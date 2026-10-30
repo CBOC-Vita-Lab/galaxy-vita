@@ -82,6 +82,9 @@ target_link_options(galaxy_native PRIVATE -Wl,--gc-sections -Wl,--no-undefined -
     -Wl,--wrap=pte_osSemaphoreCancellablePend)
 # -pthread, NOT -lpthread: VitaSDK's spec turns it into --whole-archive -lpthread (libstdc++ finds its
 # thread functions through weak references; see the Strikers Makefile.vita).
+# libstdc++'s __gthread_active_p() is the test "is pthread_cancel linked" (gthr-posix.h): without it every std::mutex and
+# std::condition_variable silently does nothing (Strikers hit this). The link fails here rather than producing such a program.
+target_link_options(galaxy_native PRIVATE "-Wl,--require-defined=pthread_cancel")
 target_link_libraries(galaxy_native PRIVATE -Wl,--start-group "${RUNTIME_ARCHIVE}"
     -Wl,--whole-archive "${GAME_ARCHIVE}" -Wl,--no-whole-archive -Wl,--end-group
     "${vgl_archive}" "${VGL_DEPS}/lib/libvitashark.a" "${VGL_DEPS}/lib/libSceShaccCgExt.a"

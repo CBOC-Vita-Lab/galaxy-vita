@@ -15,6 +15,7 @@
 //                           (needs PETARI_GAME_CLOCK=1) t = 0 is the first picture with n or more draw calls (the
 //                           title screen: 200), and nothing is scripted before: the scene loads take minutes there.
 //   ux0:data/smg/shadercache  vitaGL's compiled-shader cache
+#include <bits/gthr.h>
 #include <malloc.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
@@ -267,6 +268,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
         port_log_summary("Super Mario Galaxy Vita, basic log: frame rate and hitches every 5 s, picture-size changes, settings, errors; built %s %s",
                          __DATE__, __TIME__);
     port_log("kind=native_galaxy_vgx; build %s %s", __DATE__, __TIME__);
+    // libstdc++ locks its mutexes and condition variables only when pthread_cancel is linked (__gthread_active_p); the link line
+    // requires it (vita/vgx-game/CMakeLists.txt). One line so that a log shows it.
+    port_log_summary("threads: libstdc++ locking %s", __gthread_active_p() ? "active" : "INACTIVE (std::mutex does nothing)");
     LoadEnvFile(SMG_DATA "/env.txt");
     // Version 1.1 player defaults: Mario's eyes (final TEV byte wrap), the Settings menu and button
     // remapping, the truthful loading bar, and the NEON audio mixing kernels (bit-identical PCM to the
