@@ -27,6 +27,8 @@ const GuestHooks& Hooks();
 // GXV_FIX_LODBIAS (default 0, read once): stages sample with the texture unit's LOD bias (FsKey::Stage::lodBias, vgx_fixes.h LodBiasOf). With it on, the
 // texture unit's mode0 / mode1 registers feed the shader key hash and mark the keys dirty.
 bool FixLodBias();
+// GXV_FIX_TEVIN (default 0, read once): TEV inputs A, B and C read the low 8 bits of a register (FsKey::inWrap), see State::tevOor.
+bool FixTevIn();
 bool StaticCrowdEnabled();
 void QueueCrowdSnapshot(const staticcrowd::Tag* tags, uint32_t count, bool valid);
 void ResetCrowdTags();
@@ -179,6 +181,8 @@ struct State {
     // TEV colour registers (bits 0..3: PREV, REG0, REG1, REG2) and konst colours (bits 4..7)
     // written since the last draw: the TEV block's values, apart from bpDirty.
     uint8_t tevColDirty = 0xFF;
+    // GXV_FIX_TEVIN: 1 while a TEV colour register (PREV, REG0..2, any component) is outside 0..255; part of the shader key hash (FsKey::inWrap).
+    uint8_t tevOor = 0;
     bool layoutDirty = true;  // VCD / VAT
     uint32_t vcdGen = 0;      // counts the changes of the vertex descriptor (FoldGuess)
     uint8_t texSlotDirty = 0xFF; // which texmaps' bindings (or what they resolve to) may have changed

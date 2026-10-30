@@ -550,6 +550,7 @@ void BuildFsKey(FsKey& k) {
             stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
     }
     if (FixLogicOp() && !blending && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3) k.logicSrc = fixes::LogicOpPlan(bits(cm0, 12, 4)).src;
+    if (FixTevIn() && g.tevOor) k.inWrap = 1; // (GXV_FIX_TEVIN: a TEV register outside 0..255; State::tevOor)
 }
 
 void BuildVsKey(VsKey& k, uint8_t numTexGens, uint8_t palCls, uint8_t fsFog) {

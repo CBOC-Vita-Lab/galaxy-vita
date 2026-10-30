@@ -18,6 +18,10 @@ bool FixLodBias() {
     static const bool on = EnvInt("GXV_FIX_LODBIAS", 0) != 0;
     return on;
 }
+bool FixTevIn() {
+    static const bool on = EnvInt("GXV_FIX_TEVIN", 0) != 0;
+    return on;
+}
 void SetGuestHooks(const GuestHooks& h) { g_hooks = h; }
 const GuestHooks& Hooks() { return g_hooks; }
 
@@ -57,10 +61,10 @@ static constexpr bool IsKeyXF(uint32_t r) { return r == 0x09 || (r >= 0x0E && r 
 // KeyZ(i, v) for register i (BP 0..255, XF 0x100 + r): two 32-bit lanes, each a multiply-xorshift of the value keyed by a
 // random word per register (the console's processor has no 64-bit multiply; the keys come from a fixed splitmix sequence).
 struct KeyZTable {
-    uint32_t a[0x158], b[0x158];
+    uint32_t a[0x159], b[0x159];
     constexpr KeyZTable() : a(), b() {
         uint64_t x = 0x243F6A8885A308D3ull;
-        for (int i = 0; i < 0x158; ++i) {
+        for (int i = 0; i < 0x159; ++i) {
             for (int k = 0; k < 2; ++k) {
                 x += 0x9E3779B97F4A7C15ull;
                 uint64_t z = x;
@@ -95,6 +99,7 @@ uint64_t KeyHashOf(const State& s) {
             if (IsLodReg(r)) h ^= KeyZ(r, s.bp[r]);
     for (uint32_t r = 0; r < 0x58; ++r)
         if (IsKeyXF(r)) h ^= KeyZ(0x100u + r, s.xfReg[r]);
+    if (FixTevIn()) h ^= KeyZ(0x158u, s.tevOor);
     return h;
 }
 
@@ -191,6 +196,19 @@ static void ShadowCheckLog(bool ok, const char* what, uint32_t reg, uint32_t v) 
         VGX_LOG_N(200, "regshadow: %llu repeated writes checked, %llu mismatching\n", static_cast<unsigned long long>(g_shadowChecked),
                   static_cast<unsigned long long>(g_shadowBad));
 }
+// GXV_FIX_TEVIN: after a TEV colour register changed, keep State::tevOor (and the key hash) in step; a change marks the shader keys dirty.
+static inline void TevOorUpdate() {
+    if (!FixTevIn()) return;
+    uint8_t oor = 0;
+    for (int i = 0; i < 4; ++i)
+        for (int c = 0; c < 4; ++c)
+            if (static_cast<unsigned>(g.tevReg[i][c]) > 255u) oor = 1;
+    if (oor == g.tevOor) return;
+    if (RsCacheMode() != 0) g.keyHash ^= KeyZ(0x158u, g.tevOor) ^ KeyZ(0x158u, oor);
+    g.tevOor = oor;
+    g.bpKeyDirty = true;
+    g.bpDirty = true;
+}
 // TEV colour / konst write (BP 0xE0..0xE7, after the mask): the half of tevReg / tevKonst it names.
 static inline void WriteTevColor(uint8_t reg, uint32_t nv) {
     const int idx = (reg - 0xE0) >> 1;
@@ -200,6 +218,7 @@ static inline void WriteTevColor(uint8_t reg, uint32_t nv) {
     const uint8_t bit = static_cast<uint8_t>(1u << (idx + ((nv & 0x800000u) ? 4 : 0)));
     if (reg & 1) { if (d[2] != lo || d[1] != hi) { d[2] = lo; d[1] = hi; g.tevColDirty |= bit; } } // BG
     else { if (d[0] != lo || d[3] != hi) { d[0] = lo; d[3] = hi; g.tevColDirty |= bit; } }         // RA
+    if (!(nv & 0x800000u)) TevOorUpdate();
     g.bp[reg] = nv;
     g.tevRaw[((reg - 0xE0) << 1) | (nv >> 23)] = nv;
 }
@@ -297,6 +316,7 @@ void StoreBP(uint8_t reg, uint32_t nv) {
         if (reg & 1) { dst[idx][2] = lo; dst[idx][1] = hi; } // BG
         else { dst[idx][0] = lo; dst[idx][3] = hi; }         // RA
         if (std::memcmp(old, dst[idx], sizeof old) != 0) g.tevColDirty |= static_cast<uint8_t>(1u << (idx + ((nv & 0x800000u) ? 4 : 0)));
+        if (!(nv & 0x800000u)) TevOorUpdate();
         g.bp[reg] = nv;
         g.tevRaw[TevRawSlot(reg, nv)] = nv & 0x00FFFFFFu;
         return;

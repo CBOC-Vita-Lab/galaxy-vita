@@ -24,7 +24,10 @@ struct FsKey {
     uint8_t regFromVtx = 0;
     // GX logic op emulated by blending (vgx_fixes.h LogicOpPlan): 0 the colour as it is, 1 inverted, 2 white. Set only under GXV_FIX_LOGICOP.
     uint8_t logicSrc = 0;
-    uint8_t pad[1] = {};
+    // GX reads the TEV inputs A, B and C as the low 8 bits of the (11-bit signed) register value; vgx keeps registers as normalised floats and
+    // would clamp an out-of-range one (a J3D material colour of 270 reads as 14). Set only under GXV_FIX_TEVIN, and only while a TEV
+    // register is outside 0..255: register reads feeding A, B and C go through vgx_w3 / vgx_w1.
+    uint8_t inWrap = 0;
     struct Stage {
         uint32_t color = 0; // BP 0xC0+2n bits 0..23
         uint32_t alpha = 0; // BP 0xC1+2n bits 4..23 (swap selects stripped)

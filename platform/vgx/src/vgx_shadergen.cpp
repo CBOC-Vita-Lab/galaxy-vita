@@ -164,6 +164,11 @@ const char* ColorArg(uint32_t a) {
                                       "tex.rgb", "tex.aaa", "ras.rgb", "ras.aaa", "vec3(1.0)", "vec3(0.5)", "kc", "vec3(0.0)"};
     return t[a & 15];
 }
+// The colour / alpha input with the low-8-bit wrap (FsKey::inWrap) on register reads (selectors 0..7 / 0..3).
+std::string WrapArg(const char* plain, bool reg, bool color) {
+    if (!reg) return plain;
+    return std::string(color ? "vgx_w3(" : "vgx_w1(") + plain + ")";
+}
 const char* AlphaArg(uint32_t a) {
     static const char* const t[8] = {"prev.a", "c0.a", "c1.a", "c2.a", "tex.a", "ras.a", "ka", "0.0"};
     return t[a & 7];
@@ -315,6 +320,14 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
           "  float byteValue = floor(value * 255.0 + 0.5);\n"
           "  return (byteValue - 256.0 * floor(byteValue / 256.0)) / 255.0;\n}\n");
     }
+    if (k.inWrap) {
+        // (GXV_FIX_TEVIN) byte wrap of a register value, as GX's `& 255` on the inputs A, B, C; values in range are returned unchanged
+        o("float vgx_w1(float value) {\n"
+          "  if (value >= 0.0 && value <= 1.0) return value;\n"
+          "  float byteValue = floor(value * 255.0 + 0.5);\n"
+          "  return (byteValue - 256.0 * floor(byteValue / 256.0)) / 255.0;\n}\n"
+          "vec3 vgx_w3(vec3 value) { return vec3(vgx_w1(value.x), vgx_w1(value.y), vgx_w1(value.z)); }\n");
+    }
     for (int m = 0; m < 8; ++m)
         if (texMask & (1u << m)) o("uniform sampler2D u_tex%d;\n", m);
     o("uniform vec4 u_tev[%d];\n", FsTevCount(k));
@@ -396,9 +409,12 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
         if (kcUsed) o("  kc = %s;\n", KonstColor(st.kcsel).c_str());
         if (kaUsed) o("  ka = %s;\n", KonstAlpha(st.kasel).c_str());
         o("  {\n");
-        o("    vec3 a = %s, b = %s, c = %s, d = %s;\n", ColorArg(bits(tc, 12, 4)), ColorArg(bits(tc, 8, 4)), ColorArg(bits(tc, 4, 4)),
+        const bool w = k.inWrap != 0;
+        o("    vec3 a = %s, b = %s, c = %s, d = %s;\n", WrapArg(ColorArg(bits(tc, 12, 4)), w && bits(tc, 12, 4) < 8, true).c_str(),
+          WrapArg(ColorArg(bits(tc, 8, 4)), w && bits(tc, 8, 4) < 8, true).c_str(), WrapArg(ColorArg(bits(tc, 4, 4)), w && bits(tc, 4, 4) < 8, true).c_str(),
           ColorArg(bits(tc, 0, 4)));
-        o("    float aa = %s, ab = %s, ac = %s, ad = %s;\n", AlphaArg(bits(ta, 13, 3)), AlphaArg(bits(ta, 10, 3)), AlphaArg(bits(ta, 7, 3)),
+        o("    float aa = %s, ab = %s, ac = %s, ad = %s;\n", WrapArg(AlphaArg(bits(ta, 13, 3)), w && bits(ta, 13, 3) < 4, false).c_str(),
+          WrapArg(AlphaArg(bits(ta, 10, 3)), w && bits(ta, 10, 3) < 4, false).c_str(), WrapArg(AlphaArg(bits(ta, 7, 3)), w && bits(ta, 7, 3) < 4, false).c_str(),
           AlphaArg(bits(ta, 4, 3)));
         static const char* const kBias[3] = {"", " + 0.5", " - 0.5"};
         static const char* const kScale[4] = {"", " * 2.0", " * 4.0", " * 0.5"};
