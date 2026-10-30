@@ -2025,6 +2025,7 @@ static DrawRec* NewDrawRec(split::FinishCtx& c, uint8_t prim, uint32_t layoutMas
     CopyWords(rec->tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4));
     *c.lastDraw = static_cast<int>(draws.size()) - 1;
     *c.lastRecSerial = st.serial;
+    if (c.rig) c.rig->rec = -1; // (GXV_RIGIDMERGE: a new record is no palette run yet)
     if (c.cmds) c.cmds->push_back(Cmd{CMD_DRAW, static_cast<uint32_t>(*c.lastDraw)});
     ++*c.records;
     if (c.mainThread) {
@@ -2494,6 +2495,117 @@ uint32_t FoldGuess(uint32_t layoutMask, uint32_t count) {
     return layoutMask | slots;
 }
 
+// ================================================================ rigid draws in one record (GXV_RIGIDMERGE)
+// Nine in ten of the game's shapes are rigid: one position matrix for the whole shape. Each is its own draw call when its model-view
+// block differs from its neighbour's (the u_mv uniform), even if everything else (shaders, textures, render state, every other block)
+// is the same. A run of such draws is made one record with the matrix palette shader the skinned meshes use: every draw of the run
+// takes a slot of the palette (three position rows and the three normal rows of its u_mv block) and writes the slot's row number into
+// the w of its vertices (where a skinned vertex has its PNMTXIDX), so that the vertex shader reads its own matrix.
+//   GXV_RIGIDMERGE=0   (default) off, every key, record and block as before
+//   GXV_RIGIDMERGE=1   runs of up to 10 draws (the short palette, 60 vec4: the vertex key with perVtxPos 2)
+//   GXV_RIGIDMERGE=2   runs of up to 4 draws (the small palette, 24 vec4: perVtxPos 3)
+// Why the picture is the same, bit for bit: the palette vertex shader and the u_mv one are generated from the same lines
+// (vgx_shadergen.cpp): eye = (dot(row0, p), dot(row1, p), dot(row2, p)) with p = (x, y, z, 1) in both, the normal from the three normal
+// rows in the same order, then the same normalisation; the palette index is the whole number the front end stored (RowIndex), not clamped
+// (3 * slot <= 27, or 9). Everything else the shader reads (projection, texture matrices, lights, TEV) comes from blocks that a run shares
+// by construction: a draw joins only when all of them are the record's (same offsets in the deduplicating arena). Only the draw that
+// follows a record joins it: the order of the triangles, and so of the depth and blend operations, is that of the draws. A draw alone
+// keeps its u_mv key and block (the record is converted when the second draw joins it).
+// The vertices of a draw are in the frame's arena (static display lists are not touched: their vertices are in a buffer of their own).
+namespace {
+long RigidMode() {
+    static const long m = EnvInt("GXV_RIGIDMERGE", 0); // read once, default 0 (off)
+    return (m == 1 || m == 2) && UniformPacking() ? m : 0;
+}
+constexpr uint32_t kRigidMaxSlotsOf[3] = {0, 10, 4};
+std::vector<uint16_t> g_rigTwin; // per vertex shader id: the id of its palette twin, 0xFFFF none yet, 0xFFFE not possible
+split::RigidRun g_rig;
+uint64_t g_rigJoins = 0, g_rigRuns = 0; // draws that joined a palette run, runs made (written by the thread that finishes records)
+// The vertex shader a rigid draw of the current key joins a palette run with (the same key with the palette instead of u_mv).
+uint16_t RigidTwin() {
+    const long mode = RigidMode();
+    if (!mode || cur.vs.perVtxPos != 0) return 0xFFFF;
+    for (int i = 0; i < cur.vs.numTexGens; ++i)
+        if (cur.vs.tg[i].perVtxMtx) return 0xFFFF; // (those read the palette for texture matrices already)
+    if (g_rigTwin.size() <= cur.vsId) g_rigTwin.resize(static_cast<size_t>(cur.vsId) + 64, 0xFFFF);
+    uint16_t& t = g_rigTwin[cur.vsId];
+    if (t == 0xFFFF) {
+        VsKey k = cur.vs;
+        k.perVtxPos = mode == 1 ? 2 : 3;
+        t = Lookup(g_vsReg, k, false, GenerateVertexShader);
+    }
+    return t;
+}
+// Whether the draw `j` (state st) can join the record `p` (the last one, index `last`), and if it can, does it. The tests are those of an
+// ordinary merge except the vertex shader and the matrix block; `common` is the rest of them.
+template <class Common>
+bool RigidJoin(split::FinishCtx& c, DrawRec& p, int last, const split::DrawJob& j, const split::DrawStateRef& st, Common common) {
+    if (!c.uni || !c.rig || j.vsTwin == 0xFFFF || j.kind != split::JOB_DYNAMIC) return false;
+    const long mode = RigidMode();
+    if (!mode) return false;
+    const bool conv = c.rig->rec == last;
+    if (conv ? p.vsId != j.vsTwin : p.vsId != st.vsId) return false;
+    if (c.blockOff[UB_MV] == kNoBlock || p.ublock[UB_MV] == kNoBlock) return false;
+    for (int b = 0; b < UB_COUNT; ++b) {
+        if (b == UB_MV || (b == UB_PAL && conv)) continue; // (the record's own palette replaces them)
+        if (p.ublock[b] != c.blockOff[b]) return false;
+    }
+    UniArena& uni = *c.uni;
+    const size_t xo = c.blockOff[UB_MV];
+    if (xo + 24 > uni.size() || (!conv && static_cast<size_t>(p.ublock[UB_MV]) + 24 > uni.size())) return false;
+    const uint32_t K = mode == 1 ? 30u : 12u, maxSlots = kRigidMaxSlotsOf[mode];
+    if (!common()) return false;
+    // ---- it joins
+    uint32_t slot;
+    if (!conv) {
+        if (maxSlots < 2) return false;
+        const size_t o = uni.size();
+        uni.resize(o + static_cast<size_t>(K) * 8);
+        float* pal = uni.data() + o;
+        std::memset(pal, 0, static_cast<size_t>(K) * 8 * sizeof(float));
+        const float* const l = uni.data() + p.ublock[UB_MV];
+        std::memcpy(pal, l, 12 * sizeof(float));
+        std::memcpy(pal + K * 4, l + 12, 12 * sizeof(float));
+        p.vsId = j.vsTwin;
+        p.ublock[UB_PAL] = static_cast<uint32_t>(o);
+        c.rig->rec = last;
+        c.rig->slots = 1;
+        c.rig->pal = static_cast<uint32_t>(o);
+        if (!c.vtxLog) ++g_rigRuns;
+    }
+    const float* const x = uni.data() + xo; // its u_mv block: position rows 0..2 (4 floats each), normal rows 0..2 (4 floats each)
+    float* const pal = uni.data() + c.rig->pal;
+    const uint32_t newest = c.rig->slots - 1;
+    // (the same matrix as the newest slot's, whole words: no new slot)
+    if (std::memcmp(pal + newest * 12, x, 12 * sizeof(float)) == 0 && std::memcmp(pal + K * 4 + newest * 12, x + 12, 12 * sizeof(float)) == 0) {
+        slot = newest;
+    } else if (c.rig->slots < maxSlots) {
+        slot = c.rig->slots++;
+        std::memcpy(pal + slot * 12, x, 12 * sizeof(float));
+        std::memcpy(pal + K * 4 + slot * 12, x + 12, 12 * sizeof(float));
+    } else {
+        return false; // full: only possible for the join that opened the run (conv false) when maxSlots < 2, handled above; a full run starts a new record
+    }
+    const float w = static_cast<float>(3 * slot);
+    if (c.vtxLog) {
+        c.vtxLog->push_back(split::VtxWrite{j.vtxStart, j.count, j.stride, w});
+    } else {
+        uint8_t* v = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(j.vtxPtrLo | (static_cast<uint64_t>(j.vtxPtrHi) << 32)));
+        for (uint32_t i = 0; i < j.count; ++i, v += j.stride) std::memcpy(v + 12, &w, 4);
+    }
+    if (!c.vtxLog) ++g_rigJoins;
+    return true;
+}
+} // namespace
+void RigidMergeCounters(uint64_t out[2]) { out[0] = g_rigRuns; out[1] = g_rigJoins; }
+// GXV_RIGIDMERGE_DLMAX (read once, default 0, only with GXV_RIGIDMERGE on): a display list without matrix indices of up to this many vertices is not
+// made a static buffer (vgx_dlcache.cpp): its vertices are copied into the frame's arena at each use, where its draw can join a palette run.
+// (A static list's vertices are in a buffer of their own, and cannot be in a record with another list's.)
+uint32_t RigidMergeListMax() {
+    static const uint32_t n = RigidMode() ? static_cast<uint32_t>(EnvInt("GXV_RIGIDMERGE_DLMAX", 0)) : 0u;
+    return n;
+}
+
 // The record part of a draw: merged into the previous record when nothing but the geometry differs, else a new
 // record; then the indices. (The front-end split runs this on its finishing thread: vgx_fesplit.h.)
 uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& st) {
@@ -2529,6 +2641,14 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
         if (p.vbuf == 0 && p.prim == j.prim && p.layoutMask == j.layoutMask && p.vsId == st.vsId && p.fsId == st.useFs &&
             p.vtxCount + j.count <= 0xFFFF && contiguous &&
             p.idxOffset + p.idxCount == idx.size() && SameWords(p.ublock, c.blockOff, UB_COUNT) && (sameSerial || sameState())) {
+            rec = &p;
+            *c.lastRecSerial = st.serial;
+            if (!abs) base = p.vtxCount;
+        } else if (j.vsTwin != 0xFFFF && RigidJoin(c, p, last, j, st, [&] {
+                       return p.vbuf == 0 && p.prim == j.prim && p.layoutMask == j.layoutMask && p.fsId == st.useFs && p.vtxCount + j.count <= 0xFFFF &&
+                              contiguous && p.idxOffset + p.idxCount == idx.size() && (sameSerial || sameState());
+                   })) {
+            // (GXV_RIGIDMERGE: the draw differs from the record in its matrix only; it has a slot of the record's palette now)
             rec = &p;
             *c.lastRecSerial = st.serial;
             if (!abs) base = p.vtxCount;
@@ -2574,12 +2694,25 @@ uint32_t split::FinishStatic(FinishCtx& c, const DrawJob& j, const DrawStateRef&
 }
 
 static inline split::FinishCtx MainFinishCtx() {
-    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true};
+    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true, &g_buf.uni, &g_rig, nullptr};
 }
 static inline split::DrawStateRef CurStateRef() { return split::DrawStateRef{cur.vsId, cur.useFs, cur.texMask, cur.stateSerial, &cur.rs, cur.tex}; }
 // The record part of a draw: here, or (front-end split) a placeholder command and a job for the finishing thread.
 static inline void FinishOrSend(const split::DrawJob& j) {
     const split::DrawStateRef st = CurStateRef();
+    if (j.vsTwin != 0xFFFF) {
+        // (GXV_RIGIDMERGE: the palette twin of the key may be what a record is drawn with: its variant goes on the warm-up list too)
+        static struct { uint32_t ids = ~0u, layout = 0, serial = 0; } lastTwin;
+        const uint32_t ids = (static_cast<uint32_t>(j.vsTwin) << 16) | st.useFs;
+        if (ids != lastTwin.ids || j.layoutMask != lastTwin.layout || st.serial != lastTwin.serial) {
+            lastTwin.ids = ids;
+            lastTwin.layout = j.layoutMask;
+            lastTwin.serial = st.serial;
+            split::DrawStateRef t = st;
+            t.vsId = j.vsTwin;
+            split::NoteVariant(t, j.layoutMask);
+        }
+    }
     if (split::g_on) {
         // (the warm-up list's variant of a draw depends on these only (the blend key on the render state, whose serial
         // this is): most draws repeat the last one's)
@@ -2682,6 +2815,13 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     j.vtxStart = static_cast<uint32_t>(g_pendingVtxStart);
     j.stride = L.stride;
     j.exX = ext.x; j.exY = ext.y; j.exW = ext.w; j.exH = ext.h;
+    if (prim == PRIM_TRIANGLES) {
+        // (a CPU-transformed draw too: its block is the identity, which is a palette slot like any other matrix)
+        j.vsTwin = RigidTwin(); // (GXV_RIGIDMERGE; 0xFFFF: off or not a rigid key)
+        const uintptr_t vp = reinterpret_cast<uintptr_t>(g_buf.vtx.data() + g_pendingVtxStart);
+        j.vtxPtrLo = static_cast<uint32_t>(vp);
+        j.vtxPtrHi = static_cast<uint32_t>(static_cast<uint64_t>(vp) >> 32);
+    }
     FinishOrSend(j);
     ++g_frameDraws;
     {

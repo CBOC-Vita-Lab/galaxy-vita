@@ -143,6 +143,7 @@ struct Finisher {
     std::vector<uint16_t, NoInitAlloc<uint16_t>> idx;
     int lastDraw = -1;
     uint32_t lastRecSerial = 0, records = 0;
+    RigidRun rig;                  // GXV_RIGIDMERGE
     std::vector<uint32_t> results; // per job: the record it made, or ~0 (merged)
     uint32_t rowMismatches = 0;    // (GXV_SPLIT=2) the matrix rows the player computed differ from the builder's
     void ResetFrame() {
@@ -153,6 +154,7 @@ struct Finisher {
         for (int b = 0; b < UB_COUNT; ++b) { blockOff[b] = kNoBlock; blockLen[b] = 0; }
         lastDraw = -1;
         records = 0;
+        rig = RigidRun{};
     }
 };
 Finisher* F = nullptr;
@@ -167,9 +169,11 @@ struct Shadow {
     std::vector<Cmd> cmds;
     int lastDraw = -1;
     uint32_t lastRecSerial = 0, records = 0;
+    RigidRun rig;
+    std::vector<VtxWrite> vtxLog; // the palette indices the single-thread code would have written into vertices (GXV_RIGIDMERGE)
     std::vector<uint32_t> results;
     size_t scan = 0; // commands of the frame's list copied into `cmds` so far
-    struct Xf { size_t off; uint32_t bytes; size_t at; };
+    struct Xf { size_t off; uint32_t bytes; size_t at; uint32_t stride; };
     std::vector<Xf> xf;          // transformed vertex ranges, and where the expected bytes are in xfData
     std::vector<uint8_t> xfData;
     uint32_t rowMismatches = 0;
@@ -186,6 +190,8 @@ struct Shadow {
         for (int b = 0; b < UB_COUNT; ++b) { blockOff[b] = kNoBlock; blockLen[b] = 0; }
         lastDraw = -1;
         records = 0;
+        rig = RigidRun{};
+        vtxLog.clear();
         scan = 0;
         rowMismatches = 0;
     }
@@ -358,7 +364,7 @@ void Run(uint32_t type, const uint32_t* p) {
     case OP_JOB: {
         DrawJob j;
         CopyWords(&j, p, kJobWords);
-        FinishCtx c{&F->draws, &F->idx, nullptr, F->blockOff, &F->lastDraw, &F->lastRecSerial, &F->records, false};
+        FinishCtx c{&F->draws, &F->idx, nullptr, F->blockOff, &F->lastDraw, &F->lastRecSerial, &F->records, false, &F->uni, &F->rig, nullptr};
         const DrawStateRef st{F->vsId, F->useFs, F->texMask, F->serial, &F->rs, F->tex};
         F->results.push_back(j.kind == JOB_STATIC ? FinishStatic(c, j, st) : FinishDraw(c, j, st));
         break;
@@ -548,9 +554,23 @@ void Compare(CmdBuf& buf) {
         if (bad++ == 0) std::snprintf(what, sizeof what, "uniform arenas differ (%" VGX_PRIZU " / %" VGX_PRIZU " floats, first at %" VGX_PRIZU ")", F->uni.size(), v.uni.size(), at);
     }
     for (const Shadow::Xf& x : v.xf) {
-        if (x.off + x.bytes > buf.vtx.size() || std::memcmp(buf.vtx.data() + x.off, v.xfData.data() + x.at, x.bytes) != 0) {
+        // (the w of a position is where GXV_RIGIDMERGE writes a palette slot, after the transform: those are compared with the vtxLog's)
+        bool same = x.off + x.bytes <= buf.vtx.size();
+        for (uint32_t o = 0; same && o < x.bytes; o += x.stride)
+            same = std::memcmp(buf.vtx.data() + x.off + o, v.xfData.data() + x.at + o, 12) == 0 &&
+                   std::memcmp(buf.vtx.data() + x.off + o + 16, v.xfData.data() + x.at + o + 16, x.stride - 16) == 0;
+        if (!same) {
             ++v.badXf;
             if (bad++ == 0) std::snprintf(what, sizeof what, "transformed vertices at %" VGX_PRIZU " (%u bytes) differ", x.off, x.bytes);
+            break;
+        }
+    }
+    for (const VtxWrite& w : v.vtxLog) {
+        bool ok = w.off + static_cast<size_t>(w.count) * w.stride <= buf.vtx.size();
+        for (uint32_t k = 0; ok && k < w.count; ++k) ok = std::memcmp(buf.vtx.data() + w.off + static_cast<size_t>(k) * w.stride + 12, &w.w, 4) == 0;
+        if (!ok) {
+            ++v.badXf;
+            if (bad++ == 0) std::snprintf(what, sizeof what, "palette index of %u vertices at %" VGX_PRIZU " differs from %g", w.count, w.off, w.w);
             break;
         }
     }
@@ -707,7 +727,7 @@ void Xform(size_t offset, uint32_t count, uint32_t layoutMask) {
         const size_t at = V->xfData.size();
         V->xfData.insert(V->xfData.end(), v, v + bytes);
         SoftTransformWith(V->xfData.data() + at, count, L, m, nm);
-        V->xf.push_back(Shadow::Xf{offset, bytes, at});
+        V->xf.push_back(Shadow::Xf{offset, bytes, at, L.stride});
     }
     const uint32_t n = 16 + (nrm ? 9u : 0u);
     uint32_t* p = Begin(OP_XFORM, n);
@@ -725,7 +745,7 @@ uint32_t Job(const DrawJob& j, const DrawStateRef& st) {
     if (Verify()) {
         ShadowSync(Pending().cmds);
         V->scan = Pending().cmds.size() + 1; // (the placeholder the caller pushes next)
-        FinishCtx c{&V->draws, &V->idx, &V->cmds, V->blockOff, &V->lastDraw, &V->lastRecSerial, &V->records, false};
+        FinishCtx c{&V->draws, &V->idx, &V->cmds, V->blockOff, &V->lastDraw, &V->lastRecSerial, &V->records, false, &V->uni, &V->rig, &V->vtxLog};
         V->results.push_back(j.kind == JOB_STATIC ? FinishStatic(c, j, st) : FinishDraw(c, j, st));
     }
     SendState(st);

@@ -226,6 +226,7 @@ bool StateListFastHit(const uint8_t* list, uint32_t nbytes);  // (CallList's sho
 void StateListCounters(uint64_t out[5]); // hits, builds, refused, verify checks, verify mismatches
 // The fecache switches' counters, for the host's status line (totals since start):
 void RegShadowCounters(uint64_t out[2]);      // GXV_REGSHADOW=2: writes checked, mismatching
+void RigidMergeCounters(uint64_t out[2]);     // GXV_RIGIDMERGE: palette runs made, draws that joined one (since the start)
 void ResolveCacheCounters(uint64_t out[4]);   // GXV_RSCACHE: draws checked (=2), mismatching, key memo hits, misses
 void TexMemoCounters(uint64_t out[3]);        // GXV_TEXMEMO: memo hits, checked (=2), mismatching
 // ---- register-driven textures, palettes and copies (vgx_bpsync.cpp)
@@ -279,6 +280,7 @@ void SetPendingPosMtxMax(uint32_t row);
 uint32_t LastDecodedPosMtxMax(); // of the last DecodeVertices call
 // Number of indices a GX primitive of `count` vertices turns into; writes them (relative to `base`) when out != null.
 uint32_t PrimIndices(uint8_t gxPrim, uint32_t count, uint32_t base, uint16_t* out);
+uint32_t RigidMergeListMax(); // GXV_RIGIDMERGE_DLMAX: a rigid cached list of at most this many vertices stays in the frame's arena (0: none)
 uint32_t SoftXformLimit(); // primitives up to this many vertices may be transformed on the CPU (and merged)
 // GXV_HASH=2 needs the bytes of a static buffer to hash what a draw refers to (vgx_dlcache.cpp).
 bool StaticBufferData(uint32_t bufId, const uint8_t*& vtx, const uint16_t*& idx);

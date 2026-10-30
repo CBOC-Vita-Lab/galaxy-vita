@@ -23,12 +23,22 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
     for indices in 0 1; do
       for cache in 1 verify; do
         for hash in 0 2; do
-          for mode in clean other-page warm-then-noise list-page array-page same-list-flush change-once change-each small-list static-disabled age-out alternate-edit change-then-noise alternate-clean periodic-3 periodic-4; do
+          for mode in clean other-page warm-then-noise list-page array-page same-list-flush change-once change-each small-list static-disabled age-out alternate-edit change-then-noise alternate-clean periodic-3 periodic-4 rigid-list; do
             GXV_ABSIDX=$indices GXV_DLCACHE=$cache GXV_HASH=$hash timeout 10s /tmp/vgx_dlcache "$mode"
             cases=$((cases + 1))
           done
         done
       done
+    done
+    # GXV_RIGIDMERGE_DLMAX: a rigid list (no matrix indices) of 256 vertices stays in the frame arena (no static buffer) only with the switch on
+    for indices in 0 1; do
+      for rm in 1 2; do
+        GXV_ABSIDX=$indices GXV_RIGIDMERGE=$rm GXV_RIGIDMERGE_DLMAX=256 timeout 10s /tmp/vgx_dlcache rigid-list
+        GXV_ABSIDX=$indices GXV_RIGIDMERGE=$rm GXV_RIGIDMERGE_DLMAX=255 timeout 10s /tmp/vgx_dlcache rigid-list
+        cases=$((cases + 2))
+      done
+      GXV_ABSIDX=$indices GXV_RIGIDMERGE=0 GXV_RIGIDMERGE_DLMAX=1000 timeout 10s /tmp/vgx_dlcache rigid-list
+      cases=$((cases + 1))
     done
     printf "PASS: %s production display-list cache scenarios (synthetic geometry, not Vita FPS)\n" "$cases"
   '

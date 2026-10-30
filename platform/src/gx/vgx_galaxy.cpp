@@ -338,6 +338,16 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
                  (unsigned long long)(c[5] - last[5]), (unsigned long long)(c[7] - last[7]), (unsigned long long)(c[8] - last[8]));
         std::memcpy(last, c, sizeof c);
     }
+    {
+        // GXV_RIGIDMERGE: rigid draws made into one record with the matrix palette (nothing is printed while the switch is off)
+        static uint64_t last[2] = {};
+        uint64_t c[2];
+        vgx::RigidMergeCounters(c);
+        if (c[0] != last[0] || c[1] != last[1])
+            port_log("perf: rigidmerge: %llu palette runs, %llu draws joined them (draw calls saved)", (unsigned long long)(c[0] - last[0]),
+                     (unsigned long long)(c[1] - last[1]));
+        std::memcpy(last, c, sizeof c);
+    }
     sPerf = w;
 }
 

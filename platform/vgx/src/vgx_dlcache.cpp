@@ -411,6 +411,8 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     // in the frame's arena, where draws that differ only in their matrix merge into one record;
     // anything larger becomes a static buffer the second time it is drawn unchanged.
     if (e.totalVerts <= SoftXformLimit()) e.promotable = false;
+    // (GXV_RIGIDMERGE_DLMAX: a rigid list may stay in the arena, to join a palette run with the draws around it)
+    if (!g.vcd[0] && e.totalVerts <= RigidMergeListMax()) e.promotable = false;
     return !e.segs.empty();
 }
 

@@ -119,13 +119,16 @@ int main(int argc, char** argv) {
     const unsigned editPeriod = mode == "periodic-3" ? 3u : mode == "periodic-4" ? 4u : 0u;
     const bool mustPromote = true;
     if (mode == "small-list") { strips = 16; vertices = strips * 4; listBytes = strips * 15; }
+    // a list without matrix indices (a rigid shape) of 256 vertices: GXV_RIGIDMERGE_DLMAX decides whether it becomes a static buffer
+    const bool rigid = mode == "rigid-list";
+    if (rigid) { strips = 64; vertices = strips * 4; listBytes = strips * 11; }
     setenv("GXV_ATLAS", "0", 1);
     if (!std::getenv("GXV_HASH")) setenv("GXV_HASH", "0", 1);
     if (!std::getenv("GXV_DLCACHE")) setenv("GXV_DLCACHE", "1", 1);
     setenv("GXV_STATICBUF", mode == "static-disabled" ? "0" : "1", 1);
     vgx::ResetState();
     vgx::g.cpArrayStale = 0;
-    vgx::SetVcd(0, 1);
+    vgx::SetVcd(0, rigid ? 0 : 1);
     vgx::SetVcd(9, 3);
     vgx::SetVat(0, 9, 1, 4, 0);
     vgx::g.arrays[9] = {ram + 4096, vertices * 12, 12, false};
@@ -134,7 +137,7 @@ int main(int argc, char** argv) {
         ram[off++] = 0x98; ram[off++] = 0; ram[off++] = 4;
         for (unsigned j = 0; j != 4; ++j) {
             const unsigned i = s * 4 + j;
-            ram[off++] = 0;
+            if (!rigid) ram[off++] = 0;
             ram[off++] = static_cast<uint8_t>(i >> 8);
             ram[off++] = static_cast<uint8_t>(i);
             for (unsigned k = 0; k != 3; ++k)
@@ -199,7 +202,11 @@ int main(int argc, char** argv) {
                     "a once-edited entry still promotes promptly after its content stabilizes");
             return 0;
         }
-        const unsigned expected = (mode == "change-each" || mode == "small-list" || mode == "static-disabled") ? 0 :
+        // (GXV_RIGIDMERGE=1 with GXV_RIGIDMERGE_DLMAX >= 256: the rigid list stays in the arena)
+        const char* rm = std::getenv("GXV_RIGIDMERGE");
+        const char* dm = std::getenv("GXV_RIGIDMERGE_DLMAX");
+        const bool rigidInArena = rigid && rm && dm && (std::atoi(rm) == 1 || std::atoi(rm) == 2) && std::atol(dm) >= 256; // (a 255 limit keeps the 256-vertex list static)
+        const unsigned expected = (mode == "change-each" || mode == "small-list" || mode == "static-disabled" || rigidInArena) ? 0 :
                                   pictures - (mode == "age-out" || mode == "change-once" ? 3 : 1);
         Require(staticPictures == expected, "static-buffer reuse contract");
     }

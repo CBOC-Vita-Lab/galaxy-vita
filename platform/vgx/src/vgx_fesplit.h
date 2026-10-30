@@ -72,6 +72,22 @@ struct DrawJob {
     int16_t exX = 0, exY = 0, exW = 0, exH = 0;
     // static: the record's geometry
     uint32_t vbuf = 0, vtxOffset = 0, idxOffset = 0, vtxFirst = 0;
+    // dynamic, GXV_RIGIDMERGE: the vertex shader of the draw's key with the matrix palette (0xFFFF: the draw may not join a palette run), and
+    // where its vertices are in memory (the arena at the moment: the finishing thread writes the palette slot into their w)
+    uint16_t vsTwin = 0xFFFF, padTwin = 0;
+    uint32_t vtxPtrLo = 0, vtxPtrHi = 0;
+};
+// The palette run the last record may be (GXV_RIGIDMERGE; see FinishDraw): rec is the record's index (-1: none), slots the matrices in its
+// palette block (at uni offset pal).
+struct RigidRun {
+    int rec = -1;
+    uint32_t slots = 0, pal = 0;
+};
+// (GXV_SPLIT=2) a palette slot written into the w of `count` vertices at arena offset `off`: recorded instead of written.
+struct VtxWrite {
+    size_t off;
+    uint32_t count, stride;
+    float w;
 };
 // Where draw records go. cmds != null: the single-thread path (a new record's CMD_DRAW is pushed, and whether the
 // previous command is a draw is read from cmds); cmds == null: the caller places the records (job.prevIsDraw is used).
@@ -84,6 +100,9 @@ struct FinishCtx {
     uint32_t* lastRecSerial;
     uint32_t* records;   // incremented per new record
     bool mainThread;     // the player's own path: statistics detail, shader warm-up list
+    UniArena* uni = nullptr;            // (GXV_RIGIDMERGE) the uniform arena the palette blocks are made in
+    RigidRun* rig = nullptr;
+    std::vector<VtxWrite>* vtxLog = nullptr; // non-null: the palette indices are logged, not written (the shadow of GXV_SPLIT=2)
 };
 // Merges the primitive into the previous record or makes a new one. Returns the new record's index, or ~0u (merged).
 uint32_t FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& st);
