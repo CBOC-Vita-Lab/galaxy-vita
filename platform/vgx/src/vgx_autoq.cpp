@@ -132,6 +132,25 @@ void Log(const char* fmt, ...) {
     std::fprintf(stderr, "%s\n", line);
 }
 
+void LogSummary(const char* fmt, ...) {
+    char line[512];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(line, sizeof line, fmt, args);
+    va_end(args);
+#ifdef __VGX_VITA__
+    if (port_log_summary) {
+        port_log_summary("%s", line);
+        return;
+    }
+    if (port_log) {
+        port_log("%s", line);
+        return;
+    }
+#endif
+    std::fprintf(stderr, "%s\n", line);
+}
+
 const char* WhyText(Why w) {
     switch (w) {
     case Why::Headroom: return "the GPU has room";
@@ -142,6 +161,9 @@ const char* WhyText(Why w) {
     case Why::NewScene: return "a new scene (after a load) starts at today's size";
     case Why::Forced: return "forced";
     case Why::NoMemory: return "video memory is short";
+    case Why::FxOn: return "the GPU is the limit at today's size: a cheaper picture before a smaller one";
+    case Why::FxOff: return "room again: back at full quality";
+    case Why::FxNoGain: return "the step bought no speed";
     default: return "-";
     }
 }
@@ -153,6 +175,8 @@ Controller::Controller(const Config& c) : cfg_(c) {
     if (cfg_.windowFrames < 2) cfg_.windowFrames = 2;
     rung_ = cfg_.startRung;
     last_.from = last_.to = rung_;
+    if (cfg_.targetFps != 30) cfg_.fxStep = cfg_.bgStep = false; // (the steps belong to the whole-picture target)
+    lastFx_.from = lastFx_.to = rung_;
 }
 
 void Controller::ResetWindow() {
@@ -169,6 +193,9 @@ void Controller::ResetHolds() {
     overFrames_ = 0;
     boundSpan_ = 0;
     boundFrames_ = 0;
+    fxRoomT_ = 0;
+    boundGpuSum_ = 0;
+    boundGpuFrames_ = 0;
 }
 
 void Controller::Block(int rung, uint64_t now) {
@@ -190,23 +217,113 @@ void Controller::SetRung(int to, Why why, uint64_t now) {
     roomAt_ = 0;
     pendingBelow_ = false;
     if (why == Why::NewScene) pendingUndo_ = -1;
+    if (steps_ && to > FxRung() && why != Why::NewScene) {
+        // (the steps belong to today's rung and below: a rung above has them off)
+        steps_ = 0;
+        trial_ = 0;
+        ++fxChanges_;
+        lastFx_ = Change{last_.from, to, Why::FxOff, winLoad_, winCpu_, winIntervalMs_, now};
+    }
     ResetWindow();
     ResetHolds();
 }
 
-void Controller::Remember(uint32_t key, int rung) {
+// The next step to try at today's rung (0: none left, or blocked): half-size effects and blur first, then the cheaper background.
+unsigned Controller::NextStep(uint64_t now) const {
+    if (cfg_.fxStep && !(steps_ & 1) && now >= onBlockedUntil_[0]) return 1;
+    if (cfg_.bgStep && !(steps_ & 2) && now >= onBlockedUntil_[1]) return 2;
+    return 0;
+}
+
+void Controller::SetSteps(unsigned to, Why why, uint64_t now) {
+    if (steps_ == to) return;
+    lastFx_ = Change{rung_, rung_, why, winLoad_, winCpu_, winIntervalMs_, now};
+    steps_ = to;
+    ++fxChanges_;
+    fxEver_ = true;
+    lastFxAt_ = now;
+    sinceChange_ = 0;
+    settleUntil_ = now + static_cast<uint64_t>(cfg_.settleSec * 1e6);
+    pendingUp_ = 0;
+    minUp_ = 0;
+    roomAt_ = 0;
+    pendingBelow_ = false;
+    trial_ = 0;
+    ResetWindow();
+    ResetHolds();
+}
+
+// A new scene starts with the steps as the scene last had them (off for a scene not seen): applied with the rung, in the load.
+void Controller::SetSceneSteps(unsigned to, uint64_t now) {
+    if (steps_ != to) {
+        lastFx_ = Change{rung_, rung_, to > steps_ ? Why::FxOn : Why::FxOff, winLoad_, winCpu_, winIntervalMs_, now};
+        steps_ = to;
+        ++fxChanges_;
+        ResetWindow();
+        ResetHolds();
+    }
+    trial_ = 0;
+    stepGain_[0] = stepGain_[1] = 0;
+}
+
+void Controller::ForgetFxBlocks() {
+    onBlockedUntil_[0] = onBlockedUntil_[1] = fxOffBlockedUntil_ = 0;
+    onBlockLen_[0] = onBlockLen_[1] = fxOffBlockLen_ = 0;
+}
+
+void Controller::Remember(uint32_t key, int rung, unsigned fx) {
     if (key == 0) return;
     for (SceneRung& m : sceneMem_)
-        if (m.key == key) { m.rung = static_cast<int8_t>(rung); return; }
-    sceneMem_[sceneNext_ % 32] = SceneRung{key, static_cast<int8_t>(rung)};
+        if (m.key == key) { m.rung = static_cast<int8_t>(rung); m.fx = static_cast<uint8_t>(fx); return; }
+    sceneMem_[sceneNext_ % 32] = SceneRung{key, static_cast<int8_t>(rung), static_cast<uint8_t>(fx)};
     ++sceneNext_;
 }
 
-int Controller::Recall(uint32_t key) const {
+int Controller::Recall(uint32_t key, unsigned* fx) const {
+    if (fx) *fx = 0;
     if (key == 0) return kNoRung;
     for (const SceneRung& m : sceneMem_)
-        if (m.key == key) return m.rung;
+        if (m.key == key) {
+            if (fx) *fx = m.fx;
+            return m.rung;
+        }
     return kNoRung;
+}
+
+FloorWindow Controller::TakeFloor() {
+    const FloorWindow w = floor_;
+    floor_ = FloorWindow();
+    return w;
+}
+
+// One presented picture of the floor census (target mode). Quiet moments and stalls (loads, shader builds) are counted apart;
+// a late picture is blamed on the largest stage that reached causeShare of the budget: the GPU's busy time, two game turns'
+// CPU, the renderer's CPU. None that did, with all three measured: something unmeasured (the front end, a wait, the pacing).
+void Controller::FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
+                            uint64_t gpu, uint64_t game, uint64_t backend) {
+    FloorWindow& w = floor_;
+    if (quiet) { ++w.quiet; return; }
+    if (static_cast<double>(interval) > cfg_.gapResetMs * 1000.0) { ++w.stalls; w.stallUs += interval; return; }
+    ++w.pictures;
+    w.spanUs += interval;
+    if (static_cast<double>(interval) <= cfg_.budgetMs * 1030.0) return;
+    ++w.late;
+    w.lateUs += interval;
+    w.worstUs = std::max(w.worstUs, interval);
+    const double threshold = cfg_.causeShare * cfg_.budgetMs * 1000.0;
+    int cause = -1;
+    double best = 0;
+    auto consider = [&](bool known, uint64_t v, int id) {
+        if (known && static_cast<double>(v) >= threshold && static_cast<double>(v) > best) { best = static_cast<double>(v); cause = id; }
+    };
+    consider(gpuKnown, gpu, 0);
+    consider(gameKnown, game, 1);
+    consider(backendKnown, backend, 2);
+    if (cause == 0) ++w.gpu;
+    else if (cause == 1) ++w.game;
+    else if (cause == 2) ++w.renderer;
+    else if (measured) ++w.other;
+    else ++w.unknown;
 }
 
 void Controller::Limit(int highest, uint64_t now) {
@@ -257,13 +374,15 @@ bool Controller::Add(const FrameTimes& f) {
         // (GXV_AUTOQ_RECOVER: the blocks that ran out long ago do not count towards the next one's length)
         for (double& len : blockLen_) len = 0;
         belowBlockLen_ = 0;
+        onBlockLen_[0] = onBlockLen_[1] = fxOffBlockLen_ = 0;
         lastBlockAt_ = 0;
     }
     const uint64_t interval = f.presentUs > prevPresent_ ? f.presentUs - prevPresent_ : 0;
     const uint64_t prevDone = prevDone_, prevRun = prevRun_;
     if (sinceChange_ < (1u << 30)) ++sinceChange_;
     const bool mayChange = sinceChange_ >= static_cast<unsigned>(cfg_.minChangeFrames) &&
-        (cfg_.targetFps != 30 || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u);
+        (cfg_.targetFps != 30 || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u) &&
+        (!fxEver_ || f.presentUs >= lastFxAt_ + 3000000u);
     const uint32_t gameRun = f.gameRunUs - prevGameRun_, gameTurns = f.gameTurns - prevGameTurns_;
     const bool gameKnown = f.gameKnown && prevGameKnown_ && f.gameFaults == prevGameFaults_;
     if (cfg_.targetFps == 30) {
@@ -271,6 +390,16 @@ bool Controller::Add(const FrameTimes& f) {
         const bool backendKnown = f.backendRunUs > 0 && prevRun > 0 && f.backendRunUs >= prevRun &&
             f.backendRunUs <= INT64_MAX && prevRun <= INT64_MAX;
         const bool gpuKnown = f.timers ? f.busyKnown : !f.paced && f.gpuDoneUs != 0 && prevDone != 0;
+        {
+            // (the floor census: the same three stages, whichever of them is known)
+            const uint64_t doneSpan = f.gpuDoneUs > prevDone ? f.gpuDoneUs - prevDone : 0;
+            const uint64_t from = std::max(prevDone, f.startUs);
+            const uint64_t fenceBusy = f.gpuDoneUs > from ? std::min(f.gpuDoneUs - from, doneSpan) : 0;
+            const bool gameOk = gameKnown && gameTurns != 0;
+            FloorCount(interval, f.quiet, gameOk && backendKnown && gpuKnown, gpuKnown, gameOk, backendKnown,
+                       f.timers ? f.gpuBusyUs : fenceBusy, gameOk ? uint64_t(gameRun) * 2 / gameTurns : 0,
+                       backendKnown ? f.backendRunUs - prevRun : 0);
+        }
         if (!gameKnown || !gameTurns || !backendKnown || !gpuKnown) {
             hintKnown_ = false;
             currentWorkUs_ = 0;
@@ -319,19 +448,25 @@ bool Controller::Add(const FrameTimes& f) {
             // rung (or the start rung), applied now, while the load hides it. The same scene after a long gap (a
             // shader compile, the console suspended) keeps its rung and its blocks.
             const uint32_t from = scene_, to = f.scene;
-            Remember(from, rung_);
+            Remember(from, rung_, steps_);
             scene_ = to;
             if (to != 0 && to == from) return false;
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
-            int want = Recall(to);
+            ForgetFxBlocks();
+            unsigned wantFx = 0;
+            int want = Recall(to, &wantFx);
             if (want == kNoRung) want = cfg_.startRung;
             want = std::clamp(want, cfg_.minRung, cfg_.maxRung);
+            wantFx &= StepMask();
+            if (want > FxRung()) wantFx = 0;
             if (want != rung_) {
+                SetSceneSteps(wantFx, f.presentUs);
                 SetRung(want, Why::NewScene, f.presentUs);
                 return true;
             }
+            SetSceneSteps(wantFx, f.presentUs);
             return false;
         }
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0) {
@@ -340,6 +475,8 @@ bool Controller::Add(const FrameTimes& f) {
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
+            ForgetFxBlocks();
+            SetSceneSteps(0, f.presentUs);
             if (rung_ != cfg_.startRung) {
                 SetRung(cfg_.startRung, Why::NewScene, f.presentUs);
                 return true;
@@ -351,11 +488,14 @@ bool Controller::Add(const FrameTimes& f) {
         // The scene's key came after the load's gap (the game names the stage a few frames into it): the rung of the
         // scene left goes under the old key, and a remembered rung of the new one is taken while the scene is still
         // fading in (within 60 frames of the return to the start rung).
-        Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_);
+        Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_, steps_);
         scene_ = f.scene;
-        const int want = Recall(f.scene);
+        unsigned wantFx = 0;
+        const int want = Recall(f.scene, &wantFx);
         if (last_.why == Why::NewScene && sinceChange_ <= 60 && want != kNoRung && want != rung_) {
-            SetRung(std::clamp(want, cfg_.minRung, cfg_.maxRung), Why::NewScene, f.presentUs);
+            const int to = std::clamp(want, cfg_.minRung, cfg_.maxRung);
+            SetSceneSteps(to <= FxRung() ? (wantFx & StepMask()) : 0u, f.presentUs);
+            SetRung(to, Why::NewScene, f.presentUs);
             return true;
         }
     }
@@ -494,6 +634,31 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     const double measureMs = target ? winWorkMs_ : winIntervalMs_;
     if (target) winLoad_ = gpuMs / cfg_.budgetMs;
     ++windows_;
+    const bool fxActive = StepsEnabled() && target;
+
+    if (trial_) {
+        // A step is kept only if the GPU's busy time got shorter (judged on the GPU alone: the steps touch nothing else).
+        fxCheckT_ += dt;
+        fxCheckSum_ += gpuMs * frames_;
+        fxCheckFrames_ += frames_;
+        if (fxCheckT_ >= cfg_.checkSec && fxCheckFrames_ > 0) {
+            const unsigned bit = trial_;
+            const int idx = static_cast<int>(bit) - 1;
+            trial_ = 0;
+            const double after = fxCheckSum_ / fxCheckFrames_;
+            if (after > fxBefore_ * (1.0 - cfg_.betterFrac) && after < fxBefore_ * 1.15) {
+                // (as for a step below today: when the frames got much longer the scene got heavier, which says nothing against the step)
+                onBlockLen_[idx] = onBlockLen_[idx] > 0 ? std::min(onBlockLen_[idx] * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
+                onBlockedUntil_[idx] = now + static_cast<uint64_t>(onBlockLen_[idx] * 1e6);
+                lastBlockAt_ = now;
+                stepGain_[idx] = 0;
+                SetSteps(steps_ & ~bit, Why::FxNoGain, now);
+                boundT_ = std::max(boundT_, fxBoundKept_); // (the GPU has been the limit all this time: the next step need not wait again)
+                return false;
+            }
+            if (after > 0.0 && after < fxBefore_ * (1.0 - cfg_.betterFrac)) stepGain_[idx] = std::clamp(fxBefore_ / after, 1.05, 3.0);
+        }
+    }
 
     if (checking_) {
         // A step below today's size is kept only if the frames got shorter.
@@ -536,7 +701,9 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     int up = 0;
     // Unknown front-end/shared-core work may also miss the target. Do not add
     // GPU quality until actual cadence fits, even if measured stages look cheap.
-    while (up < cfg_.maxUpStep && rung_ + up + 1 <= cfg_.maxRung && !Blocked(rung_ + up + 1, now) &&
+    // (the step belongs to the bottom rungs: while it is on, the climb stops at the bottom ordinary rung; the step goes off first)
+    const int upMax = fxActive && steps_ ? std::min(cfg_.maxRung, FxRung()) : cfg_.maxRung;
+    while (up < cfg_.maxUpStep && rung_ + up + 1 <= upMax && !Blocked(rung_ + up + 1, now) &&
            (target ? wholeKnown && hintKnown_ && winIntervalMs_ <= cfg_.budgetMs * 1.03 &&
             std::max({gameMs, backendMs, gpuMs * Cost(rung_ + up + 1) / Cost(rung_)}) <= cfg_.upTarget * cfg_.budgetMs :
             upLoad * Cost(rung_ + up + 1) / Cost(rung_) <= cfg_.upTarget)) {
@@ -550,10 +717,25 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         boundT_ += dt;
         boundSpan_ += target ? measureMs * 1000.0 * frames_ : static_cast<double>(present_);
         boundFrames_ += frames_;
+        boundGpuSum_ += gpuMs * frames_;
+        boundGpuFrames_ += frames_;
     } else {
         boundT_ = 0;
         boundSpan_ = 0;
         boundFrames_ = 0;
+        boundGpuSum_ = 0;
+        boundGpuFrames_ = 0;
+    }
+    if (fxActive && steps_ && !trial_ && rung_ == FxRung()) {
+        // Room for the last step to go off: the GPU's busy time as it would be without it (the measured saving, or the assumed
+        // one) and the other stages must fit the margin, and the cadence must hold.
+        const int idx = (steps_ & 2) ? 1 : 0;
+        const double ratio = std::max(stepGain_[idx] > 0.0 ? stepGain_[idx] : (idx ? cfg_.bgRatio : cfg_.fxRatio), 1.05);
+        const bool offRoom = wholeKnown && hintKnown_ && winIntervalMs_ <= cfg_.budgetMs * 1.03 &&
+            std::max({gameMs, backendMs, gpuMs * ratio}) <= cfg_.upTarget * cfg_.budgetMs;
+        fxRoomT_ = offRoom ? fxRoomT_ + dt : 0.0;
+    } else {
+        fxRoomT_ = 0.0;
     }
 
     if (cfg_.calm) {
@@ -571,6 +753,27 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         if (!bound) pendingBelow_ = false;
     }
     if (!mayChange) return false; // (too soon after the last change: the holds go on counting)
+    if (fxActive && rung_ == FxRung() && !checking_ && pendingUndo_ < 0 && !trial_) {
+        const unsigned next = NextStep(now);
+        if (next && boundT_ >= cfg_.fxHoldSec) {
+            // GPU-limited at today's rung: the thing that means least to a player first.
+            fxBefore_ = boundGpuFrames_ ? boundGpuSum_ / boundGpuFrames_ : gpuMs;
+            fxBoundKept_ = boundT_;
+            fxOffBlockLen_ = lastFxOffAt_ != 0 && now - lastFxOffAt_ < static_cast<uint64_t>(cfg_.fxRepeatSec * 1e6) && fxOffBlockLen_ > 0
+                ? std::min(fxOffBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.fxOffBlockSec;
+            fxOffBlockedUntil_ = now + static_cast<uint64_t>(fxOffBlockLen_ * 1e6);
+            SetSteps(steps_ | next, Why::FxOn, now);
+            trial_ = next;
+            fxCheckT_ = fxCheckSum_ = 0;
+            fxCheckFrames_ = 0;
+            return false;
+        }
+        if (steps_ && fxRoomT_ >= cfg_.fxOffHoldSec && now >= fxOffBlockedUntil_) {
+            lastFxOffAt_ = now;
+            SetSteps(steps_ & ~((steps_ & 2) ? 2u : 1u), Why::FxOff, now); // (the cheaper background first, then the effects)
+            return false;
+        }
+    }
     const int floorUp = std::max(kToday, cfg_.minRung); // the lowest rung an overload above today goes to
     if (rung_ > floorUp && overT_ >= cfg_.downHoldSec) {
         int to = rung_ - 1;
@@ -583,7 +786,9 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         SetRung(to, saturated ? Why::Saturated : Why::Overload, now);
         return true;
     }
-    if (!checking_ && rung_ <= kToday && rung_ > cfg_.minRung && boundT_ >= cfg_.belowHoldSec && now >= belowBlockedUntil_ && pendingUndo_ < 0) {
+    // (the half-size step goes before the emergency rung: while it is still to come, or being judged, the rung stays)
+    const bool fxFirst = fxActive && rung_ == FxRung() && (trial_ || NextStep(now));
+    if (!checking_ && !fxFirst && rung_ <= kToday && rung_ > cfg_.minRung && boundT_ >= cfg_.belowHoldSec && now >= belowBlockedUntil_ && pendingUndo_ < 0) {
         const int from = rung_;
         const double before = boundFrames_ ? boundSpan_ / 1000.0 / boundFrames_ : winIntervalMs_;
         if (cfg_.calm && (!target || boundT_ < 8.0)) {

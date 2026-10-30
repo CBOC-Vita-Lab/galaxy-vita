@@ -112,6 +112,34 @@
 // does not undo a real GPU saving. Changes are at least 3 s apart (except scene
 // restores). Paced presentation needs exact GPU timers; a late frame fence
 // cannot distinguish callback waiting from GPU work, so it holds the rung.
+//
+// Floor protection by degrees (Config::fxStep / Config::bgStep, GXV_AUTOQ_FXSTEP=1|2, target mode, default off): the things
+// that mean least to a player go first, the picture size and the emergency rung last. The order of degrading is
+//   0. the multisampled rungs (7, 8), then the sizes above the game's own 640x456 (6..3): the ladder above, as before,
+//   1. at today's rung (2, 640x456), after fxHoldSec (2 s) of a GPU-limited miss: effects and blur at half size (the back
+//      end's GXV_FXHALF / GXV_PASSHALF as a state this controller flips; Controller::FxStepOn()),
+//   2. still GPU-limited, after fxHoldSec more: cheaper background (Controller::BgStepOn(); the back end samples the
+//      textures of everything that is not a character or key item with the nearest mip level between the mip levels, not
+//      the blend of two: half the texture fetches of a trilinear surface; only with GXV_AUTOQ_FXSTEP=2),
+//   3. then the picture size below the game's own (rungs 1, 0: 592x422, 544x388), by the old rules,
+//   4. last the 480x340 emergency rung.
+// Alongside (not a controller step): GXV_CHARAA_AUTO=1 draws the characters' edge smoothing (GXV_CHARAA's filter) for Mario's and
+// Luigi's own textures only, and only while the picture is below 640x456 (rungs 1, 0, emergency): the player stays crisp when the
+// rest of the picture softens, at the cost of the filter only where the picture is already cheaper (vgx_backend_gl.cpp PresentCharaAA).
+// Each step is judged like a step below today: after checkSec the GPU's mean busy time must be betterFrac shorter, else it is
+// switched off again (the next step is tried at once; this one is not tried again for blockSec, doubling), so a step that buys
+// nothing in a scene costs two seconds, not a lasting loss.
+// The way back is the reverse: 480x340 -> 544x388 -> 592x422 -> 640x456 by the old rules (the climb stops at today's rung while
+// a step is on); then, at today's rung, the cheaper background goes off after fxOffHoldSec (8 s) of predicted room (the GPU's
+// busy time times the measured saving of the step, or fxRatio / bgRatio until one was measured, within upTarget of the budget,
+// and the other stages as well), then the half-size effects after another 8 s; only then may the picture size rise above
+// today's. A step switched on again within a minute of being switched off blocks the next switching off for fxOffBlockSec
+// (20 s), doubling. Changes are at least 3 s apart, as for rungs. A CPU-limited stretch never starts a step (the GPU must be
+// the largest of the three stages by 5 % and near the budget: the rules for the emergency rung). A scene remembers the steps
+// with its rung.
+//
+// Floor census (Controller::TakeFloor, target mode): for the basic log's "floor:" line, the pictures of a window, those later
+// than the budget (+3 %), the time they took, and for each late picture which stage was the largest.
 #pragma once
 #include <cstdint>
 
@@ -168,6 +196,18 @@ struct Config {
     double recoverFrameFrac = 1.0;  // target mode: one frame cancels a stretch of room only if its predicted work at the next rung
                                     // exceeds this share of the budget (instead of upTarget), or its cadence missed the budget;
                                     // the window means still have to fit upTarget
+    // GXV_AUTOQ_FXSTEP (target mode only; default off, and then every decision is the one made without these): half-size effects
+    // and blur before the emergency rung, back off first when room returns (see above).
+    bool fxStep = false;         // step 1: effects and blur at half size
+    bool bgStep = false;         // step 2: cheaper background (after step 1 or, when that bought nothing, on its own)
+    double fxHoldSec = 2.0;      // GPU-limited at today's rung this long: a step goes on
+    double fxOffHoldSec = 8.0;   // predicted room in a row before a step goes off
+    double fxRatio = 1.3;        // GPU time without the step / with it, assumed until the step's own saving is measured
+    double bgRatio = 1.1;
+    double fxOffBlockSec = 20.0; // after a switch on within fxRepeatSec of a switch off, no switching off for this long (doubling)
+    double fxRepeatSec = 60.0;
+    // A late picture (interval over budgetMs + 3 %) is blamed on a stage when that stage's work is at least this share of the budget
+    double causeShare = 0.85;
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
     static Config Legacy() {
         Config c;
@@ -210,7 +250,7 @@ struct FrameTimes {
     uint32_t scene = 0;        // calm mode: the scene's key (0 = unknown)
 };
 
-enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory };
+enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain };
 const char* WhyText(Why w);
 
 struct Change {
@@ -218,6 +258,19 @@ struct Change {
     Why why = Why::None;
     double load = 0, cpu = -1, intervalMs = 0; // the window that decided it
     uint64_t atUs = 0;
+};
+
+// The floor census of a window (target mode): see Controller::TakeFloor.
+struct FloorWindow {
+    uint64_t spanUs = 0;                   // time the pictures of the window took (without quiet moments)
+    uint32_t pictures = 0;                 // pictures counted
+    uint32_t late = 0;                     // ... later than the budget + 3 % (not counting stalls)
+    uint64_t lateUs = 0;                   // the time those late pictures took: seconds below 30
+    uint64_t worstUs = 0;                  // the longest late picture
+    uint32_t gpu = 0, game = 0, renderer = 0, other = 0, unknown = 0; // late pictures by their largest stage
+    uint32_t stalls = 0;                   // intervals over gapResetMs (a load, a shader build): not in `late`
+    uint64_t stallUs = 0;
+    uint32_t quiet = 0;                    // pictures of quiet moments (pause menu, fades): not counted
 };
 
 class Controller {
@@ -244,6 +297,15 @@ public:
     double WindowGameMs() const { return winGameMs_; }
     double WindowBackendMs() const { return winBackendMs_; }
     unsigned Windows() const { return windows_; }
+    // Floor protection by degrees: whether the back end should draw effects and blur passes at half size now (always false
+    // without Config::fxStep), the last change of it, and how often it changed.
+    bool FxStepOn() const { return (steps_ & 1) != 0; }
+    bool BgStepOn() const { return (steps_ & 2) != 0; }
+    unsigned Steps() const { return steps_; }
+    const Change& LastFxChange() const { return lastFx_; }
+    unsigned FxChanges() const { return fxChanges_; }
+    // The floor census since the last call (target mode): returns it and starts a new window.
+    FloorWindow TakeFloor();
     unsigned Changes() const { return changes_; }
     const Config& Cfg() const { return cfg_; }
     // When the block on `rung` ends (microseconds on the frames' clock; 0: not blocked): diagnostics and tests.
@@ -305,20 +367,47 @@ private:
     double belowBefore_ = 0;
     uint64_t roomAt_ = 0;            // when that window ended (0: no room seen since the last change or overload)
     uint32_t scene_ = 0;             // the key of the scene being played
-    struct SceneRung { uint32_t key; int8_t rung; };
+    struct SceneRung { uint32_t key; int8_t rung; uint8_t fx; };
     SceneRung sceneMem_[32] = {};
     unsigned sceneNext_ = 0;
-    void Remember(uint32_t key, int rung);
-    int Recall(uint32_t key) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
+    void Remember(uint32_t key, int rung, unsigned fx = 0);
+    int Recall(uint32_t key, unsigned* fx = nullptr) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
+    unsigned NextStep(uint64_t now) const;
+    void SetSteps(unsigned to, Why why, uint64_t now);
+    void SetSceneSteps(unsigned to, uint64_t now);
+    bool StepsEnabled() const { return cfg_.fxStep || cfg_.bgStep; }
+    unsigned StepMask() const { return (cfg_.fxStep ? 1u : 0u) | (cfg_.bgStep ? 2u : 0u); }
+    void ForgetFxBlocks();
+    int FxRung() const { return cfg_.minRung > kToday ? cfg_.minRung : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
+    void FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
+                    uint64_t gpu, uint64_t game, uint64_t backend);
 public:
     unsigned QuietUps() const { return quietUps_; }
 private:
     unsigned quietUps_ = 0;
+    // floor protection by degrees (Config::fxStep)
+    unsigned steps_ = 0;                    // bit 0 half-size effects and blur, bit 1 cheaper background
+    Change lastFx_;
+    unsigned fxChanges_ = 0;
+    uint64_t lastFxAt_ = 0;
+    bool fxEver_ = false;                   // a change was made: changes are spaced from lastFxAt_
+    unsigned trial_ = 0;                    // the step (1, 2) whose trial is running; 0: none
+    double fxBefore_ = 0, fxCheckT_ = 0, fxCheckSum_ = 0; // GPU ms before; trial time and sum of GPU ms x frames
+    double stepGain_[2] = {0, 0};           // measured saving of each step (0: not measured)
+    unsigned fxCheckFrames_ = 0;
+    double fxRoomT_ = 0, fxBoundKept_ = 0;
+    double boundGpuSum_ = 0;                // GPU ms x frames over the unbroken GPU-limited stretch
+    unsigned boundGpuFrames_ = 0;
+    uint64_t onBlockedUntil_[2] = {0, 0}, fxOffBlockedUntil_ = 0, lastFxOffAt_ = 0;
+    double onBlockLen_[2] = {0, 0}, fxOffBlockLen_ = 0;
+    FloorWindow floor_;
 };
 
 // The log of automatic quality: the Vita's port_log (the console's log file; the back end's stderr goes nowhere there),
 // stderr elsewhere. One line, no newline needed.
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// The same, into the basic log (the Vita's port_log_summary, which every build writes; stderr elsewhere): the "floor:" line.
+void LogSummary(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 bool Target30Enabled(); // GXV_AUTOQ_TARGET, read once for both the controller and game CPU sampling
 
 // ---- the GPU clock (the Vita: a watcher thread that time-stamps the GPU's completion of every presented

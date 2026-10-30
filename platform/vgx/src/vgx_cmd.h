@@ -399,6 +399,9 @@ void AutoQualitySwapped();
 void ForceQualityRung(int rung);
 // The highest rung of the quality ladder this platform can show (8 with 4x multisampling of the EFB, 7 with 2x, 6 without).
 int QualityTopRung();
+// (tests) Floor protection by degrees (vgx_autoq.h) set by hand for the next frame: effects and blur passes at half size, the
+// cheaper background. The controller stops being the one to set them only if it is off (tests run without one).
+void DebugSetQualitySteps(bool fxHalf, bool cheapBackground);
 // The rung of the quality ladder now.
 int QualityRung();
 void QualityRungSize(int& w, int& h, int& samples); // the internal picture now (render target size, EFB samples)

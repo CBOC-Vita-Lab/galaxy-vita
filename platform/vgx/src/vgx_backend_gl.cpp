@@ -113,6 +113,9 @@ extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 
 
 extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));  // the basic log, when the platform layer has one
 
+// The front end's list of character and key-item textures (vgx_state.h): weak, a build without the front end has none.
+namespace vgx { bool IsCharaTexture(uint32_t texId) __attribute__((weak)); }
+
 namespace vgx::backend {
 
 namespace {
@@ -364,6 +367,14 @@ uint32_t g_passDirectTex = 0;   // not 0: the open pass is drawn straight into t
 int g_passX = 0, g_passY = 0;   // what to subtract from EFB pixel coordinates inside the pass (the pass rectangle's origin, less its place in an atlas)
 int g_passW = 0, g_passH = 0;   // size of the pass's render target
 float g_passScale = 1.0f;       // GXV_PASSHALF: the open pass is drawn at this fraction of the render scale
+// Floor protection by degrees (vgx_autoq.h, GXV_AUTOQ_FXSTEP): states the controller (or a test, DebugSetQualitySteps) sets
+// between frames; AutoQualityFrame latches them at the start of each frame, so a frame is wholly one or the other.
+//   g_stepFx  effects and blur passes at half size, as GXV_FXHALF=2 and GXV_PASSHALF=1 would draw them
+//   g_stepBg  the textures of draws that sample no character or key-item texture use the nearest mip level between levels
+//             (LINEAR_MIPMAP_LINEAR -> LINEAR_MIPMAP_NEAREST): half the texture fetches of a trilinear surface
+// Off, every draw is the one the static switches (or nothing) give.
+bool g_stepFxWanted = false, g_stepBgWanted = false;
+bool g_stepFx = false, g_stepBg = false;
 float g_passScaleNext = 1.0f;   // ... for the pass BeginPass begins next (set by its caller, used once)
 
 // ------------------------------------------------------------ cached GL state
@@ -1370,7 +1381,7 @@ bool ApplyRenderState(const RenderState& rs) {
     return true;
 }
 
-void BindTexture(int unit, const TexBind& b) {
+void BindTexture(int unit, const TexBind& b, bool cheap = false) {
     if (b.texId == 0 || b.texId >= g_tex.size() || g_tex[b.texId].id == 0) {
         BindTex(unit, g_whiteTex);
         return;
@@ -1382,6 +1393,11 @@ void BindTexture(int unit, const TexBind& b) {
                                    GL_LINEAR_MIPMAP_LINEAR};
     uint8_t minF = b.minFilter;
     if (!t.mips && minF >= FILT_NEAR_MIP_NEAR) minF = (minF == FILT_NEAR_MIP_NEAR || minF == FILT_NEAR_MIP_LIN) ? FILT_NEAR : FILT_LINEAR;
+    // (the cheaper background: no blend of two mip levels; EFB copies and other render targets keep theirs)
+    if (cheap && !t.renderTarget) {
+        if (minF == FILT_LIN_MIP_LIN) minF = FILT_LIN_MIP_NEAR;
+        else if (minF == FILT_NEAR_MIP_LIN) minF = FILT_NEAR_MIP_NEAR;
+    }
     if (t.wrapS == b.wrapS && t.wrapT == b.wrapT && t.minF == minF && t.magF == b.magFilter) return;
     if (S.unit != unit) { G(glActiveTexture(GL_TEXTURE0 + unit)); S.unit = unit; }
     if (t.wrapS != b.wrapS) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, static_cast<GLint>(kWrap[b.wrapS % 3]))); t.wrapS = b.wrapS; ++C.texParams; }
@@ -1839,6 +1855,12 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     if (g_uniDirtyF) { C.ringBytes += p.fsBytes; g_uniDirtyF = false; }
 
     DP(2);
+    // The cheaper background (g_stepBg): draws that sample a character's or key item's texture (the HD pack's list, vgx::IsCharaTexture
+    // of the front end; none in a build without it) keep their filters.
+    bool cheap = g_stepBg;
+    if (cheap && vgx::IsCharaTexture)
+        for (int m = 0; m < 8 && cheap; ++m)
+            if ((r.texMask & (1u << m)) && vgx::IsCharaTexture(r.tex[m].texId)) cheap = false;
     for (int m = 0; m < 8; ++m)
         if (r.texMask & (1u << m)) {
             if (ResourceAuditOn()) {
@@ -1850,7 +1872,7 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
                     ResourceAudit(ResourceStage::WhiteFallback, record);
                 }
             }
-            BindTexture(m, r.tex[m]);
+            BindTexture(m, r.tex[m], cheap);
         }
     DP(3);
 
@@ -3070,6 +3092,16 @@ void ResetCrowd();
 namespace {
 std::unique_ptr<autoq::Controller> g_autoq;
 bool g_autoqLog = false;
+bool EnsureFxDepthProgram(); // (defined with the effects, below)
+// The half-size step's two programs, built before the step first turns on (a program build is milliseconds on the console: not
+// in the picture that has just missed its time). Without the effects' depth texture they are not needed (the step then draws as before).
+void WarmFxPrograms() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    EnsureFxDepthProgram();
+    EnsureCopyProgram();
+}
 uint64_t g_autoqStatusUs = 0;
 uint64_t g_poolEvicted = 0;   // pooled objects deleted by EvictIdlePool (status line)
 unsigned g_autoqTimed = 0;    // frames the GPU clock has timed (status line)
@@ -3664,6 +3696,15 @@ void AutoQualityInit() {
     cfg.longGapMs = static_cast<double>(EnvInt("GXV_AUTOQ_SCENE_MS", 1500));
     // GXV_AUTOQ_SPACING=<frames>: two changes at least this many frames apart (default 20; the Strikers port, 160c3f9)
     cfg.minChangeFrames = static_cast<int>(EnvInt("GXV_AUTOQ_SPACING", 20));
+    // GXV_AUTOQ_FXSTEP=0|1|2 (default 0; target 30 only): floor protection by degrees (vgx_autoq.h). 1: at 640x456, a GPU-limited miss
+    // first halves the effects and blur passes (GXV_FXHALF / GXV_PASSHALF as a runtime state), before any smaller picture; 2: and
+    // then makes the background's textures cheaper (the nearest mip level, not the blend of two, for draws that sample no character's
+    // or key item's texture). Each step is kept only if it shortens the GPU's busy time; the way back is the reverse.
+    if (const long steps = target30 ? EnvInt("GXV_AUTOQ_FXSTEP", 0) : 0; steps >= 1) {
+        const bool fxStatic = EnvInt("GXV_FXHALF", 0) != 0 && EnvInt("GXV_PASSHALF", 0) != 0;
+        cfg.fxStep = !fxStatic;
+        cfg.bgStep = steps >= 2;
+    }
     if (!autoq::clock::Start()) {
         autoq::Log("[autoq] off: no GPU clock here, the EFB's own size");
         return;
@@ -3671,6 +3712,9 @@ void AutoQualityInit() {
     g_autoq = std::make_unique<autoq::Controller>(cfg);
     const autoq::Config& c = g_autoq->Cfg();
     SetRungFactors(g_autoq->Current());
+    if (c.fxStep || c.bgStep)
+        autoq::Log("[autoq] GXV_AUTOQ_FXSTEP: at 640x456, a GPU-limited miss first takes %s%s%s before any smaller picture (each step kept only if it shortens the GPU's busy time; the way back is the reverse)",
+                   c.fxStep ? "half-size effects and blur" : "", c.fxStep && c.bgStep ? ", then " : "", c.bgStep ? "cheaper background textures" : "");
     if (target30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
     char lo[32], hi[32], st[32];
     RungText(c.minRung, lo, sizeof lo);
@@ -3712,7 +3756,45 @@ void AutoQualityStatus() {
                    static_cast<unsigned>(g_rtSpares.size()));
 }
 
+// The floor census (vgx_autoq.h, target 30): the basic log's line every 5 s, so that a run tells exactly why any picture fell under
+// 30: the time spent in pictures later than the budget, and which stage was the largest in each: GPU, game CPU (two turns),
+// renderer CPU, none of the three (the front end, a wait, the pacing), or not measured.
+uint64_t g_floorAt = 0;
+const char* RungSizeText(int rung) {
+    static char text[32];
+    RungText(rung, text, sizeof text);
+    return text;
+}
+void FloorReport() {
+    const uint64_t now = autoq::clock::NowUs();
+    if (g_floorAt == 0) { g_floorAt = now; g_autoq->TakeFloor(); return; }
+    if (now - g_floorAt < 5000000u) return;
+    const double window = static_cast<double>(now - g_floorAt) / 1e6;
+    g_floorAt = now;
+    const autoq::FloorWindow w = g_autoq->TakeFloor();
+    char rungText[32];
+    RungText(g_rung, rungText, sizeof rungText);
+    char steps[96] = "";
+    if (g_autoq->Cfg().fxStep || g_autoq->Cfg().bgStep)
+        std::snprintf(steps, sizeof steps, "; half-size effects %s, cheaper background %s", g_autoq->FxStepOn() ? "on" : "off", g_autoq->BgStepOn() ? "on" : "off");
+    char extra[96] = "";
+    if (w.stalls || w.quiet)
+        std::snprintf(extra, sizeof extra, "; not counted: %u stalls (%.2f s), %u pause/fade pictures", w.stalls, static_cast<double>(w.stallUs) / 1e6, w.quiet);
+    const double late = static_cast<double>(w.lateUs) / 1e6;
+    if (w.late == 0) {
+        autoq::LogSummary("floor: %.1f s, %u pictures, none under 30; rung %d (%s)%s%s", window, w.pictures, g_rung, rungText, steps, extra);
+        return;
+    }
+    autoq::LogSummary("floor: %.1f s, %u pictures, %u late (over %.1f ms) = %.2f s below 30, worst %.0f ms; late by GPU %u, game CPU %u, renderer CPU %u, "
+                      "none of the three (front end, waits, pacing) %u, not measured %u; rung %d (%s)%s%s",
+                      window, w.pictures, w.late, g_autoq->Cfg().budgetMs * 1.03, late, static_cast<double>(w.worstUs) / 1000.0, w.gpu, w.game, w.renderer,
+                      w.other, w.unknown, g_rung, rungText, steps, extra);
+}
+
 void AutoQualityFrame() {
+    g_stepFx = g_stepFxWanted; // (the steps latch here: a frame is wholly one state)
+    g_stepBg = g_stepBgWanted;
+    if (g_autoq && g_autoq->Cfg().fxStep) WarmFxPrograms();
     AutoQualityStatus();
     if (g_forceRung != autoq::kNoRung) {
         g_autoq.reset();
@@ -3743,6 +3825,16 @@ void AutoQualityFrame() {
         f.quiet = quiet;
         f.scene = scene;
         if (g_autoq->Add(f)) want = g_autoq->Current();
+    }
+    if (g_autoq->Cfg().targetFps == 30) FloorReport();
+    if (g_autoq->FxStepOn() != g_stepFxWanted || g_autoq->BgStepOn() != g_stepBgWanted) {
+        const autoq::Change& fc = g_autoq->LastFxChange();
+        g_stepFxWanted = g_autoq->FxStepOn();
+        g_stepBgWanted = g_autoq->BgStepOn();
+        g_stepFx = g_stepFxWanted;
+        g_stepBg = g_stepBgWanted;
+        autoq::Log("[autoq] quality steps now: half-size effects and blur %s, cheaper background %s, at rung %d (%s): %s (GPU %.0f %% of the budget, %.1f ms a picture)",
+                   g_stepFx ? "on" : "off", g_stepBg ? "on" : "off", g_rung, RungSizeText(g_rung), autoq::WhyText(fc.why), fc.load * 100.0, fc.intervalMs);
     }
     double needMiB = 0, freeMiB = 0;
     // Short of video memory above 640x456 (textures of a new scene, other render targets): back to it now.
@@ -3800,6 +3892,11 @@ void AutoQualitySwapped() {
     if (g_autoq) autoq::clock::FramePresented();
 }
 
+void DebugSetQualitySteps(bool fxHalf, bool cheapBackground) {
+    g_stepFxWanted = fxHalf;
+    g_stepBgWanted = cheapBackground;
+    if (fxHalf) WarmFxPrograms();
+}
 void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, autoq::Target30Enabled() ? autoq::kEmergency : 0, TopRung()); }
 void DebugFailAllocation(int nth) { g_simFailAt = nth; g_simChecks = 0; }
 void DebugLastChange(unsigned& resampled, unsigned& plain) { resampled = g_lastResampled; plain = g_lastPlain; }
@@ -4134,6 +4231,11 @@ int PresentCharaAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int
     const CopyDispCmd* d = g_charaDisp;
     if (!d || (d->charaN == 0 && !g_charaFull) || w <= 0 || h <= 0 || dw <= 0 || dh <= 0) return 0;
     if (g_efbSamples > 1) { ++g_charaStats.msaaSkips; return 0; } // (rungs 7-8: the whole picture is multisampled)
+    // GXV_CHARAA_AUTO=1 (with GXV_CHARAA off; the front end then notes the player's own draws only: Mario and Luigi): the edge filter
+    // runs only while the picture is upscaled from a render size below the EFB's (rungs 1, 0 and the emergency rung), so the player
+    // stays crisp exactly when the rest of the picture softens. At the EFB's own size and above, nothing is drawn.
+    static const bool charaAuto = EnvInt("GXV_CHARAA", 0) == 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0;
+    if (charaAuto && g_rtW >= g_efbW && g_rtH >= g_efbH) return 0;
     // GXV_CHARAA_KERNEL=fxaa|sub (default fxaa): the edge filter (EnsureCharaProgram)
     static const int kernelEnv = [] { const char* e = std::getenv("GXV_CHARAA_KERNEL"); return e && std::strcmp(e, "sub") == 0 ? 1 : 0; }();
     const int kernel = g_charaKernel >= 0 ? g_charaKernel : kernelEnv;
@@ -4761,7 +4863,7 @@ void RunHoist(const CmdBuf& buf, size_t i, size_t j) {
 //   GXV_PASSHALF=0   off (default); 1 on
 float PassScaleFor(const CmdBuf& buf, size_t begin, const PassCmd& ps) {
     static const bool on = EnvInt("GXV_PASSHALF", 0) != 0;
-    if (!on || GpupassOff(GP_PASSHALF) || ps.atlasTex || ps.crowd.valid()) return 1.0f;
+    if (!(on || g_stepFx) || GpupassOff(GP_PASSHALF) || ps.atlasTex || ps.crowd.valid()) return 1.0f;
     if (static_cast<int>(ps.rect.w) * ps.rect.h * 4 > static_cast<int>(g_efbW) * g_efbH) return 1.0f;
     const float sx = static_cast<float>(g_rtW) / static_cast<float>(g_efbW) * 0.5f, sy = static_cast<float>(g_rtH) / static_cast<float>(g_efbH) * 0.5f;
     if (Rnd(ps.rect.w * sx) < 8 || Rnd(ps.rect.h * sy) < 8) return 1.0f;
@@ -4804,7 +4906,7 @@ int FxDiv() {
         const long v = EnvInt("GXV_FXHALF", 0);
         return v == 2 || v == 4 ? static_cast<int>(v) : 0;
     }();
-    return div;
+    return div ? div : (g_stepFx ? 2 : 0); // (the quality step: half size, when the switch itself is off)
 }
 bool FxEligible(const DrawRec& d) {
     const RenderState& rs = d.rs;
