@@ -30,6 +30,10 @@ static bool LightMerge() {
     static const bool on = EnvInt("GXV_LTMERGE", 0) != 0;
     return on;
 }
+long PaletteRowsMode() {
+    static const long m = EnvInt("GXV_PALROWS", 0); // see vgx_shadergen.h
+    return m;
+}
 long FogVtxMode() {
     static const long m = EnvInt("GXV_FOGVTX", 0); // 0 per-pixel fog (as always), 1 exact vertex fog (ortho linear), 2 + perspective linear
     return m;
@@ -566,8 +570,9 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
         if (texSrcMask & (1u << t)) o("attribute vec2 a_tex%d;\n", t);
     if (needTmi) o("attribute vec4 a_tmi0;\nattribute vec4 a_tmi1;\n");
     o("uniform mat4 u_proj;\n");
-    const bool shortPal = k.perVtxPos == 2;
-    if (needPal) o("uniform vec4 u_pal[%d];\n", shortPal ? kPalRowsShort : kPalRowsFull);
+    const bool shortPal = k.perVtxPos == 2 || k.perVtxPos == 3;
+    const int palK = PalRowsOfKey(k.perVtxPos); // rows of the short palette's position half (its normal half starts there)
+    if (needPal) o("uniform vec4 u_pal[%d];\n", k.perVtxPos == 3 ? kPalRowsSmall : shortPal ? kPalRowsShort : kPalRowsFull);
     if (!k.perVtxPos) o("uniform vec4 u_mv[6];\n");
     if (needTm) o("uniform vec4 u_tm[%d];\n", k.numTexGens * 3);
     if (needPtm) o("uniform vec4 u_ptm[%d];\n", k.numTexGens * 3);
@@ -578,11 +583,11 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     o("void main() {\n  vec4 p = vec4(a_pos.xyz, 1.0);\n");
     if (k.perVtxPos) {
         RowIndex(o, "  ", "pi", "a_pos.w");
-        if (shortPal) o("  if (pi > %d) pi = %d;\n", kPalShortMaxRow, kPalShortMaxRow);
+        if (shortPal) o("  if (pi > %d) pi = %d;\n", palK - 3, palK - 3);
         else o("  if (pi > 61) pi = 61;\n");
         o("  vec3 eye = vec3(dot(u_pal[pi], p), dot(u_pal[pi + 1], p), dot(u_pal[pi + 2], p));\n");
         if (needNrm) {
-            if (shortPal) o("  int ni = 30 + pi;\n"); // (position rows 0..29, then normal rows 0..29)
+            if (shortPal) o("  int ni = %d + pi;\n", palK); // (position rows 0..K-1, then normal rows 0..K-1)
             else o("  int ni = pi > 29 ? 93 : 64 + pi;\n");
             o("  vec3 n = vec3(dot(u_pal[ni].xyz, a_nrm), dot(u_pal[ni + 1].xyz, a_nrm), dot(u_pal[ni + 2].xyz, a_nrm));\n");
         }
@@ -715,7 +720,7 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     src.nMv = k.perVtxPos ? 0 : 6;
     src.nTm = needTm ? static_cast<uint8_t>(k.numTexGens * 3) : 0;
     src.nPtm = needPtm ? static_cast<uint8_t>(k.numTexGens * 3) : 0;
-    src.nPal = needPal ? static_cast<uint8_t>(shortPal ? kPalRowsShort : kPalRowsFull) : 0;
+    src.nPal = needPal ? static_cast<uint8_t>(k.perVtxPos == 3 ? kPalRowsSmall : shortPal ? kPalRowsShort : kPalRowsFull) : 0;
     src.nLt = static_cast<uint8_t>(4 + (maxLight + 1) * 5);
 }
 

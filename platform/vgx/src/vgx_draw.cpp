@@ -392,7 +392,7 @@ struct Resolved {
     bool foldOk = false, fold = false;
     uint16_t fsIdFold = 0, useFs = 0;
     bool fsIdFoldValid = false;
-    bool shortPalOk = false; // what the vertex key was built with
+    uint8_t palCls = 0; // what the vertex key was built with: 0 the full palette, 1 the short one, 2 the small one (PalClass)
     uint32_t vcdMtxMask = 0;
     uint32_t vcdGen = 0xFFFFFFFFu; // State::vcdGen when ResolveState last ran
     uint32_t stateSerial = 0; // bumped whenever rs, tex or texMask are built again (a record made at this serial has the same ones)
@@ -550,7 +550,7 @@ void BuildFsKey(FsKey& k) {
     if (FixLogicOp() && !blending && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3) k.logicSrc = fixes::LogicOpPlan(bits(cm0, 12, 4)).src;
 }
 
-void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk, uint8_t fsFog) {
+void BuildVsKey(VsKey& k, uint8_t numTexGens, uint8_t palCls, uint8_t fsFog) {
     std::memset(&k, 0, sizeof k);
     k.numTexGens = numTexGens;
     if (fsFog & kFogVtxBit) k.fogVtx = static_cast<uint8_t>((fsFog & 8) ? 3 : 1); // (the fragment key's fog bits: GXV_FOGVTX)
@@ -597,10 +597,10 @@ void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk, uint8_t fsFog) {
     }
     // The short palette holds position rows 0..29 and their normal rows: enough when the
     // vertices use no higher row and no texture matrix comes from the palette.
-    if (k.perVtxPos && shortPalOk) {
+    if (k.perVtxPos && palCls) {
         bool texFromPal = false;
         for (int i = 0; i < numTexGens; ++i) texFromPal |= k.tg[i].perVtxMtx != 0;
-        if (!texFromPal) k.perVtxPos = 2;
+        if (!texFromPal) k.perVtxPos = palCls == 2 ? 3 : 2;
     }
 }
 
@@ -787,13 +787,14 @@ uint64_t BuildMtxC(BlockCtx& c, const State& g, const VsKey& vs, bool soft) {
     for (int i = 0; i < vs.numTexGens; ++i) pal |= vs.tg[i].perVtxMtx != 0;
     if (pal) {
         float pb[384];
-        if (vs.perVtxPos == 2) {
-            // Short palette: position rows 0..29, then normal rows 0..29.
-            std::memcpy(pb, g.xfPos, 30 * 4 * sizeof(float));
-            for (int r = 0; r < 30; ++r) {
-                pb[120 + r * 4] = g.xfNrm[r][0]; pb[121 + r * 4] = g.xfNrm[r][1]; pb[122 + r * 4] = g.xfNrm[r][2]; pb[123 + r * 4] = 0;
+        if (vs.perVtxPos == 2 || vs.perVtxPos == 3) {
+            // Short palette: position rows 0..K-1, then normal rows 0..K-1 (K 30; the small palette, perVtxPos 3: 12).
+            const int K = PalRowsOfKey(vs.perVtxPos);
+            std::memcpy(pb, g.xfPos, static_cast<size_t>(K) * 4 * sizeof(float));
+            for (int r = 0; r < K; ++r) {
+                pb[K * 4 + r * 4] = g.xfNrm[r][0]; pb[K * 4 + 1 + r * 4] = g.xfNrm[r][1]; pb[K * 4 + 2 + r * 4] = g.xfNrm[r][2]; pb[K * 4 + 3 + r * 4] = 0;
             }
-            PushBlock(c, UB_PAL, pb, kPalRowsShort * 4);
+            PushBlock(c, UB_PAL, pb, static_cast<uint32_t>(K) * 8);
         } else {
             std::memcpy(pb, g.xfPos, 256 * 4);
             for (int r = 0; r < 32; ++r) {
@@ -831,9 +832,10 @@ void MtxReads(const State& g, const VsKey& vs, bool soft, uint64_t& pos, uint32_
     bool pal = vs.perVtxPos != 0;
     for (int i = 0; i < vs.numTexGens; ++i) pal |= vs.tg[i].perVtxMtx != 0;
     if (pal) {
-        if (vs.perVtxPos == 2) {
-            pos |= (1ull << 30) - 1;
-            nrm |= (1u << 30) - 1;
+        if (vs.perVtxPos == 2 || vs.perVtxPos == 3) {
+            const int K = PalRowsOfKey(vs.perVtxPos);
+            pos |= (1ull << K) - 1;
+            nrm |= (1u << K) - 1;
         } else {
             pos = ~0ull;
             nrm = ~0u;
@@ -1183,18 +1185,35 @@ inline void BlkTev(const FsKey& fs, const uint16_t texW[8], const uint16_t texH[
 [[maybe_unused]] void BuildLight(const VsKey& vs) { split::BlockCtx c = MainBlockCtx(); split::BuildLightC(c, g, vs); }
 [[maybe_unused]] uint64_t BuildMtx(const VsKey& vs, bool soft) { split::BlockCtx c = MainBlockCtx(); return split::BuildMtxC(c, g, vs, soft); }
 
-static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool shortPalOk);
+// Which palette a draw with a per-vertex position matrix can have, from the highest row its vertices name (g_pendingPosMtxMax,
+// 0xFF: not known): 0 the full one, 1 the short one (rows 0..29), 2 the small one (rows 0..11, GXV_PALROWS=1). A key built for a
+// class is exact for every draw of the class: the shader reads rows pi..pi+2 and the same normal rows, and pi never exceeds the maximum.
+// GXV_PALROWS=2 (census) changes nothing and counts the draws by that maximum.
+struct PalCensus {
+    uint64_t draws = 0, byMax[10] = {}, beyond = 0, unknown = 0;
+} g_palCensus;
+inline uint8_t PalClass(uint32_t maxRow, bool packing, bool perVtxPos) {
+    if (perVtxPos && PaletteRowsMode() == 2) {
+        ++g_palCensus.draws;
+        if (maxRow == 0xFF) ++g_palCensus.unknown;
+        else if (maxRow > static_cast<uint32_t>(kPalShortMaxRow)) ++g_palCensus.beyond;
+        else ++g_palCensus.byMax[maxRow / 3];
+    }
+    if (!packing || maxRow > static_cast<uint32_t>(kPalShortMaxRow)) return 0;
+    return (PaletteRowsMode() == 1 && maxRow <= static_cast<uint32_t>(kPalSmallMaxRow)) ? 2 : 1;
+}
+static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t palCls);
 // Most draws follow one that left everything the keys and blocks are built from as it was (only a particle's vertices, position
 // matrix and colours changed): then there is nothing to rebuild, and the only questions are whether the draw is transformed on the
 // CPU and folds the registers as the last one did. GXV_RESOLVEFAST=0 always takes the full path, 2 takes both and compares what they left.
 // (GXV_RSCACHE=0: this and ResolveStateFull are the path; otherwise ResolveStateCached below.)
 void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
     // The short matrix palette is enough when the draw's vertices stay within its rows.
-    const bool shortPalOk = UniformPacking() && g_pendingPosMtxMax <= static_cast<uint32_t>(kPalShortMaxRow);
+    const uint8_t palCls = PalClass(g_pendingPosMtxMax, UniformPacking(), (vcdMtxMask & 1u) != 0);
     g_pendingPosMtxMax = 0xFF;
     static const int fastMode = static_cast<int>(EnvInt("GXV_RESOLVEFAST", 1));
     if (fastMode != 0 && cur.valid && !g_blocksStale && !g.DirtyAny() && vcdMtxMask == cur.vcdMtxMask &&
-        !((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk) && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
+        !((vcdMtxMask & 1u) && palCls != cur.palCls) && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
         const bool soft = vertexCount <= SoftXformLimit() && SoftEligible(cur.vs);
         if (soft == cur.soft) {
             const bool fold = soft && cur.foldOk && FoldValuesOk();
@@ -1208,7 +1227,7 @@ void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
                     std::memcpy(offs, g_blockOff, sizeof offs);
                     const size_t uni = g_buf.uni.size();
                     const uint32_t gen = g.vcdGen;
-                    ResolveStateFull(vcdMtxMask, vertexCount, shortPalOk);
+                    ResolveStateFull(vcdMtxMask, vertexCount, palCls);
                     // (vcdGen is the one thing the full path updates)
                     cur.vcdGen = reinterpret_cast<const Resolved*>(before.data())->vcdGen;
                     ++checked;
@@ -1227,12 +1246,12 @@ void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
             }
         }
     }
-    ResolveStateFull(vcdMtxMask, vertexCount, shortPalOk);
+    ResolveStateFull(vcdMtxMask, vertexCount, palCls);
 }
-static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool shortPalOk) {
+static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t palCls) {
     // (see MarkBP / MarkXFReg in vgx_state.cpp for what sets which flag)
     const bool keysDirty = !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask ||
-                           ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+                           ((vcdMtxMask & 1u) && palCls != cur.palCls);
     const bool texDirty = keysDirty || g.texDirty;
     // (a key that was built again and came out the same leaves the blocks that only depend
     // on the key alone)
@@ -1242,8 +1261,8 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk, fs.fog);
-        cur.shortPalOk = shortPalOk;
+        BuildVsKey(vs, fs.numTexGens, palCls, fs.fog);
+        cur.palCls = palCls;
         fsChanged = !cur.valid || !SameStruct(fs, cur.fs);
         vsChanged = !cur.valid || !SameStruct(vs, cur.vs);
         if (fsChanged) { cur.fs = fs; cur.fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader); cur.fsIdFoldValid = false; }
@@ -1352,13 +1371,13 @@ uint64_t g_keyMemoHits = 0, g_keyMemoMisses = 0;
 uint64_t g_rsChecked = 0, g_rsBad = 0; // (GXV_RSCACHE=2)
 
 inline uint32_t KeyMemoSlot(uint64_t h, uint32_t mask, uint8_t spo) {
-    const uint32_t x = static_cast<uint32_t>(h) ^ static_cast<uint32_t>(h >> 32) ^ (mask * 0x9E3779B1u) ^ (spo ? 0x7F4A7C15u : 0u);
+    const uint32_t x = static_cast<uint32_t>(h) ^ static_cast<uint32_t>(h >> 32) ^ (mask * 0x9E3779B1u) ^ (spo * 0x7F4A7C15u);
     return (x ^ (x >> 15)) & (kKeyMemoSize - 1);
 }
 // The legacy path's notion of "the keys may have changed" (it also decides when it records the short-palette flag, and when
 // it rebuilds a render state whose depth comes from a Z texture: the cached path does those as it does).
-inline bool LegacyKeysDirty(uint32_t vcdMtxMask, bool shortPalOk) {
-    return !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask || ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+inline bool LegacyKeysDirty(uint32_t vcdMtxMask, uint8_t palCls) {
+    return !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask || ((vcdMtxMask & 1u) && palCls != cur.palCls);
 }
 inline bool ZTexReplace() { return bits(g.bp[0xF5], 2, 2) == 2; }
 inline bool SameCurKey(uint32_t vcdMtxMask, uint8_t spo) {
@@ -1366,7 +1385,7 @@ inline bool SameCurKey(uint32_t vcdMtxMask, uint8_t spo) {
 }
 
 // The keys for the current registers into cur; fsChanged / vsChanged as ResolveStateFull has them.
-void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& fsChanged, bool& vsChanged) {
+void ResolveKeysCached(uint32_t vcdMtxMask, uint8_t palCls, uint8_t spo, bool& fsChanged, bool& vsChanged) {
     const uint64_t h = g.keyHash;
     const uint32_t slot = KeyMemoSlot(h, vcdMtxMask, spo);
     KeyMemo& m = g_keyMemo[slot];
@@ -1379,7 +1398,7 @@ void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& 
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk, fs.fog);
+        BuildVsKey(vs, fs.numTexGens, palCls, fs.fog);
         fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader);
         vsId = Lookup(g_vsReg, vs, false, GenerateVertexShader);
         m = KeyMemo{};
@@ -1426,9 +1445,9 @@ inline bool SoftEligibleCur() {
 }
 void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
     static const bool packing = UniformPacking();
-    const bool shortPalOk = packing && g_pendingPosMtxMax <= static_cast<uint32_t>(kPalShortMaxRow);
+    const uint8_t palCls = PalClass(g_pendingPosMtxMax, packing, (vcdMtxMask & 1u) != 0);
     g_pendingPosMtxMax = 0xFF;
-    const uint8_t spo = ((vcdMtxMask & 1u) && shortPalOk) ? 1 : 0;
+    const uint8_t spo = (vcdMtxMask & 1u) ? palCls : 0;
     const bool sameKeys = SameCurKey(vcdMtxMask, spo);
     // ---- nothing to rebuild: the keys are the same, and no flag that feeds a block or the render state is up
     // (bpKeyDirty / xfKeyDirty / xfRegDirty alone mean nothing once the key registers hash the same). The flags are
@@ -1444,14 +1463,14 @@ void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
 #endif
     if (sameKeys && !g_blocksStale && !otherFlags && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
         // (sameKeys: cur.valid and the vertex-matrix mask unchanged, so the old path's "keys may have changed" is this)
-        const bool legacyKeysDirty = g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+        const bool legacyKeysDirty = g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || ((vcdMtxMask & 1u) && palCls != cur.palCls);
         if (legacyKeysDirty && ZTexReplace()) goto full;
         {
         const bool soft = vertexCount <= SoftXformLimit() && SoftEligibleCur();
         if (soft == cur.soft) {
             const bool fold = soft && cur.foldOk && FoldValuesOk();
             if (fold == cur.fold && (!fold || cur.fsIdFoldValid) && (g.tevColDirty & (fold ? 0xF9u : 0xFFu)) == 0) {
-                if (legacyKeysDirty) cur.shortPalOk = shortPalOk;
+                if (legacyKeysDirty) cur.palCls = palCls;
                 ClearResolveDirty();
                 cur.vcdGen = g.vcdGen;
                 return;
@@ -1461,12 +1480,12 @@ void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
     }
 full:
     // ---- keys
-    const bool legacyKeysDirty = LegacyKeysDirty(vcdMtxMask, shortPalOk);
+    const bool legacyKeysDirty = LegacyKeysDirty(vcdMtxMask, palCls);
     const bool vcdChanged = !cur.valid || vcdMtxMask != cur.vcdMtxMask;
     bool fsChanged = false, vsChanged = false;
-    if (legacyKeysDirty) cur.shortPalOk = shortPalOk;
+    if (legacyKeysDirty) cur.palCls = palCls;
     const bool keysChanged = !sameKeys;
-    if (keysChanged) ResolveKeysCached(vcdMtxMask, shortPalOk, spo, fsChanged, vsChanged);
+    if (keysChanged) ResolveKeysCached(vcdMtxMask, palCls, spo, fsChanged, vsChanged);
     // ---- render state: key registers (cull, blend, pixel format, Z texture mode), viewport, scissor / depth / line width
     // (a depth taken from a Z texture is read when the state is built: built exactly when the old path built it)
     if (keysChanged || g.xfViewDirty || g.bpRsDirty || (legacyKeysDirty && ZTexReplace())) {
@@ -4406,6 +4425,12 @@ void FrontPresent(bool direct, void (*onDecoded)()) {
         std::fprintf(stderr, "[vgx] light directions up to frame %llu: %llu blocks built; %llu non-zero directions written as zero (%llu of them non-finite, %llu not read by the shader at all); %llu kept (%llu non-finite)\n",
                      (unsigned long long)g_frame, (unsigned long long)g_lnc.blocks, (unsigned long long)g_lnc.zeroed, (unsigned long long)g_lnc.zeroedNonFinite,
                      (unsigned long long)g_lnc.zeroedUnread, (unsigned long long)g_lnc.kept, (unsigned long long)g_lnc.keptNonFinite);
+    if (PaletteRowsMode() == 2 && (g_frame == 1 || g_frame % 600 == 0))
+        std::fprintf(stderr, "[vgx] palette rows up to frame %llu: %llu draws with a per-vertex matrix; highest row 0-2: %llu, 3-5: %llu, 6-8: %llu, 9-11: %llu, 12-14: %llu, 15-17: %llu, 18-20: %llu, 21-23: %llu, 24-26: %llu, 27-29: %llu; above 27: %llu; not known: %llu\n",
+                     (unsigned long long)g_frame, (unsigned long long)g_palCensus.draws, (unsigned long long)g_palCensus.byMax[0], (unsigned long long)g_palCensus.byMax[1],
+                     (unsigned long long)g_palCensus.byMax[2], (unsigned long long)g_palCensus.byMax[3], (unsigned long long)g_palCensus.byMax[4], (unsigned long long)g_palCensus.byMax[5],
+                     (unsigned long long)g_palCensus.byMax[6], (unsigned long long)g_palCensus.byMax[7], (unsigned long long)g_palCensus.byMax[8], (unsigned long long)g_palCensus.byMax[9],
+                     (unsigned long long)g_palCensus.beyond, (unsigned long long)g_palCensus.unknown);
     stats::FrameEnd(g_frame);
     {
         static const long n = diag::Int("GXV_TRACE_DRAWS", 0);

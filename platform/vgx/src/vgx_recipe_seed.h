@@ -80,7 +80,7 @@ struct Record { uint32_t type, v[4]; };
 struct List { std::vector<VsKey> vs; std::vector<FsKey> fs; std::vector<Record> records; };
 
 inline bool Safe(const VsKey& k) {
-    if (k.numTexGens > 8 || k.numChans > 2 || k.perVtxPos > 2) return false;
+    if (k.numTexGens > 8 || k.numChans > 2 || k.perVtxPos > 3) return false;
     for (const auto& c : k.chan)
         if (c.enable > 1 || c.matSrcVtx > 1 || c.ambSrcVtx > 1 || c.diffuse > 2 || c.attn > 2) return false;
     for (const auto& t : k.tg)

@@ -7,6 +7,7 @@
 #include "vgx_state.h"
 #include "vgx_fesplit.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -141,6 +142,13 @@ void Draws() {
                 if (layout & (vgx::VL_TEX0 << t)) { float* c = reinterpret_cast<float*>(verts + i * L.stride + L.offTex[t]); c[0] = Rf(0, 1); c[1] = Rf(0, 1); }
         }
         if (Rn(8) == 0) vgx::WriteBP((0xE2u + Rn(4)) << 24 | (Rnd() & 0xFF07FF)); // a particle's colour
+        {
+            // (what the vertex decoder reports: the highest matrix row the vertices name, so that the short and the small
+            // matrix palette (GXV_PALROWS) are chosen as in the game; the rows are 0, 3, ..., 27)
+            uint32_t mx = 0;
+            for (uint32_t i = 0; i < count; ++i) mx = std::max(mx, static_cast<uint32_t>(reinterpret_cast<const float*>(verts + i * L.stride)[3]));
+            vgx::SetPendingPosMtxMax(mx);
+        }
         vgx::DrawDecoded(prim, layout, verts, count);
     }
 }

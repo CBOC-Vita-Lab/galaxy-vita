@@ -1636,7 +1636,7 @@ void ValidateDraw(const CmdBuf& buf, const DrawRec& r, const Program& p) {
     const ShaderSource* vs = r.vsId < g_vsSrc.size() ? g_vsSrc[r.vsId] : nullptr;
     const ShaderSource* fs = r.fsId < g_fsSrc.size() ? g_fsSrc[r.fsId] : nullptr;
     const bool positionPalette = vs && vs->usesPalette && !vs->nMv;
-    const unsigned clampRow = vs && vs->nPal == kPalRowsShort ? kPalShortMaxRow : 61u;
+    const unsigned clampRow = vs && vs->nPal == kPalRowsShort ? kPalShortMaxRow : vs && vs->nPal == kPalRowsSmall ? kPalSmallMaxRow : 61u;
     const bool unavailableStatic = r.vbuf && !view.vertices;
     DrawRec inspected = r;
     if (unavailableStatic) { inspected.idxOffset = 0; inspected.idxCount = 0; }

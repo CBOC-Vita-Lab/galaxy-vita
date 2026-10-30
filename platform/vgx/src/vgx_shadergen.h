@@ -44,7 +44,8 @@ struct FsKey {
 struct VsKey {
     uint8_t numTexGens = 0;
     uint8_t numChans = 0;   // 0..2 lit colour channels produced
-    uint8_t perVtxPos = 0;  // position/normal matrix row comes from a_pos.w (2: no row above 27 is used, the palette is the short one)
+    uint8_t perVtxPos = 0;  // position/normal matrix row comes from a_pos.w (2: no row above 27 is used, the palette is the short one;
+                            // 3: none above 9, the small palette of 4 matrices: GXV_PALROWS)
     // (was padding: 0 unless GXV_FOGVTX is on) bit 0: write the varying v_fog for the fragment shader's vertex fog
     // (FsKey::fog & kFogVtxBit), bit 1: from clip z (orthographic fog) instead of clip w (perspective fog)
     uint8_t fogVtx = 0;
@@ -111,6 +112,14 @@ bool UniformPacking();
 int FsTevCount(const FsKey& k);  // u_tev
 int VsLightCount(const VsKey& k); // u_lt
 constexpr int kPalRowsFull = 96, kPalRowsShort = 60, kPalShortMaxRow = 27;
+// The small palette (GXV_PALROWS): position rows 0..11, then normal rows 0..11. J3D loads the matrices of a shape into
+// slots 0, 3, 6, ... so a shape with at most four matrices never names a row above 9.
+constexpr int kPalSmallK = 12, kPalRowsSmall = 24, kPalSmallMaxRow = 9;
+// Rows of position matrix memory a palette of this perVtxPos value holds (the normal rows follow them in the block).
+constexpr int PalRowsOfKey(int perVtxPos) { return perVtxPos == 3 ? kPalSmallK : 30; }
+// GXV_PALROWS (default 0): 1 = a draw whose vertices use no matrix row above 9 gets the small palette (24 vec4 instead of
+// 60 in the shader, the block, the upload and the console's uniform buffer); 2 = also count the rows draws use (census).
+long PaletteRowsMode();
 void GenerateFragmentShader(const FsKey& key, ShaderSource& out);
 void GenerateVertexShader(const VsKey& key, ShaderSource& out);
 
