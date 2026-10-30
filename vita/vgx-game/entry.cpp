@@ -293,8 +293,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // (checked against the software decoder on the first picture, software on any failure); the frame clock at the
     // clocks' priority; one clean A press per touch in dialogue; Square/R shakes shorter than a game update kept.
     // Shaders whose text these change are prepared by the warm-up after the title and kept in the compiled cache.
+    // Also: dedicated small programs for exact EFB copies, and dynamic quality returning to full resolution 20 s after a
+    // busy stretch (not 120 s).
     for (const char* name : {"GXV_FIX_INDPREV", "GXV_FIX_DSTA", "GXV_FIX_LOGICOP", "GXV_FIX_TEXOFF", "GXV_NODISCARD", "GXV_THPHW",
-                             "GXV_VBLANK_PRIO", "GXV_TAP_CLEAN", "GXV_SHAKE_LATCH"})
+                             "GXV_VBLANK_PRIO", "GXV_TAP_CLEAN", "GXV_SHAKE_LATCH", "GXV_COPYVAR", "GXV_AUTOQ_RECOVER"})
         setenv(name, "1", 0);
     LoadInputScript(SMG_DATA "/input.txt");
     {
