@@ -1,11 +1,6 @@
 // Exercise stale diagnostic settings against real Mesa and the Vita stdio wrappers.
 #include <cstddef>
-#include <GLES2/gl2.h>
-// Mesa owns real textures; these Vita-only memory queries have no host equivalent.
-constexpr int VGL_MEM_VRAM = 0;
-size_t vglMemFree(int) { return 128u << 20; }
-size_t vglMemTotal(int) { return 128u << 20; }
-void* vglGetTexDataPointer(GLenum) { static unsigned char storage; return &storage; }
+#include "vgx_vita_vgl_stubs.h"
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #include "../platform/vgx/src/vgx_autoq.cpp"

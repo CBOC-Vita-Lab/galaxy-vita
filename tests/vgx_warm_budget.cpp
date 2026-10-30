@@ -1,6 +1,7 @@
 // The splash ticker publishes the budget while the render thread consumes it.
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
 namespace vgx::backend { namespace { __attribute__((noinline)) void RunWarm(); } }
+#include "vgx_vita_vgl_stubs.h"
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #include <thread>
 
