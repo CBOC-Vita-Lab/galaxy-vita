@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v1.1",
+  "release": "galaxy-v1.2",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
