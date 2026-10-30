@@ -13,7 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <pthread.h>
+
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -102,7 +105,143 @@ static struct {
 static std::atomic<int64_t> sMixNs{0}, sMixMaxNs{0};
 static std::atomic<u32> sMixCalls{0};
 
+// The mixer renders one 80-sample sub-frame into the game's two output buffers.
+struct MixJob {
+    s16* outL;
+    s16* outR;
+    u16 level;
+};
+
+static void mixOne(const MixJob& job) {
+    const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
+    {
+        vgx::workload::Scope observation(vgx::workload::Dsp);
+        port_dsp_mix_frame(1, job.outL, job.outR, job.level);
+    }
+    const int64_t dt = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - t0 : 0;
+    sMixNs.fetch_add(dt, std::memory_order_relaxed);
+    sMixCalls.fetch_add(1, std::memory_order_relaxed);
+    if (dt > sMixMaxNs.load(std::memory_order_relaxed)) sMixMaxNs.store(dt, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// The mixing on a thread of its own (GXV_AUDIO_THREAD=1)
+//
+// On the Wii the sub-frame is rendered by the DSP chip, a processor of its own: the CPU's audio thread releases the voices
+// (the 0x00 packet of the last group of sixteen), goes back to waiting for a message, and the DSP's mail wakes it for the next
+// sub-frame.  Here the mixer is software and ran inside the release, on the guest CPU, i.e. on core 0 in front of the game's
+// own work (about 0.1 ms a sub-frame, 400 a second).  With the switch on, the release hands the sub-frame to a host thread
+// (cores 1-2 on the console, see port_vita_audio_mixer_boost) and returns; the guest's audio thread then blocks in its message
+// queue, the game thread runs on, and when the thread has finished it queues the same reply mail and raises the same DSP
+// interrupt, which the guest takes at its next safe point.  What the game's audio code (JASAudioThread, JASDriver, the
+// sequences, JASPortCmd and its queues) does is untouched: it still runs on the guest CPU, in the same order, and the
+// protocol stays lock-step (one sub-frame in flight; the next release only comes after the reply mail).  Every other command
+// waits for the sub-frame in flight to be finished and its mail queued first, so the DSP's in-order mailbox is kept.
+// Off (the default) the sub-frame is rendered inside the release as before.
+//   GXV_AUDIO_THREAD=0   mix inside the release (default)
+//   GXV_AUDIO_THREAD=1   mix on the mixer thread; if the thread cannot be made, inside the release
+// The sub-frames' PCM and the voice blocks it leaves are the same bytes either way (tests/dsp_async_mix.cpp).
+// ---------------------------------------------------------------------------
+extern "C" void __attribute__((weak)) port_vita_audio_mixer_boost(void);  // vita/runtime/audio.cpp: core and priority
+
+static bool mixThreadWanted() {
+    static const bool on = vgx::EnvInt("GXV_AUDIO_THREAD", 0) == 1;  // read once; default off
+    return on;
+}
+
+// (Never destroyed: the mixer thread is detached and still waits on them when the process exits.)
+static std::mutex& sJobMutex = *new std::mutex;
+static std::condition_variable& sJobCv = *new std::condition_variable;   // the mixer thread waits here for a job
+static std::condition_variable& sDoneCv = *new std::condition_variable;  // the guest waits here for the job in flight
+static MixJob sJob;
+static bool sJobPending = false;           // guarded by sJobMutex
+static std::atomic<bool> sJobBusy{false};  // handed over, and its reply mail is not queued yet
+static std::atomic<int> sMixThreadState{0};  // 0: not started, 1: running, -1: could not be made
+static std::atomic<u32> sMixThreadJobs{0}, sMixDrainWaits{0};
+static std::atomic<int64_t> sMixDrainNs{0};
+
+static void* mixThreadMain(void*) {
+    PORT_QEMU_THREAD("dsp-mixer");
+    if (port_vita_audio_mixer_boost) {
+        port_vita_audio_mixer_boost();
+    }
+    for (;;) {
+        MixJob job;
+        {
+            std::unique_lock<std::mutex> lk(sJobMutex);
+            sJobCv.wait(lk, [] { return sJobPending; });
+            job = sJob;
+            sJobPending = false;
+        }
+        mixOne(job);
+        sMixThreadJobs.fetch_add(1, std::memory_order_relaxed);
+        // The mail first, then the "free" flag: whoever sees the flag clear queues its own mail behind this one.
+        queueMail(0xDCD10004, 0xF355FF00);
+        {
+            std::lock_guard<std::mutex> lk(sJobMutex);
+            sJobBusy.store(false, std::memory_order_release);
+        }
+        sDoneCv.notify_all();
+        port_irq_raise(PORT_IRQ_DSP);
+    }
+    return nullptr;
+}
+
+// Guest side: returns when no sub-frame is in flight (its voice blocks and PCM written, its mail queued).
+static void drainMix() {
+    if (!sJobBusy.load(std::memory_order_acquire)) {
+        return;
+    }
+    const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
+    {
+        std::unique_lock<std::mutex> lk(sJobMutex);
+        sDoneCv.wait(lk, [] { return !sJobBusy.load(std::memory_order_acquire); });
+    }
+    sMixDrainWaits.fetch_add(1, std::memory_order_relaxed);
+    if (PORT_RUNTIME_DIAGNOSTICS) sMixDrainNs.fetch_add(port_host_time_ns() - t0, std::memory_order_relaxed);
+}
+
+static bool startMixThread() {
+    const int state = sMixThreadState.load(std::memory_order_acquire);
+    if (state != 0) {
+        return state > 0;
+    }
+    PortHostAllocScope host;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 128u << 10);
+    pthread_t thread;
+    const int rc = pthread_create(&thread, &attr, mixThreadMain, nullptr);
+    pthread_attr_destroy(&attr);
+    if (rc == 0) {
+        pthread_detach(thread);
+    }
+    port_log("audio: DSP mixer %s (GXV_AUDIO_THREAD=1)", rc == 0 ? "on a thread of its own" : "thread could not be made; mixing in the release");
+    sMixThreadState.store(rc == 0 ? 1 : -1, std::memory_order_release);
+    return rc == 0;
+}
+
+// Hands one sub-frame to the mixer thread; false: the caller mixes it itself.
+static bool submitMix(const MixJob& job) {
+    if (!startMixThread()) {
+        return false;
+    }
+    drainMix();  // (lock-step: nothing is in flight here unless the game broke the protocol)
+    {
+        std::lock_guard<std::mutex> lk(sJobMutex);
+        sJob = job;
+        sJobPending = true;
+        sJobBusy.store(true, std::memory_order_release);
+    }
+    sJobCv.notify_one();
+    return true;
+}
+
+// (tests/dsp_async_mix.cpp) Sub-frames the mixer thread has rendered so far.
+extern "C" unsigned port_dsp_mixer_thread_jobs(void) { return sMixThreadJobs.load(std::memory_order_relaxed); }
+
 static void executePacket() {
+    drainMix();  // (GXV_AUDIO_THREAD) the DSP does its commands in order: a sub-frame in flight is finished, its mail queued, first
     const std::vector<u32>& p = sPacket;
     u32 w0 = p.empty() ? 0 : p[0];
     u32 cmd = w0 >> 24;
@@ -117,17 +256,15 @@ static void executePacket() {
     case 0x00:  // release halt: voices 0 .. 16 * (group + 1) - 1 are ready for the sub-frame
         if (((w0 >> 16) & 0xFF) == 3 && sFrame.done < sFrame.subFrames) {
             if (sFrame.outL && sFrame.outR) {
-                const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
-                {
-                    vgx::workload::Scope observation(vgx::workload::Dsp);
-                    port_dsp_mix_frame(1, sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel);
+                const MixJob job{sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel};
+                sFrame.done++;
+                if (mixThreadWanted() && submitMix(job)) {
+                    break;  // (the mixer thread queues the reply mail and raises the interrupt when it is done)
                 }
-                const int64_t dt = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - t0 : 0;
-                sMixNs.fetch_add(dt, std::memory_order_relaxed);
-                sMixCalls.fetch_add(1, std::memory_order_relaxed);
-                if (dt > sMixMaxNs.load(std::memory_order_relaxed)) sMixMaxNs.store(dt, std::memory_order_relaxed);
+                mixOne(job);
+            } else {
+                sFrame.done++;
             }
-            sFrame.done++;
             queueMail(0xDCD10004, 0xF355FF00);
         }
         break;
@@ -403,6 +540,12 @@ static void aiClock() {
             const u32 mixes = sMixCalls.exchange(0);
             const int64_t mixNs = sMixNs.exchange(0), mixMax = sMixMaxNs.exchange(0);
             const u32 dspHolds = sDspHolds.exchange(0, std::memory_order_relaxed);
+            char mt[112] = "";
+            if (sMixThreadState.load(std::memory_order_acquire) > 0) {
+                snprintf(mt, sizeof(mt), "; mixer thread %u sub-frames, the game's audio waited for it %u times (%.2f ms)",
+                         sMixThreadJobs.exchange(0, std::memory_order_relaxed), sMixDrainWaits.exchange(0, std::memory_order_relaxed),
+                         sMixDrainNs.exchange(0, std::memory_order_relaxed) / 1e6);
+            }
             unsigned spkUnder = 0, spkDropped = 0;
             const bool spkOn = port_audio_take_speaker_stats(&spkUnder, &spkDropped) != 0;
             if (late || dspHolds || underruns != lastUnderruns || logEvery) {
@@ -412,9 +555,9 @@ static void aiClock() {
                 } else {
                     snprintf(spk, sizeof(spk), "; remote speaker off");
                 }
-                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held)%s",
+                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held)%s%s",
                          blocks, late, underruns - lastUnderruns, minQueued / 1e6, maxQueued / 1e6, peak, mixes, mixes ? mixNs / 1e6 / mixes : 0.0, mixMax / 1e6,
-                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, spk);
+                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, spk, mt);
             }
             lastUnderruns = underruns;
             gapMax = 0;

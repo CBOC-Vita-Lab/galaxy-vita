@@ -147,6 +147,27 @@ extern "C" void port_vita_audio_clock_boost(void) {
              static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
 }
 
+// Called once by the DSP mixer thread (platform/src/audio/ai_dsp.cpp) on its own thread; only exists to be called with GXV_AUDIO_THREAD=1.
+// Priority 0x50, the clocks' class: a sub-frame is a short burst (about 0.1 ms) and the game's audio thread is waiting for each one, so it
+// has to run when it is handed one, ahead of the renderer threads on its core.  GXV_AUDIO_THREAD_CORE (read once): 0 (default) cores 1 and 2
+// (the scheduler chooses), 1 or 2 that core alone, 3 the system core (SCE_KERNEL_CPU_MASK_SYSTEM; if the kernel refuses it the thread
+// takes cores 1 and 2). Core 0 is the game's and is never used.
+extern "C" void port_vita_audio_mixer_boost(void) {
+    static const long wanted = [] {
+        const char* e = getenv("GXV_AUDIO_THREAD_CORE");
+        return e && *e ? strtol(e, nullptr, 0) : 0L;
+    }();
+    const int before = sceKernelGetThreadCurrentPriority();
+    const int pr = sceKernelChangeThreadPriority(0, 0x50);
+    const int kBoth = 0x60000;  // SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2
+    const int mask = wanted == 1 ? 0x20000 : wanted == 2 ? 0x40000 : wanted == 3 ? 0x80000 : kBoth;
+    int ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);
+    if (ar < 0 && mask != kBoth) ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kBoth);
+    port_log("audio: DSP mixer thread priority 0x%X -> 0x50: 0x%08X, cpu mask 0x%X requested -> 0x%08X (now 0x%X)", static_cast<unsigned>(before),
+             static_cast<unsigned>(pr), static_cast<unsigned>(mask), static_cast<unsigned>(ar),
+             static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
+}
+
 extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {
     if (thread >= 0 || sAudioPort >= 0 || !drain) return 0;
     startResumeWatcher();
