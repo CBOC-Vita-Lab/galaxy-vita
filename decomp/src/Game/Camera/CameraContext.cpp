@@ -176,28 +176,13 @@ void CameraContext::updateProjectionMtx() {
     mProjection.makePerspective(mFovy, getAspect(), mNearZ, mFarZ);
 
     TProj3f trans;
+#ifdef TARGET_PC
+    // Reduced motion (GXV_REDUCED_MOTION, port/reduced_motion.h): the shake in the projection is a quarter of its size. This is the one
+    // projection the renderer, screen positions, the Star Pointer hit-test and the HUD marks all read, so the pointer hits what is on screen.
+    trans.makeTrans(port::motion::ShakeScale(mShakeOffset.x), port::motion::ShakeScale(mShakeOffset.y));
+#else
     trans.makeTrans(mShakeOffset.x, mShakeOffset.y);
+#endif
 
     mProjection.concat(trans, mProjection);
-
-#ifdef TARGET_PC
-    // Reduced motion: the renderer gets the shake at a quarter of its size (mProjection, which game logic reads, keeps all of it).
-    if (port::motion::Enabled()) {
-        mRenderProjection.makePerspective(mFovy, getAspect(), mNearZ, mFarZ);
-
-        TProj3f calmTrans;
-        calmTrans.makeTrans(port::motion::ShakeScale(mShakeOffset.x), port::motion::ShakeScale(mShakeOffset.y));
-
-        mRenderProjection.concat(calmTrans, mRenderProjection);
-    }
-#endif
-}
-
-const TProj3f& CameraContext::getRenderProjection() const {
-#ifdef TARGET_PC
-    if (port::motion::Enabled()) {
-        return mRenderProjection;
-    }
-#endif
-    return mProjection;
 }

@@ -1,12 +1,14 @@
 // Reduced motion in play (Settings > Display > Reduced motion, GXV_REDUCED_MOTION=1; default off).
 //
-// The setting calms the picture, never the game: it changes only what is drawn. Two things are scaled, both after the game has
-// decided everything else, so physics, timing, collision, camera pose and game logic run exactly as with the option off.
+// The setting calms the picture, never the game: physics, timing, collision, camera pose and game logic run exactly as with the
+// option off. Three things are scaled:
 //
 //  * Camera shake (CameraShaker -> CameraContext). The shake is a screen-space offset that the camera context folds into the
-//    projection it hands to the renderer. With the option on, the renderer gets the offset times kShakeScale (25 %). The shake
-//    timers, their lengths and their patterns are untouched, and the projection that game logic reads back (CameraContext::
-//    mProjection: screen positions, pointer targets) still holds the full-size offset, so nothing that decides gameplay changes.
+//    projection. With the option on the context folds in the offset times kShakeScale (25 %). The shake timers, their lengths and
+//    their patterns are untouched. There is one projection for everything, so the picture, calcScreenPosition, the Star Pointer
+//    hit-test, the HUD marks and the lens flare all agree: the pointer hits what is on screen.
+//  * Radial zoom blur (CenterScreenBlur: explosions, the first-person camera): drawn at kBlurScale (50 %) of its offset and opacity;
+//    its length and fades are untouched.
 //  * Short full-screen flashes (WipeFade): a bright fade that lasts kShortFlashFrames or fewer is drawn at no more than
 //    kFlashAlphaCap (40 %) opacity. Scene transitions and wipes to black are longer or dark and are never touched; every fade
 //    the game starts today is 30 frames or more, so this is a guard for short ones and changes nothing that exists now.
@@ -20,6 +22,7 @@ namespace port {
 namespace motion {
 
 constexpr float kShakeScale = 0.25f;     // camera shake amplitude with the option on
+constexpr float kBlurScale = 0.5f;       // CenterScreenBlur (radial zoom blur) strength with the option on
 constexpr float kFlashAlphaCap = 0.40f;  // highest opacity (0..1) of a short bright full-screen flash with the option on
 constexpr int kShortFlashFrames = 12;    // a fade of this many 60 Hz game frames or fewer counts as a flash (0.2 s)
 constexpr int kBrightLuma = 160;         // fill colours at least this bright (0..255, Rec.601 weights) count as bright
@@ -41,6 +44,10 @@ inline bool Enabled() {
 // A shake offset component, scaled for the view.
 inline float ShakeScale(float v, bool on) { return on ? v * kShakeScale : v; }
 inline float ShakeScale(float v) { return ShakeScale(v, Enabled()); }
+
+// A CenterScreenBlur strength (its zoom offset in pixels, or its opacity 0..255), scaled for the view.
+inline float BlurScale(float v, bool on) { return on ? v * kBlurScale : v; }
+inline float BlurScale(float v) { return BlurScale(v, Enabled()); }
 
 inline int Luma(int r, int g, int b) { return (r * 299 + g * 587 + b * 114) / 1000; }
 

@@ -142,8 +142,7 @@ namespace MR {
     }
 
     void loadProjectionMtx() {
-        // reduced motion: the picture is drawn with the calmer camera shake (GXV_REDUCED_MOTION; identical to mProjection when off)
-        GXSetProjection(::getCameraContext()->getRenderProjection(), (GXProjectionType) 0);
+        GXSetProjection(::getCameraContext()->mProjection, (GXProjectionType) 0);
     }
 
     void loadViewMtx() {
@@ -160,13 +159,6 @@ namespace MR {
 
     const TProj3f& getCameraProjectionMtx() {
         return ::getCameraContext()->mProjection;
-    }
-
-    // The projection for drawing: getCameraProjectionMtx() with the camera shake at the reduced-motion size when that is on.
-    // Everything that builds a picture from the projection (projected textures, 2D shapes placed over 3D points) uses this one;
-    // game logic (screen positions, pointer targets) keeps getCameraProjectionMtx().
-    const TProj3f& getCameraRenderProjectionMtx() {
-        return ::getCameraContext()->getRenderProjection();
     }
 
     void setCameraViewMtx(const TPos3f& rMtx, bool a2, bool a3, const TVec3f& a4) {

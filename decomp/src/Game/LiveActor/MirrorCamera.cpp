@@ -85,7 +85,7 @@ void MirrorCamera::updateViewMtx() {
 }
 
 void MirrorCamera::updateModelTexMtx() {
-    TProj3f mtx = MR::getCameraRenderProjectionMtx();  // drawn: reduced-motion shake
+    TProj3f mtx = MR::getCameraProjectionMtx();
     mtx[2][0] = 0.0f;
     mtx[2][1] = 0.0f;
     mtx[2][2] = -1.0f;

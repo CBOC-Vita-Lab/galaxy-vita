@@ -104,7 +104,7 @@ ViewProjmapEffectMtxSetter::ViewProjmapEffectMtxSetter(J3DModelData* pModelData)
 }
 
 void ViewProjmapEffectMtxSetter::update() {
-    TMtx44f projection = MR::getCameraRenderProjectionMtx();  // drawn: reduced-motion shake
+    TMtx44f projection = MR::getCameraProjectionMtx();
     projection[2][0] = 0.0f;
     projection[2][1] = 0.0f;
     projection[2][2] = -1.0f;

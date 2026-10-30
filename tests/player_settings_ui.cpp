@@ -111,7 +111,7 @@ int main() {
     s.working.reducedMotion=false;Draw(s,session,{first.data(),960,544,960},0);Draw(s,session,{second.data(),960,544,960},999999);
     size_t changed=0;for(size_t i=0;i<first.size();++i)changed+=first[i]!=second[i];assert(changed>0&&changed<10000);
     DrawAudit audit;DrawChecked(s,session,{first.data(),960,544,960},0,audit);assert(audit.minX>=32&&audit.minY>=32&&audit.maxX<=928&&audit.maxY<=512&&audit.textRuns>=15);
-    // The Reduced motion row's note ("Less camera shake and softer flashes.") fits its line with the fallback and the game font, off and on.
+    // The Reduced motion row's note ("Less camera shake and screen blur.") fits its line with the fallback and the game font, off and on.
     for(bool fonts:{false,true})for(bool on:{false,true}) {
         session.fonts=fonts?synthetic.view():FontSet{};Begin(s,session);s.row=3;s.working.reducedMotion=on;
         DrawAudit noteAudit;DrawChecked(s,session,{first.data(),960,544,960},0,noteAudit);

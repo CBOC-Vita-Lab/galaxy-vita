@@ -18,9 +18,6 @@ public:
     void setFovy(f32);
     void setShakeOffset(f32, f32);
     void updateProjectionMtx();
-    // The projection the renderer loads. The same as mProjection, except that with reduced motion on (GXV_REDUCED_MOTION, see
-    // port/reduced_motion.h) its camera shake offset is scaled down. Game logic keeps reading mProjection.
-    const TProj3f& getRenderProjection() const;
 
     f32 getNearZ() const {
         return mNearZ;
@@ -42,7 +39,4 @@ public:
     /* 0xB4 */ f32 mFarZ;
     /* 0xB8 */ f32 mFovy;
     /* 0xBC */ TVec2f mShakeOffset;
-#ifdef TARGET_PC
-    /* 0xC4 */ TProj3f mRenderProjection;  // only kept up to date while reduced motion is on
-#endif
 };

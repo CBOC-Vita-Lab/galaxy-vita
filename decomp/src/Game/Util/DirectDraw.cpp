@@ -663,7 +663,7 @@ namespace TDDraw {
         f32 projection[7];
         f32 viewport[6];
         GXGetViewportv(viewport);
-        const TProj3f& rProjection = MR::getCameraRenderProjectionMtx();  // drawn: reduced-motion shake
+        const TProj3f& rProjection = MR::getCameraProjectionMtx();
         projection[0] = 0.0f;
         projection[1] = rProjection.mMtx[0][0];
         projection[2] = rProjection.mMtx[0][2];

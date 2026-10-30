@@ -213,7 +213,7 @@ bool ScenarioSelectScene::isResetEnd() const {
 
 void ScenarioSelectScene::setupCameraMtx() const {
     PSMTXCopy(mCameraContext->getViewMtx(), j3dSys.mViewMtx);
-    GXSetProjection(mCameraContext->getRenderProjection(), GX_PERSPECTIVE);
+    GXSetProjection(mCameraContext->mProjection, GX_PERSPECTIVE);
 }
 
 bool ScenarioSelectScene::trySetCurrentScenarioNo() const {

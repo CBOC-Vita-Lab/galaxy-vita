@@ -1,9 +1,10 @@
 // Reduced motion (platform/include/port/reduced_motion.h): shake scale, flash cap, off = identity, the GXV_REDUCED_MOTION switch, and
-// the projection arithmetic the camera context uses (the real TProj3f from the decomp's JGeometry).
+// the projection arithmetic the camera context uses (shake, blur, flash cap) (the real TProj3f from the decomp's JGeometry).
 //   reduced_motion            the arithmetic checks
 //   reduced_motion --env 0|1  the switch as the process was started (Enabled() is read once)
 #include "port/reduced_motion.h"
 #include <JSystem/JGeometry.hpp>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -48,7 +49,7 @@ int main(int argc, char** argv) {
     assert(!Enabled() || std::getenv("GXV_REDUCED_MOTION"));  // default off
 
     // The numbers the Settings text promises.
-    assert(kShakeScale == 0.25f && kFlashAlphaCap == 0.40f);
+    assert(kShakeScale == 0.25f && kBlurScale == 0.5f && kFlashAlphaCap == 0.40f);
 
     // Off is identity, bit for bit, for every value including the odd ones.
     for (float v : {0.0f, -0.0f, 1.0f, -1.0f, 0.08f, 9.0f, 123.456f, -0.5625f, 1e-38f, 3.4e38f, INFINITY, -INFINITY, NAN})
@@ -99,9 +100,27 @@ int main(int argc, char** argv) {
         last = c;
     }
 
-    // The projection: the camera context folds the shake into the projection as a translation, so scaling the offset scales
-    // the shake on screen, linearly, and nothing else in the matrix changes.
+    // The blur: half the offset and half the opacity; off is the same bits.
+    for (float v : {0.0f, 1.0f, 15.0f, 80.0f, 255.0f, 0.3f}) {
+        assert(Bits(BlurScale(v, false)) == Bits(v));
+        assert(BlurScale(v, true) == v * 0.5f && BlurScale(v, true) <= v);
+    }
+    for (int alpha : {0, 1, 80, 255}) for (int step = 0; step <= 30; ++step) {  // CenterScreenBlur::draw: u8 b = mAlpha * mBlendRate
+        const float rate = step / 30.0f;
+        const uint8_t full = static_cast<uint8_t>(alpha * rate), calm = static_cast<uint8_t>(BlurScale(static_cast<float>(alpha) * rate, true));
+        assert(calm <= full && calm >= full / 2 - 1);
+    }
+
+    // The projection: the camera context folds the shake into the projection as a translation, and with the option on it folds in the
+    // scaled offset. That one projection is what the renderer, calcScreenPosition, the Star Pointer hit-test and the HUD marks read,
+    // so a point's screen position moves a quarter as far, and the pointer, which is a screen position, hits what is drawn.
     const TProj3f rest = Projection(0.0f, 0.0f);
+    // CameraUtil calcNormalizedScreenPositionFromView, for a view-space point.
+    auto screenOf = [](const TProj3f& p, float x, float y, float z, float* sx, float* sy) {
+        const float w = -z;
+        *sx = (x * p.mMtx[0][0] + z * p.mMtx[0][2]) / w;
+        *sy = -((y * p.mMtx[1][1] + z * p.mMtx[1][2]) / w);
+    };
     for (auto [x, y] : {std::pair<float, float>{0.0f, 0.0f}, {0.0f, 0.5f}, {-0.3f, 0.07f}, {0.56f, -0.56f}}) {
         const TProj3f full = Projection(x, y), calm = Projection(ShakeScale(x, true), ShakeScale(y, true)), same = Projection(ShakeScale(x, false), ShakeScale(y, false));
         for (int i = 0; i < 4; ++i)
@@ -112,10 +131,17 @@ int main(int argc, char** argv) {
                     assert(Bits(calm.mMtx[i][j]) == Bits(full.mMtx[i][j]));            // lens, depth range, aspect: untouched
                 } else {
                     const float shakeFull = full.mMtx[i][j] - rest.mMtx[i][j], shakeCalm = calm.mMtx[i][j] - rest.mMtx[i][j];
-                    assert(std::fabs(shakeCalm - shakeFull * 0.25f) <= 1e-6f);        // the screen shift is a quarter
+                    assert(std::fabs(shakeCalm - shakeFull * 0.25f) <= 1e-6f);        // the shake in the projection is a quarter
                 }
             }
+        for (auto [px, py, pz] : {std::array<float, 3>{0, 0, -1000}, {300, -120, -2500}, {-800, 450, -400}}) {
+            float rx, ry, fx, fy, cx, cy;
+            screenOf(rest, px, py, pz, &rx, &ry);
+            screenOf(full, px, py, pz, &fx, &fy);
+            screenOf(calm, px, py, pz, &cx, &cy);
+            assert(std::fabs((cx - rx) - (fx - rx) * 0.25f) <= 1e-5f && std::fabs((cy - ry) - (fy - ry) * 0.25f) <= 1e-5f);
+        }
     }
-    std::puts("reduced_motion: switch, scale, cap, identity and projection arithmetic passed");
+    std::puts("reduced_motion: switch, shake and blur scale, cap, identity and projection arithmetic passed");
     return 0;
 }

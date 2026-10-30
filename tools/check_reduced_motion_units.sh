@@ -4,8 +4,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-units=(Camera/CameraContext Util/CameraUtil LiveActor/MaterialCtrl LiveActor/MirrorCamera Util/DrawUtil Util/DirectDraw
-       Scene/ScenarioSelectScene Screen/WipeFade)
+units=(Camera/CameraContext Screen/CenterScreenBlur
+       Screen/WipeFade)
 inc=(-Iplatform/include -Idecomp/include -Idecomp/libs/JSystem/include -Idecomp/libs/RVL_SDK/include -Idecomp/libs/nw4r/include
      -Idecomp/libs/RVLFaceLib/include)
 common=(-DTARGET_PC=1 -DNDEBUG=1 -DVERSION=0 -fshort-wchar -fsigned-char -fno-strict-aliasing -fwrapv -fms-extensions -ferror-limit=0

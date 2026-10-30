@@ -230,7 +230,7 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
         if(!session.features.fixed30&&(state.working.fpsLimit==30||state.working.fpsLimit==kSteady30))note="Locked 30 saved; unavailable in this build. Current rate unchanged.";
         else if(state.row==0&&state.working.fpsLimit!=0)note="Locked 30: an even 30 FPS, every frame, at full effects.";
         else if(state.row==0)note="Up to 60: as fast as each scene allows, with 30 as the floor.";
-        else if(state.row==3)note="Less camera shake and softer flashes.";
+        else if(state.row==3)note="Less camera shake and screen blur.";
         if(!session.overrides.empty()) {
             r.asset(60,372,28,kButtonSquare);note="Developer Overrides ("+std::to_string(session.overrides.size())+")";r.text(100,377,note,muted,792,true);
         } else r.text(60,377,note,muted,832,true);
