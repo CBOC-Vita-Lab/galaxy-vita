@@ -3,13 +3,22 @@
 tour (PETARI_STAGE list, PETARI_STAGE_HOLD frames of gameplay in each) with a pad script that wanders: stick forwards
 with turns, star-spin, jump, pointer sweeps with B (star-bit shots) and A taps for speech boxes.
 
-    python3 -I tools/pgo/make_tour_route.py [hold-seconds] > tools/pgo/routes/tour.txt
+    python3 -I tools/pgo/make_tour_route.py [hold-seconds [Galaxy:scenario ...]] > tools/pgo/routes/tour.txt
 
-Times are game seconds (the harness runs on a virtual clock).  The stage list is the one the recorded profile used."""
+Times are game seconds (the harness runs on a virtual clock).  Without a list: the one of routes/tour.txt.  The other routes
+were made with the lists below (45 s each); a run needs about 80 + 70 seconds per galaxy, and a battle that does not end
+holds the tour (tour3 stayed in the first Bowser battle):
+  tour2  OceanRingGalaxy SurfingLv1Galaxy HoneyBeeKingdomGalaxy IceVolcanoGalaxy BattleShipGalaxy FactoryGalaxy (:1 each; ended in
+         Factory at 800 s) and four more that it never reached
+  tour3  KoopaBattleVs1Galaxy:1 (the other four of its list were not reached)
+  tour4  TamakoroExLv1Galaxy StarDustGalaxy FlipPanelExGalaxy TriLegLv1Galaxy (:1 each)
+"""
 import sys
 
 STAGES = ["AstroGalaxy:1", "EggStarGalaxy:1", "EggStarGalaxy:2", "HeavenlyBeachGalaxy:1", "KoopaBattleVs3Galaxy:1"]
 hold = int(sys.argv[1]) if len(sys.argv) > 1 else 45
+if len(sys.argv) > 2:
+    STAGES = sys.argv[2:]
 
 out = ["# PGO tour route (tools/pgo/make_tour_route.py): menu path of opening.txt, storybook skipped by a hold of A,",
        "# then each galaxy of PETARI_STAGE for %d s of gameplay with a wandering pad script." % hold,

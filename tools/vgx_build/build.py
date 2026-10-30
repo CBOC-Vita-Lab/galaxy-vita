@@ -7,6 +7,7 @@ Stages: source (the 1,834 game units, Clang), lto (the same units as ThinLTO bit
 runtime (the Vita runtime and the vgx renderer), link (eboot.bin). `all` runs them in that order.
 """
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -101,6 +102,8 @@ def prepare_profile(profile, root, directory, env):
     A profile recorded in another checkout is rewritten to this one's path with llvm-profdata, so that the functions
     with internal linkage still match; one without such functions, or from this checkout, is copied unchanged."""
     data = profile.read_bytes()
+    if profile.suffix == ".gz":
+        data = gzip.decompress(data)
     if not data.startswith(PROFDATA_MAGIC):
         raise ValueError(f"{profile} is not an indexed profile: merge the .profraw files with llvm-profdata merge -o")
     directory.mkdir(parents=True, exist_ok=True)
@@ -110,8 +113,11 @@ def prepare_profile(profile, root, directory, env):
         tool = shutil.which("llvm-profdata", path=env["PATH"]) or shutil.which("llvm-profdata-18", path=env["PATH"])
         if not tool:
             raise ValueError(f"The profile was recorded in {prefix}; rewriting it for {root} needs llvm-profdata")
+        plain = directory / "profile-input.profdata"
+        plain.write_bytes(data)
         text = directory / "profile.txt"
-        run([tool, "merge", "--text", "-o", text, profile], env)
+        run([tool, "merge", "--text", "-o", text, plain], env)
+        plain.unlink()
         body = text.read_bytes()
         found = PROFILE_TEXT_PATH_RX.search(body)
         if found:
@@ -224,7 +230,7 @@ def main():
     parser.add_argument("--logging", action="store_true",
                         help="a test build that keeps the port's log (ux0:data/smg/log.txt); never for a release")
     parser.add_argument("--pgo-profile", type=Path, default=None, metavar="FILE.profdata",
-                        help="compile the game units with this merged clang profile (-fprofile-use; tools/pgo/README.md); "
+                        help="compile the game units with this merged clang profile, .profdata or .profdata.gz (-fprofile-use; tools/pgo/README.md); "
                              "default none: the plain build")
     parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.2)")
     args = parser.parse_args()

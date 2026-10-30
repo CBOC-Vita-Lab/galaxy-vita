@@ -80,6 +80,22 @@ class PgoBuildTests(unittest.TestCase):
             self.assertRegex(out.name, r"^[0-9a-f]{12}\.profdata$")
 
     @unittest.skipUnless(PROFDATA, "llvm-profdata not installed")
+    def test_gzipped_profile_is_unpacked(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as directory:
+            profile = make_profile(directory, "/work/checkout")
+            packed = Path(directory) / "p.profdata.gz"
+            packed.write_bytes(gzip.compress(profile.read_bytes()))
+            with redirect_stdout(io.StringIO()):
+                out = self.builder.prepare_profile(packed, Path("/work/checkout"), Path(directory) / "pgo",
+                                                   dict(os.environ))
+            self.assertEqual(out.read_bytes(), profile.read_bytes())
+            with redirect_stdout(io.StringIO()):
+                moved = self.builder.prepare_profile(packed, Path("/elsewhere"), Path(directory) / "pgo2",
+                                                     dict(os.environ))
+            self.assertIn("/elsewhere/decomp/src/Game/a.cpp;_ZL1fv", show_text(moved))
+
+    @unittest.skipUnless(PROFDATA, "llvm-profdata not installed")
     def test_profile_of_another_checkout_names_its_static_functions_here(self):
         with tempfile.TemporaryDirectory() as directory:
             profile = make_profile(directory, "/recorded/elsewhere")
