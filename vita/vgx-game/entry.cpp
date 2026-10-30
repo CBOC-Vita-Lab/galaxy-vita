@@ -299,7 +299,7 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // busy stretch (not 120 s); one pass over the lights when a lit channel's colour and alpha share their light set.
     for (const char* name : {"GXV_FIX_INDPREV", "GXV_FIX_DSTA", "GXV_FIX_LOGICOP", "GXV_FIX_TEXOFF", "GXV_NODISCARD", "GXV_THPHW",
                              "GXV_VBLANK_PRIO", "GXV_TAP_CLEAN", "GXV_SHAKE_LATCH", "GXV_COPYVAR", "GXV_AUTOQ_RECOVER",
-                             "GXV_LTMERGE"})
+                             "GXV_LTMERGE", "GXV_PALROWS"})
         setenv(name, "1", 0);
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
