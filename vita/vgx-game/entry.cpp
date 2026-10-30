@@ -307,6 +307,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // The loading screen (the title picture with the loading bar) can never sit at 99 %: if the game has been running pictures in
     // the last loading stage for 60 s without the title logo being recognised, the screen fades out and the game's own picture shows.
     setenv("GXV_BOOT_TITLE_FALLBACK", "60", 0);
+    // 30 FPS is the floor in every picture rate (Up to 60 stays the default): dynamic quality budgets the whole picture's work
+    // (two game turns, the renderer, the GPU) against 33 ms and lowers resolution only when a scene would fall below 30.
+    setenv("GXV_AUTOQ_TARGET", "30", 0);
     // Consecutive rigid draws that differ only in their matrix drawn as one, through the 10-matrix palette (GXV_RIGIDMERGE=1;
     // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs) stays a test switch.
     setenv("GXV_RIGIDMERGE", "1", 0);

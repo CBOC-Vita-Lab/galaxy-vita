@@ -37,5 +37,8 @@ int main() {
     assert(!getenv("GXV_PACE")&&!getenv("GXV_AUTOQ_TARGET")&&!getenv("GXV_FXHALF"));c.fpsLimit=kSteady30;ApplyStartup(c,true);
     assert(!getenv("GXV_PACE")&&std::string(getenv("GXV_FPS_LIMIT"))=="30"&&std::string(getenv("GXV_AUTOQ_TARGET"))=="30"&&!getenv("GXV_FXHALF"));
     unsetenv("GXV_FPS_LIMIT");unsetenv("GXV_AUTOQ_TARGET");unsetenv("GXV_FXHALF");
+    // The start-up default GXV_AUTOQ_TARGET=30 (the 30 FPS floor) is not reported as an override; another value is.
+    setenv("GXV_AUTOQ_TARGET","30",1);c.fpsLimit=0;assert(ApplyStartup(c,true).empty());
+    setenv("GXV_AUTOQ_TARGET","60",1);assert(ApplyStartup(c,true).size()==1);unsetenv("GXV_AUTOQ_TARGET");
     std::cout<<"launch: exact dispatch, Play precedence, regional catalogs, gates and overrides passed\n";
 }

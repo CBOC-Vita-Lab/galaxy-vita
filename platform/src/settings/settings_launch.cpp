@@ -54,6 +54,8 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
         if(const char* raw=std::getenv(key)) {
             // Remapping is on by default (the start-up default sets GXV_REMAP=1); only turning it off is an override.
             if(std::strcmp(key,"GXV_REMAP")==0&&std::strcmp(raw,"1")==0)continue;
+            // The 30 FPS floor of dynamic quality is on by default (GXV_AUTOQ_TARGET=30, set at start-up) in every picture rate.
+            if(std::strcmp(key,"GXV_AUTOQ_TARGET")==0&&std::strcmp(raw,"30")==0)continue;
             std::string effective=raw;
             if(std::strcmp(key,"GXV_FPS_LIMIT")==0) effective=std::strcmp(raw,"30")==0?"30 FPS requested (driver capability required)":"Existing picture-rate path";
             if(std::strcmp(key,"GXV_REMAP")==0) effective=std::strcmp(raw,"0")==0?"Remapping disabled":"Remapping off (unknown value)";
