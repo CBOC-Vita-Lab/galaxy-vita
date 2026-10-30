@@ -66,8 +66,9 @@ void Change(UiState& s,int direction) {
     switch(s.row) {
         case 0: {
             // Right moves along the screen (30 FPS, Steady 30, Up to 60) and wraps; fixed 30 needs the driver capability.
-            if(!s.session->features.fixed30&&s.working.fpsLimit==30) {s.message="Fixed 30 FPS unavailable in this build";break;}
-            std::vector<int> rates{0};if(s.session->features.fixed30)rates.push_back(30);rates.push_back(kSteady30);
+            if(!s.session->features.fixed30&&(s.working.fpsLimit==30||s.working.fpsLimit==kSteady30)) {s.message="Fixed 30 FPS unavailable in this build";break;}
+            // Steady 30 is built on the fixed 30 ceiling, so both need the driver capability.
+            std::vector<int> rates{0};if(s.session->features.fixed30){rates.push_back(30);rates.push_back(kSteady30);}
             auto at=std::find(rates.begin(),rates.end(),s.working.fpsLimit);const int n=static_cast<int>(rates.size());
             const int index=at==rates.end()?0:static_cast<int>(at-rates.begin());
             s.working.fpsLimit=rates[static_cast<size_t>((index+direction+n)%n)];break;

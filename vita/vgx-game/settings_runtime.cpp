@@ -393,7 +393,7 @@ extern "C" int port_settings_input_service(void) {
     }
     static uint64_t pollAfter = 0;
     if (Now() >= pollAfter) {
-        pollAfter = Now() + 250000;
+        pollAfter = Now() + 1000000;  // once a second: the LiveArea request is a tap, and each check is a system call on the input core
         if (TakeLaunch() == LaunchRequest::Settings) port_settings_request();
     }
     return 0;
