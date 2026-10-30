@@ -18,6 +18,9 @@
 //   - runs the AAN IDCT on NEON (four lanes), straight into the 8x4 tiles of the output planes;
 //   - can decode pictures on worker threads a picture or two ahead of the game (see "Pipeline"): the game thread
 //     (and the audio mixer on its core) then only copies the finished planes.
+// Optionally (Vita only, GXV_THPHW=1, default off; see "Hardware path") a worker hands the frame to the console's JPEG
+// decoder instead: thpToStandardJpeg() turns the THP stream into a standard JPEG (byte stuffing put back, restart markers
+// put back, end-of-image appended), and the decoder's planar YCbCr output is re-tiled into the same GX I8 planes.
 #ifdef THP_STANDALONE  // host-side test build (tools/thp_test)
 #include <stdint.h>
 typedef uint8_t u8;
@@ -51,6 +54,9 @@ typedef int BOOL;
 
 #if defined(__vita__) && !defined(THP_STANDALONE)
 #include <psp2/kernel/threadmgr.h>
+#define THP_HW 1  // the hardware JPEG path is compiled in (it still needs GXV_THPHW=1 at run time)
+#include <psp2/jpeg.h>
+#include <psp2/kernel/sysmem.h>
 #endif
 
 extern "C" void port_gpu_memory_written(void* addr, uint32_t size);
@@ -519,6 +525,9 @@ void idctToTemp(const float* in0, int count, u8* out /* 8x8 */) {
 
 // Writes an 8x8 block at (x, y) into an I8 texture of the given size, clipped (the picture's edge).
 void storeBlockClipped(u8* plane, u32 width, u32 height, u32 x, u32 y, const u8* px) {
+    if (x >= width) {
+        return;  // a block wholly right of the picture (width 1..8 more than a multiple of 16): no tile of its own, it would wrap into the next row
+    }
     u32 tilesPerRow = (width + 7) / 8;
     for (u32 r = 0; r < 8 && y + r < height; r++) {
         u32 row = y + r;
@@ -663,6 +672,275 @@ s32 decodeFrame(Decoder& d, const void* file, u32 limit, u8* tileY, u8* tileU, u
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stream fix-up for a standard JPEG decoder (the Vita's hardware one).  What a THP frame lacks compared with a JPEG file:
+//   - the 0xFF 0x00 byte stuffing of the entropy-coded data (a 0xFF there is plain data), so every 0xFF is stuffed again;
+//   - the RSTn markers: a restart interval (DRI) only realigns the stream to the next byte, so at every interval end the
+//     last byte is padded with 1 bits and the next marker of the cycle D0..D7 is written.  Where the intervals end is
+//     only known by reading the symbols, so with a DRI the scan is walked once without reconstructing (skipBlock);
+//   - the end-of-image marker, which may be missing, may be followed by padding, and is appended in any case.
+// Headers are copied as they are (SOF0, DQT, DHT, DRI, SOS); APPn and COM segments are dropped.  The tables must come
+// with the frame (a standard decoder has no tables of its own to fall back on): a frame without them is refused.
+// ---------------------------------------------------------------------------
+struct JpegOut {
+    u8* base;
+    u32 cap;
+    u32 n;
+    bool bad;
+    void put(const u8* p, size_t len) {
+        if (bad || len > cap - n) {
+            bad = true;
+            return;
+        }
+        memcpy(base + n, p, len);
+        n += (u32)len;
+    }
+    void put2(u8 a, u8 b) {
+        const u8 two[2] = {a, b};
+        put(two, 2);
+    }
+    void putStuffed(const u8* p, size_t len) {
+        while (len) {
+            const u8* ff = (const u8*)memchr(p, 0xFF, len);
+            const size_t chunk = ff ? (size_t)(ff - p) : len;
+            put(p, chunk);
+            if (!ff) {
+                break;
+            }
+            put2(0xFF, 0x00);
+            p = ff + 1;
+            len -= chunk + 1;
+        }
+    }
+    // bytes [p, p + len) of the scan; `padMask` (the unused low bits of the last byte, set to 1 as a restart interval's
+    // end requires) is OR-ed into the last byte
+    void putScanBytes(const u8* p, size_t len, u8 padMask) {
+        if (padMask && len) {
+            putStuffed(p, len - 1);
+            const u8 last = p[len - 1] | padMask;
+            if (last == 0xFF) {
+                put2(0xFF, 0x00);
+            } else {
+                put(&last, 1);
+            }
+        } else {
+            putStuffed(p, len);
+        }
+    }
+};
+
+// Reads one block's symbols without making the block: the same bits decodeBlock() consumes.
+inline void skipBlock(const u8* base, u32& pos, const Component& c, const Decoder& d) {
+    const Huffman& dcTable = d.huff[c.dc];
+    u32 w = peek(base, pos);
+    int len, s;
+    u16 e = dcTable.look[w >> (32 - Huffman::kLookBits)];
+    if (e) {
+        len = e >> 8;
+        s = e & 0xFF;
+    } else {
+        s = slowSymbol(dcTable, w, len);
+    }
+    pos += len + (s & 15);
+    const Huffman& ac = d.huff[c.ac];
+    int k = 1;
+    while (k < 64) {
+        w = peek(base, pos);
+        e = ac.look[w >> (32 - Huffman::kLookBits)];
+        int rs;
+        if (e) {
+            len = e >> 8;
+            rs = e & 0xFF;
+        } else {
+            rs = slowSymbol(ac, w, len);
+        }
+        const int mag = rs & 15;
+        pos += len + mag;
+        if (mag) {
+            k += (rs >> 4) + 1;
+        } else if ((rs >> 4) == 15) {
+            k += 16;
+        } else {
+            break;
+        }
+    }
+}
+
+// The bits of the byte at bit position `pos` that follow it (those a restart interval's end pads with 1s).
+inline u8 unusedBits(u32 pos) { return (pos & 7) ? (u8)(0xFF >> (pos & 7)) : (u8)0; }
+
+// Which Huffman tables (id * 2 + class) a DHT segment (`seg` points at its length field) defines.
+u8 huffmanTablesIn(const u8* seg, u32 len) {
+    u8 seen = 0;
+    const u8* p = seg + 2;
+    const u8* e = seg + len;
+    while (p + 17 <= e) {
+        const u8 cls = *p >> 4, id = *p & 15;
+        u32 total = 0;
+        for (int l = 0; l < 16; l++) {
+            total += p[1 + l];
+        }
+        if (cls > 1 || id > 1) {
+            break;
+        }
+        seen |= (u8)(1 << (id * 2 + cls));
+        p += 17 + total;
+    }
+    return seen;
+}
+
+// Writes a standard JPEG for the THP frame `file` (`size` bytes, followed by at least 64 readable bytes) to `out`
+// (`outCap` bytes; twice the frame plus a few hundred bytes always suffice).  Returns 0, or an error code (the frame is not
+// one this fix-up handles: decode it in software).  `d` is only used for its table state (a worker's own decoder).
+[[maybe_unused]] s32 thpToStandardJpeg(Decoder& d, const void* file, u32 size, u8* out, u32 outCap, u32* outSize, u32* width,
+                                       u32* height) {
+    d.restartInterval = 0;
+    d.width = d.height = 0;
+    JpegOut o = {out, outCap, 0, false};
+    const u8* c = (const u8*)file;
+    const u8* end = c + size;
+    bool sawFrame = false, sawQuant = false;
+    u8 seenHuff = 0;
+    for (;;) {
+        if (c >= end || *c++ != 0xFF) {
+            return kErrBadSyntax;
+        }
+        while (c < end && *c == 0xFF) {
+            c++;
+        }
+        if (c >= end) {
+            return kErrBadSyntax;
+        }
+        const u8 marker = *c++;
+        if (marker == 0xD8) {  // SOI
+            o.put2(0xFF, 0xD8);
+            continue;
+        }
+        if (end - c < 2) {
+            return kErrBadSyntax;
+        }
+        const u32 len = read16(c);
+        if (len < 2 || len > (u32)(end - c)) {
+            return kErrBadSyntax;
+        }
+        const u8* seg = c;  // the segment's length field
+        const u8* p = seg;
+        s32 status = 0;
+        bool copy = true;
+        switch (marker) {
+        case 0xC0:  // SOF0
+            if (len < 17) {
+                return kErrBadSyntax;
+            }
+            status = readFrameHeader(d, p);
+            sawFrame = true;
+            break;
+        case 0xC4:  // DHT
+            status = readHuffman(d, p, seg + len);
+            seenHuff |= huffmanTablesIn(seg, len);
+            break;
+        case 0xDB:  // DQT
+            sawQuant = true;
+            break;
+        case 0xDD:  // DRI
+            if (len != 4) {
+                return kErrBadSyntax;
+            }
+            d.restartInterval = read16(seg + 2);
+            break;
+        case 0xDA: {  // SOS: the entropy-coded data follows
+            if (len != 12 || !sawFrame || !sawQuant || !d.width || !d.height) {
+                return kErrBadSyntax;
+            }
+            status = readScanHeader(d, p);
+            if (status) {
+                return status;
+            }
+            for (int i = 0; i < 3; i++) {
+                if (!(seenHuff & (1 << d.comp[i].dc)) || !(seenHuff & (1 << d.comp[i].ac))) {
+                    return kErrBadTable;
+                }
+            }
+            o.put2(0xFF, marker);
+            o.put(seg, len);
+            const u8* data = seg + len;
+            const u32 avail = (u32)(end - data);
+            if (!d.restartInterval) {
+                // One run of bits to the end: cut a trailing end-of-image marker and the padding after it.
+                u32 n = avail;
+                u32 e = avail;
+                while (e > 0 && data[e - 1] == 0) {
+                    e--;
+                }
+                if (e >= 2 && data[e - 2] == 0xFF && data[e - 1] == 0xD9) {
+                    n = e - 2;
+                }
+                o.putStuffed(data, n);
+            } else {
+                const u32 mcusX = (d.width + 15) / 16, mcusY = (d.height + 15) / 16;
+                const u64 mcus = (u64)mcusX * mcusY;
+                const u64 limitBits = (u64)avail * 8;
+                u32 pos = 0, segStart = 0, untilRestart = d.restartInterval, rst = 0;
+                for (u64 m = 0; m < mcus; m++) {
+                    if (pos + 64 > limitBits) {
+                        return kErrBadSyntax;  // truncated: the software decoder keeps what it got
+                    }
+                    for (int b = 0; b < 4; b++) {
+                        skipBlock(data, pos, d.comp[0], d);
+                    }
+                    skipBlock(data, pos, d.comp[1], d);
+                    skipBlock(data, pos, d.comp[2], d);
+                    if (--untilRestart == 0) {
+                        untilRestart = d.restartInterval;
+                        if (m + 1 < mcus) {
+                            const u32 byteEnd = (pos + 7) >> 3;
+                            if (byteEnd > avail) {
+                                return kErrBadSyntax;
+                            }
+                            o.putScanBytes(data + segStart, byteEnd - segStart, unusedBits(pos));
+                            o.put2(0xFF, (u8)(0xD0 + (rst++ & 7)));
+                            segStart = byteEnd;
+                            pos = byteEnd * 8;
+                        }
+                    }
+                }
+                const u32 byteEnd = (pos + 7) >> 3;
+                if (byteEnd > avail || byteEnd < segStart) {
+                    return kErrBadSyntax;
+                }
+                o.putScanBytes(data + segStart, byteEnd - segStart, unusedBits(pos));
+            }
+            o.put2(0xFF, 0xD9);
+            if (o.bad) {
+                return kErrBadSyntax;
+            }
+            *outSize = o.n;
+            *width = d.width;
+            *height = d.height;
+            return 0;
+        }
+        default:
+            if ((marker >= 0xE0 && marker <= 0xEF) || marker == 0xFE) {
+                copy = false;  // APPn, COM
+            } else {
+                return kErrUnsupportedMarker;
+            }
+            break;
+        }
+        if (status) {
+            return status;
+        }
+        if (copy) {
+            o.put2(0xFF, marker);
+            o.put(seg, len);
+        }
+        c = seg + len;
+        if (o.bad) {
+            return kErrBadSyntax;
+        }
+    }
+}
+
 Decoder sDec;  // the calling thread's own decoder (synchronous mode)
 
 // ---------------------------------------------------------------------------
@@ -690,6 +968,408 @@ struct Slot {
     u64 seq = 0;
 };
 
+int envInt(const char* name, int fallback) {
+    const char* e = getenv(name);
+    return e && *e ? atoi(e) : fallback;
+}
+
+#if defined(THP_HW)
+// ---------------------------------------------------------------------------
+// Hardware path (Vita, GXV_THPHW=1; default off).  A worker turns the THP frame into a standard JPEG (thpToStandardJpeg)
+// in its own buffer, copies it into the codec's memory, and calls sceJpegDecodeMJpegYCbCr; the YCbCr 4:2:0 planes come
+// back in the same memory and are re-tiled into the slot's GX I8 planes.  Anything that does not work for a frame (a
+// stream the fix-up does not take, a decoder error, memory that could not be had) leaves the frame to the software decoder;
+// each kind of failure is logged once, and 16 failures in a row switch the hardware path off for the session.
+//
+// Memory: the codec reads and writes physically contiguous memory that the CPU does not cache (so there is nothing to
+// flush or invalidate): one block per worker, from SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW (GXV_THPHW_MEM=1:
+// ..._MAIN_NC_RW), holding the JPEG (twice the largest THP frame plus headers: stuffing at most doubles it), the codec's
+// coefficient work buffer (GXV_THPHW_COEF_KB, else 3 bytes a pixel of the 16-aligned picture) and the YCbCr output
+// (4:2:0, strides up to 64-aligned and 32 rows of alignment allowed for).  The blocks are sized when the first frame of a
+// movie says how large it is (640x368 needs about 1.3 MB, rounded up to the 1 MiB of the block type; 640x480 about 1.6 MB),
+// and made again only for a larger picture.  Pictures over 1024x768 pixels stay in software.
+//
+// The layout of the output (plane order, row pitch and the rows each plane is padded to) is not documented in the SDK
+// header, so the first hardware picture of every movie size is also decoded in software and compared with the hardware's
+// at sampled points over a set of plausible layouts; the one that matches (mean difference <= 4 levels in luma and <= 6 in
+// chroma) is used from then on, and when none does the hardware path is switched off.  The libraries do not need a module
+// load (SceJpeg is a resident library; only the ...Arm variants need SCE_SYSMODULE_INTERNAL_JPEG_ARM); the importer is
+// SceJpeg_stub.
+// ---------------------------------------------------------------------------
+#define THP_LOG(...)             \
+    do {                         \
+        if (port_log) port_log(__VA_ARGS__); \
+    } while (0)
+
+struct HwCtx {
+    SceUID uid = -1;
+    u32 w = 0, h = 0;  // the picture size the block was sized for
+    u8 *in = nullptr, *coef = nullptr, *out = nullptr;
+    u32 inCap = 0, coefCap = 0, outCap = 0;
+    bool failed = false;  // no memory could be had: this worker stays in software
+    std::vector<u8> fix, tmpU, tmpV;
+};
+
+// Output layout: order 0 = Y, U, V planes; 1 = Y, V, U; 2 = Y then interleaved UV; 3 = Y then interleaved VU.
+// Chroma planes are strideY / 2 wide (planar) or strideY (interleaved) and rowsY / 2 rows (rounded up).
+struct HwLayout {
+    u32 w = 0, h = 0, strideY = 0, rowsY = 0;
+    int order = 0;
+};
+
+struct HwShared {
+    std::mutex engine;  // one hardware decoder: one call at a time
+    std::mutex mu;      // guards inited, layout, probing
+    std::atomic<int> state{0};  // 0 = layout not verified yet, 1 = verified, 2 = switched off
+    bool inited = false, initFailed = false, probing = false;
+    HwLayout layout;
+    std::atomic<int> consecutiveFails{0};
+    std::atomic<bool> loggedFix{false}, loggedCall{false}, loggedMem{false};
+    std::atomic<u64> frames{0}, usFix{0}, usCall{0}, usConv{0}, softFrames{0};
+};
+HwShared gHw;
+
+inline u32 alignUp(u32 v, u32 a) { return (v + a - 1) & ~(a - 1); }
+
+void hwOff(const char* why) {
+    if (gHw.state.exchange(2) != 2) {
+        THP_LOG("THP hardware JPEG: switched off (%s); pictures are decoded in software", why);
+    }
+}
+
+bool hwEnsureInit() {
+    std::lock_guard<std::mutex> lock(gHw.mu);
+    if (gHw.inited) {
+        return true;
+    }
+    if (gHw.initFailed) {
+        return false;
+    }
+    const int r = sceJpegInitMJpeg(1);
+    if (r < 0) {
+        gHw.initFailed = true;
+        THP_LOG("THP hardware JPEG: sceJpegInitMJpeg failed 0x%08x", (unsigned)r);
+        gHw.state.store(2);
+        return false;
+    }
+    gHw.inited = true;
+    THP_LOG("THP hardware JPEG: decoder initialised");
+    return true;
+}
+
+bool hwEnsureMemory(HwCtx& ctx, u32 w, u32 h) {
+    if (ctx.failed) {
+        return false;
+    }
+    if (ctx.uid >= 0 && ctx.w == w && ctx.h == h) {
+        return true;
+    }
+    static const int memType = envInt("GXV_THPHW_MEM", 0);          // 0 = physically contiguous, 1 = plain uncached
+    static const int coefKb = envInt("GXV_THPHW_COEF_KB", 0);       // coefficient work buffer in KiB (0 = 3 bytes a pixel)
+    const u32 w16 = alignUp(w, 16), h16 = alignUp(h, 16);
+    if (!w || !h || (u64)w16 * h16 > 1024u * 768u) {
+        return false;  // (not a failure of the memory: this picture is simply too large for the path)
+    }
+    const u32 outCap = alignUp(alignUp(w, 64) * alignUp(h, 32) * 3 / 2 + 4096, 256);
+    const u32 inCap = alignUp(2 * kFrameCap + 4096, 256);
+    const u32 coefCap = alignUp(coefKb > 0 ? (u32)coefKb * 1024 : (w16 * h16 * 3 > 256 * 1024 ? w16 * h16 * 3 : 256 * 1024), 256);
+    if (ctx.uid >= 0 && ctx.inCap >= inCap && ctx.outCap >= outCap && ctx.coefCap >= coefCap) {
+        ctx.w = w;
+        ctx.h = h;
+        return true;
+    }
+    if (ctx.uid >= 0) {
+        sceKernelFreeMemBlock(ctx.uid);
+        ctx.uid = -1;
+    }
+    const u32 gran = memType == 0 ? (1u << 20) : 4096u;
+    const u32 size = alignUp(inCap + coefCap + outCap, gran);
+    const SceKernelMemBlockType type = memType == 0 ? SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW : SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW;
+    const SceUID uid = sceKernelAllocMemBlock("thp_jpeg", type, size, nullptr);
+    void* base = nullptr;
+    if (uid < 0 || sceKernelGetMemBlockBase(uid, &base) < 0 || !base) {
+        if (uid >= 0) {
+            sceKernelFreeMemBlock(uid);
+        }
+        ctx.failed = true;
+        if (!gHw.loggedMem.exchange(true)) {
+            THP_LOG("THP hardware JPEG: cannot allocate %u KiB of codec memory (type %d, error 0x%08x); software decoding for this worker", size / 1024,
+                    memType, (unsigned)uid);
+        }
+        return false;
+    }
+    ctx.uid = uid;
+    ctx.in = (u8*)base;
+    ctx.coef = ctx.in + inCap;
+    ctx.out = ctx.coef + coefCap;
+    ctx.inCap = inCap;
+    ctx.coefCap = coefCap;
+    ctx.outCap = outCap;
+    ctx.w = w;
+    ctx.h = h;
+    ctx.fix.assign(inCap, 0);
+    THP_LOG("THP hardware JPEG: %ux%u: codec block %u KiB (jpeg %u, coefficients %u, output %u)", w, h, size / 1024, inCap / 1024, coefCap / 1024,
+            outCap / 1024);
+    return true;
+}
+
+inline u8 tileTexel(const u8* tiles, u32 width, u32 x, u32 y) {
+    const u32 tilesPerRow = (width + 7) / 8;
+    return tiles[((size_t)(y >> 2) * tilesPerRow + (x >> 3)) * 32 + (y & 3) * 8 + (x & 7)];
+}
+
+// A linear plane (`stride` bytes a row) into the GX I8 tiles of a w x h plane, clipped at the picture's edge.
+void linearToTiles(const u8* src, u32 stride, u32 w, u32 h, u8* dst) {
+    const u32 tilesPerRow = (w + 7) / 8;
+    for (u32 row = 0; row < h; row++) {
+        const u8* s = src + (size_t)row * stride;
+        u8* t = dst + ((size_t)(row >> 2) * tilesPerRow) * 32 + (row & 3) * 8;
+        u32 x = 0;
+        for (; x + 8 <= w; x += 8, t += 32) {
+            memcpy(t, s + x, 8);
+        }
+        if (x < w) {
+            memcpy(t, s + x, w - x);
+        }
+    }
+}
+
+// Chroma plane geometry of a layout.
+struct HwChroma {
+    const u8 *u, *v;
+    u32 stride;  // bytes a row of the plane the pointers index; interleaved: `step` 2
+    u32 step;
+};
+
+inline HwChroma hwChroma(const u8* o, const HwLayout& L) {
+    const u32 yBytes = L.strideY * L.rowsY;
+    const u32 rowsC = (L.rowsY + 1) / 2;
+    HwChroma c;
+    if (L.order <= 1) {
+        const u32 strideC = L.strideY / 2;
+        const u8* first = o + yBytes;
+        const u8* second = first + (size_t)strideC * rowsC;
+        c.u = L.order == 0 ? first : second;
+        c.v = L.order == 0 ? second : first;
+        c.stride = strideC;
+        c.step = 1;
+    } else {
+        c.u = o + yBytes + (L.order == 2 ? 0 : 1);
+        c.v = o + yBytes + (L.order == 2 ? 1 : 0);
+        c.stride = L.strideY;
+        c.step = 2;
+    }
+    return c;
+}
+
+u32 hwBytes(const HwLayout& L) {
+    const u32 rowsC = (L.rowsY + 1) / 2;
+    return L.strideY * L.rowsY + (L.order <= 1 ? 2 * (L.strideY / 2) * rowsC : L.strideY * rowsC);
+}
+
+void hwConvert(HwCtx& ctx, const HwLayout& L, Slot& s) {
+    const u32 w = L.w, h = L.h, cw = (w + 1) / 2, ch = (h + 1) / 2;
+    linearToTiles(ctx.out, L.strideY, w, h, s.y.data());
+    const HwChroma c = hwChroma(ctx.out, L);
+    if (c.step == 1) {
+        linearToTiles(c.u, c.stride, cw, ch, s.u.data());
+        linearToTiles(c.v, c.stride, cw, ch, s.v.data());
+    } else {
+        ctx.tmpU.resize((size_t)cw * ch);
+        ctx.tmpV.resize((size_t)cw * ch);
+        for (u32 r = 0; r < ch; r++) {
+            const u8* su = c.u + (size_t)r * c.stride;
+            const u8* sv = c.v + (size_t)r * c.stride;
+            u8* du = ctx.tmpU.data() + (size_t)r * cw;
+            u8* dv = ctx.tmpV.data() + (size_t)r * cw;
+            for (u32 x = 0; x < cw; x++) {
+                du[x] = su[x * 2];
+                dv[x] = sv[x * 2];
+            }
+        }
+        linearToTiles(ctx.tmpU.data(), cw, cw, ch, s.u.data());
+        linearToTiles(ctx.tmpV.data(), cw, cw, ch, s.v.data());
+    }
+}
+
+// Mean absolute difference at sampled points between the codec's output under layout L and the software planes (1e9: the
+// layout does not fit).  Writes the three means.
+double hwScore(const u8* o, u32 outCap, const HwLayout& L, const Slot& s, double mean[3]) {
+    const u32 w = L.w, h = L.h, cw = (w + 1) / 2, ch = (h + 1) / 2;
+    if (L.strideY < w || L.rowsY < h || (L.order <= 1 && (L.strideY & 1)) || hwBytes(L) > outCap) {
+        return 1e9;
+    }
+    const HwChroma c = hwChroma(o, L);
+    if (c.stride < cw * c.step - (c.step - 1)) {
+        return 1e9;
+    }
+    double sum[3] = {0, 0, 0};
+    u32 n[3] = {0, 0, 0};
+    const u32 ys = h / 48 ? h / 48 : 1, xs = w / 64 ? w / 64 : 1;
+    for (u32 y = 0; y < h; y += ys) {
+        for (u32 x = 0; x < w; x += xs) {
+            sum[0] += abs((int)o[(size_t)y * L.strideY + x] - (int)tileTexel(s.y.data(), w, x, y));
+            n[0]++;
+        }
+    }
+    const u32 cys = ch / 48 ? ch / 48 : 1, cxs = cw / 64 ? cw / 64 : 1;
+    for (u32 y = 0; y < ch; y += cys) {
+        for (u32 x = 0; x < cw; x += cxs) {
+            sum[1] += abs((int)c.u[(size_t)y * c.stride + x * c.step] - (int)tileTexel(s.u.data(), cw, x, y));
+            sum[2] += abs((int)c.v[(size_t)y * c.stride + x * c.step] - (int)tileTexel(s.v.data(), cw, x, y));
+            n[1]++;
+            n[2]++;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        mean[i] = n[i] ? sum[i] / n[i] : 1e9;
+    }
+    if (mean[0] > 4.0 || mean[1] > 6.0 || mean[2] > 6.0) {
+        return 1e9;
+    }
+    return mean[0] + mean[1] + mean[2];
+}
+
+// The first hardware picture of a size: decode the same frame in software (this is the picture that is shown), find the
+// layout of the codec's output.  Returns true (the slot is filled, `status` is the software decoder's).
+bool hwProbe(HwCtx& ctx, Decoder& d, Slot& s, u32 fixSize, s32& status) {
+    {
+        std::lock_guard<std::mutex> lock(gHw.mu);
+        if (gHw.probing) {
+            return false;  // another worker is at it: this picture is decoded in software the ordinary way
+        }
+        gHw.probing = true;
+    }
+    status = decodeFrame(d, s.in.data(), s.inSize, s.y.data(), s.u.data(), s.v.data());
+    HwLayout best;
+    double bestScore = 1e9, bestMean[3] = {0, 0, 0};
+    u32 infoPitch = 0;
+    if (status == 0) {
+        SceJpegOutputInfo info;
+        memset(&info, 0, sizeof(info));
+        int ir;
+        {
+            std::lock_guard<std::mutex> lock(gHw.engine);
+            ir = sceJpegGetOutputInfo(ctx.in, fixSize, 0, 0, &info);
+        }
+        THP_LOG("THP hardware JPEG: output info %d: colorSpace %d, %ux%u, size %u, pitch %u/%u %u/%u %u/%u", ir, (int)info.colorSpace, (unsigned)info.width,
+                (unsigned)info.height, (unsigned)info.outputSize, (unsigned)info.pitch[0].x, (unsigned)info.pitch[0].y, (unsigned)info.pitch[1].x,
+                (unsigned)info.pitch[1].y, (unsigned)info.pitch[2].x, (unsigned)info.pitch[2].y);
+        if (ir >= 0 && info.pitch[0].x >= s.width && info.pitch[0].x <= 4096) {
+            infoPitch = info.pitch[0].x;
+        }
+        u32 strides[5] = {s.width, alignUp(s.width, 16), alignUp(s.width, 32), alignUp(s.width, 64), infoPitch};
+        u32 rows[3] = {s.height, alignUp(s.height, 16), alignUp(s.height, 32)};
+        for (int si = 0; si < 5; si++) {
+            for (int ri = 0; ri < 3; ri++) {
+                for (int order = 0; order < 4; order++) {
+                    HwLayout L;
+                    L.w = s.width;
+                    L.h = s.height;
+                    L.strideY = strides[si];
+                    L.rowsY = rows[ri];
+                    L.order = order;
+                    double mean[3];
+                    const double score = strides[si] ? hwScore(ctx.out, ctx.outCap, L, s, mean) : 1e9;
+                    if (score < bestScore) {
+                        bestScore = score;
+                        best = L;
+                        bestMean[0] = mean[0];
+                        bestMean[1] = mean[1];
+                        bestMean[2] = mean[2];
+                    }
+                }
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(gHw.mu);
+        gHw.probing = false;
+        if (status != 0) {
+            return true;  // (the picture is bad: nothing learned, the next one probes)
+        }
+        if (bestScore < 1e9) {
+            gHw.layout = best;
+            gHw.state.store(1);
+        }
+    }
+    if (bestScore < 1e9) {
+        static const char* const kOrder[4] = {"Y,U,V", "Y,V,U", "Y,UV", "Y,VU"};
+        THP_LOG("THP hardware JPEG: %ux%u output layout verified: planes %s, row pitch %u, luma rows %u (mean difference from software: Y %.2f, U %.2f, V %.2f)",
+                best.w, best.h, kOrder[best.order], best.strideY, best.rowsY, bestMean[0], bestMean[1], bestMean[2]);
+    } else {
+        hwOff("the output did not match the software picture under any layout tried");
+    }
+    return true;
+}
+
+// Decodes the frame in slot `s` (planes sized for w x h) with the hardware decoder.  Returns true when the slot is
+// finished and `status` is its status; false: the caller decodes the frame in software.
+bool hwDecode(HwCtx& ctx, Decoder& d, Slot& s, u32 w, u32 h, s32& status) {
+    using Clock = std::chrono::steady_clock;
+    auto us = [](Clock::time_point a, Clock::time_point b) { return (u64)std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+    if (gHw.state.load() == 2 || !hwEnsureInit() || !hwEnsureMemory(ctx, w, h)) {
+        return false;
+    }
+    const auto t0 = Clock::now();
+    u32 fixSize = 0, fw = 0, fh = 0;
+    const s32 fixStatus = thpToStandardJpeg(d, s.in.data(), s.inSize, ctx.fix.data(), ctx.inCap, &fixSize, &fw, &fh);
+    if (fixStatus != 0 || fw != w || fh != h) {
+        if (!gHw.loggedFix.exchange(true)) {
+            THP_LOG("THP hardware JPEG: frame not taken by the stream fix-up (code %d, %ux%u, restart interval %u); software for such frames", (int)fixStatus, fw,
+                    fh, d.restartInterval);
+        }
+        gHw.softFrames++;
+        return false;
+    }
+    memcpy(ctx.in, ctx.fix.data(), fixSize);
+    const auto t1 = Clock::now();
+    int r;
+    {
+        std::lock_guard<std::mutex> lock(gHw.engine);
+        r = sceJpegDecodeMJpegYCbCr(ctx.in, fixSize, 0, ctx.out, ctx.outCap, ctx.coef, ctx.coefCap);
+    }
+    const auto t2 = Clock::now();
+    if (r < 0) {
+        if (!gHw.loggedCall.exchange(true)) {
+            THP_LOG("THP hardware JPEG: sceJpegDecodeMJpegYCbCr failed 0x%08x (%ux%u, %u bytes); software for failed frames", (unsigned)r, w, h, fixSize);
+        }
+        gHw.softFrames++;
+        if (gHw.consecutiveFails.fetch_add(1) + 1 >= 16) {
+            hwOff("16 decoder errors in a row");
+        }
+        return false;
+    }
+    gHw.consecutiveFails.store(0);
+    HwLayout L;
+    int state;
+    {
+        std::lock_guard<std::mutex> lock(gHw.mu);
+        L = gHw.layout;
+    }
+    state = gHw.state.load();
+    if (state == 2) {
+        return false;
+    }
+    if (state == 0 || L.w != w || L.h != h) {
+        return hwProbe(ctx, d, s, fixSize, status);
+    }
+    hwConvert(ctx, L, s);
+    const auto t3 = Clock::now();
+    gHw.usFix += us(t0, t1);
+    gHw.usCall += us(t1, t2);
+    gHw.usConv += us(t2, t3);
+    const u64 n = ++gHw.frames;
+    if ((n % 600) == 0) {
+        THP_LOG("THP hardware JPEG: %llu pictures (%llu left to software); per picture: fix-up and copy %.2f ms, decoder %.2f ms, re-tiling %.2f ms",
+                (unsigned long long)n, (unsigned long long)gHw.softFrames.load(), (double)gHw.usFix.load() / 1000.0 / (double)n,
+                (double)gHw.usCall.load() / 1000.0 / (double)n, (double)gHw.usConv.load() / 1000.0 / (double)n);
+    }
+    status = 0;
+    return true;
+}
+#endif  // THP_HW
+
 struct Pipeline {
     std::mutex mu;
     std::condition_variable work, done;
@@ -702,6 +1382,9 @@ struct Pipeline {
     int workers = 0;
     std::thread threads[kMaxWorkers];
     Decoder decoders[kMaxWorkers];
+#if defined(THP_HW)
+    HwCtx hw[kMaxWorkers];
+#endif
     std::chrono::steady_clock::time_point lastCall;
     // statistics
     u64 shown = 0, repeated = 0, skipped = 0, waits = 0, decoded = 0, fresh = 0, lagSum = 0, dropped = 0;
@@ -714,11 +1397,6 @@ Pipeline* gPipe = nullptr;
 std::mutex gPipeInitMu;
 bool gPipeInitDone = false;
 u32 gFrameSizeHint = 0;
-
-int envInt(const char* name, int fallback) {
-    const char* e = getenv(name);
-    return e && *e ? atoi(e) : fallback;
-}
 
 void pinWorker(int index) {
 #if defined(__vita__) && !defined(THP_STANDALONE)
@@ -806,7 +1484,16 @@ void workerMain(Pipeline* p, int index) {
                 }
                 const auto d0 = std::chrono::steady_clock::now();
                 const int64_t c0 = port_thread_cpu_us ? port_thread_cpu_us() : 0;
-                status = decodeFrame(d, s.in.data(), s.inSize, s.y.data(), s.u.data(), s.v.data());
+                bool done = false;
+#if defined(THP_HW)
+                static const int hwOn = envInt("GXV_THPHW", 0);  // Vita: decode on the console's JPEG hardware (see "Hardware path"); 0 = software
+                if (hwOn) {
+                    done = hwDecode(p->hw[index], d, s, w, h, status);
+                }
+#endif
+                if (!done) {
+                    status = decodeFrame(d, s.in.data(), s.inSize, s.y.data(), s.u.data(), s.v.data());
+                }
                 decodeMsLocal = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count();
                 if (port_thread_cpu_us) decodeCpuLocal = (double)(port_thread_cpu_us() - c0) / 1000.0;
             } else {

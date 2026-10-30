@@ -90,7 +90,7 @@ target_link_libraries(galaxy_native PRIVATE -Wl,--start-group "${RUNTIME_ARCHIVE
     SceGxm_stub SceDisplay_stub SceCtrl_stub SceMotion_stub SceTouch_stub SceAudio_stub
     SceKernelThreadMgr_stub SceSysmem_stub SceIofilemgr_stub SceProcessmgr_stub
     SceShaccCg_stub SceCommonDialog_stub SceKernelDmacMgr_stub SceAppUtil_stub SceAppMgr_stub SceLibKernel_stub
-    SceRtc_stub ScePower_stub m)
+    SceRtc_stub ScePower_stub SceJpeg_stub m)
 vita_create_self(eboot.bin galaxy_native)
 # ATTRIBUTE2=12: the extended (about 365 MiB) memory budget, as the Strikers package sets it.
 set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
