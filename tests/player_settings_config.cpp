@@ -25,7 +25,7 @@ int main() {
     assert(d.config.fpsLimit == 30);
     {
         auto steady=serialized;steady.replace(steady.find("fps_limit=30"),12,"fps_limit=steady30");settings::Document s2;
-        assert(settings::ParseDocument(steady,api,s2).status==settings::StoreStatus::Ok&&s2.config.fpsLimit==settings::kSteady30);
+        assert(settings::ParseDocument(steady,api,s2).status==settings::StoreStatus::Ok&&s2.config.fpsLimit==30); // 1.1's Steady 30 reads as the 1.2 locked 30
     }
     auto invalid=serialized;invalid.replace(invalid.find("fps_limit=30"),12,"fps_limit=60");
     assert(settings::ParseDocument(invalid, api, d).status == settings::StoreStatus::Malformed);

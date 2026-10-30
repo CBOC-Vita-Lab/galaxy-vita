@@ -87,7 +87,7 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
-        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=v=="30"?30:v=="steady30"?kSteady30:0; }
+        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=(v=="30"||v=="steady30")?30:0; /* 1.1's "Steady 30" is the 1.2 locked 30 */ }
         else if(k=="auto_quality") { if(v!="default"&&v!="on"&&v!="off") return Error(StoreStatus::Malformed,"Invalid dynamic quality");d.config.autoQuality=v=="default"?AutoQuality::Default:v=="on"?AutoQuality::Enabled:AutoQuality::Disabled; }
         else if(k=="profile") { if(v!="handheld"&&v!="playstation")return Error(StoreStatus::Malformed,"Invalid control profile");d.config.profile=v=="handheld"?controls::ProfileId::Handheld:controls::ProfileId::PlayStation; }
         else if(k=="language") d.config.language=v;
