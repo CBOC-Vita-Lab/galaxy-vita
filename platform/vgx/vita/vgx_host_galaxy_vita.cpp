@@ -140,7 +140,9 @@ constexpr const char* kSeedDir = "app0:shadercache";
 #define GXV_VGL_CACHE_DIR "v3"
 #endif
 constexpr const char* kVglCacheVersionDir = GXV_VGL_CACHE_DIR;
+} // namespace (an extern "C" variable belongs at global scope: declared inside the anonymous namespace, GCC finds it ambiguous with later global declarations)
 extern "C" char vgl_shader_cache_path[256] __attribute__((weak)); // (vitaGL vgl.c, set in vglInit*)
+namespace {
 // Decoded guest textures the renderer keeps (RGBA8 bytes). Galaxy's castle frame references
 // ~6.5 MiB of distinct images (desktop statistics); a budget of 32 MiB keeps the whole working
 // set of a scene plus its neighbours and is what the Strikers port ran with.

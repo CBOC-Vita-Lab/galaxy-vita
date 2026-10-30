@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 extern shader* shaders[8];
-extern bool is_shark_online;
+extern unsigned char is_shark_online; // (vitaGL's GLboolean, as vgx_host_galaxy_vita.cpp declares it)
 extern vglSemanticMode glsl_sema_mode;
 extern shark_opt compiler_opts;
 extern int32_t compiler_fastmath, compiler_fastprecision, compiler_fastint;
