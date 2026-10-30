@@ -114,6 +114,7 @@ bool port_vita_input_raw_poll(PortVitaRawInput& out) {
     out.caps=port::controls::NominalCaps(port::controls::ProfileId::Handheld);out.caps.connected=true;return true;
 }
 bool port_vita_input_mapping_available() {return true;}
+extern "C" int port_vita_input_external_pad() {return 0;}
 extern "C" void port_vita_input_settings_rearm() { assert(fixture::interrupts==0 && sInputHold.Requested());++fixture::hostRearms;fixture::gameplayHeld=false; }
 extern "C" void port_input_settings_rearm() { assert(fixture::interrupts==0 && sInputHold.Requested());++fixture::guestRearms;fixture::gameplayHeld=false; }
 extern "C" int port_is_paused() {return fixture::paused;}
