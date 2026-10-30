@@ -317,6 +317,8 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     setenv("GXV_CHARAA_AUTO", "1", 0);
     // TEV inputs A, B, C read the low 8 bits of a colour register, as on the Wii (the Lumas were white without it).
     setenv("GXV_FIX_TEVIN", "1", 0);
+    // Lost quality comes back sooner: a step up after 10 s of room in a row (not 20); a failed step still blocks itself.
+    setenv("GXV_AUTOQ_RECOVER_SEC", "10", 0);
     // When the CPU (not the GPU) is the limit and a pair of game turns just misses 33 ms, keep every second turn's picture and let
     // the game run up to 20 % slower (as the Wii did) instead of halving the pictures; beyond 20 % the old skipping returns.
     setenv("GXV_SLIP", "1", 0);
