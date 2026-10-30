@@ -859,7 +859,12 @@ extern "C" void port_vgx_pace_waited(uint64_t us) { sPaceWaitUs.fetch_add(us, st
 extern "C" int port_vgx_pace_turn(int allowed) {
     const int mode = PaceMode();
     if (!mode) return -1;
-    static port::pace::Controller pace(mode == 2, mode == 3 ? port::pace::Policy::Fixed30 : port::pace::Policy::Adaptive);
+    static port::pace::Controller pace = [mode] {
+        port::pace::Controller c(mode == 2, mode == 3 ? port::pace::Policy::Fixed30 : port::pace::Policy::Adaptive);
+        // GXV_SLIP (read in port/perf.cpp, which starts and ends the turns; default 0 = the slip never engages): Locked 30 only.
+        if (mode == 3) c.UseSlip(&port::pace::GlobalSlip());
+        return c;
+    }();
     const unsigned before = pace.Divisor();
     const uint64_t backendUs = sPaceBackendUs.load(std::memory_order_relaxed);
     const uint64_t wholeUs = port_autoq_picture_work_us ? port_autoq_picture_work_us() : 0;

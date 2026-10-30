@@ -14,6 +14,7 @@
 #include "port/diagnostics.h"
 #include "port/game_progress.h"
 #include "port/vgx_coldtrace_control.h"
+#include "port/frame_pace.h"
 #include "../../vgx/src/vgx_workload.h"
 #include "mtx_profile.h"
 
@@ -256,7 +257,10 @@ void port_perf_frame_begin(void) {
 #endif
 }
 
+static void SlipWorkDone();  // (below, with port_frameskip_turn)
+
 void port_perf_frame_work_done(void) {
+    SlipWorkDone();  // GXV_SLIP: the turn's cost sample, taken before the retrace wait; nothing when off
 #if PORT_PHASE_CPU_COMPILED
     port::phasecpu::End();
 #endif
@@ -580,7 +584,21 @@ extern "C" int port_turn_skipped(void) {
     return on && sTurnSkipped.load(std::memory_order_relaxed);
 }
 
-int port_frameskip_turn(int allowed) {
+// GXV_SLIP=1 (default 0): bounded slip, see port::pace::Slip (platform/include/port/frame_pace.h). GXV_SLIP_MAX=<percent> (default 15)
+// is the largest slowdown of the game it may take instead of skipping pictures. Read once; 0 = off (then nothing below runs).
+static unsigned SlipMax() {
+    static const unsigned max = [] {
+        if (vgx::EnvInt("GXV_SLIP", 0) == 0) return 0u;
+        const long m = vgx::EnvInt("GXV_SLIP_MAX", 15);
+        const unsigned pct = m < 1 ? 1u : m > 50 ? 50u : static_cast<unsigned>(m);
+        port::pace::GlobalSlip().Configure(pct);
+        return pct;
+    }();
+    return max;
+}
+static bool sSlipDrew = false;  // the last turn's picture decision (port_frameskip_turn), for the end of its work
+
+static int FrameskipDecide(int allowed) {
     if (PORT_RUNTIME_DIAGNOSTICS) sTurn.kind = allowed ? TurnKind::DrawSelected : TurnKind::RequiredDraw;
     // Testing (the harness has a virtual clock and never falls behind): PETARI_FORCE_SKIP=N leaves out N turns of every N+1.
     static const int forced = [] {
@@ -619,36 +637,40 @@ int port_frameskip_turn(int allowed) {
         const char* e = getenv("PETARI_PIPE_RUN");
         return e && *e ? (atoi(e) < 0 ? 0 : (atoi(e) > 12 ? 12 : atoi(e))) : 6;
     }();
-    static const int64_t period = 16683350;  // ns
-    static int64_t last = 0, debt = 0;
-    static int run = 0;
-    const int64_t now = port_host_time_ns();
-    const int64_t dt = last ? now - last : period;
-    last = now;
-    if (dt > 15 * period || !allowed) {  // a load, a pause, a scene change: nothing to catch up with
-        debt = 0;
-        run = 0;
-        return 0;
-    }
-    debt += dt - period;
-    if (debt < 0) debt = 0;
-    if (debt > 4 * period) debt = 4 * period;
-    const bool behind = debt >= period / 2 && run < maxRun;
-    const bool gpuBusy = pipeDepth > 0 && port_vgx_backend_pending && port_vgx_backend_pending() >= static_cast<unsigned>(pipeDepth) && run < maxPipeRun;
-    if (behind || gpuBusy) {
-        ++run;
+    // The rule itself is port::pace::LegacySkip (platform/include/port/frame_pace.h), so that the host model runs the same code.
+    static port::pace::LegacySkip rule(maxRun, pipeDepth, maxPipeRun, &port::pace::GlobalSlip());
+    const unsigned pending = pipeDepth > 0 && port_vgx_backend_pending ? port_vgx_backend_pending() : 0;
+    const port::pace::LegacySkip::Verdict v = rule.Turn(port_host_time_ns(), allowed != 0, pending);
+    if (v.code != 0) {
         sSkippedTurns.fetch_add(1, std::memory_order_relaxed);
         if (PORT_RUNTIME_DIAGNOSTICS) {
-            sTurn.kind = behind ? TurnKind::LateSkip : TurnKind::BacklogSkip;
-            sTurn.bothSkipReasons = behind && gpuBusy;
+            sTurn.kind = v.behind ? TurnKind::LateSkip : v.gpuBusy ? TurnKind::BacklogSkip : TurnKind::PacedSkip;
+            sTurn.bothSkipReasons = v.behind && v.gpuBusy;
         }
         // 2: late, catch up (the turn does not wait for its retrace: a wait would make every skipped turn last a
         // whole refresh, the debt would never be paid, and the title screen ran at a fixed 15 pictures a second
         // on the console); 1: not late, the turn takes its retrace.
-        return behind ? 2 : 1;
     }
-    run = 0;
-    return 0;
+    return v.code;
+}
+int port_frameskip_turn(int allowed) {
+    if (SlipMax()) port::pace::GlobalSlip().Begin(static_cast<uint64_t>(port_host_time_ns() / 1000), allowed != 0);
+    const int decision = FrameskipDecide(allowed);
+    sSlipDrew = decision == 0;
+    return decision;
+}
+// The end of a turn's work (before the retrace wait): the slip's cost sample, and its log line when it engages or leaves.
+static void SlipWorkDone() {
+    if (!SlipMax()) return;
+    port::pace::Slip& slip = port::pace::GlobalSlip();
+    slip.End(static_cast<uint64_t>(port_host_time_ns() / 1000), sSlipDrew);
+    static unsigned reported = 0;
+    if (slip.Changes() != reported) {
+        reported = slip.Changes();
+        port_log("pace: slip %s: a pair of turns costs %.1f ms (%.1f pictures a second at %.0f %% game speed, cap %u %%); %.0f ms behind real time so far (not caught up)",
+                 slip.Engaged() ? "engaged" : "left", slip.PairUs() / 1000.0, 60.0 * port::pace::Slip::kPeriodUs / slip.PairUs(),
+                 slip.SpeedPercent(), slip.MaxPercent(), slip.LagUs() / 1000.0);
+    }
 }
 uint32_t port_frameskip_count(void) { return sSkippedTurns.load(std::memory_order_relaxed); }
 
