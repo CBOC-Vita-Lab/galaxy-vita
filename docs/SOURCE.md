@@ -1,5 +1,17 @@
 # Source Record
 
+## Version 1.2 (`galaxy-v1.2`)
+
+Version 1.1 plus the changes below, built from this repository (the release commit) with the player build flags, the game code profile-guided (`tools/pgo/smg.profdata.gz`, recorded under the ARM harness) and vitaGL `nhustdx`: upstream `9bf3e3f` + patches 0001-0012 (0009 scene begin fails closed, 0010 checked depth/stencil, 0011 GXM state cache, 0012 optional fragment precision), `GPU_TIMERS`, `FBO_MSAA`, and the `DRAW_SPEEDHACK INDICES_SPEEDHACK SAMPLERS_SPEEDHACK` options (each checked against the vgx back end; tools/vitagl/README.md).
+- **Undoing 1.1's slowdown:** shader generator version back to 2 (the 1.0 compiled-shader cache key `c0477cd7`); the eye fix wraps alpha only (`GXV_TEVWRAP=2`); a fixed 30 ceiling instead of the 30/20 pacer; the Settings parameter polled once a second.
+- **Frame rate:** the 30 FPS floor in every picture rate (`GXV_AUTOQ_TARGET=30`), Mario-first degradation (`GXV_AUTOQ_FXSTEP=2`, `GXV_CHARAA_AUTO`), faster recovery (`GXV_AUTOQ_RECOVER`, 10 s), bounded slip instead of halving the picture rate (`GXV_SLIP`, cap 20 %), the queue depth judged by the back end's own CPU time under a cap (`GXV_FIXED_DEPTH`), `GXV_PACE_VBLANK_COUNT`, the game thread alone on core 0 (`GXV_CORE0_ALONE`), disc read-ahead and one movie decoder on the system core when allowed (`GXV_CORE3_IO`), DSP mixing on its own thread (`GXV_AUDIO_THREAD`), the end-of-turn draw-done wait deferred (`GXV_DRAWDONE_DEFER=1`), frame clock priority (`GXV_VBLANK_PRIO`).
+- **Renderer work:** rigid-draw merging (`GXV_RIGIDMERGE`), small palette (`GXV_PALROWS`), merged light passes (`GXV_LTMERGE`), copy programs (`GXV_COPYVAR`), no-discard where the alpha test cannot fail (`GXV_NODISCARD`), a 4-way shader-key memo (`GXV_KEYMEMO_WAYS`), hardware JPEG for THP frames (`GXV_THPHW`), `-fno-math-errno`.
+- **Picture fixes:** `GXV_FIX_TEVIN` (Lumas), `GXV_FIX_INDPREV`, `GXV_FIX_DSTA`, `GXV_FIX_LOGICOP`, `GXV_FIX_TEXOFF`, `GXV_FIX_LODBIAS`, `GXV_AUTHORED_I4_MIPS`, `GXV_FIX_BCKCNT` (Bowser's battle intros: the converter's signed key counts, repaired at load), `GXV_FIX_FURMAP` (Queen Bee's fur), the 1.1 repair guards (clip capture, dome zoom, zero destination alpha, EFB/render-target allocation and rebinding, display-list bounds, GPU timer ring, Settings save).
+- **Gameplay and controls:** music after sleep or Home (`GXV_DVD_REOPEN`, `GXV_AUDIO_RETRY`), `GXV_TAP_CLEAN`, `GXV_SHAKE_LATCH`, PS TV pad defaults (`GXV_PAD_DEFAULTS`), mouse-style aiming, reduced motion in play (`GXV_REDUCED_MOTION`), Locked 30 / Up to 60.
+- **Start-up:** bounded waits with a stall message, `GXV_BOOT_TITLE_FALLBACK=60`, named libshacccg and graphics-start errors.
+- Test switches, off: `GXV_FOGVTX`, `GXV_SANITIZE`, `GXV_WAITLOG`, `GXV_RESUME_RESET`, `GXV_FS_HALF`, `GXV_RIGIDMERGE_DLMAX`, `GXV_FXHALF`, `GXV_VITA_DISPLAY_SCENES` / `FBO_SCENES` / `TRIPLE`.
+- Compiled-shader seed: 1,417 programs under `c0477cd7` (1.0's 1,131 byte-identical, plus the shaders 1.2's fixes change, compiled in Vita3K with the console's compiler).
+
 ## Version 1.1 (`galaxy-v1.1`)
 
 Version 1.0 plus the changes below, built from this repository (the release commit) with the 1.0 player build flags and vitaGL `nhustd` with patch `0008-no-present-submit.patch` (8 patches):
