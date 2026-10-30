@@ -229,7 +229,7 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
         }
         std::string note=session.mode==OpenMode::Running?"Current game keeps its active settings until restart.":"Saved choices apply on a fresh launch.";
         if(!session.features.fixed30&&state.working.fpsLimit==30)note="30 FPS saved; unavailable in this build. Current rate unchanged.";
-        else if(state.row==0&&state.working.fpsLimit==kSteady30)note="Steady 30: an even 30 FPS; lowers resolution and effects when needed.";
+        else if(state.row==0&&state.working.fpsLimit==kSteady30)note="Steady 30: an even 30 FPS at full effects; resolution drops only if needed.";
         if(!session.overrides.empty()) {
             r.asset(60,372,28,kButtonSquare);note="Developer Overrides ("+std::to_string(session.overrides.size())+")";r.text(100,377,note,muted,792,true);
         } else r.text(60,377,note,muted,832,true);

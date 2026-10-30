@@ -62,9 +62,9 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     }
     if(!std::getenv("GXV_FPS_LIMIT")&&config.fpsLimit==30)setenv("GXV_FPS_LIMIT","30",0);
     // Steady 30, the aggressive opt-in mode: the fixed 30 FPS ceiling (never the 30/20 adaptive cadence),
-    // dynamic quality aimed at 30 that lowers resolution to hold it, and half-size effects. 60 Hz game
+    // dynamic quality aimed at 30 that lowers resolution only as a last resort; effects stay full size. 60 Hz game
     // turns are unchanged. env.txt values win over each part.
-    if(config.fpsLimit==kSteady30&&!std::getenv("GXV_FPS_LIMIT")) {setenv("GXV_FPS_LIMIT","30",0);setenv("GXV_AUTOQ_TARGET","30",0);setenv("GXV_FXHALF","2",0);}
+    if(config.fpsLimit==kSteady30&&!std::getenv("GXV_FPS_LIMIT")) {setenv("GXV_FPS_LIMIT","30",0);setenv("GXV_AUTOQ_TARGET","30",0);} // full-size effects: 30 is held by speed, not by smaller effects (GXV_FXHALF stays a test switch)
     if(!std::getenv("GXV_AUTOQ")&&!std::getenv("GXV_AUTOQ_LEVEL")&&!std::getenv("GXV_AUTOQ_CYCLE")&&config.autoQuality!=AutoQuality::Default)
         setenv("GXV_AUTOQ",config.autoQuality==AutoQuality::Enabled?"1":"0",0);
     if(!std::getenv("PETARI_LANGUAGE")&&!config.language.empty()) {
