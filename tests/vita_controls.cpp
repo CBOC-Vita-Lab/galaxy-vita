@@ -1,4 +1,5 @@
 #include "input.h"
+#include "port/pointer_aim.h"
 #include <psp2/ctrl.h>
 #include <psp2/motion.h>
 #include <psp2/touch.h>
@@ -81,6 +82,80 @@ int main(int argc, char** argv) {
         raw.buttons=SCE_CTRL_TRIANGLE; assert(poll().buttons & 0x0010); neutral(); poll();
         zoom = 0;
         std::puts("PASS: remapped confirm, back and pause pass through the pause menu");
+        return 0;
+    }
+    if (!std::strncmp(argv[1], "pad", 3)) {
+        // An external pad (PS TV: DS4). pad: the PlayStation default profile with GXV_PAD_DEFAULTS=1: R2 shoots, the right stick moves
+        // the pointer without any button, the D-pad is the camera, Circle does nothing. padlegacy (switch off): the 1.1 layout, Circle
+        // shoots and the right stick is the camera. padhandheld: a Handheld profile chosen by hand on a pad keeps the Vita layout.
+        const bool legacy = !std::strcmp(argv[1], "padlegacy"), handheld = !std::strcmp(argv[1], "padhandheld");
+        const ProfileId id = handheld ? ProfileId::Handheld : ProfileId::PlayStation;
+        std::string error;
+        assert(PadDefaultsEnabled() == !legacy);
+        assert(SetActiveMapping(GetControlApi().defaults(id), id, NominalCaps(id), error));
+        type = SCE_CTRL_TYPE_DS4;
+        assert(port_vita_input_external_pad() == 1);
+        assert(port_vita_input_init()); poll();
+        const bool circleShoots = legacy || handheld;
+        auto fresh = [&] { neutral(); port_vita_input_settings_rearm(); poll(); poll(); };  // (a pointer stays on screen for 3 s: start each case clean)
+        fresh(); raw.buttons = SCE_CTRL_CIRCLE; auto p = poll();
+        assert(!!(p.buttons & 0x400) == circleShoots && p.pointerValid == circleShoots);
+        fresh(); raw.buttons = SCE_CTRL_R2; p = poll();
+        assert(!!(p.buttons & 0x400) == !circleShoots && p.pointerValid == !circleShoots);
+        // The stick alone: the pointer (pad defaults) or the camera.
+        fresh(); raw.rx = 255; p = poll();
+        assert(p.pointerValid == !circleShoots && !!(p.buttons & 0x0002) == circleShoots);
+        if (!circleShoots) { for (int i = 0; i < 30; ++i) p = poll(); assert(p.pointerX > 0.5f && std::fabs(p.pointerY) < 0.01f && !(p.buttons & 0x0002)); }
+        fresh(); raw.ry = 0; p = poll(); assert(!!(p.buttons & 0x0008) == circleShoots && !!p.pointerValid == !circleShoots);
+        neutral(); poll();
+        // The D-pad is the camera everywhere; the other buttons are the same on both layouts.
+        const struct { unsigned raw; unsigned wii; } keys[] = {{SCE_CTRL_LEFT, 1}, {SCE_CTRL_RIGHT, 2}, {SCE_CTRL_DOWN, 4}, {SCE_CTRL_UP, 8},
+            {SCE_CTRL_CROSS, 0x800}, {SCE_CTRL_L1, 0x2000}, {SCE_CTRL_TRIANGLE, 0x4000}, {SCE_CTRL_START, 0x10}, {SCE_CTRL_SELECT, 0x1000}};
+        for (auto k : keys) { neutral(); poll(); raw.buttons = k.raw; assert(poll().buttons == k.wii); }
+        for (unsigned spin : {SCE_CTRL_SQUARE, SCE_CTRL_R1}) { neutral(); poll(); raw.buttons = spin; raw.timeStamp += 16667; p = poll(); assert(p.accX != 0 && !(p.buttons & 0x400)); }
+        // L2 and the sticks' clicks are not bound by default.
+        for (unsigned none : {SCE_CTRL_L2, SCE_CTRL_L3, SCE_CTRL_R3}) { neutral(); poll(); raw.buttons = none; assert(poll().buttons == 0); }
+        if (!circleShoots) {
+            // PETARI_RSTICK=camera keeps the camera on the stick for a player who wants it there too.
+            neutral(); poll(); setenv("PETARI_RSTICK", "camera", 1); assert(port_vita_input_init()); poll();
+            raw.rx = 255; p = poll(); assert(!p.pointerValid && (p.buttons & 0x0002));
+        }
+        std::puts("PASS: external pad layout (R2 shoots, right stick points, D-pad camera) and its switches");
+        return 0;
+    }
+    if (!std::strncmp(argv[1], "mouse", 5)) {
+        // Mouse-style aiming (GXV_MOUSE_AIM=1): the pointer follows port::aim::Step on the raw stick, the same place at 30 and 60 reads a
+        // second. mouse: Circle held on the handheld, the stick the pointer only then. mousepad: a pad with the pad defaults, stick alone.
+        const bool pad = !std::strcmp(argv[1], "mousepad");
+        std::string error;
+        if (pad) { assert(SetActiveMapping(GetControlApi().defaults(ProfileId::PlayStation), ProfileId::PlayStation, NominalCaps(ProfileId::PlayStation), error)); type = SCE_CTRL_TYPE_DS4; }
+        assert(port_vita_input_init()); poll();
+        auto reset = [&] { neutral(); port_vita_input_settings_rearm(); poll(); poll(); };
+        auto drive = [&](int rate, uint8_t rx, uint8_t ry, float seconds, port::aim::State& expect, unsigned buttons) {
+            for (int i = 0; i < int(seconds * rate + .5f); ++i) {
+                raw.rx = rx; raw.ry = ry; raw.buttons = buttons;
+                port::aim::Step(expect, (rx - 127.5f) / 127.5f, (127.5f - ry) / 127.5f, 1.0f / rate, 960.0f / 544.0f);
+                poll(1.0f / rate);
+            }
+        };
+        const unsigned hold = pad ? 0 : SCE_CTRL_CIRCLE;
+        PortPadState at30, at60;
+        for (int rate : {30, 60}) {
+            reset(); port::aim::State expect;
+            drive(rate, 190, 100, 1.0f, expect, hold);     // right and up, a moderate push
+            drive(rate, 128, 128, 0.2f, expect, hold);     // let go
+            drive(rate, 90, 150, 0.5f, expect, hold);      // left and down
+            raw.rx = raw.ry = 128; raw.buttons = hold; auto p = poll(1.0f / rate); (rate == 30 ? at30 : at60) = p;  // (stick centred: this read adds nothing)
+            assert(p.pointerValid && std::fabs(p.pointerX - expect.x) < 1e-5f && std::fabs(p.pointerY - expect.y) < 1e-5f);
+            assert(std::fabs(p.pointerX) < 1 && std::fabs(p.pointerY) < 1 && !(p.buttons & 0x0003));
+        }
+        assert(std::fabs(at30.pointerX - at60.pointerX) < 1e-4f && std::fabs(at30.pointerY - at60.pointerY) < 1e-4f);
+        // Inside the dead zone nothing moves; held at an edge it stays on the picture.
+        reset(); { port::aim::State ignored; drive(60, 135, 121, 1.0f, ignored, hold); auto p = poll(); assert(p.pointerX == 0 && p.pointerY == 0); }
+        reset(); { port::aim::State ignored; drive(60, 255, 255, 4.0f, ignored, hold); auto p = poll(); assert(p.pointerX == 1.0f && p.pointerY == 1.0f); }
+        // Not aiming (the handheld without Circle): the stick is still the camera, not the pointer.
+        if (!pad) { reset(); raw.rx = 255; auto p = poll(); assert((p.buttons & 0x0002) && !p.pointerValid); }
+        std::puts("PASS: mouse-style aiming in the input path (30 and 60 reads a second, dead zone, clamp)");
         return 0;
     }
     if (std::strcmp(argv[1], "calibration") == 0) {

@@ -10,7 +10,9 @@ controls::ControllerCaps EditCaps(const UiState& s) {
     if(s.controller.connected&&s.detectedProfile==s.working.profile) {caps=s.controller;caps.availableButtons&=controls::NominalCaps(s.working.profile).availableButtons;}
     return caps;
 }
-unsigned Commands(const UiState& s) {return s.page==Page::Display?4:static_cast<unsigned>(s.session->controls->actionCount)+1;}
+// Controls page: the profile row, one row per action, then the mouse-style aiming option; Display page: four settings.
+unsigned Commands(const UiState& s) {return s.page==Page::Display?4:static_cast<unsigned>(s.session->controls->actionCount)+2;}
+bool AimRow(const UiState& s) {return s.page==Page::Controls&&s.row==s.session->controls->actionCount+1;}
 void ModalOpen(UiState& s,Modal modal) {s.modal=modal;s.modalChoice=0;s.captureArmed=false;s.candidate=0;s.previousMenu=0;s.armed=false;s.repeatKey=0;}
 void Finish(UiState& s) {s.result={Safe(*s.session),false};s.done=true;}
 void Cancel(UiState& s) {if(Dirty(s))ModalOpen(s,Modal::Discard);else Finish(s);}
@@ -57,7 +59,8 @@ void Capture(UiState& s,const UiInput& input) {
 }
 void Change(UiState& s,int direction) {
     if(s.page==Page::Controls) {
-        if(s.row==0) {s.working.profile=s.working.profile==controls::ProfileId::Handheld?controls::ProfileId::PlayStation:controls::ProfileId::Handheld;s.bindingSlot=0;s.armed=false;}
+        if(s.row==0) {s.working.profile=s.working.profile==controls::ProfileId::Handheld?controls::ProfileId::PlayStation:controls::ProfileId::Handheld;s.working.profileChosen=true;s.bindingSlot=0;s.armed=false;}
+        else if(AimRow(s))s.working.mouseAim=!s.working.mouseAim;
         else if(s.row<=s.session->controls->actionCount) {
             const auto& action=s.session->controls->actions[s.row-1];if(action.maxBindings>1)s.bindingSlot=1-s.bindingSlot;
         }
@@ -151,6 +154,7 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
     if(event&(PreviousPage|NextPage)) {s.page=s.page==Page::Display?Page::Controls:Page::Display;s.row=0;s.bindingSlot=0;s.changedAt=now;return;}
     if(event&Reset&&s.page==Page::Controls) {
         if(!s.session->features.remap)s.message="Remapping unavailable in this build";
+        else if(AimRow(s)) return;
         else if(s.row>0&&s.row<=s.session->controls->actionCount) {s.action=s.session->controls->actions[s.row-1].id;s.picker=0;ModalOpen(s,Modal::ButtonPicker);}
         else ModalOpen(s,Modal::ResetProfile);
         return;
@@ -163,7 +167,7 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
         if(s.row==commands)Save(s,s.session->mode==OpenMode::Running?ExitIntent::Return:ExitIntent::Play);
         else if(s.row==commands+1) {if(s.session->mode==OpenMode::Running)ModalOpen(s,Modal::Restart);else Save(s,ExitIntent::Exit);}
         else if(s.row==commands+2)Cancel(s);
-        else if(s.page==Page::Display||s.row==0)Change(s,1);
+        else if(s.page==Page::Display||s.row==0||AimRow(s))Change(s,1);
         else if(s.session->features.remap) {
             s.action=s.session->controls->actions[s.row-1].id;s.message.clear();
             const auto chord=controls::Start|controls::Select;

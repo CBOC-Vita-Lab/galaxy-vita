@@ -16,6 +16,26 @@ Super Mario Galaxy was made for the Wii Remote and Nunchuk. On the Vita, every o
 | **START** | Pause | + |
 | **Select** | Reset tilt (in tilt levels) | − |
 
+## PlayStation controller (PS TV)
+
+With a PS3 or PS4 controller on a PS TV, the controls are laid out for a pad:
+
+| Controller | What it does |
+|---|---|
+| **Left stick** | Move Mario |
+| **Right stick** | Move the pointer |
+| **R2** | Shoot a Star Bit at the pointer |
+| **D-pad** | Camera: left and right turn, up for first person, down to look back |
+| **Cross** | Jump |
+| **Square** or **R1** | Spin |
+| **L1** | Crouch, ground pound, long jump, backflip |
+| **Triangle** | Camera behind Mario |
+| **START** / **Select** | Pause / reset tilt |
+
+This is the default when no profile has been chosen by hand in **Settings**. Every button can be changed under **Settings > Controls**, which also lists L2, R2, L3 and R3 for a pad. The Vita's own controls are as in the table above.
+
+**Mouse-style aiming (Settings > Controls, off by default).** The stick still sets how fast the pointer moves, but small pushes move it slowly and exactly, a full push sweeps across the screen, and the pointer speeds up the longer you keep pushing. It works the same at 30 and 60 FPS.
+
 ## Touch
 
 - **Front screen:** your pointer. Touch to point, and Star Bits fly to you. A quick tap presses A where you touch (open, choose, talk). Hold a finger still to grab a Pull Star.

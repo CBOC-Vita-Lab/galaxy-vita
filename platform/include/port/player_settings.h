@@ -17,6 +17,12 @@ struct Config {
     controls::ProfileId profile = controls::ProfileId::Handheld;
     std::string language;
     bool reducedMotion = false;
+    // Mouse-style Star Bit pointer aiming (vita/runtime/input.cpp, platform/include/port/pointer_aim.h): the right stick steers the
+    // pointer by speed with acceleration. Off: the 1.0 linear stick-to-pointer-speed behaviour. Optional key mouse_aim.
+    bool mouseAim = false;
+    // The profile row was changed by hand in the Settings menu; until then a pad on a PS TV gets the PlayStation profile (see
+    // ApplyPadDefaults). Optional key profile_chosen.
+    bool profileChosen = false;
     std::array<controls::ProfileMapping, 2> profiles;
 };
 enum class StoreStatus : uint8_t { Ok, Missing, Recovered, Malformed, UnsupportedVersion, TooLarge, IoError };
@@ -36,6 +42,10 @@ struct FileOps {
     int (*remove)(void*, const char*);
 };
 Config DefaultConfig(const controls::ControlApi&);
+// With an external pad (PS TV: DS3 or DS4) connected and the profile never chosen by hand, a Handheld profile that still holds
+// the default buttons is switched to the PlayStation profile, so the pad gets its own default layout. Returns true if it switched.
+// Does nothing with GXV_PAD_DEFAULTS=0.
+bool ApplyPadDefaults(Config&, bool externalPad);
 bool Equal(const Config&, const Config&);
 StoreResult ParseDocument(const std::string&, const controls::ControlApi&, Document&);
 StoreResult SerializeDocument(const Document&, const Config&, const controls::ControlApi&, std::string&);

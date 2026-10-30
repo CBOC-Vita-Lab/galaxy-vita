@@ -55,4 +55,12 @@ const CompiledMapping& ActiveMapping();
 void FreezeActiveCapabilities(const ControllerCaps&);
 const ControllerCaps& ActiveCapabilities();
 bool RemapEnabled();
+// GXV_PAD_DEFAULTS (read once, 1 = on; the Vita player build sets it on at start-up like the other 1.2 defaults, vita/vgx-game/entry.cpp,
+// and NAME=0 in env.txt turns it off; unset it is off): the PlayStation profile's defaults are the ones for a pad on a PS TV or other external
+// controller: R2 shoots Star Bits, the right stick moves the pointer (vita/runtime/input.cpp), the D-pad stays the camera.
+// Off gives the 1.1 layout (Circle shoots, the right stick is the camera). The Handheld profile is never affected.
+bool PadDefaultsEnabled();
+// The PlayStation profile as 1.1 shipped it; a settings file written before 1.2 that still holds exactly this was never customised.
+ProfileMapping LegacyPlayStationDefaults();
+bool SameBindings(const ProfileMapping&, const ProfileMapping&);
 } // namespace port::controls

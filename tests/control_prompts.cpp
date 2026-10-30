@@ -12,11 +12,22 @@ static std::u16string message(const std::u16string& source) {
 }
 int main(int argc, char** argv) {
     assert(argc == 2);
-    const bool remap = std::strcmp(argv[1], "on") == 0;
+    const bool pad = std::strcmp(argv[1], "pad") == 0;
+    const bool remap = pad || std::strcmp(argv[1], "on") == 0;
     setenv("GXV_REMAP", remap ? "1" : "0", 1);
     setenv("PETARI_HANDHELD_UI", "1", 1);
     auto map = GetControlApi().defaults(ProfileId::PlayStation);
     std::string error, conflict;
+    if (pad) {
+        // The pad defaults (GXV_PAD_DEFAULTS=1): the prompts for Star Bits show R2, the others are unchanged.
+        assert(PadDefaultsEnabled());
+        assert(SetActiveMapping(map, ProfileId::PlayStation, NominalCaps(ProfileId::PlayStation), error));
+        FreezeActiveCapabilities(NominalCaps(ProfileId::PlayStation));
+        assert(ResolveGlyph(2, kGlyphCircle) == kGlyphR2 && ResolveGlyph(1, kGlyphCross) == kGlyphCross);
+        assert(ResolveGlyph(6, kGlyphSquare) == kGlyphSquare && ResolveGlyph(26, kGlyphL) == kGlyphL1);
+        std::puts("PASS: prompts show R2 for Star Bits with the pad defaults");
+        return 0;
+    }
     assert(GetControlApi().bind(map, "jump", 0, "l2", false, NominalCaps(ProfileId::PlayStation), conflict) == BindResult::Applied);
     assert(GetControlApi().bind(map, "pause", 0, "triangle", true, NominalCaps(ProfileId::PlayStation), conflict) == BindResult::Applied);
     assert(GetControlApi().bind(map, "spin", 0, "r3", false, NominalCaps(ProfileId::PlayStation), conflict) == BindResult::Applied);

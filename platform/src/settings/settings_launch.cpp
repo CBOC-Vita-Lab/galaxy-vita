@@ -50,7 +50,7 @@ LanguageCatalog ReadLanguages() {
 }
 std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     std::vector<Override> overrides;if(!enabled)return overrides;
-    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP"}) {
+    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP","GXV_MOUSE_AIM"}) {
         if(const char* raw=std::getenv(key)) {
             // Remapping is on by default (the start-up default sets GXV_REMAP=1); only turning it off is an override.
             if(std::strcmp(key,"GXV_REMAP")==0&&std::strcmp(raw,"1")==0)continue;
@@ -67,6 +67,8 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     if(config.fpsLimit==kSteady30&&!std::getenv("GXV_FPS_LIMIT")) {setenv("GXV_FPS_LIMIT","30",0);setenv("GXV_AUTOQ_TARGET","30",0);} // full-size effects: 30 is held by speed, not by smaller effects (GXV_FXHALF stays a test switch)
     if(!std::getenv("GXV_AUTOQ")&&!std::getenv("GXV_AUTOQ_LEVEL")&&!std::getenv("GXV_AUTOQ_CYCLE")&&config.autoQuality!=AutoQuality::Default)
         setenv("GXV_AUTOQ",config.autoQuality==AutoQuality::Enabled?"1":"0",0);
+    // Mouse-style Star Bit pointer aiming (vita/runtime/input.cpp reads GXV_MOUSE_AIM once); an env.txt value wins.
+    if(config.mouseAim)setenv("GXV_MOUSE_AIM","1",0);
     if(!std::getenv("PETARI_LANGUAGE")&&!config.language.empty()) {
         const auto catalog=ReadLanguages();
         // An ordinary launch may not have discovered the disc yet; the existing

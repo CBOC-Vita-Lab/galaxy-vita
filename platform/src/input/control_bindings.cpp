@@ -3,6 +3,7 @@
 #include <cstring>
 
 namespace port::controls {
+bool PadDefaultsEnabled();
 namespace {
 constexpr ActionInfo actions[] = {
     {"jump", "Jump / Confirm / Hold", true, 1}, {"star_bits", "Star Bits / Aim", true, 1},
@@ -28,12 +29,16 @@ int buttonIndex(const std::string& id) {
     for (size_t i = 0; i < 16; ++i) if (id == buttons[i].id) return static_cast<int>(i);
     return -1;
 }
-ProfileMapping makeDefaults(ProfileId) {
+ProfileMapping buildDefaults(ProfileId profile, bool padLayout) {
     ProfileMapping result;
-    for (size_t i = 0; i < ActionCount; ++i)
-        result.bindings.push_back({actions[i].id, {defaults[i], i == 2 ? "r1" : ""}});
+    for (size_t i = 0; i < ActionCount; ++i) {
+        const char* button = defaults[i];
+        if (padLayout && profile == ProfileId::PlayStation && i == static_cast<size_t>(Action::StarBits)) button = "r2";
+        result.bindings.push_back({actions[i].id, {button, i == 2 ? "r1" : ""}});
+    }
     return result;
 }
+ProfileMapping makeDefaults(ProfileId profile) { return buildDefaults(profile, PadDefaultsEnabled()); }
 bool validate(const ProfileMapping& mapping, ProfileId profile, const ControllerCaps& caps, std::string& error) {
     error.clear();
     if (profile != ProfileId::Handheld && profile != ProfileId::PlayStation) { error = "Unknown profile"; return false; }
@@ -156,6 +161,20 @@ void FreezeActiveCapabilities(const ControllerCaps& caps) {
 const ControllerCaps& ActiveCapabilities() {
     if (!capsSet) FreezeActiveCapabilities(NominalCaps(ActiveMapping().profile));
     return activeCaps;
+}
+bool PadDefaultsEnabled() {
+    static const bool enabled = [] { const char* e = std::getenv("GXV_PAD_DEFAULTS"); return e && std::strcmp(e, "1") == 0; }();
+    return enabled;
+}
+ProfileMapping LegacyPlayStationDefaults() { return buildDefaults(ProfileId::PlayStation, false); }
+bool SameBindings(const ProfileMapping& a, const ProfileMapping& b) {
+    if (a.bindings.size() != b.bindings.size()) return false;
+    for (const auto& x : a.bindings) {
+        bool found = false;
+        for (const auto& y : b.bindings) if (x.action == y.action) { found = x.buttons == y.buttons; break; }
+        if (!found) return false;
+    }
+    return true;
 }
 bool RemapEnabled() {
     static const bool enabled = [] { const char* e = std::getenv("GXV_REMAP"); return e && std::strcmp(e, "1") == 0; }();

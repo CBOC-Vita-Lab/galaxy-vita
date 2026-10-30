@@ -20,3 +20,12 @@ GXV_SETTINGS=1 "$out/test" off
 "$out/test" on
 "$out/test" calibration
 "$out/test" escape
+# 1.2 external pad layout (GAL-032) and mouse-style aiming (GAL-031)
+GXV_PAD_DEFAULTS=1 "$out/test" off
+GXV_PAD_DEFAULTS=1 "$out/test" default
+GXV_PAD_DEFAULTS=1 "$out/test" on
+GXV_PAD_DEFAULTS=1 "$out/test" pad
+GXV_PAD_DEFAULTS=1 "$out/test" padhandheld
+"$out/test" padlegacy
+GXV_MOUSE_AIM=1 "$out/test" mouse
+GXV_MOUSE_AIM=1 GXV_PAD_DEFAULTS=1 "$out/test" mousepad

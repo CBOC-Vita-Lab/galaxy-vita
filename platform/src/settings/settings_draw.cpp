@@ -136,7 +136,7 @@ void Controller(Raster& r,const UiState& state,const SettingsSession& session) {
         const auto id=b.buttons[state.bindingSlot];
         struct Marker {const char* id;int hx,hy,px,py;};
         constexpr Marker markers[]={{"cross",268,58,205,68},{"circle",281,47,223,51},{"square",255,47,187,51},{"triangle",268,35,205,33},
-            {"l1",42,11,49,10},{"r1",258,11,200,10},{"l2",42,11,49,10},{"r2",258,11,200,10},{"l3",39,78,83,85},{"r3",262,78,167,85},
+            {"l1",42,11,49,24},{"r1",258,11,200,24},{"l2",42,11,49,10},{"r2",258,11,200,10},{"l3",39,78,83,85},{"r3",262,78,167,85},
             {"start",272,100,177,28},{"select",255,100,73,28},{"up",32,35,47,36},{"down",32,58,47,64},{"left",20,47,33,51},{"right",44,47,61,51}};
         for(const auto& m:markers)if(id==m.id) {int x=(ps?637:612)+(ps?m.px:m.hx),y=(ps?223:232)+(ps?m.py:m.hy);r.rect(x-12,y-12,25,2,cyan);r.rect(x-12,y+11,25,2,cyan);r.rect(x-12,y-12,2,25,cyan);r.rect(x+11,y-12,2,25,cyan);}
         r.text(612,ps?391:383,Action(session,b.action),white,300,true);
@@ -205,7 +205,7 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
     r.text(60,135,"Display",state.page==Page::Display?white:muted,180);r.text(248,135,"Controls",state.page==Page::Controls?white:muted,180);
     r.rect(44,169,872,1,RGB(67,91,100));r.rect(state.page==Page::Display?44:232,166,160,4,cyan);
     const auto elapsed=now>=state.changedAt?now-state.changedAt:0;
-    const unsigned commands=state.page==Page::Display?4:static_cast<unsigned>(session.controls->actionCount)+1;
+    const unsigned commands=state.page==Page::Display?4:static_cast<unsigned>(session.controls->actionCount)+2;
     if(state.page==Page::Display) {
         const char* labels[]={"Picture rate","Dynamic quality","Game language","Reduced motion"};
         std::string lang=state.working.language.empty()?(session.languages.names.empty()?"Game data unavailable":"Disc default"):state.working.language;
@@ -236,16 +236,21 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
     } else {
         if(state.row==0)Focus(r,181,536,elapsed,state.working.reducedMotion);
         r.text(60,185,"Profile",white,160);r.text(244,185,state.working.profile==controls::ProfileId::Handheld?"Handheld":"PlayStation",gold,310);
-        unsigned focus=state.row>0&&state.row<=session.controls->actionCount?state.row-1:0;
+        // The scrolling list is the actions, then the mouse-style aiming option as its last item.
+        const unsigned items=static_cast<unsigned>(session.controls->actionCount)+1;
+        unsigned focus=state.row>0&&state.row<=items?state.row-1:0;
         unsigned first=focus<5?0:focus-4;
-        if(session.controls->actionCount>5) {
+        if(items>5) {
             r.rect(583,226,2,160,RGB(39,57,63));
-            const int thumb=static_cast<int>(800/session.controls->actionCount);
-            const int offset=static_cast<int>(first*(160-thumb)/(session.controls->actionCount-5));
+            const int thumb=static_cast<int>(800/items);
+            const int offset=static_cast<int>(first*(160-thumb)/(items-5));
             r.rect(583,226+offset,2,thumb,cyan);
         }
-        for(unsigned slot=0;slot<5&&first+slot<session.controls->actionCount;++slot) {
+        for(unsigned slot=0;slot<5&&first+slot<items;++slot) {
             unsigned i=first+slot;int y=229+static_cast<int>(slot)*32;if(state.row==i+1)Focus(r,y-3,536,elapsed,state.working.reducedMotion,28);
+            if(i==session.controls->actionCount) {
+                r.text(60,y,"Mouse-style aiming",white,288,true);r.text(360,y,state.working.mouseAim?"On":"Off",gold,196,true);continue;
+            }
             r.text(60,y,session.controls->actions[i].label,white,288,true);
             const auto* binding=Binding(state,session.controls->actions[i].id);if(!binding)continue;
             const auto& b=*binding;std::string value=Button(session,state.working.profile,b.buttons[0]);
@@ -253,7 +258,8 @@ void Render(const UiState& state,const SettingsSession& session,Surface surface,
             r.text(360,y,value,gold,196,true);
         }
         Controller(r,state,session);
-        if(session.features.remap) {r.asset(60,382,28,kButtonSquare);r.text(100,390,state.row>0&&state.row<=session.controls->actionCount?"Button List":"Reset Profile",muted,488,true);}
+        if(state.row==session.controls->actionCount+1) r.text(60,390,"Right stick moves the pointer by speed, like a mouse",muted,528,true);
+        else if(session.features.remap) {r.asset(60,382,28,kButtonSquare);r.text(100,390,state.row>0&&state.row<=session.controls->actionCount?"Button List":"Reset Profile",muted,488,true);}
         else r.text(60,390,"Remapping unavailable in this build",muted,528,true);
     }
     Command(r,state,commands,414,session.mode==OpenMode::Running?"Save for Next Launch and Return":"Apply and Play",now);

@@ -1,4 +1,5 @@
 #include "input.h"
+#include "port/pointer_aim.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -21,12 +22,20 @@ SceTouchPanelInfo panel, rearPanel;
 // Controls (env.txt):
 //   PETARI_RSTICK=pointer   the right stick moves the pointer (default: it is the camera, the
 //                           Wii remote's D-pad: left / right turn, up first person, down back)
+//                           With an external pad (PS TV: DS3 / DS4) on the PlayStation profile the right stick is the pointer
+//                           by default (R2 shoots, the D-pad is the camera, see platform/src/input/control_bindings.cpp);
+//                           PETARI_RSTICK=camera keeps the stick the camera there too.
+//   GXV_MOUSE_AIM=1         (Settings > Controls > Mouse-style aiming) the stick moves the pointer like a mouse: speed on a curve
+//                           with acceleration while held (platform/include/port/pointer_aim.h); default off = the 1.0 linear speed
 //   PETARI_TOUCH_A=0        a touch only moves the pointer (default: a short tap also presses A
 //                           where it lands, a finger held still holds A, a drag does neither)
 //   GXV_VITA_WIDE=0         (renderer) the picture unstretched between side bars; the pointer follows
 // Always: on the game's 2D menus the left stick and the D-pad move the pointer; in tilt-steered
 // levels "level" is the grip when the level starts steering, Select sets it again.
 bool rstickPointer, touchA = true, wide = true;
+bool rstickCamera;       // PETARI_RSTICK=camera: the stick stays the camera on a pad too
+bool mouseAim;           // GXV_MOUSE_AIM
+float mouseHeld;         // port::aim::State::held
 // The touch in progress.
 bool touching, touchMoved;
 float touchTime, touchX0, touchY0;
@@ -134,6 +143,7 @@ void resetTransient() {
     calibrated = pointerValid = touching = touchMoved = menuPointer = tiltWasActive = false;
     neutral = right = forward = {};
     pointerX = pointerY = pointerLife = tapA = touchTime = touchX0 = touchY0 = 0;
+    mouseHeld = 0;
     holdPulsed = false;
     rearId = -1; rearSeenCount = 0;
     memset(rearSeen, 0, sizeof rearSeen);
@@ -314,7 +324,8 @@ extern "C" int port_vita_input_init(void) {
     pointerValid = false;
     pointerX = pointerY = 0;
     pointerLife = 0;
-    if (const char* e = getenv("PETARI_RSTICK")) rstickPointer = strcmp(e, "pointer") == 0;
+    if (const char* e = getenv("PETARI_RSTICK")) { rstickPointer = strcmp(e, "pointer") == 0; rstickCamera = strcmp(e, "camera") == 0; }
+    if (const char* e = getenv("GXV_MOUSE_AIM")) mouseAim = atoi(e) != 0;  // read once; the Settings menu sets it (settings_launch.cpp), default off
     if (const char* e = getenv("PETARI_TOUCH_A")) touchA = atoi(e) != 0;
     if (const char* e = getenv("GXV_VITA_WIDE")) wide = atoi(e) != 0;
     if (const char* e = getenv("PETARI_REAR_ACCUM")) rearAccumulate = atoi(e) != 0;
@@ -367,6 +378,16 @@ extern "C" void port_vita_input_settings_rearm(void) { pendingReset.store(true, 
 
 extern "C" void port_vita_input_recenter(void) { calibrated = false; }
 
+// True when the controller in use is an external pad (a DS3 or DS4 on a PS TV) and no Vita handheld controls are present.
+// Valid before port_vita_input_init: the Settings start-up uses it to choose the profile.
+extern "C" int port_vita_input_external_pad(void) {
+    SceCtrlPortInfo info{};
+    if (sceCtrlGetControllerPortInfo(&info) < 0 || info.port[0] == SCE_CTRL_TYPE_PHY) return 0;
+    for (int i = 1; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) return 1;
+    return 0;
+}
+
 extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     // The UI cannot consume this flag. Reset before even the first resumed SDK read.
     if (pendingReset.exchange(false, std::memory_order_acq_rel)) resetTransient();
@@ -389,6 +410,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     if (blockRightStick) control.rx = control.ry = 128;
     unsigned commandButtons = control.buttons;
     bool mappedSpin = false;
+    bool padPointer = false;  // an external pad on the PlayStation profile: the right stick is the pointer
     if (remap) {
         using namespace port::controls;
         const auto& active = ActiveMapping();
@@ -431,6 +453,8 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
                 menuKeys |= mapping->masks[static_cast<size_t>(a)];
             normalized &= ~((L1 | R1 | Triangle) & ~menuKeys);
         }
+        padPointer = port::controls::PadDefaultsEnabled() && !rstickCamera && sampled.controllerType != SCE_CTRL_TYPE_PHY &&
+            mapping->profile == ProfileId::PlayStation;
         const auto translated = Translate(*mapping, normalized);
         mappedSpin = translated.spin;
         control.buttons = 0;
@@ -465,15 +489,23 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     zoomButtons(commandButtons, dt);
     rearToggleButton(commandButtons);
     const bool aiming = (control.buttons & SCE_CTRL_CIRCLE) != 0;
-    if (rstickPointer || aiming) {
+    if (rstickPointer || padPointer || aiming) {
         if (aiming && pointerLife <= 0) pointerX = pointerY = 0; // (a fresh aim starts from the middle)
-        if (rx != 0 || ry != 0) {
+        if (mouseAim) {
+            // Mouse-style: speed on a curve with acceleration while held (the raw stick: the dead zone is in aim::Step).
+            const float aspect = (wide ? 960.0f : 544.0f * 4.0f / 3.0f) / 544.0f;
+            port::aim::State st{pointerX, pointerY, mouseHeld};
+            const bool moved = port::aim::Step(st, (control.rx - 127.5f) / 127.5f, (127.5f - control.ry) / 127.5f, dt, aspect);
+            pointerX = st.x; pointerY = st.y; mouseHeld = st.held;
+            if (moved) pointerLife = kPointerSeconds;
+        } else if (rx != 0 || ry != 0) {
             pointerX = clamp(pointerX + rx * dt * 2.0f, -1, 1);
             pointerY = clamp(pointerY - ry * dt * 2.0f, -1, 1);
             pointerLife = kPointerSeconds;
         }
         if (aiming) pointerLife = kPointerSeconds;
     } else {
+        mouseHeld = 0;
         if (rx < -0.5f) pad->buttons |= 0x0001;
         if (rx > 0.5f) pad->buttons |= 0x0002;
         if (ry < -0.6f) pad->buttons |= 0x0004;

@@ -31,8 +31,10 @@ bool KnownAction(const controls::ControlApi& api,const std::string& s) {
     for(size_t i=0;i<api.actionCount;++i) if(s==api.actions[i].id) return true;
     return false;
 }
+// Keys 1.1 files do not have: absent means the default, and (profile_chosen) marks a file written before the 1.2 pad defaults.
+bool IsOptionalKey(const std::string& key) {return key=="mouse_aim"||key=="profile_chosen";}
 bool Managed(const std::string& key,const controls::ControlApi& api) {
-    if(key=="schema"||key=="fps_limit"||key=="auto_quality"||key=="profile"||key=="language"||key=="reduced_motion") return true;
+    if(key=="schema"||key=="fps_limit"||key=="auto_quality"||key=="profile"||key=="language"||key=="reduced_motion"||IsOptionalKey(key)) return true;
     for(const auto* p:{"bind.handheld.","bind.playstation."})
         if(key.compare(0,std::char_traits<char>::length(p),p)==0&&KnownAction(api,key.substr(std::char_traits<char>::length(p)))) return true;
     return false;
@@ -48,7 +50,7 @@ std::map<std::string,std::string> Values(const Config& c) {
     std::map<std::string,std::string> v{{"schema","1"},{"fps_limit",c.fpsLimit==kSteady30?std::string("steady30"):std::to_string(c.fpsLimit)},
         {"auto_quality",c.autoQuality==AutoQuality::Default?"default":c.autoQuality==AutoQuality::Enabled?"on":"off"},
         {"profile",c.profile==controls::ProfileId::Handheld?"handheld":"playstation"},
-        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"}};
+        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"},{"mouse_aim",c.mouseAim?"1":"0"},{"profile_chosen",c.profileChosen?"1":"0"}};
     for(unsigned i=0;i<2;++i) for(const auto& b:c.profiles[i].bindings)
         v[std::string("bind.")+(i?"playstation.":"handheld.")+b.action]=b.buttons[0]+(b.buttons[1].empty()?"":","+b.buttons[1]);
     return v;
@@ -56,6 +58,11 @@ std::map<std::string,std::string> Values(const Config& c) {
 }
 Config DefaultConfig(const controls::ControlApi& api) {
     Config c; for(unsigned i=0;i<2;++i)c.profiles[i]=api.defaults(static_cast<controls::ProfileId>(i));return c;
+}
+bool ApplyPadDefaults(Config& c,bool externalPad) {
+    if(!controls::PadDefaultsEnabled()||!externalPad||c.profileChosen||c.profile!=controls::ProfileId::Handheld)return false;
+    if(!controls::SameBindings(c.profiles[0],controls::GetControlApi().defaults(controls::ProfileId::Handheld)))return false;
+    c.profile=controls::ProfileId::PlayStation;return true;
 }
 bool Equal(const Config& a,const Config& b) { return Values(a)==Values(b) && a.version==b.version; }
 StoreResult ParseDocument(const std::string& source,const controls::ControlApi& api,Document& result) {
@@ -76,7 +83,7 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     // Schema 1 is always a complete snapshot, not a sparse preferences overlay.
     // This distinguishes interrupted writes (including newline boundaries) from
     // intentional defaults before a primary may displace a valid backup.
-    for(const auto& value:Values(d.config))if(!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
+    for(const auto& value:Values(d.config))if(!IsOptionalKey(value.first)&&!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
@@ -85,6 +92,8 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
         else if(k=="profile") { if(v!="handheld"&&v!="playstation")return Error(StoreStatus::Malformed,"Invalid control profile");d.config.profile=v=="handheld"?controls::ProfileId::Handheld:controls::ProfileId::PlayStation; }
         else if(k=="language") d.config.language=v;
         else if(k=="reduced_motion") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid reduced motion");d.config.reducedMotion=v=="1"; }
+        else if(k=="mouse_aim") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid mouse aim");d.config.mouseAim=v=="1"; }
+        else if(k=="profile_chosen") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid profile choice");d.config.profileChosen=v=="1"; }
         else if(Managed(k,api)&&k.compare(0,5,"bind.")==0) {
             const bool ps=k.compare(5,12,"playstation.")==0;
             const auto action=k.substr(ps?17:14); auto comma=v.find(',');
@@ -95,6 +104,11 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
             }
         }
     }
+    // A file from before the 1.2 pad defaults (no profile_chosen key) whose PlayStation profile is still exactly the 1.1 default was
+    // never customised: it takes the new default. Once 1.2 has written the file the key is there and nothing is migrated, so a
+    // player who sets Star Bits back to Circle keeps it.
+    if(!seen.count("profile_chosen")&&controls::PadDefaultsEnabled()&&controls::SameBindings(d.config.profiles[1],controls::LegacyPlayStationDefaults()))
+        d.config.profiles[1]=api.defaults(controls::ProfileId::PlayStation);
     std::string error;
     if(!ValidConfig(d.config,api,error))return Error(StoreStatus::Malformed,error);
     result=std::move(d);return {StoreStatus::Ok,""};

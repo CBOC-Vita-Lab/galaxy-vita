@@ -268,6 +268,8 @@ RunResult Menu(Screen& screen, OpenMode mode) {
     const auto& api = port::controls::GetControlApi();
     const auto loaded = LoadDocument(kPath, api, kFiles, sDocument);
     UiInput initial{}; Poll(&screen, initial);
+    // The same choice the game made at start-up, so the menu shows the profile that is in use (and is not "changed" by it).
+    port::settings::ApplyPadDefaults(sDocument.config, initial.caps.connected && initial.detectedProfile == port::controls::ProfileId::PlayStation);
     SettingsSession session{mode, sDocument, sActiveConfig, ReadLanguages(), sOverrides, initial.caps,
         {port_vgx_vita_fixed_cap_supported() != 0, port::controls::RemapEnabled()},
         {screen.pixels, 960, 544, 960}, {&screen, Poll, Present, HostNow, Wait}, kPath, &kFiles, &api};
@@ -366,6 +368,8 @@ extern "C" int port_settings_startup(int argc, char** argv) {
     const auto& api = port::controls::GetControlApi();
     LoadDocument(kPath, api, kFiles, sDocument);
     sActiveConfig = sDocument.config;
+    // A pad on a PS TV, with the profile never chosen by hand, plays with the PlayStation profile (R2 shoots, right stick aims).
+    port::settings::ApplyPadDefaults(sActiveConfig, port_vita_input_external_pad() != 0);
     sOverrides = ApplyStartup(sActiveConfig, true);
     std::string error;
     const unsigned profile = sActiveConfig.profile == port::controls::ProfileId::Handheld ? 0 : 1;

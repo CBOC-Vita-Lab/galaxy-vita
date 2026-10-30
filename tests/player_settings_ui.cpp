@@ -65,6 +65,40 @@ int main() {
     Draw(tallState,tallSession,surface,0);assert(surface.pixels[476*surface.stride+448]==0xff9487fbu);
     auto shoulderSession=Session();UiState shoulder;Begin(shoulder,shoulderSession);shoulder.page=Page::Controls;shoulder.row=4;shoulder.working.profile=controls::ProfileId::PlayStation;
     Draw(shoulder,shoulderSession,surface,0);for(unsigned y=202;y<=220;++y)for(unsigned x=612;x<928;++x)assert(surface.pixels[y*surface.stride+x]!=0xffe9dc49u);
+    // The mouse-style aiming option is the last row of the controls list, saved with the other choices; the profile row marks the profile as chosen.
+    {
+        auto aimSession=Session();UiState a;Begin(a,aimSession);Arm(a);Tap(a,NextPage);assert(a.page==Page::Controls&&!a.working.mouseAim&&!a.working.profileChosen);
+        const unsigned aimRow=static_cast<unsigned>(aimSession.controls->actionCount)+1;assert(RowCount(a)==aimRow+4);
+        Tap(a,Up);Tap(a,Up);Tap(a,Up);Tap(a,Up);assert(a.row==aimRow);                 // Cancel, Apply, Save, then the option (wrapping from row 0)
+        Tap(a,Right);assert(a.working.mouseAim&&Dirty(a));Tap(a,Left);assert(!a.working.mouseAim&&!Dirty(a));Tap(a,Accept);assert(a.working.mouseAim&&a.modal==Modal::None);
+        Tap(a,Reset);assert(a.modal==Modal::None&&a.working.mouseAim);                 // Square has nothing to reset here
+        Tap(a,Down);assert(a.row==aimRow+1);Tap(a,Accept);assert(a.saveRequested&&a.working.mouseAim);
+        Begin(a,aimSession);Arm(a);Tap(a,NextPage);a.row=0;Tap(a,Right);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::PlayStation);
+        Tap(a,Left);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::Handheld&&Dirty(a));
+        // It draws, as a row of the list, on both profiles, and the actions above it are still reachable.
+        UiState d;for(unsigned profile=0;profile<2;++profile)for(unsigned row:{aimRow-1,aimRow,aimRow+1,aimRow+3}) {
+            Begin(d,aimSession);d.page=Page::Controls;d.working.profile=static_cast<controls::ProfileId>(profile);d.row=row;d.working.mouseAim=row&1;
+            DrawAudit audit;DrawChecked(d,aimSession,surface,0,audit);assert(audit.minX>=32&&audit.maxX<=928&&audit.maxY<=512);
+        }
+        // The highlight on the pad picture lands on L2 / R2 (a box of its own above the L1 / R1 box) and stays clear of the status text.
+        auto padSession=Session();padSession.detectedProfile=controls::ProfileId::PlayStation;padSession.controller=controls::NominalCaps(controls::ProfileId::PlayStation);
+        const auto playstation=controls::ProfileId::PlayStation;const auto caps=controls::NominalCaps(playstation);std::string conflict;
+        constexpr uint32_t kCyan=0xffe9dc49u;
+        struct Case {const char* action;const char* button;unsigned row;int cx,cy;};
+        for(const Case& c:{Case{"star_bits","r2",2,837,233},Case{"crouch","l2",4,686,233},Case{"spin","r1",3,837,247},Case{"crouch","l1",4,686,247}}) {
+            UiState h;Begin(h,padSession);h.page=Page::Controls;h.working.profile=playstation;h.row=c.row;
+            auto map=h.working.profiles[1];
+            if(std::string(c.action)=="spin") map=h.working.profiles[1];             // spin keeps Square + R1: slot 1 is R1
+            else assert(padSession.controls->bind(map,c.action,0,c.button,true,caps,conflict)==controls::BindResult::Applied);
+            h.working.profiles[1]=map;if(std::string(c.action)=="spin")h.bindingSlot=1;
+            Draw(h,padSession,surface,0);
+            const unsigned x=static_cast<unsigned>(c.cx)-12,y=static_cast<unsigned>(c.cy)-12;
+            assert(surface.pixels[y*surface.stride+x]==kCyan&&surface.pixels[y*surface.stride+x+24]==kCyan&&surface.pixels[(y+24)*surface.stride+x]==kCyan);  // the box's corners
+            for(unsigned yy=202;yy<=220;++yy)for(unsigned xx=612;xx<928;++xx)assert(surface.pixels[yy*surface.stride+xx]!=kCyan);
+            // and nowhere else on the picture: the other shoulder's box is absent
+            const unsigned otherX=static_cast<unsigned>(c.cx==837?686:837)-12;assert(surface.pixels[y*surface.stride+otherX]!=kCyan);
+        }
+    }
     for(bool fonts:{false,true})for(auto page:{Page::Display,Page::Controls})for(auto modal:{Modal::None,Modal::Discard,Modal::Restart,Modal::Capture,Modal::Conflict,Modal::ButtonPicker,Modal::ResetProfile,Modal::Overrides})for(unsigned profile=0;profile<2;++profile) {
         session.fonts=fonts?synthetic.view():FontSet{};
         Begin(s,session);s.page=page;s.modal=modal;s.working.profile=static_cast<controls::ProfileId>(profile);s.row=4;s.action="jump";s.message=std::string(300,'W');

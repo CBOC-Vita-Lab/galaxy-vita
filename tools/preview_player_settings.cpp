@@ -37,6 +37,10 @@ int main(int argc,char** argv) {
     state.row=6;if(!render("controls-playstation-start",state))return 1;
     state.row=7;if(!render("controls-playstation-select",state))return 1;
     state.row=11;if(!render("controls-scrolled",state))return 1;
+    {std::string conflict;auto caps=port::controls::NominalCaps(port::controls::ProfileId::PlayStation);
+     if(session.controls->bind(state.working.profiles[1],"star_bits",0,"r2",true,caps,conflict)!=port::controls::BindResult::Applied)return 1;
+     state.row=2;if(!render("controls-playstation-r2",state))return 1;
+     state.row=12;if(!render("controls-aim-row",state))return 1;state.working.mouseAim=true;if(!render("controls-aim-row-on",state))return 1;state.working.mouseAim=false;}
     state.modal=Modal::Capture;state.action="jump";if(!render("capture",state))return 1;
     state.candidate=port::controls::Circle;if(!render("capture-release",state))return 1;
     state.modal=Modal::ButtonPicker;state.picker=6;if(!render("button-picker",state))return 1;
@@ -54,5 +58,5 @@ int main(int argc,char** argv) {
     session.features={true,true};session.document.config.fpsLimit=0;Begin(state,session);state.changedAt=1000000;
     if(!render("animation-0",state,1000000)||!render("animation-75",state,1075000)||!render("animation-150",state,1150000))return 1;
     state.working.reducedMotion=true;if(!render("reduced-motion",state,10000000))return 1;
-    std::cout<<"preview: 27 native-size PPM frames and safe text bounds generated\n";
+    std::cout<<"preview: 30 native-size PPM frames and safe text bounds generated\n";
 }
