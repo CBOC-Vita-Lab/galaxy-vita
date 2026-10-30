@@ -275,8 +275,7 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Version 1.1 player defaults: Mario's eyes (final TEV byte wrap), the Settings menu and button
     // remapping, the truthful loading bar, and the NEON audio mixing kernels (bit-identical PCM to the
     // scalar code; they run on the game thread). Set only when env.txt has not: NAME=0 turns one off.
-    // Steady 30 (pacing, dynamic quality aimed at 30, half-size effects) is a Settings choice; the other
-    // performance experiments stay off unless env.txt asks for them.
+    // Steady 30 (the fixed 30 ceiling, dynamic quality aimed at 30, full-size effects) is a Settings choice.
     for (const char* name : {"GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD", "GXV_DSPNEON", "GXV_DSPFIR", "GXV_DSPRAMP"})
         setenv(name, "1", 0);
     setenv("GXV_TEVWRAP", "2", 0);  // alpha-only wrap: the eye repair without wrapping RGB
@@ -287,6 +286,15 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     for (const char* name : {"GXV_CLIP_CAPTURE_FIX", "GXV_ASTRO_DOME_ZOOM_GUARD", "GXV_DSTALPHA_ZERO", "GXV_EFB_CREATE_GUARD",
                              "GXV_RT_ALLOC_GUARD", "GXV_EFB_REBIND_GUARD", "GXV_DLCACHE_BOUNDS_GUARD", "GXV_GPU_TIMER_GUARD",
                              "GXV_SETTINGS_SAVE_GUARD"})
+        setenv(name, "1", 0);
+    // 1.2 picture and speed defaults (NAME=0 in env.txt turns one off): GX-exact indirect add-previous, constant
+    // destination alpha under blending, logic-op blends, white for a switched-off texture stage; no `discard` where the
+    // alpha test cannot fail (keeps the GPU's hidden-surface removal); THP movie frames on the hardware JPEG decoder
+    // (checked against the software decoder on the first picture, software on any failure); the frame clock at the
+    // clocks' priority; one clean A press per touch in dialogue; Square/R shakes shorter than a game update kept.
+    // Shaders whose text these change are prepared by the warm-up after the title and kept in the compiled cache.
+    for (const char* name : {"GXV_FIX_INDPREV", "GXV_FIX_DSTA", "GXV_FIX_LOGICOP", "GXV_FIX_TEXOFF", "GXV_NODISCARD", "GXV_THPHW",
+                             "GXV_VBLANK_PRIO", "GXV_TAP_CLEAN", "GXV_SHAKE_LATCH"})
         setenv(name, "1", 0);
     LoadInputScript(SMG_DATA "/input.txt");
     {
