@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The vitaGL of the 1.0 release (variant name "nhustd"):
-#   upstream vitaGL at 76f43e6 (https://github.com/Rinnegatamante/vitaGL)
+#   upstream vitaGL at 9a14d17 (30 Oct 2026; 1.0 and 1.1 used 76f43e6) (https://github.com/Rinnegatamante/vitaGL)
 #   + patches/*.patch        the Strikers port's fixes: uniform pool lifetime, blit flip, shader cache file names,
 #                            allocation recovery, title id buffer, shader cache and shader/program robustness,
 #                            shader source length
@@ -16,7 +16,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 name=${1:-nhustd}
 upstream=${VGL_UPSTREAM:?set VGL_UPSTREAM to a git clone of https://github.com/Rinnegatamante/vitaGL}
-base=76f43e6fbe1513cee44118da7ff2c16728c4fed2
+base=9a14d17808bdeb5c74648e8e1221093df3bfc83f
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 git -C "$upstream" archive --format=tar "$base" | tar -x -C "$work"

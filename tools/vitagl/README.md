@@ -6,7 +6,7 @@ that exact library.
 
 ## Recipe (variant `nhustd`)
 
-1. **Upstream** vitaGL at commit `76f43e6fbe1513cee44118da7ff2c16728c4fed2`.
+1. **Upstream** vitaGL at commit `9a14d17808bdeb5c74648e8e1221093df3bfc83f` (30 Oct 2026: faster matrix and uniform paths, small-transpose and index-conversion speed-ups; versions 1.0 and 1.1 used `76f43e6`).
 2. **[patches/](patches/)**, applied in order: fixes first made for the Mario Strikers Charged port
    (uniform pool lifetime and blit flip, allocation recovery, title ID buffer, shader cache and
    shader/program robustness, shader source length) and the shader cache file names the port's

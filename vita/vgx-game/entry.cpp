@@ -276,6 +276,14 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     for (const char* name : {"GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD", "GXV_DSPNEON", "GXV_DSPFIR", "GXV_DSPRAMP"})
         setenv(name, "1", 0);
     setenv("GXV_TEVWRAP", "2", 0);  // alpha-only wrap: the eye repair without wrapping RGB
+    // 1.2 repairs, on by default (each has an exact host test; NAME=0 in env.txt turns one off):
+    // Ghostly Galaxy's proximity floor (divide-by-zero capture), the dome's Pull Star framing, zero
+    // destination alpha, safe failures for EFB/render-target allocation and rebinding, the display-list
+    // cache refusing half-readable decodes, the GPU timer ring guard, and no Settings entry mid-save.
+    for (const char* name : {"GXV_CLIP_CAPTURE_FIX", "GXV_ASTRO_DOME_ZOOM_GUARD", "GXV_DSTALPHA_ZERO", "GXV_EFB_CREATE_GUARD",
+                             "GXV_RT_ALLOC_GUARD", "GXV_EFB_REBIND_GUARD", "GXV_DLCACHE_BOUNDS_GUARD", "GXV_GPU_TIMER_GUARD",
+                             "GXV_SETTINGS_SAVE_GUARD"})
+        setenv(name, "1", 0);
     LoadInputScript(SMG_DATA "/input.txt");
     {
         // The console starts an application at 333 MHz with the GPU at half speed: ask for the
