@@ -94,6 +94,7 @@ void Clear(const ClearSpec&, const EfbRect&) { ++clearCalls; }
 void DrawQuad(GLuint,float,float,float,float,const float*,const float*) {
     ++draws; if (!S.fbo || !storage[attached[S.fbo]].valid) ++missingDraws;
 }
+bool SanitizeCopyOnlyClear(const CopyTexCmd&) { return false; } // (GXV_SANITIZE is not part of this contract)
 bool EfbSwap(const CopyTexCmd&) { return false; } // RGB565's forced-alpha conversion cannot use the identity-only swap.
 #include "copy-alloc-production.inc"
 }

@@ -55,6 +55,7 @@
 #include "vgx_diagnostic_csv.h"
 #include "vgx_shadergen.h"
 #include "vgx_validate.h"
+#include "vgx_sanitize.h"
 #include "vgx_coldtrace.h"
 #include "vgx_autoq.h"
 #include "vgx_resource_audit.h"
@@ -287,6 +288,12 @@ uint64_t g_serial = 0;
 Stats g_stats;
 uint32_t g_progsThisFrame = 0;
 
+// GXV_SANITIZE (vgx_sanitize.h): checks on what reaches the GPU, read once, default 0 (off): nothing is read, counted or skipped.
+sanitize::Counts g_san;
+inline unsigned SanMode() {
+    static const unsigned mode = sanitize::ParseMode(EnvInt("GXV_SANITIZE", 0));
+    return mode;
+}
 std::unique_ptr<validate::Session> g_validation;
 bool g_validateFrame = false;
 struct ValidationFrame {
@@ -1313,6 +1320,19 @@ bool ApplyRenderState(const RenderState& rs) {
     // of GL state behind this function's back clears g_rsValid; a state whose scissor
     // came out empty is never remembered): nothing to do.
     if (g_rsValid && SameStruct(rs, g_rs)) return true;
+    float zNear = rs.zNear, zFar = rs.zFar;
+    if (const unsigned sm = SanMode()) { // (GXV_SANITIZE: a viewport of no area or of non-finite numbers is not drawn into; a NaN depth range becomes 0..1)
+        if (!sanitize::ViewportUsable(rs.vpX, rs.vpY, rs.vpW, rs.vpH)) {
+            ++g_san.badViewport;
+            VGX_LOG_N(8, "GXV_SANITIZE: viewport %g,%g %gx%g%s\n", rs.vpX, rs.vpY, rs.vpW, rs.vpH, sanitize::Acts(sm) ? ": draw skipped" : "");
+            if (sanitize::Acts(sm)) { ++g_san.skippedDraws; return false; }
+        }
+        if (!sanitize::Finite(zNear) || !sanitize::Finite(zFar)) {
+            ++g_san.badDepthRange;
+            VGX_LOG_N(8, "GXV_SANITIZE: depth range %g..%g%s\n", zNear, zFar, sanitize::Acts(sm) ? ": 0..1 used" : "");
+            if (sanitize::Acts(sm)) { zNear = sanitize::DepthValue(zNear, 0.0f); zFar = sanitize::DepthValue(zFar, 1.0f); }
+        }
+    }
     const float ps = g_inPass ? g_passScale : 1.0f; // (GXV_PASSHALF)
     const float sx = ScaleX() * ps, sy = ScaleY() * ps;
     // Inside an offscreen pass the target is the pass rectangle: same pixels, moved to the origin.
@@ -1329,7 +1349,7 @@ bool ApplyRenderState(const RenderState& rs) {
     if (x0 == 0 && y0 == 0 && x1 == tw && y1 == th) SetScissor(false);
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     SetViewport(Rnd(rs.vpX * sx) - ox, Rnd(rs.vpY * sy) - oy, Rnd(rs.vpW * sx), Rnd(rs.vpH * sy));
-    SetDepthRange(rs.zNear, rs.zFar);
+    SetDepthRange(zNear, zFar);
     if (rs.blend) SetBlend(rs.blendEq == BE_REVSUB ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend(rs.blendSrc), MapBlend(rs.blendDst), rs.dstAlphaZero != 0);
     else SetBlendOff();
     if (rs.depthTest) {
@@ -1645,6 +1665,65 @@ void ValidateDraw(const CmdBuf& buf, const DrawRec& r, const Program& p) {
     }
 }
 
+// GXV_SANITIZE: true when the draw must not reach the GPU. Counts what it finds (log-only mode counts and goes on).
+// Always checked: non-finite projection or position-matrix words and an index range outside the frame's index data;
+// with bit 1 also every streamed vertex the draw names; with bit 3 also non-finite texture / palette / TEV words.
+bool SanitizeRefusesDraw(const CmdBuf& buf, const DrawRec& r, const Program& p) {
+    const unsigned mode = SanMode();
+    bool bad = false;
+    const float* u = buf.uni.data();
+    const size_t un = buf.uni.size();
+    auto block = [&](int b, size_t extra, size_t words, bool always) {
+        if (!words || r.ublock[b] == kNoBlock) return;
+        const size_t start = static_cast<size_t>(r.ublock[b]) + extra;
+        if (start > un || words > un - start) return;
+        const uint32_t k = sanitize::CountNonFinite(u + start, words);
+        if (!k) return;
+        ++g_san.nonFiniteUniform[b];
+        VGX_LOG_N(16, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u: %u non-finite words in uniform block %d+%u\n", static_cast<unsigned long long>(buf.frame),
+                  static_cast<unsigned>(r.vsId), static_cast<unsigned>(r.fsId), k, b, static_cast<unsigned>(extra));
+        if (always || (mode & sanitize::kStrict)) bad = true;
+    };
+    block(UB_PROJ, 0, p.proj != -1 ? 16 : 0, true);
+    block(UB_MV, 0, p.mv != -1 ? 12 : 0, true); // (the position rows; the normal rows' fourth words are unused)
+    block(UB_TEXM, 0, p.tm != -1 ? static_cast<size_t>(p.nTm) * 4 : 0, false);
+    block(UB_TEXM, 96, p.ptm != -1 ? static_cast<size_t>(p.nPtm) * 4 : 0, false);
+    block(UB_PAL, 0, p.pal != -1 ? static_cast<size_t>(p.nPal) * 4 : 0, false);
+    block(UB_LIGHT, 0, p.lt != -1 ? static_cast<size_t>(p.nLt) * 4 : 0, false);
+    block(UB_TEV, 0, p.tev != -1 ? static_cast<size_t>(p.nTev) * 4 : 0, false);
+    if (!r.vbuf) { // (a cached display list's buffers are not kept here: the validator's shadow covers them)
+        if (!sanitize::IndexRangeUsable(r.idxOffset, r.idxCount, buf.idx.size())) {
+            ++g_san.badIndexRange;
+            VGX_LOG_N(16, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u: indices %u+%u outside the %u of the frame\n", static_cast<unsigned long long>(buf.frame),
+                      static_cast<unsigned>(r.vsId), static_cast<unsigned>(r.fsId), r.idxOffset, r.idxCount, static_cast<unsigned>(buf.idx.size()));
+            bad = true;
+        } else if (mode & sanitize::kVertexScan) {
+            const uint8_t* vertices = nullptr;
+            size_t vertexBytes = 0;
+            const size_t chunks = buf.vtxChunks.empty() ? 1 : buf.vtxChunks.size();
+            if (r.vchunk < chunks) {
+                const size_t first = buf.vtxChunks.empty() ? 0 : buf.vtxChunks[r.vchunk];
+                const size_t last = r.vchunk + 1u < chunks ? buf.vtxChunks[r.vchunk + 1] : buf.vtx.size();
+                if (first <= last && last <= buf.vtx.size() && !buf.vtx.empty()) { vertices = buf.vtx.data() + first; vertexBytes = last - first; }
+            }
+            const sanitize::VertexScan sc = sanitize::ScanVertices(r, vertices, vertexBytes, buf.idx.data(), buf.idx.size());
+            g_san.badVertexRefs += sc.badRefs;
+            g_san.outsideRefs += sc.outside;
+            g_san.nonFinitePos += sc.nonFinitePos;
+            g_san.extremePos += sc.extremePos;
+            g_san.nonFiniteAttr += sc.nonFiniteAttr;
+            if (sc.badRefs || sc.nonFinitePos || sc.extremePos || sc.nonFiniteAttr || sc.outside) {
+                VGX_LOG_N(16, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u: %u vertices outside the data, %u indices outside the declared range, %u non-finite and %u extreme positions, %u non-finite attributes\n",
+                          static_cast<unsigned long long>(buf.frame), static_cast<unsigned>(r.vsId), static_cast<unsigned>(r.fsId), sc.badRefs, sc.outside,
+                          sc.nonFinitePos, sc.extremePos, sc.nonFiniteAttr);
+            }
+            if (sc.badRefs || sc.nonFinitePos || sc.extremePos || sc.nonFiniteAttr) bad = true; // (an index outside the declared range alone is only counted)
+        }
+    }
+    if (bad && sanitize::Acts(mode)) { ++g_san.skippedDraws; return true; }
+    return false;
+}
+
 // GXV_PROF=3: where a draw spends its time (program, state, uniforms, textures, layout, call).
 inline double DNow() { return NowMs(); }
 bool g_dprofOn = false;
@@ -1667,6 +1746,7 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
         return;
     }
     if (g_validateFrame) ValidateDraw(buf, r, p);
+    if (SanMode() && SanitizeRefusesDraw(buf, r, p)) return;
     if (g_noCache) {
         S.program = ~0u;
         S.layoutVbo = ~0u;
@@ -1937,6 +2017,12 @@ void Upload(const TexUpload& up) {
         coldtrace::Key{g_progFrame,CMD_TEX_UPLOAD,up.texId,up.format,uint32_t(up.width)|(uint32_t(up.height)<<16),
             uint32_t(up.levels.size())|(up.genMips?0x80000000u:0u)},coldtrace::Origin::Texture);
 #endif
+    if (const unsigned sm = SanMode(); sm && !sanitize::UploadUsable(up.width, up.height, up.levels.size(), up.levels.empty() ? 0 : up.levels[0].size())) {
+        ++g_san.badUpload; // (GXV_SANITIZE: a texture of no texels, or with no data for its first level)
+        VGX_LOG_N(8, "GXV_SANITIZE: upload to texture %u: %ux%u, %u levels%s\n", up.texId, static_cast<unsigned>(up.width), static_cast<unsigned>(up.height),
+                  static_cast<unsigned>(up.levels.size()), sanitize::Acts(sm) ? ": not uploaded" : "");
+        if (sanitize::Acts(sm)) { ++g_san.skippedUploads; return; }
+    }
     Tex& t = TexSlotFor(up.texId);
     if (t.renderTarget && t.id) DeleteTex(t);
     if (!t.id) { G(glGenTextures(1, &t.id)); ++g_stats.textures; }
@@ -2492,6 +2578,20 @@ void BeginPass(const PassCmd& p) {
     g_rsValid = false;
 }
 
+// GXV_SANITIZE: true when this copy is reduced to its clear (a copy of no texels, or of non-finite colour numbers).
+bool SanitizeCopyOnlyClear(const CopyTexCmd& c) {
+    const unsigned sm = SanMode();
+    if (!sm || c.skip || sanitize::CopyUsable(c, g_efbW, g_efbH)) return false;
+    ++g_san.badCopy;
+    VGX_LOG_N(8, "GXV_SANITIZE: copy to texture %u: source %d,%d %dx%d, destination %ux%u (atlas %ux%u)%s\n", c.texId, c.src.x, c.src.y, c.src.w, c.src.h,
+              static_cast<unsigned>(c.dstW), static_cast<unsigned>(c.dstH), static_cast<unsigned>(c.dstTexW), static_cast<unsigned>(c.dstTexH),
+              sanitize::Acts(sm) ? ": only its clear is made" : "");
+    if (!sanitize::Acts(sm)) return false;
+    ++g_san.skippedCopies;
+    dplan::g_valid = false; // (no copy scene happened: conservative depth hints for the rest of the frame, as for a failed target)
+    return true;
+}
+
 void EndPass() { // back to the EFB
     BindFbo(g_efbFbo);
     g_inPass = false;
@@ -2503,7 +2603,7 @@ void EndPass() { // back to the EFB
 
 bool EfbSwap(const CopyTexCmd& c); // (GXV_EFBSWAP, below)
 void CopyTex(const CopyTexCmd& c) {
-    if (c.skip) { // only its clear matters (a dead copy, or one that is made later from an atlas cell)
+    if (c.skip || SanitizeCopyOnlyClear(c)) { // only its clear matters (a dead copy, or one that is made later from an atlas cell)
         if (c.fromPass && g_inPass) EndPass();
         Clear(c.clear, c.src);
         return;
@@ -3631,6 +3731,7 @@ void QualityRungSize(int& w, int& h, int& samples) { w = g_rtW; h = g_rtH; sampl
 
 int QualityTopRung() { return TopRung(); }
 unsigned DebugEfbSwaps() { return g_efbSwapsTotal; }
+const sanitize::Counts& DebugSanitizeCounts() { return g_san; } // (GXV_SANITIZE: tests)
 int EfbSamples() { return g_efbSamples; }
 
 // (tests) A triangle of one colour over the lower left half of the EFB (corners bottom-left, bottom-right, top-left of the
@@ -5765,6 +5866,23 @@ static void ExecuteFrame(const CmdBuf& buf) {
         if (!g_validation->Enabled()) g_validation.reset();
     }
     g_validateFrame = false;
+    if (SanMode()) { // GXV_SANITIZE: one line when the totals moved, at most every 120 frames
+        static uint64_t reported = 0, lastFrame = 0;
+        if (g_san.Total() != reported && buf.frame >= lastFrame + 120) {
+            reported = g_san.Total();
+            lastFrame = buf.frame;
+            std::fprintf(stderr, "[vgx] GXV_SANITIZE: frame %llu: %llu findings (skipped: %llu draws, %llu copies, %llu uploads; viewport %llu, depth range %llu, copy %llu, upload %llu, index range %llu, vertex refs %llu, non-finite positions %llu, extreme positions %llu, non-finite attributes %llu, uniforms proj/mv/texm/pal/light/tev %llu/%llu/%llu/%llu/%llu/%llu)\n",
+                         static_cast<unsigned long long>(buf.frame), static_cast<unsigned long long>(reported), static_cast<unsigned long long>(g_san.skippedDraws),
+                         static_cast<unsigned long long>(g_san.skippedCopies), static_cast<unsigned long long>(g_san.skippedUploads), static_cast<unsigned long long>(g_san.badViewport),
+                         static_cast<unsigned long long>(g_san.badDepthRange), static_cast<unsigned long long>(g_san.badCopy), static_cast<unsigned long long>(g_san.badUpload),
+                         static_cast<unsigned long long>(g_san.badIndexRange), static_cast<unsigned long long>(g_san.badVertexRefs), static_cast<unsigned long long>(g_san.nonFinitePos),
+                         static_cast<unsigned long long>(g_san.extremePos), static_cast<unsigned long long>(g_san.nonFiniteAttr),
+                         static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_PROJ]), static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_MV]),
+                         static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_TEXM]), static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_PAL]),
+                         static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_LIGHT]), static_cast<unsigned long long>(g_san.nonFiniteUniform[UB_TEV]));
+            std::fflush(stderr);
+        }
+    }
 #ifdef VGX_GL_STUB
     ReportGlMem(buf.frame);
 #endif
