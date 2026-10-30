@@ -414,7 +414,7 @@ namespace MR {
     }
 
     void loadTexProjectionMtx(u32 id) {
-        TProj3f cameraProjection = MR::getCameraProjectionMtx();
+        TProj3f cameraProjection = MR::getCameraRenderProjectionMtx();  // drawn: reduced-motion shake
         cameraProjection.mMtx[2][0] = 0.0f;
         cameraProjection.mMtx[2][1] = 0.0f;
         cameraProjection.mMtx[2][2] = -1.0f;

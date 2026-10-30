@@ -17,6 +17,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 - **Queen Bee's fur** looks as it should.
 - **Textures as sharp or soft as the game asks for,** including the dome floors and the Dark Matter Plant, and water keeps the game's own distant detail.
 - **Trails, bump and water effects** follow the Wii's rules more closely.
+- **Reduced motion works in play.** Settings > Display > Reduced motion now cuts camera shake to a quarter of its size. Nothing about how the game plays changes.
 
 ### Controls and gameplay
 - **Music keeps playing after sleep or the Home menu.**

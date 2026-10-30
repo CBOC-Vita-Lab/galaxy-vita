@@ -40,5 +40,17 @@ int main() {
     // The start-up default GXV_AUTOQ_TARGET=30 (the 30 FPS floor) is not reported as an override; another value is.
     setenv("GXV_AUTOQ_TARGET","30",1);c.fpsLimit=0;assert(ApplyStartup(c,true).empty());
     setenv("GXV_AUTOQ_TARGET","60",1);assert(ApplyStartup(c,true).size()==1);unsetenv("GXV_AUTOQ_TARGET");
+    // Reduced motion: the setting sets GXV_REDUCED_MOTION=1 (env.txt wins); only an env value that disagrees with the setting is an override.
+    unsetenv("GXV_REDUCED_MOTION");c.reducedMotion=false;assert(ApplyStartup(c,true).empty()&&!getenv("GXV_REDUCED_MOTION"));
+    c.reducedMotion=true;assert(ApplyStartup(c,true).empty()&&std::string(getenv("GXV_REDUCED_MOTION"))=="1");
+    assert(ApplyStartup(c,false).empty());unsetenv("GXV_REDUCED_MOTION");assert(ApplyStartup(c,false).empty()&&!getenv("GXV_REDUCED_MOTION"));  // disabled start-up touches nothing
+    setenv("GXV_REDUCED_MOTION","1",1);assert(ApplyStartup(c,true).empty()&&std::string(getenv("GXV_REDUCED_MOTION"))=="1");   // agrees: not an override
+    setenv("GXV_REDUCED_MOTION","0",1);{auto o=ApplyStartup(c,true);assert(o.size()==1&&o[0].key=="GXV_REDUCED_MOTION"&&o[0].effectiveLabel=="Reduced motion off");}
+    assert(std::string(getenv("GXV_REDUCED_MOTION"))=="0");                                                                  // env.txt value kept (setenv overwrite 0)
+    c.reducedMotion=false;setenv("GXV_REDUCED_MOTION","1",1);{auto o=ApplyStartup(c,true);assert(o.size()==1&&o[0].rawValue=="1"&&o[0].effectiveLabel=="Reduced motion on");}
+    setenv("GXV_REDUCED_MOTION","0",1);assert(ApplyStartup(c,true).empty());                                                 // off and off agree
+    setenv("GXV_REDUCED_MOTION","",1);assert(ApplyStartup(c,true).empty());                                                  // empty reads as off
+    c.reducedMotion=true;{auto o=ApplyStartup(c,true);assert(o.size()==1&&std::string(getenv("GXV_REDUCED_MOTION")).empty());} // empty is off: disagrees, kept
+    unsetenv("GXV_REDUCED_MOTION");c.reducedMotion=false;
     std::cout<<"launch: exact dispatch, Play precedence, regional catalogs, gates and overrides passed\n";
 }

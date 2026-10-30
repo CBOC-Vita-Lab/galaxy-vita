@@ -4,6 +4,7 @@
 #include "Game/Util/SystemUtil.hpp"
 
 #ifdef TARGET_PC
+#include "port/reduced_motion.h"
 #include "Game/Demo/DemoDirector.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/System/GameSystem.hpp"
@@ -178,4 +179,25 @@ void CameraContext::updateProjectionMtx() {
     trans.makeTrans(mShakeOffset.x, mShakeOffset.y);
 
     mProjection.concat(trans, mProjection);
+
+#ifdef TARGET_PC
+    // Reduced motion: the renderer gets the shake at a quarter of its size (mProjection, which game logic reads, keeps all of it).
+    if (port::motion::Enabled()) {
+        mRenderProjection.makePerspective(mFovy, getAspect(), mNearZ, mFarZ);
+
+        TProj3f calmTrans;
+        calmTrans.makeTrans(port::motion::ShakeScale(mShakeOffset.x), port::motion::ShakeScale(mShakeOffset.y));
+
+        mRenderProjection.concat(calmTrans, mRenderProjection);
+    }
+#endif
+}
+
+const TProj3f& CameraContext::getRenderProjection() const {
+#ifdef TARGET_PC
+    if (port::motion::Enabled()) {
+        return mRenderProjection;
+    }
+#endif
+    return mProjection;
 }

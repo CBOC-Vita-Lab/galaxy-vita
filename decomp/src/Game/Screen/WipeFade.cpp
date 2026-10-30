@@ -2,6 +2,9 @@
 #include "Game/Util/DrawUtil.hpp"
 #include "Game/Util/LayoutUtil.hpp"
 #include "Game/Util/MathUtil.hpp"
+#ifdef TARGET_PC
+#include "port/reduced_motion.h"
+#endif
 
 namespace {
     static const s32 sFadeFrame = 30;
@@ -34,6 +37,14 @@ void WipeFade::draw() const {
     if (mIsWipeIn) {
         alpha = 1.0f - alpha;
     }
+
+#ifdef TARGET_PC
+    // Reduced motion (GXV_REDUCED_MOTION): a short bright fade that is under way is a flash and is drawn at 40 % opacity at most.
+    // Scene fades (30 frames or more), fades to black and a held (force-closed) screen are not touched; the wipe state is not changed.
+    if (mStep < mFrame) {
+        alpha = port::motion::CapFlashAlpha(alpha, mFrame, mFillColor.r, mFillColor.g, mFillColor.b);
+    }
+#endif
 
 #ifdef TARGET_PC
     port_vr_wipe(0, alpha, (u32)mFillColor.r << 16 | (u32)mFillColor.g << 8 | mFillColor.b);

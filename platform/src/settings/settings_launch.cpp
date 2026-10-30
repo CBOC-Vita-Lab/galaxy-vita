@@ -1,5 +1,6 @@
 #include "port/settings_launch.h"
 #include "port/port.h"
+#include "port/reduced_motion.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -50,14 +51,17 @@ LanguageCatalog ReadLanguages() {
 }
 std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     std::vector<Override> overrides;if(!enabled)return overrides;
-    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP","GXV_MOUSE_AIM"}) {
+    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP","GXV_MOUSE_AIM","GXV_REDUCED_MOTION"}) {
         if(const char* raw=std::getenv(key)) {
             // Remapping is on by default (the start-up default sets GXV_REMAP=1); only turning it off is an override.
             if(std::strcmp(key,"GXV_REMAP")==0&&std::strcmp(raw,"1")==0)continue;
             // The 30 FPS floor of dynamic quality is on by default (GXV_AUTOQ_TARGET=30, set at start-up) in every picture rate.
             if(std::strcmp(key,"GXV_AUTOQ_TARGET")==0&&std::strcmp(raw,"30")==0)continue;
+            // Reduced motion is an override only when env.txt disagrees with the Settings choice (the game reads it as on or off).
+            if(std::strcmp(key,"GXV_REDUCED_MOTION")==0&&motion::ParseSwitch(raw)==config.reducedMotion)continue;
             std::string effective=raw;
             if(std::strcmp(key,"GXV_FPS_LIMIT")==0) effective=std::strcmp(raw,"30")==0?"30 FPS requested (driver capability required)":"Existing picture-rate path";
+            if(std::strcmp(key,"GXV_REDUCED_MOTION")==0) effective=motion::ParseSwitch(raw)?"Reduced motion on":"Reduced motion off";
             if(std::strcmp(key,"GXV_REMAP")==0) effective=std::strcmp(raw,"0")==0?"Remapping disabled":"Remapping off (unknown value)";
             overrides.push_back({key,raw,effective});
         }
@@ -71,6 +75,8 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
         setenv("GXV_AUTOQ",config.autoQuality==AutoQuality::Enabled?"1":"0",0);
     // Mouse-style Star Bit pointer aiming (vita/runtime/input.cpp reads GXV_MOUSE_AIM once); an env.txt value wins.
     if(config.mouseAim)setenv("GXV_MOUSE_AIM","1",0);
+    // Reduced motion in play (port/reduced_motion.h reads GXV_REDUCED_MOTION once: less camera shake, softer short flashes); an env.txt value wins.
+    if(config.reducedMotion)setenv("GXV_REDUCED_MOTION","1",0);
     if(!std::getenv("PETARI_LANGUAGE")&&!config.language.empty()) {
         const auto catalog=ReadLanguages();
         // An ordinary launch may not have discovered the disc yet; the existing

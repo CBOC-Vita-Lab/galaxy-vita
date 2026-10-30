@@ -111,6 +111,17 @@ int main() {
     s.working.reducedMotion=false;Draw(s,session,{first.data(),960,544,960},0);Draw(s,session,{second.data(),960,544,960},999999);
     size_t changed=0;for(size_t i=0;i<first.size();++i)changed+=first[i]!=second[i];assert(changed>0&&changed<10000);
     DrawAudit audit;DrawChecked(s,session,{first.data(),960,544,960},0,audit);assert(audit.minX>=32&&audit.minY>=32&&audit.maxX<=928&&audit.maxY<=512&&audit.textRuns>=15);
+    // The Reduced motion row's note ("Less camera shake and softer flashes.") fits its line with the fallback and the game font, off and on.
+    for(bool fonts:{false,true})for(bool on:{false,true}) {
+        session.fonts=fonts?synthetic.view():FontSet{};Begin(s,session);s.row=3;s.working.reducedMotion=on;
+        DrawAudit noteAudit;DrawChecked(s,session,{first.data(),960,544,960},0,noteAudit);
+        assert(noteAudit.minX>=32&&noteAudit.minY>=32&&noteAudit.maxX<=928&&noteAudit.maxY<=512);
+        // The test font is wider than the game's and truncates labels elsewhere already; the note adds no truncated run to what row 2 shows.
+        UiState other=s;other.row=2;DrawAudit otherAudit;DrawChecked(other,session,{second.data(),960,544,960},0,otherAudit);
+        assert(noteAudit.truncatedRuns==otherAudit.truncatedRuns&&(fonts||noteAudit.truncatedRuns==0));
+        size_t noteDiff=0;for(size_t y=372;y<410;++y)for(size_t x=60;x<900;++x)noteDiff+=first[y*960+x]!=second[y*960+x];assert(noteDiff>100);  // row 3 has its own note line
+    }
+    session.fonts={};
     session.overrides={{"GXV_FPS_LIMIT","no","Existing picture-rate path"},{"GXV_REMAP","0","Remapping disabled"}};
     Begin(s,session);Arm(s);Tap(s,Reset);assert(s.modal==Modal::Overrides);Tap(s,Accept);assert(s.modal==Modal::None);
     // Arbitrarily ordered valid mappings must still show/edit the catalog action.

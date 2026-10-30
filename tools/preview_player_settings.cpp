@@ -27,6 +27,8 @@ int main(int argc,char** argv) {
     if(!render("display-cold",state))return 1;
     state.working.fpsLimit=30;state.working.autoQuality=AutoQuality::Enabled;state.working.language="French";state.row=2;
     if(!render("display-edited",state))return 1;
+    // The Reduced motion row focused, off and on: its one-line note must stay inside the safe text bounds and not be truncated.
+    state.row=3;if(!render("display-reduced-motion-row",state))return 1;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return 1;state.working.reducedMotion=false;state.row=2;
     session.mode=OpenMode::Running;Begin(state,session);state.modal=Modal::Restart;
     if(!render("restart-cancel",state))return 1;state.modalChoice=1;if(!render("restart-confirm",state))return 1;
     state.modal=Modal::Discard;if(!render("discard",state))return 1;
@@ -58,5 +60,5 @@ int main(int argc,char** argv) {
     session.features={true,true};session.document.config.fpsLimit=0;Begin(state,session);state.changedAt=1000000;
     if(!render("animation-0",state,1000000)||!render("animation-75",state,1075000)||!render("animation-150",state,1150000))return 1;
     state.working.reducedMotion=true;if(!render("reduced-motion",state,10000000))return 1;
-    std::cout<<"preview: 30 native-size PPM frames and safe text bounds generated\n";
+    std::cout<<"preview: 32 native-size PPM frames and safe text bounds generated\n";
 }

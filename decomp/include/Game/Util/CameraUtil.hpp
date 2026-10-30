@@ -23,6 +23,7 @@ namespace MR {
     const TPos3f& getCameraViewMtx();
     const TPos3f& getCameraInvViewMtx();
     const TProj3f& getCameraProjectionMtx();
+    const TProj3f& getCameraRenderProjectionMtx();
 
     f32 getAspect();
     f32 getNearZ();
