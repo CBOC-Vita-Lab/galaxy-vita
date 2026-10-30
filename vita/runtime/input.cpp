@@ -10,6 +10,7 @@
 
 extern "C" int port_rear_aim_enabled(void);  // platform/src/port/perf.cpp: the option, kept in settings.ini
 extern "C" int port_rear_aim_toggle(void);
+extern "C" int port_skip_context_kind(void) __attribute__((weak));  // platform/src/port/cutscene_skip.cpp: 4 cutscene, 5 dialogue, 0 none
 
 namespace {
 struct Vec { float x, y, z; };
@@ -30,6 +31,22 @@ bool rstickPointer, touchA = true, wide = true;
 bool touching, touchMoved;
 float touchTime, touchX0, touchY0;
 float tapA; // seconds of A still to give after a tap
+// GXV_TAP_CLEAN=1 (read once, default off): during a dialogue or a cutscene a touch is only ever a press of A, never a held
+// A.  The game finishes a page of text when A is held for 11 updates (TalkStateEvent::talk) and the port skips the whole
+// dialogue when A is held for a second (platform/src/port/cutscene_skip.cpp), and a finger resting on the screen held A for
+// as long as it stayed.  With the switch a finger held still gives one 0.1 s press at the 0.2 s mark (the same edge a
+// longer touch gave), and a new touch ends a press still running so two taps are two edges.  Pull Stars and the rest of
+// play (no dialogue, no cutscene) keep the held A.
+bool holdPulsed;
+bool tapCleanOn() {
+    static const bool on = [] { const char* e = getenv("GXV_TAP_CLEAN"); return e && strcmp(e, "1") == 0; }();
+    return on;
+}
+bool talkOrDemoOnScreen() {
+    if (!port_skip_context_kind) return false;
+    const int kind = port_skip_context_kind();
+    return kind == 4 /* PORT_SKIP_DEMO */ || kind == 5 /* PORT_SKIP_TALK */;
+}
 // The pointer is on screen while a finger is, for a few seconds after, and while Circle (B:
 // shoot a Star Bit at the pointer) is held, when the right stick aims it. With no pointer the
 // game's menus ask to "touch the screen" (the "point at the screen" text, platform/src/port/handheld_ui.cpp).
@@ -117,6 +134,7 @@ void resetTransient() {
     calibrated = pointerValid = touching = touchMoved = menuPointer = tiltWasActive = false;
     neutral = right = forward = {};
     pointerX = pointerY = pointerLife = tapA = touchTime = touchX0 = touchY0 = 0;
+    holdPulsed = false;
     rearId = -1; rearSeenCount = 0;
     memset(rearSeen, 0, sizeof rearSeen);
     rearLastX = rearLastY = rearVelX = rearVelY = 0;
@@ -498,10 +516,18 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
             touchTime = 0;
             touchX0 = pointerX;
             touchY0 = pointerY;
+            holdPulsed = false;
+            if (tapCleanOn()) tapA = 0;  // (a press of the tap before is over: this touch makes its own edge)
         }
         touchTime += dt;
         if (fabsf(pointerX - touchX0) > 0.08f || fabsf(pointerY - touchY0) > 0.08f) touchMoved = true;
-        if (touchA && !touchMoved && touchTime >= 0.20f) pad->buttons |= 0x0800; // a finger held still: A held (pull stars)
+        if (touchA && !touchMoved && touchTime >= 0.20f) {
+            if (tapCleanOn() && talkOrDemoOnScreen()) {
+                if (!holdPulsed) { holdPulsed = true; tapA = 0.10f; }  // one press, not a hold
+            } else {
+                pad->buttons |= 0x0800; // a finger held still: A held (pull stars)
+            }
+        }
     } else if (touching) {
         touching = false;
         if (touchA && !touchMoved && touchTime < 0.20f) tapA = 0.10f; // a tap: A where it landed

@@ -165,6 +165,7 @@ void port_vi_retrace(void);
 void port_skip_set_hold_seconds(float seconds);  // 0 turns skipping off
 int port_skip_inject_a(void);                    // A as the game should read it, -1: as pressed
 void port_skip_indicator(float* progress, int* forwarding, unsigned* skips);
+int port_skip_context_kind(void);                // PORT_SKIP_* of the dialogue or cutscene on screen, 0 none (cutscene_skip.cpp)
 int port_input_real_a(void);  // controller 0's A button as the player presses it (wpad.cpp)
 // The camera's left and right turns swapped (the invert_camera setting; the
 // game's side is port_input_camera_inverted in port/compat.h).

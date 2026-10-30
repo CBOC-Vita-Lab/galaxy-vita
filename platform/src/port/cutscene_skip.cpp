@@ -188,6 +188,10 @@ void port_skip_context(int kind) {
     sSkips.fetch_add(1);
 }
 
+// What the game last reported (PORT_SKIP_NONE when it has stopped reporting): the input layer asks whether a dialogue or a
+// cutscene is on screen.
+int port_skip_context_kind(void) { return contextStale(port_host_time_ns()) ? PORT_SKIP_NONE : sKind; }
+
 int port_skip_take(int kind) {
     if (sPending != kind) {
         return 0;
