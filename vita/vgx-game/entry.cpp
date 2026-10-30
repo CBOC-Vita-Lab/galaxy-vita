@@ -315,6 +315,8 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // picture; while the picture is upscaled Mario and Luigi get their own edge smoothing.
     setenv("GXV_AUTOQ_FXSTEP", "2", 0);
     setenv("GXV_CHARAA_AUTO", "1", 0);
+    // TEV inputs A, B, C read the low 8 bits of a colour register, as on the Wii (the Lumas were white without it).
+    setenv("GXV_FIX_TEVIN", "1", 0);
     // Consecutive rigid draws that differ only in their matrix drawn as one, through the 10-matrix palette (GXV_RIGIDMERGE=1;
     // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs) stays a test switch.
     setenv("GXV_RIGIDMERGE", "1", 0);
