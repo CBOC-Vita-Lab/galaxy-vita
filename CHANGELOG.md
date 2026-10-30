@@ -7,6 +7,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 - **30 FPS is the floor.** In every picture rate, dynamic quality watches the whole frame's work and lowers resolution only when a scene would otherwise fall under 30, then brings it back within seconds.
 - **Lock it at 30.** Settings > Picture rate now offers **Locked 30** (an even 30 FPS, every frame, at full effects) or **Up to 60** (the default). Locked 30 replaces 1.1's "30 FPS" and "Steady 30", and it never drops to 20.
 - **The game and the renderer work side by side again.** Under a 30 FPS cap they had started taking turns, so each frame cost both of them added together. This was the main cause of the slow Comet Observatory.
+- **No more drops to 15 FPS.** When a scene is just too busy for the processor, the game now keeps showing every picture and slows down a touch, as the Wii did, instead of halving the frame rate.
 - **Less work every frame.** Matching pieces of scenery are drawn together, lights are worked out once instead of twice, screen copies use their own small programs, and sound mixing has moved off the game's own processor core.
 - **Movies on the Vita's video hardware.** The title video and cutscenes are decoded by the console's JPEG hardware, with the software decoder as a fallback.
 - **The newest vitaGL**, with its speed improvements.

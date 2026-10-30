@@ -317,6 +317,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     setenv("GXV_CHARAA_AUTO", "1", 0);
     // TEV inputs A, B, C read the low 8 bits of a colour register, as on the Wii (the Lumas were white without it).
     setenv("GXV_FIX_TEVIN", "1", 0);
+    // When the CPU (not the GPU) is the limit and a pair of game turns just misses 33 ms, keep every second turn's picture and let
+    // the game run up to 20 % slower (as the Wii did) instead of halving the pictures; beyond 20 % the old skipping returns.
+    setenv("GXV_SLIP", "1", 0);
+    setenv("GXV_SLIP_MAX", "20", 0);
     // Consecutive rigid draws that differ only in their matrix drawn as one, through the 10-matrix palette (GXV_RIGIDMERGE=1;
     // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs) stays a test switch.
     setenv("GXV_RIGIDMERGE", "1", 0);
