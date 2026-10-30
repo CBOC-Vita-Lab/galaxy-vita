@@ -1,7 +1,12 @@
 #include "memory.h"
 
+#include <atomic>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "port/core_layout.h"
 
 #include <psp2/kernel/error.h>
 #include <psp2/kernel/modulemgr.h>
@@ -29,6 +34,32 @@ bool native_range(const void* base, uint32_t size) {
 bool valid_range(const void* base, uint32_t size, uint32_t alignment) {
     return aligned(base, alignment) && native_range(base, size);
 }
+
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));  // the basic log (os_alarm.cpp)
+extern "C" void port_log(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));
+
+// The thread-layout switches. Read at each use, not cached: this runs at thread start-up only, and the log writer thread starts
+// (platform/src/os/os_alarm.cpp) before vita/vgx-game/entry.cpp has loaded env.txt, so a value cached at its first call would be stale.
+port::cores::Switches CoreSwitches() {
+    return port::cores::ReadSwitches([](const char* name) { return getenv(name); });
+}
+
+void BasicLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void BasicLog(const char* fmt, ...) {
+    char text[200];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    if (port_log_summary) port_log_summary("%s", text);
+    else if (port_log) port_log("%s", text);
+}
+
+// The calling thread's affinity mask, for port::cores::PlaceIoThread.
+struct SelfKernel {
+    int Set(int mask) { return sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask); }
+    int Get() { return sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId()); }
+};
 
 } // namespace
 
@@ -147,10 +178,44 @@ extern "C" int port_vita_thread_class(int cls) {
     // otherwise places these unpinned threads anywhere, and at 0x50 / 0x70 they preempt the game thread there. In the Observatory
     // (18 Oct console log, thp48d) the game thread's turn ran 20-23 % longer by the clock than it computed; these threads and the
     // audio ones are the ones that can take that time. Cores 1 and 2 (back end and front end) have room. GXV_HELPER_CORES=0: as before.
-    static const bool helperCores = [] { const char* e = getenv("GXV_HELPER_CORES"); return !(e && *e == '0'); }();
-    if (helperCores && cls != 3) sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x60000);  // SCE_KERNEL_CPU_MASK_USER_1 | USER_2
+    // (GXV_CORE0_ALONE=1 also moves them when GXV_HELPER_CORES=0 says otherwise: the game thread has core 0 to itself, see port/core_layout.h)
+    if (const int helperMask = port::cores::HelperMask(CoreSwitches()); helperMask && cls != 3)
+        sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), helperMask);  // SCE_KERNEL_CPU_MASK_USER_1 | USER_2
     if (cls <= 3 && !(mask & (1u << (cls - 1)))) return 0;
     return sceKernelChangeThreadPriority(0, kPriority[cls]);
+}
+
+// GXV_CORE0_ALONE=1 (default 0): 1 when the game thread is to have core 0 to itself (see port/core_layout.h).
+extern "C" int port_vita_core0_alone(void) { return CoreSwitches().core0Alone ? 1 : 0; }
+
+// A helper thread that has no class (log writer, freeze watch, an unraised frame clock): off core 0 under GXV_CORE0_ALONE=1, else untouched.
+// Returns the mask applied, 0 when nothing was changed.
+extern "C" int port_vita_thread_helper(void) {
+    const int mask = port::cores::UnclassedMask(CoreSwitches());
+    if (!mask) return 0;
+    return sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask) >= 0 ? mask : 0;
+}
+
+// GXV_CORE3_IO=1 (default 0): delay-tolerant work asks for the system core. kind 0 the disc read-ahead worker, 1 a movie decoder (only
+// index 2 asks). The thread tries the change on itself and keeps it only when the call succeeded and the mask reads back as asked;
+// otherwise it is put back (cores 1-2) and nothing but one line in the basic log says so. Never called by the render, front-end or
+// present threads, and nothing that runs here spins: the disc worker and the decoders sleep on condition variables.
+// Returns the mask the thread has afterwards (0x80000 on the system core), 0 when the switch is off or the thread was left alone.
+extern "C" int port_vita_thread_io(int kind, int index) {
+    static std::atomic<unsigned> reported{0};
+    const port::cores::IoKind which = kind == 1 ? port::cores::IoKind::MovieDecoder : port::cores::IoKind::DiscReader;
+    SelfKernel kernel;
+    const port::cores::Switches switches = CoreSwitches();
+    const port::cores::Placement p = port::cores::PlaceIoThread(kernel, switches, which, index);
+    if (!p.tried) return 0;
+    const unsigned bit = 1u << (kind == 1 ? 1 : 0);
+    if (!(reported.fetch_or(bit) & bit)) {
+        const char* what = kind == 1 ? "movie decoder 3" : "disc read-ahead worker";
+        if (p.onSystem) BasicLog("threads: core 3 io: the %s runs on the system core (mask 0x%X)", what, static_cast<unsigned>(p.mask));
+        else BasicLog("threads: core 3 io: the %s stays on cores 1-2 (change rc 0x%X, mask read back 0x%X)", what, static_cast<unsigned>(p.askRc),
+                      static_cast<unsigned>(p.readBack));
+    }
+    return p.mask;
 }
 
 // CPU time the calling thread has used, in microseconds.

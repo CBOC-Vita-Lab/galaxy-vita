@@ -14,8 +14,10 @@
 #include <vector>
 
 #include "port/gx_fifo.h"
+#include "port/core_layout.h"
 #include "port/frame_pace.h"
 #include "port/heap_routing.h"
+#include "port/queue_depth.h"
 #include "port/port.h"
 #include "port/diagnostics.h"
 #include "port/qemu_hooks.h"
@@ -64,6 +66,7 @@ extern "C" void port_vgx_vita_settings_resume(void);
 extern "C" int port_vgx_vita_error_shown(void);     // 1 when a start-up failure is on the loading screen
 extern "C" int port_vgx_vita_fail(const char* message);  // put a start-up failure on the loading screen (1: shown)
 extern "C" void port_vgx_vita_backend_failed(void); // the back end's own set-up failed: say so on the loading screen
+extern "C" int port_vita_core0_alone(void) __attribute__((weak)); // GXV_CORE0_ALONE (vita/runtime/memory.cpp)
 #endif
 
 namespace vgx {
@@ -155,6 +158,7 @@ extern "C" int port_settings_active(void) __attribute__((weak));
 void StartFreezeWatch() {
     if (!PORT_LOGGING || vgx::EnvInt("GXV_FREEZE_WATCH", 1) == 0) return;
     std::thread([] {
+        port_thread_helper();  // GXV_CORE0_ALONE=1: off the game's core (port.h); a once-a-second sleeper
         unsigned long long lastShown = sFramesShown.load(std::memory_order_relaxed);
         uint32_t lastTurns = 0;
         int still = 0;
@@ -393,6 +397,9 @@ unsigned sMaxInFlight = 1;
 // it is not (60 fps scenes) the queue evens out the frames' unequal times, and the full limit stays.  Guarded by sMtx.
 unsigned sQueueLimit = 1;
 bool sAdaptDepth = false;
+std::atomic<uint64_t> sGateWaitN{0}, sGateWaitUs{0}, sGateWaitMaxUs{0};  // FrameSink waits (GXV_WAITLOG)
+bool sWaitLog = false;     // GXV_WAITLOG, read once in port_gx_select_backend
+bool sFixedDepth = false;  // GXV_FIXED_DEPTH, read once in port_gx_select_backend
 // Where the back end is, for the stall report: 0 waiting for a frame, 1 executing it, 2 after it (the counters, the picture
 // copy), and when it got there (host ns).
 std::atomic<int> sBackStage{0};
@@ -520,6 +527,7 @@ void RenderMain() {
         vgx::backend::RequestCapture(cap);
         const int64_t tExec = PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0 ? port_host_time_ns() : 0;
         const int64_t tAdapt = sAdaptDepth ? port_host_time_ns() : 0;
+        const int64_t cpuAdaptBefore = sAdaptDepth && sFixedDepth ? port_thread_cpu_us() : 0;
         const int64_t tPace = PaceMode() ? port_host_time_ns() : 0;
         const int64_t paceCpuBefore = tPace ? port_thread_cpu_us() : 0;
         if (PORT_RUNTIME_DIAGNOSTICS) {
@@ -541,28 +549,28 @@ void RenderMain() {
         }
         unsigned newLimit = 0;  // (0: unchanged)
         if (sAdaptDepth) {
-            // The mean time of 24 frames' execution (a frame's time is capped, so a shader-compile stall does not decide).
-            static int64_t sumNs = 0;
-            static unsigned n = 0, changes = 0;
-            static bool tight = false;
-            const int64_t t = port_host_time_ns() - tAdapt;
-            sumNs += t < 60000000 ? t : 60000000;
-            if (++n >= 24) {
-                const int64_t avg = sumNs / n;
-                sumNs = 0;
-                n = 0;
-                if (!tight && avg >= 26000000) {
-                    tight = true;
-                    newLimit = 1;
-                } else if (tight && avg <= 20000000) {
-                    tight = false;
-                    newLimit = sMaxInFlight + 1;
-                }
-                if (newLimit && changes < 40) {
-                    ++changes;
-                    port_log("gx: the back end takes %.1f ms a frame: %s", avg / 1e6,
-                             tight ? "it is the bottleneck, so the queue is cut to one frame" : "it keeps up, so the queue is open again");
-                }
+            // The mean time of 24 frames' execution (port/queue_depth.h; a frame's time is capped, so a shader-compile stall does not
+            // decide). GXV_FIXED_DEPTH=1 (default 0): with a display cap in force the thread's own CPU time is measured instead of its
+            // wall time, because the wall time then includes the wait for the display queue and never gets under the cut-off.
+            static port::depth::Adapter adapter;
+            static unsigned changes = 0;
+            static bool configured = false;
+            if (!configured) {
+                configured = true;
+                adapter.Configure(sMaxInFlight + 1);
+            }
+            const int64_t wallNs = port_host_time_ns() - tAdapt;
+            int64_t sample = wallNs;
+            if (sFixedDepth && PaceMode() != 0 && cpuAdaptBefore > 0) {
+                const int64_t cpuNow = port_thread_cpu_us();
+                if (cpuNow >= cpuAdaptBefore) sample = (cpuNow - cpuAdaptBefore) * 1000;
+            }
+            newLimit = adapter.Feed(sample);
+            if (newLimit && changes < 40) {
+                ++changes;
+                port_log("gx: the back end takes %.1f ms a frame (%s): %s", adapter.LastMean() / 1e6,
+                         sample == wallNs ? "wall time" : "own CPU time",
+                         adapter.Tight() ? "it is the bottleneck, so the queue is cut to one frame" : "it keeps up, so the queue is open again");
             }
         }
         const unsigned long long shown = CompleteJob();
@@ -686,6 +694,18 @@ void FrameSink(vgx::CmdBuf& buf) {
         vgx::workload::Scope observation(vgx::workload::FrontQueue);
         const double limit = GraphicsWaitLimitSeconds();
         const int64_t waitStart = port_host_time_ns();
+        // GXV_WAITLOG=1 (default 0): how long the game thread waited here for the render thread, counted for the "waits:" line.
+        struct GateCensus {
+            int64_t start;
+            ~GateCensus() {
+                if (!start) return;
+                const uint64_t us = static_cast<uint64_t>(port_host_time_ns() - start) / 1000;
+                sGateWaitN.fetch_add(1, std::memory_order_relaxed);
+                sGateWaitUs.fetch_add(us, std::memory_order_relaxed);
+                uint64_t seen = sGateWaitMaxUs.load(std::memory_order_relaxed);
+                while (us > seen && !sGateWaitMaxUs.compare_exchange_weak(seen, us, std::memory_order_relaxed)) {}
+            }
+        } census{sWaitLog ? waitStart : 0};
         while (!sCv.wait_for(lk, std::chrono::milliseconds(20), [] { return !sFree.empty() && sJobs.size() < sQueueLimit; })) {
             // (time limit: see RenderMain)
             if (sStarted && !sStartOk) {
@@ -762,6 +782,12 @@ extern "C" int sceKernelGetThreadCurrentPriority(void);
 void SplitThreadInit(int core) {
     PORT_QEMU_THREAD("vgx-finish");
 #if defined(__vita__)
+    // GXV_CORE0_ALONE=1: a finishing thread asked onto core 0 (GXV_SPLIT_CORE=0) goes to core 1 instead; core 0 is the game's.
+    if (port_vita_core0_alone && port_vita_core0_alone()) {
+        port::cores::Switches alone;
+        alone.core0Alone = true;
+        core = port::cores::SplitCore(alone, core);
+    }
     const int pin = core >= 0 && core <= 2 ? port_vita_pin_core(core) : 0;
     port_thread_class(3);
     long prio = vgx::EnvInt("GXV_SPLIT_PRIO", 0);
@@ -810,6 +836,13 @@ extern "C" unsigned port_vgx_backend_pending(void) {
 }
 extern "C" unsigned port_vgx_pace_divisor(void) {
     return PaceMode() ? sPaceDivisor.load(std::memory_order_relaxed) : 0;
+}
+// The FrameSink gate census since the last call (GXV_WAITLOG): waits, their total and longest, in us.
+extern "C" int port_vgx_gate_wait_take(uint64_t* n, uint64_t* totalUs, uint64_t* maxUs) {
+    *n = sGateWaitN.exchange(0, std::memory_order_relaxed);
+    *totalUs = sGateWaitUs.exchange(0, std::memory_order_relaxed);
+    *maxUs = sGateWaitMaxUs.exchange(0, std::memory_order_relaxed);
+    return sWaitLog ? 1 : 0;
 }
 extern "C" uint64_t port_vgx_pace_wait_total_us(void) { return sPaceWaitUs.load(std::memory_order_relaxed); }
 extern "C" void port_vgx_pace_waited(uint64_t us) { sPaceWaitUs.fetch_add(us, std::memory_order_relaxed); }
@@ -1151,6 +1184,8 @@ extern "C" void port_gx_select_backend(void) {
 #if defined(__vita__)
     // (GXV_INFLIGHT set by hand: that number is kept; GXV_ADAPT_DEPTH=0 turns the adaptation off)
     sAdaptDepth = !getenv("GXV_INFLIGHT") && vgx::EnvInt("GXV_ADAPT_DEPTH", 1) != 0;
+    sWaitLog = vgx::EnvInt("GXV_WAITLOG", 0) != 0;  // (the "waits:" line: where the game and render threads blocked)
+    sFixedDepth = vgx::EnvInt("GXV_FIXED_DEPTH", 0) != 0;  // (the queue-depth adaptation measures its own CPU time under a display cap)
 #endif
     sSkipWhenBehind = vgx::EnvInt("GXV_SKIP_BEHIND", skipDefault) != 0;
 #if defined(__vita__)

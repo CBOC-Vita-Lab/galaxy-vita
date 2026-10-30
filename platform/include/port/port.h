@@ -148,6 +148,17 @@ int port_vita_thread_class(int cls) __attribute__((weak));
 static inline void port_thread_class(int cls) {
     if (port_vita_thread_class) port_vita_thread_class(cls);
 }
+// Thread layout (PS Vita only; port/core_layout.h): a helper thread that has no class (log writer, watchdog) calls port_thread_helper();
+// with GXV_CORE0_ALONE=1 it moves off the game's core 0. The disc read-ahead worker and a movie decoder call port_thread_io(): with
+// GXV_CORE3_IO=1 they try the system core and keep it only when the kernel grants it. Both do nothing elsewhere and with the switches off.
+int port_vita_thread_helper(void) __attribute__((weak));
+int port_vita_thread_io(int kind, int index) __attribute__((weak));
+static inline int port_thread_helper(void) {
+    return port_vita_thread_helper ? port_vita_thread_helper() : 0;  // the mask applied; 0: nothing changed (switch off, or not Vita)
+}
+static inline void port_thread_io(int kind, int index) {
+    if (port_vita_thread_io) port_vita_thread_io(kind, index);
+}
 
 // Freezes the game: the video retrace and audio DMA clocks stop, so the game
 // thread waits in VIWaitForRetrace and no new audio is mixed.  Used while the

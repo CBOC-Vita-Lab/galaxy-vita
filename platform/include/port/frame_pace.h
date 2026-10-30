@@ -166,4 +166,32 @@ private:
     unsigned divisor_ = 2;
     bool started_ = false;
 };
+
+// The wait for a presentation slot, off the display hardware. Display: uint32_t Count() (the vblank counter) and int WaitVblank()
+// (blocks until the next vblank starts; negative: the wait failed, stop). Returns the vblank the picture will be on.
+//
+// The older loop (countWaits false) trusts the counter after every wait. If the counter is read before it was updated for the vblank
+// that just woke the thread, the loop thinks that vblank has not come yet and waits for one more: a 30 FPS picture is held for three
+// vblanks instead of two, once. countWaits true counts a wait that returned as a vblank that passed, so the picture is never later
+// than the slot (the counter is still believed when it is ahead, e.g. after a thread slept through several vblanks).
+struct SlotWaitResult {
+    uint32_t shown = 0;     // the vblank the picture will be shown on
+    unsigned waits = 0;     // vblank waits made (0: the slot had already come)
+    bool failed = false;    // WaitVblank reported an error
+};
+template <class Display> SlotWaitResult WaitForSlot(Display& d, uint32_t due, bool countWaits, unsigned maxWaits = 8) {
+    SlotWaitResult r;
+    r.shown = static_cast<uint32_t>(d.Count()) + 1;
+    while (static_cast<int32_t>(due - r.shown) > 0 && r.waits < maxWaits) {
+        if (d.WaitVblank() < 0) {
+            r.failed = true;
+            break;
+        }
+        ++r.waits;
+        uint32_t seen = static_cast<uint32_t>(d.Count()) + 1;
+        if (countWaits && static_cast<int32_t>(seen - (r.shown + 1)) < 0) seen = r.shown + 1;
+        r.shown = seen;
+    }
+    return r;
+}
 }

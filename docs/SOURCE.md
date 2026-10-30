@@ -9,7 +9,7 @@ Version 1.0 plus the changes below, built from this repository (the release comm
 - `platform/vgx/vita/`: truthful loading progress (`GXV_BOOTGUARD`, on by default in 1.1) and the title-screen loading picture (`vita/vgx-game/sce_sys/loading-title.rgba`, see [ASSETS.md](ASSETS.md)).
 - `vita/vgx-game/fd_guard.cpp`: a seek on a file handle that is not open fails with EBADF instead of crashing.
 - Basic log: loading stages, time to title, and shaders prepared per five-second line.
-- Off by default, for testing only (`env.txt`): `GXV_PACE`, `GXV_AUTOQ_TARGET=30`, `GXV_DSPNEON`, `GXV_DSPFIR`, `GXV_DSPRAMP`, `GXV_FXSCANFAST`, `GXV_XFBURST`, `GXV_POSDEFAULT`, `GXV_TEVWRAP_ELIDE`, `GXV_BOOTDIALOG`, `GXV_BOOTDATA`, `GXV_CORE3_PROBE`.
+- Off by default, for testing only (`env.txt`): `GXV_PACE`, `GXV_AUTOQ_TARGET=30`, `GXV_DSPNEON`, `GXV_DSPFIR`, `GXV_DSPRAMP`, `GXV_FXSCANFAST`, `GXV_XFBURST`, `GXV_POSDEFAULT`, `GXV_TEVWRAP_ELIDE`, `GXV_BOOTDIALOG`, `GXV_BOOTDATA`, `GXV_CORE3_PROBE`, `GXV_CORE0_ALONE`, `GXV_CORE3_IO`, `GXV_PACE_VBLANK_COUNT`, `GXV_FIXED_DEPTH`, `GXV_WAITLOG`.
 
 The tables below describe 1.0.
 

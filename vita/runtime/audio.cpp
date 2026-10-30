@@ -1,4 +1,5 @@
 #include "audio.h"
+#include "port/core_layout.h"
 #include "port/settings_lifecycle.h"
 
 #include <atomic>
@@ -22,6 +23,8 @@ const int kFrames = 512;
 // buffers in rotation leave each one untouched for two whole periods.
 const int kOutputBuffers = 3;
 alignas(64) int16_t sOutput[kOutputBuffers][kFrames * 2];
+// The audio output and the AI clock stay off core 0 (GXV_HELPER_CORES=0 leaves them to the scheduler, GXV_CORE0_ALONE=1 overrides that).
+int HelperMask() { return port::cores::HelperMask(port::cores::ReadSwitches([](const char* name) { return getenv(name); })); }
 int sAudioPort = -1;
 SceUID thread = -1;
 PortVitaAudioDrain drainAudio;
@@ -139,7 +142,7 @@ extern "C" void port_vita_audio_clock_boost(void) {
         return;
     }
     const int r = sceKernelChangeThreadPriority(0, 0x40);
-    { const char* helper = getenv("GXV_HELPER_CORES"); if (!(helper && *helper == '0')) sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x60000); }  // (off core 0)
+    { const int helperMask = HelperMask(); if (helperMask) sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), helperMask); }  // (off core 0; GXV_CORE0_ALONE overrides GXV_HELPER_CORES=0)
     port_log("audio: AI clock thread priority 0x%X -> 0x40: 0x%08X (cpu mask 0x%X)", static_cast<unsigned>(before), static_cast<unsigned>(r),
              static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
 }
@@ -160,8 +163,7 @@ extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {
     }
     drainAudio = drain;
     // (off the game's core 0: see port_vita_thread_class; GXV_HELPER_CORES=0 leaves it to the scheduler)
-    const char* helper = getenv("GXV_HELPER_CORES");
-    thread = sceKernelCreateThread("galaxy_audio", audioThread, 0x40, 16 * 1024, 0, (helper && *helper == '0') ? 0 : 0x60000, nullptr);
+    thread = sceKernelCreateThread("galaxy_audio", audioThread, 0x40, 16 * 1024, 0, HelperMask(), nullptr);
     if (thread < 0) {
         sceAudioOutReleasePort(sAudioPort);
         sAudioPort = -1;

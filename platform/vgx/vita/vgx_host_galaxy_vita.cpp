@@ -57,6 +57,7 @@
 #include "vgx_shadergen.h"
 #include "vgx_coldtrace.h"
 #include "port/vgx_coldtrace_control.h"
+#include "port/core_layout.h"
 #include "port/frame_pace.h"
 #include "vgx_state.h"
 #if defined(GXV_SHADER_CACHE_PACK) && GXV_SHADER_CACHE_PACK
@@ -86,7 +87,9 @@ extern "C" void vglResumeUniformPoolScene(GLboolean resume) __attribute__((weak)
 extern "C" void vglSubmitWithoutSwap(void) __attribute__((weak));
 extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak)); // (platform/src/os/os_alarm.cpp: the basic log in ux0:data/smg/log.txt)
 extern "C" unsigned port_vgx_pace_divisor(void);
+extern "C" int port_vita_core0_alone(void) __attribute__((weak)); // GXV_CORE0_ALONE (vita/runtime/memory.cpp)
 extern "C" void port_vgx_pace_waited(uint64_t us);
+extern "C" int port_vgx_gate_wait_take(uint64_t* n, uint64_t* totalUs, uint64_t* maxUs);
 extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built with MASK_SKIP: full-target mask quads left out so far
 #include "vgx_core3_probe_vita.h"
 extern "C" unsigned long long port_game_frames(void); // vgx_galaxy.cpp: frames the game has finished
@@ -165,6 +168,20 @@ std::atomic<unsigned> g_presentSlotEpoch{0};
 
 uint64_t NowUs() { return sceKernelGetProcessTimeWide(); }
 unsigned NowMs() { return static_cast<unsigned>(NowUs() / 1000u); }
+
+// GXV_WAITLOG=1 (default 0): where the render thread blocks, per 5 s window ("waits:" line next to "pace:"): the display swap (the
+// scene end and the wait for a free display buffer) and the hidden frame's GPU finish.
+struct WaitCensus {
+    std::atomic<uint64_t> n{0}, totalUs{0}, maxUs{0};
+    void Add(uint64_t us) {
+        n.fetch_add(1, std::memory_order_relaxed);
+        totalUs.fetch_add(us, std::memory_order_relaxed);
+        uint64_t seen = maxUs.load(std::memory_order_relaxed);
+        while (us > seen && !maxUs.compare_exchange_weak(seen, us, std::memory_order_relaxed)) {}
+    }
+};
+WaitCensus g_swapWait, g_hiddenFinishWait;
+bool WaitLogOn() { static const bool on = vgx::EnvInt("GXV_WAITLOG", 0) != 0; return on; }
 
 bool Exists(const char* path) {
     SceIoStat st;
@@ -1197,9 +1214,16 @@ void SeedShaderList() {
 // queue next to the render thread, the collector to the auxiliary core (so neither takes time
 // from the game thread's core). Threads can appear late, so this runs again at a few presents.
 // (Vita3K does not implement sceKernelGetThreadmgrUIDClass: there the scan sees nothing.)
+//
+// GXV_CORE0_ALONE=1 (default 0): the game thread has core 0 to itself, so every other thread of the process that is allowed to run
+// there is moved to cores 1-2 as well (port::cores::SweepTarget: not the threads pinned to core 0 alone, those are the game's), and
+// the basic log says which ones and how many threads stay pinned on core 0.
 void PinLibraryThreads(bool log, bool census = false) {
     SceKernelThreadInfo info;
-    int missesInRow = 0, moved = 0, seen = 0;
+    int missesInRow = 0, moved = 0, seen = 0, sweptOff = 0, pinnedCore0 = 0;
+    port::cores::Switches layout;
+    layout.core0Alone = port_vita_core0_alone && port_vita_core0_alone() != 0;
+    static int sweepLines = 0;
     for (SceUID uid = 0x40010001; uid < 0x40020000 && missesInRow < 500; ++uid) {
         if (sceKernelGetThreadmgrUIDClass(uid) != SCE_KERNEL_TMID_Thread) { ++missesInRow; continue; }
         std::memset(&info, 0, sizeof(info));
@@ -1212,15 +1236,26 @@ void PinLibraryThreads(bool log, bool census = false) {
                              static_cast<unsigned>(info.currentPriority), static_cast<unsigned>(info.initPriority), static_cast<unsigned>(info.currentCpuAffinityMask),
                              static_cast<unsigned>(info.initCpuAffinityMask), static_cast<unsigned long long>(info.runClocks));
         int target = 0;
+        bool swept = false;
         if (std::strstr(info.name, "Garbage Collector")) target = kCoreAux;
         else if (!std::strcmp(info.name, "SceGxmDisplayQueue")) target = kCoreRender;
+        else if (layout.core0Alone) swept = (target = port::cores::SweepTarget(layout, static_cast<unsigned>(info.currentCpuAffinityMask))) != 0;
+        if (layout.core0Alone && info.currentCpuAffinityMask == static_cast<SceUInt32>(kCoreGame)) ++pinnedCore0;
         if (target && info.currentCpuAffinityMask != static_cast<SceUInt32>(target)) {
             const int res = sceKernelChangeThreadCpuAffinityMask(uid, target);
             ++moved;
+            if (swept && res >= 0) ++sweptOff;
+            if (swept && sweepLines < 24) {
+                ++sweepLines;
+                GXV_BASIC_LOG("threads: core 0 alone: \"%s\" (priority 0x%X, core mask 0x%X) moved to 0x%X: %s", info.name, static_cast<unsigned>(info.currentPriority),
+                              static_cast<unsigned>(info.currentCpuAffinityMask), static_cast<unsigned>(target), res >= 0 ? "ok" : "refused");
+            }
             port_log("[vgx-vita] thread \"%s\" (priority 0x%X) moved to core mask 0x%X: %s", info.name, static_cast<unsigned>(info.currentPriority),
                      static_cast<unsigned>(target), res >= 0 ? "ok" : "refused");
         }
     }
+    if (layout.core0Alone && (log || sweptOff))
+        GXV_BASIC_LOG("threads: core 0 alone: %d threads seen, %d moved off core 0 now, %d left pinned to core 0 alone (the game's)", seen, sweptOff, pinnedCore0);
     if (log) port_log("[vgx-vita] library threads: %d threads seen, %d moved%s", seen, moved, seen == 0 ? " (none seen: expected in the emulator)" : "");
 }
 
@@ -1431,8 +1466,9 @@ bool StartGl(char* error, size_t errorSize) {
     // must outlive the frame, so only the stream buffers (the frame's vertex chunks and indices) may be
     // scratch. Without that build option the call does nothing.
     vglSetupScratchMemory(GL_FALSE, GL_TRUE);
-    port_log("[vgx-vita] sceGxm buffers: %s buffering, parameter buffer %ld KiB, VDM ring %ld KiB (0 = vitaGL's default)",
-             tripleBuffering ? "triple" : "double", paramKib, vdmKib);
+    // (vitaGL's own default is three display buffers; GXV_VITA_TRIPLE=0 leaves that alone, it does not make two)
+    port_log("[vgx-vita] sceGxm buffers: %s, parameter buffer %ld KiB, VDM ring %ld KiB (0 = vitaGL's default)",
+             tripleBuffering ? "triple buffering asked for" : "vitaGL's default display buffers", paramKib, vdmKib);
     port_log("[vgx-vita] render targets: %ld scene(s) per frame; shader patcher pools %ld / %ld / %ld MiB; collector on core mask 0x%X", fboScenes, patcherMib,
              (patcherMib + 1) / 2, (patcherMib + 1) / 2, static_cast<unsigned>(kCoreAux));
 
@@ -1612,15 +1648,19 @@ void PaceDisplay(void*) {
         for (uint64_t& n : held) n = 0;
         slotEpoch = requestedEpoch;
     }
-    uint32_t shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
+    // GXV_PACE_VBLANK_COUNT=1 (default 0): a vblank wait that returned counts as a vblank that passed, even if the counter has not
+    // moved yet (frame_pace.h WaitForSlot); off = the counter is trusted after every wait, as before.
+    static const bool countWaits = vgx::EnvInt("GXV_PACE_VBLANK_COUNT", 0) != 0;
+    struct VitaDisplay {
+        uint32_t Count() const { return static_cast<uint32_t>(sceDisplayGetVcount()); }
+        int WaitVblank() const { return sceDisplayWaitVblankStart(); }
+    } display;
+    uint32_t shown = display.Count() + 1;
     const uint32_t due = slots.Next(shown, interval);
     const uint64_t before = NowUs();
-    unsigned guard = 0;
-    while (static_cast<int32_t>(due - shown) > 0 && guard++ < 8) {
-        if (sceDisplayWaitVblankStart() < 0) break;
-        shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
-    }
-    if (guard) port_vgx_pace_waited(NowUs() - before);
+    const port::pace::SlotWaitResult slot = port::pace::WaitForSlot(display, due, countWaits);
+    shown = slot.shown;
+    if (slot.waits) port_vgx_pace_waited(NowUs() - before);
     slots.Shown(shown);
     if (lastShown) {
         const uint32_t n = shown - lastShown;
@@ -1637,6 +1677,16 @@ void PaceDisplay(void*) {
                              static_cast<unsigned long long>(held[0]), static_cast<unsigned long long>(held[1]),
                              static_cast<unsigned long long>(held[2]), static_cast<unsigned long long>(held[3]),
                              static_cast<unsigned long long>(held[4]));
+        if (WaitLogOn() && port_log_summary) {
+            uint64_t gn, gt, gm;
+            port_vgx_gate_wait_take(&gn, &gt, &gm);
+            const uint64_t sn = g_swapWait.n.exchange(0), st = g_swapWait.totalUs.exchange(0), sm = g_swapWait.maxUs.exchange(0);
+            const uint64_t fn = g_hiddenFinishWait.n.exchange(0), ft = g_hiddenFinishWait.totalUs.exchange(0), fm = g_hiddenFinishWait.maxUs.exchange(0);
+            port_log_summary("waits: game thread gate %llu x avg %.1f max %.1f ms; render swap %llu x avg %.1f max %.1f ms; hidden-frame finish %llu x avg %.1f max %.1f ms",
+                             static_cast<unsigned long long>(gn), gn ? gt / 1000.0 / gn : 0.0, gm / 1000.0,
+                             static_cast<unsigned long long>(sn), sn ? st / 1000.0 / sn : 0.0, sm / 1000.0,
+                             static_cast<unsigned long long>(fn), fn ? ft / 1000.0 / fn : 0.0, fm / 1000.0);
+        }
         windowAt = now;
         pictures = 0;
         for (uint64_t& n : held) n = 0;
@@ -1732,7 +1782,9 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // GXV_CHARAA (vgx_draw.cpp, "character edge smoothing"): the characters' and key items' edges, over what was just drawn,
     // in this same scene (nothing is drawn in a frame without them, nor on a multisampled EFB).
     vgx::backend::PresentCharaAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpened ? sharpen : 0.0f, true);
+    const uint64_t swapStart = WaitLogOn() ? NowUs() : 0;
     vglSwapBuffers(GL_FALSE);
+    if (swapStart) g_swapWait.Add(NowUs() - swapStart);
     if (g_fixedJob) {
         g_wasSplash = false;
         g_jobSwapped = true;
@@ -1757,7 +1809,11 @@ extern "C" void port_vgx_vita_set_present_allowed(int allowed) {
     g_jobSwapped = false;
 }
 extern "C" void port_vgx_vita_finish_unpresented_frame(void) {
-    if (!g_jobSwapped && vglSubmitWithoutSwap) vglSubmitWithoutSwap();
+    if (!g_jobSwapped && vglSubmitWithoutSwap) {
+        const uint64_t start = WaitLogOn() ? NowUs() : 0;
+        vglSubmitWithoutSwap();
+        if (start) g_hiddenFinishWait.Add(NowUs() - start);
+    }
 }
 extern "C" unsigned long long port_vgx_vita_game_swaps(void) {
     return g_gameSwaps.load(std::memory_order_relaxed);
@@ -1909,6 +1965,7 @@ extern "C" void port_boot_progress(const char* what, int done, int total) { spla
 // drifts against the display and drops or repeats a picture every few seconds).
 extern "C" void port_vi_retrace(void);
 extern "C" int port_vita_thread_class(int cls) __attribute__((weak)); // vita/runtime/memory.cpp
+extern "C" int port_vita_thread_helper(void) __attribute__((weak));
 namespace {
 void* VblankMain(void*) {
     // GXV_VBLANK_PRIO=1: the frame clock runs at the clocks' priority (0x50, cores 1-2) like the timer and retrace threads. Left to the
@@ -1916,6 +1973,7 @@ void* VblankMain(void*) {
     // back end when it shares a core with them; it does a few microseconds of work per vertical blank. Default 0: as before.
     static const bool raise = std::getenv("GXV_VBLANK_PRIO") && std::atoi(std::getenv("GXV_VBLANK_PRIO")) == 1;
     if (raise && port_vita_thread_class) port_vita_thread_class(1);
+    else if (port_vita_thread_helper) port_vita_thread_helper();  // GXV_CORE0_ALONE=1: off the game's core even when not raised
     for (;;) {
         sceDisplayWaitVblankStart();
         port_vi_retrace();

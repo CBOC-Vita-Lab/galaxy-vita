@@ -62,6 +62,7 @@ typedef int BOOL;
 extern "C" void port_gpu_memory_written(void* addr, uint32_t size);
 extern "C" int port_vita_pin_core(int core) __attribute__((weak));
 extern "C" int port_vita_thread_class(int cls) __attribute__((weak));
+extern "C" int port_vita_thread_io(int kind, int index) __attribute__((weak));  // GXV_CORE3_IO (vita/runtime/memory.cpp)
 extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));  // CPU time of the calling thread (the console)
 extern "C" void port_log(const char* fmt, ...) __attribute__((weak));
 
@@ -1410,6 +1411,11 @@ void pinWorker(int index) {
     // "lower than the game's" priority cannot be made by adding to it: the game's threads are raised instead, port_thread_class.)
     if (port_vita_thread_class) {
         port_vita_thread_class(4);
+    }
+    // GXV_CORE3_IO=1 (default 0): the third decoder tries the system core, a spare lane for movie frames; it sleeps on a condition
+    // variable between pictures. The other two stay on the cores the movie leaves free.
+    if (port_vita_thread_io) {
+        port_vita_thread_io(1, index);
     }
 #else
     (void)index;

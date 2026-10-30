@@ -1231,6 +1231,7 @@ static void noteResume() {
 static void workerMain() {
     PORT_QEMU_THREAD("dvd-worker");
     port_thread_class(2);
+    port_thread_io(0, 0);  // GXV_CORE3_IO=1: the read-ahead worker tries the system core (port.h); off by default
     const bool readAheadOn = !getenv("PETARI_READAHEAD") || getenv("PETARI_READAHEAD")[0] != '0';
     const bool movieWindowOn = readAheadOn && (!getenv("PETARI_MOVIEWIN") || getenv("PETARI_MOVIEWIN")[0] != '0');
     for (;;) {

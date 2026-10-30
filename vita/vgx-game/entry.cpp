@@ -42,6 +42,8 @@
 extern "C" void port_boot(const char*, const char*);
 extern "C" int port_vita_pin_core(int core);
 extern "C" int port_vita_thread_class(int cls);
+extern "C" int port_vita_core0_alone(void);   // GXV_CORE0_ALONE=1: the game thread has core 0 to itself (port/core_layout.h)
+extern "C" int port_vita_thread_helper(void);
 extern "C" void port_vgx_vita_log_memory(const char* when);
 extern "C" void port_vgx_vita_thread_report(void);
 extern "C" void port_splash_begin(void); // the loading screen (platform/vgx/vita/vgx_host_galaxy_vita.cpp): up from the first moments, until the title has appeared
@@ -302,6 +304,13 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
     setenv("GXV_PAD_DEFAULTS", "1", 0);
+    // Frame pipeline (1.2): the game thread alone on core 0 (every other thread on cores 1-2); under a frame cap the queue depth
+    // follows the back end's own CPU time, not its wall time (which includes the display wait and kept the queue at one frame,
+    // so the game and the renderer stopped overlapping); a vblank wait that returned counts as a passed vblank.
+    // GXV_CORE3_IO (disc and movie work on the system core) stays a test switch.
+    for (const char* name : {"GXV_CORE0_ALONE", "GXV_FIXED_DEPTH", "GXV_PACE_VBLANK_COUNT"}) setenv(name, "1", 0);
+    // This thread, which started with no restriction, leaves core 0 as soon as GXV_CORE0_ALONE is known.
+    port_vita_thread_helper();
     LoadInputScript(SMG_DATA "/input.txt");
     {
         // The console starts an application at 333 MHz with the GPU at half speed: ask for the
@@ -366,7 +375,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     }
     // port_boot: memory arenas, disc, GX + the renderer's thread (vitaGL start-up happens inside
     // port_gx_select_backend, so this call takes a few seconds), then the guest's own thread.
-    port_vita_pin_core(0);  // this thread becomes the game's main thread
+    // (this thread is the process's main thread, not the game's: the game thread is the one platform/src/os/os_thread.cpp makes and pins
+    // to core 0. This one polls the pad at the clocks' priority below, where port_vita_thread_class(1) moves it to cores 1-2 as well.)
+    if (!port_vita_core0_alone()) port_vita_pin_core(0);
     // This thread also polls the pad every few milliseconds.  At the main thread's own priority (0xA0, below every game thread at
     // 0x9F) it got no time at all while the game thread computed without stopping (a stage load: several seconds), so a
     // button pressed then was seen late or not at all.  It runs a hundred microseconds at a time: the clocks' priority.
