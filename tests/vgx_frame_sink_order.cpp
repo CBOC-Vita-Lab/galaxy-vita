@@ -97,6 +97,8 @@ int64_t port_host_time_ns() { return 0; }
 int64_t port_thread_cpu_us() { return 0; }
 void port_fatal(const char*, ...) { Require(false, "unexpected fatal path"); std::abort(); }
 void port_log(const char*, ...) {}
+int port_vgx_vita_fail(const char*) { return 0; }  // (loading-screen hooks the fixture slice of vgx_galaxy.cpp references)
+int port_vgx_vita_error_shown(void) { return 0; }
 void port_irq_raise(int irq) {
     std::lock_guard<std::mutex> lock(probeMutex);
     if (irq == PORT_IRQ_PE_FINISH) ++finishes;

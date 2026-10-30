@@ -54,6 +54,8 @@ void port_log_summary(const char* format, ...) {
     summary = buf;
 }
 void port_log(const char*, ...) {}
+int port_vgx_vita_fail(const char*) { return 0; }  // (loading-screen hooks the fixture slice of vgx_galaxy.cpp references)
+int port_vgx_vita_error_shown(void) { return 0; }
 void port_perf_game_totals(int64_t* work, uint32_t* turns, int64_t* cpu, int64_t* max) {
     *work = *cpu = *max = 0; *turns = clockUs / 16683;
 }
