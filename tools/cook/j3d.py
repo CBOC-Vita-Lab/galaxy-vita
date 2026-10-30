@@ -255,9 +255,19 @@ def anm_tables(b, o, end, offs_at, kinds):
     sw32(b, o + offs_at, len(kinds))
 
 
+ANK1_COUNT_LIMIT = 0x8000
+ANK1_MARKER = b'UCNT'   # written over the start of the block's padding (+0x24) when a key count is 0x8000 or more
+
+
 def ank1(b, o, end):
-    n_s, n_r, n_t = s16(b, o + 0x0E), s16(b, o + 0x10), s16(b, o + 0x12)
+    # The key counts are unsigned: read as signed, a count of 32768 or more came out negative and the
+    # array was left big-endian (Bowser's three battle-start cutscenes, among others, twisted and spun).
+    n_s, n_r, n_t = u16(b, o + 0x0E), u16(b, o + 0x10), u16(b, o + 0x12)
     tbl, sc, rot, tr = [u32(b, o + 0x14 + 4 * i) for i in range(4)]
+    if max(n_s, n_r, n_t) >= ANK1_COUNT_LIMIT and tbl >= 0x28:
+        # Tells the game this block was converted with the unsigned counts (data converted before the fix
+        # has no marker, and the game swaps those arrays itself when it loads them).
+        b[o + 0x24:o + 0x28] = ANK1_MARKER
     if tbl:
         sw_range(b, o + tbl, (o + sc) if sc else end, 2)
     if sc:

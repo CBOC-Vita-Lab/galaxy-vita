@@ -1,6 +1,7 @@
 #include "JSystem/J3DGraphLoader/J3DAnmLoader.hpp"
 #include "JSystem/J3DGraphAnimator/J3DAnimation.hpp"
 #include "JSystem/JSupport/JSupport.hpp"
+#include "port/anm_key_repair.h"
 
 J3DAnmBase* J3DAnmLoaderDataBase::load(const void* i_data, J3DAnmLoaderDataBaseFlag flag) {
     if (!i_data) {
@@ -301,6 +302,8 @@ void J3DAnmKeyLoader_v15::setResource(J3DAnmBase* param_1, const void* param_2) 
 }
 
 void J3DAnmKeyLoader_v15::setAnmTransform(J3DAnmTransformKey* param_1, const J3DAnmTransformKeyData* param_2) {
+    // GXV_FIX_BCKCNT (default 1): key arrays of 32768 or more that the older converter left big-endian are swapped here.
+    port::anmkey::RepairInPlace(const_cast< J3DAnmTransformKeyData* >(param_2));
     param_1->field_0x1e = param_2->field_0xc;
     param_1->mFrameMax = param_2->mFrameMax;
     param_1->mAttribute = param_2->field_0x8;
