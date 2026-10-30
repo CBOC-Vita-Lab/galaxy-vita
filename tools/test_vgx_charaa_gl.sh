@@ -14,3 +14,5 @@ nice -n 10 "${CXX:-g++}" -std=gnu++20 -O1 -g -w -I"$src" -I"$root/platform/vgx/t
   "$root/tests/vgx_charaa_gl_test.cpp" "$src/vgx_backend_gl.cpp" "$src/vgx_autoq.cpp" "$src/vgx_shadergen.cpp" \
   "$root/platform/vgx/host/vgx_host_egl.cpp" -lEGL -lGLESv2 -lpthread -o "$out/vgx_charaa_gl_test"
 GXV_CAP_PRESENT=960x544 GXV_CAP_AB=1 GXV_CHARAA=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_charaa_gl_test" "$out"
+# GXV_CHARAA_AUTO=1 with GXV_CHARAA unset: the same rectangle, drawn only below the EFB's own size (the gate; see the test's header)
+GXV_CAP_PRESENT=960x544 GXV_CAP_AB=1 GXV_CHARAA_AUTO=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_charaa_gl_test" "$out"

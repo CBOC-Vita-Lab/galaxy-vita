@@ -347,12 +347,15 @@ struct TexReplaceQuery {
     bool mipClamp;        // backend::Caps::mipClamp: no compressed level below one 4x4 block
     uint64_t liveBytes;   // bytes of replacement textures the back end holds now
     bool* inPack = nullptr; // (not null) set to true when the texture is one of the pack's, replaced or not (GXV_CHARAA)
+    bool* player = nullptr; // (not null) set to true when it is one of Mario's or Luigi's (GXV_CHARAA_AUTO)
 };
 void SetTextureReplaceHook(bool (*fn)(const TexReplaceQuery& q, TexUpload& up), uint8_t mipFilter);
 uint64_t ReplacedTextureBytes(); // bytes of replacement textures alive in the back end
 // A texture of the HD pack's list (characters and key items: tools/hdtex/selection.txt), whatever was uploaded for it
 // (GXV_CHARAA: their draws are the ones smoothed). False for EFB copies and unknown ids.
 bool IsCharaTexture(uint32_t texId);
+// The same, restricted to the player's own: the archives of Mario and Luigi in the list (GXV_CHARAA_AUTO).
+bool IsPlayerTexture(uint32_t texId);
 
 // ---- edge smoothing of the characters and key items (GXV_CHARAA, vgx_draw.cpp "character edge smoothing")
 int CharaAAMode(); // GXV_CHARAA, read once: 0 off, 1 on, 2 on with the smoothed areas tinted (diagnostic)

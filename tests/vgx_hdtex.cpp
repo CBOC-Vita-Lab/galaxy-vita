@@ -1,5 +1,7 @@
 // HD texture replacement through the real texture cache (tools/test_vgx_hdtex.sh).
-//   vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson
+//   vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson [player|notplayer]
+// The optional last word says whether the pack's one entry (its name decides) must be known as one of Mario's or Luigi's own
+// textures (vgx::IsPlayerTexture, GXV_CHARAA_AUTO); it is always a character texture (vgx::IsCharaTexture).
 // The pack is tools/hdtex/make_test_pack.py's: one 8x8 CMPR original, a 16x16 DXT1 replacement
 // with levels 16..1 whose bytes are 0x10 + level.
 #include "vgx_hdtex.h"
@@ -38,7 +40,7 @@ void Require(bool ok, const char* message) {
 }
 
 int main(int argc, char** argv) {
-    Require(argc == 3, "usage: vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson");
+    Require(argc == 3 || argc == 4, "usage: vgx_hdtex <pack> replace|clamp|budget|dryrun|copy|changed|eyes|eyeson");
     const std::string mode = argv[2];
     setenv("GXV_HDTEX_PATH", argv[1], 1);
     setenv("GXV_MIPCLAMP", mode == "clamp" ? "1" : "0", 1);
@@ -79,6 +81,12 @@ int main(int argc, char** argv) {
         return 0;
     }
     Require(pending.uploads.size() == 1, "one upload");
+    if (argc > 3) {
+        const bool wantPlayer = std::string(argv[3]) == "player";
+        Require(vgx::IsCharaTexture(pending.uploads.front().texId), "the pack's texture is a character or key item texture");
+        Require(vgx::IsPlayerTexture(pending.uploads.front().texId) == wantPlayer,
+                wantPlayer ? "Mario's or Luigi's archive: the player's own texture" : "not Mario's or Luigi's archive: not the player's own texture");
+    }
     const auto& up = pending.uploads.front();
     const bool replaced = mode == "replace" || mode == "clamp" || mode == "changed" || mode == "eyeson";
     vgx::hdtex::Counters c;

@@ -77,10 +77,10 @@ uint64_t g_dxtUploads = 0, g_dxtBytes = 0, g_rgbaUploads = 0, g_rgbaBytes = 0, g
 uint64_t g_laUploads = 0, g_laBytes = 0;
 // The textures of the HD pack's list, by texture id (IsCharaTexture; ids are handed out in order and never reused).
 std::vector<uint8_t> g_charaTex;
-inline void SetCharaTexture(uint32_t texId, bool on) {
+inline void SetCharaTexture(uint32_t texId, bool on, bool player = false) {
     if (!on && texId >= g_charaTex.size()) return;
     if (texId >= g_charaTex.size()) g_charaTex.resize(static_cast<size_t>(texId) + 256, 0);
-    g_charaTex[texId] = on ? 1 : 0;
+    g_charaTex[texId] = on ? (player ? 3 : 1) : 0; // bit 0: the pack's list, bit 1: Mario's or Luigi's
 }
 // Texture replacement (vgx_hdtex.cpp): the hook, the filter its binds get, the bytes alive.
 bool (*g_replaceHook)(const TexReplaceQuery&, TexUpload&) = nullptr;
@@ -153,6 +153,7 @@ void SetTextureReplaceHook(bool (*fn)(const TexReplaceQuery&, TexUpload&), uint8
 }
 uint64_t ReplacedTextureBytes() { return g_hdLive; }
 bool IsCharaTexture(uint32_t texId) { return texId < g_charaTex.size() && g_charaTex[texId] != 0; }
+bool IsPlayerTexture(uint32_t texId) { return texId < g_charaTex.size() && (g_charaTex[texId] & 2) != 0; }
 
 // GXInvalidateTexAll. On the console it empties the texture cache in front of
 // the texture units, and the game calls it every frame. It carries no
@@ -308,14 +309,15 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
         uint32_t authored = levels;
         // A replacement image (vgx_hdtex.cpp: HD textures), asked only here, at upload.
         if (e.hd) { g_hdLive -= e.bytes; e.hd = false; }
-        bool hd = false, inPack = false;
+        bool hd = false, inPack = false, player = false;
         if (g_replaceHook && !(g_texPatchHook && (!g_texPatchNeedsRgba || g_texPatchNeedsRgba(e.contentHash, o.width, o.height)))) {
             TexReplaceQuery q{data, fmt, o.width, o.height, tlut, tlut ? (tlutEntries == 0xFFFF ? 32768u : tlutEntries * 2u) : 0u, caps.mipClamp, g_hdLive};
             q.inPack = &inPack;
+            q.player = &player;
             hd = g_replaceHook(q, up);
             if (hd) authored = static_cast<uint32_t>(up.levels.size());
         }
-        SetCharaTexture(e.texId, inPack); // (GXV_CHARAA: a character's or key item's texture, by the pack's list)
+        SetCharaTexture(e.texId, inPack, player); // (GXV_CHARAA: a character's or key item's texture, by the pack's list)
         // CMPR goes to the back end as DXT1 (an eighth of the memory, no decode) unless
         // a level uses the one thing DXT1 renders differently (see CmprToDxt1).
         //   GXV_DXT1=0  always decode;  =2  DXT1 for those textures too (their transparent

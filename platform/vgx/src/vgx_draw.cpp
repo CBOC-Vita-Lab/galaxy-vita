@@ -2133,12 +2133,23 @@ static bool SmallDrawBounds(uint8_t gxPrim, const uint8_t* v, uint32_t count, ui
 // 43.3 off, the front end ("player") 0.66 ms a frame dearer (the Observatory is front-end-bound and has up to 190 character
 // draws a frame, the Lumas). The gain on the picture is modest. GXV_CHARAA=1 turns it on.
 constexpr int kCharaDefault = 0;
+//   GXV_CHARAA_AUTO=1      (default 0; with GXV_CHARAA off) the same machinery for the player's own draws only (the textures of the
+//                          pack's list from the archives of Mario and Luigi: IsPlayerTexture), and the back end draws the filter
+//                          only while the picture is upscaled from a render size below the EFB's (backend::PresentCharaAA): Mario
+//                          stays crisp exactly when the rest of the picture softens. The Observatory's 190 Luma draws are not
+//                          noted, so the 0.66 ms measured for all characters is not paid. HUD markers are written, as for GXV_CHARAA=1.
 int CharaAAMode() {
     static const int m = [] {
         const long v = EnvInt("GXV_CHARAA", kCharaDefault);
-        return v < 0 ? 0 : (v > 2 ? 2 : static_cast<int>(v));
+        const int mode = v < 0 ? 0 : (v > 2 ? 2 : static_cast<int>(v));
+        return mode == 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0 ? 1 : mode;
     }();
     return m;
+}
+// GXV_CHARAA_AUTO in force: only the player's draws are noted (the switch itself being off).
+bool CharaAAPlayerOnly() {
+    static const bool on = EnvInt("GXV_CHARAA", kCharaDefault) <= 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0;
+    return on;
 }
 namespace {
 inline bool ChaOn() {
@@ -2362,7 +2373,11 @@ void CharaNote(const uint8_t* v, uint32_t count, uint32_t stride, uint32_t layou
     if (cur.stateSerial != g_cha.serial) {
         g_cha.serial = cur.stateSerial;
         bool c = false;
-        for (uint32_t m = cur.texMask; m && !c; m &= m - 1) c = IsCharaTexture(cur.tex[__builtin_ctz(m)].texId);
+        static const bool playerOnly = CharaAAPlayerOnly();
+        for (uint32_t m = cur.texMask; m && !c; m &= m - 1) {
+            const uint32_t id = cur.tex[__builtin_ctz(m)].texId;
+            c = playerOnly ? IsPlayerTexture(id) : IsCharaTexture(id);
+        }
         g_cha.chara = c;
     }
     if (!g_cha.chara || !cur.rs.colorWrite) return;
