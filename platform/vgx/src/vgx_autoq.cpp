@@ -175,6 +175,7 @@ void Controller::Block(int rung, uint64_t now) {
     double& len = blockLen_[rung + 1];
     len = len > 0 ? std::min(len * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
     blockUntil_[rung + 1] = now + static_cast<uint64_t>(len * 1e6);
+    lastBlockAt_ = now;
 }
 
 void Controller::SetRung(int to, Why why, uint64_t now) {
@@ -252,6 +253,12 @@ bool Controller::Add(const FrameTimes& f) {
         prevGameKnown_ = f.gameKnown;
         return false;
     }
+    if (cfg_.recover && cfg_.calm && lastBlockAt_ != 0 && f.presentUs >= lastBlockAt_ + static_cast<uint64_t>(cfg_.blockForgetSec * 1e6)) {
+        // (GXV_AUTOQ_RECOVER: the blocks that ran out long ago do not count towards the next one's length)
+        for (double& len : blockLen_) len = 0;
+        belowBlockLen_ = 0;
+        lastBlockAt_ = 0;
+    }
     const uint64_t interval = f.presentUs > prevPresent_ ? f.presentUs - prevPresent_ : 0;
     const uint64_t prevDone = prevDone_, prevRun = prevRun_;
     if (sinceChange_ < (1u << 30)) ++sinceChange_;
@@ -281,8 +288,11 @@ bool Controller::Add(const FrameTimes& f) {
             const uint32_t published = g_pictureWorkUs.load(std::memory_order_relaxed);
             if (published && currentWorkUs_ > published) g_pictureWorkUs.store(currentWorkUs_, std::memory_order_release);
             const int candidate = std::min(rung_ + std::max(1, pendingUp_), cfg_.maxRung);
+            // (GXV_AUTOQ_RECOVER: a single frame ends the stretch of room only when it really missed, not when it was merely
+            // above the margin the window means must keep: recoverFrameFrac against upTarget)
+            const double frameFrac = cfg_.recover && cfg_.calm ? cfg_.recoverFrameFrac : cfg_.upTarget;
             currentRoom = interval <= cfg_.budgetMs * 1030.0 &&
-                std::max({double(game), double(backend), gpu * Cost(candidate) / Cost(rung_)}) <= cfg_.upTarget * cfg_.budgetMs * 1000.0;
+                std::max({double(game), double(backend), gpu * Cost(candidate) / Cost(rung_)}) <= frameFrac * cfg_.budgetMs * 1000.0;
         }
         if (!currentRoom) {
             pendingUp_ = 0;
@@ -497,6 +507,7 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
             if (after > checkBefore_ * (1.0 - cfg_.betterFrac) && after < checkBefore_ * 1.15) {
                 belowBlockLen_ = belowBlockLen_ > 0 ? std::min(belowBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
                 belowBlockedUntil_ = now + static_cast<uint64_t>(belowBlockLen_ * 1e6);
+                lastBlockAt_ = now;
                 if (cfg_.calm) {
                     pendingUndo_ = checkFrom_; // (calm: back at the next quiet moment)
                 } else {
@@ -591,6 +602,15 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         checkSpan_ = 0;
         checkFrames_ = 0;
         return true;
+    }
+    if (cfg_.recover && cfg_.calm) {
+        // (GXV_AUTOQ_RECOVER: room for recoverHoldSec in a row, and not past what every window of it allowed)
+        if (roomT_ >= cfg_.recoverHoldSec) {
+            checking_ = false;
+            SetRung(rung_ + std::max(1, std::min(up, minUp_)), Why::Headroom, now);
+            return true;
+        }
+        return false;
     }
     if (roomT_ >= (cfg_.calm ? cfg_.upLongHoldSec : cfg_.upHoldSec)) {
         checking_ = false;

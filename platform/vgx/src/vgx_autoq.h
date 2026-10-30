@@ -89,6 +89,17 @@
 //           the rung. Up to 32 scenes are remembered.
 //   Quiet frames are not measured (a black screen or a still menu says nothing about play).
 //
+// Recovery (Config::recover, GXV_AUTOQ_RECOVER=1, calm mode, default off). Console reading of the rules above, for a game that
+// has to hold 30 and should go back to its full size afterwards: (1) a step up in play needs 120 s of room in a row, and in
+// target mode ONE frame whose predicted work at the next rung exceeds 70 % of the budget (23 ms) ends the stretch, so a scene
+// with noise of 15-25 % around a mean that fits stays at a lower rung for minutes; (2) the doubling of the blocks (60 s up to
+// 480 s) is forgotten only at a new scene, so a few overloads in one long stage keep the full size away for most of it.
+// With the option: the stretch needed in play is recoverHoldSec (20 s, the smallest step any window of it allowed, one
+// rung at least); a frame ends the stretch only when its cadence missed the budget or its predicted work exceeds
+// recoverFrameFrac (100 %) of it, the window means still having to fit upTarget; and the blocks' doubling starts again
+// blockForgetSec (300 s) after the last block. Step downs are untouched: they still need the same overload for the same
+// time, so one spike (or an overload shorter than downHoldSec, 1.5 s) costs nothing, and the quiet-moment paths are as before.
+//
 // Opt-in 30 Hz target (GXV_AUTOQ_TARGET=30, default 0): the throughput estimate
 // is max(two game turns' CPU work, back-end CPU per picture, GPU busy/picture),
 // never the sum of overlapping stages or a deliberate present wait. A step up
@@ -149,6 +160,14 @@ struct Config {
     double upLongHoldSec = 120.0; // room in a row that steps up without a quiet moment
     double upQuietHoldSec = 8.0;  // room in a row before a quiet moment may step up
     double roomMemorySec = 5.0;   // how old the last window with room (or a GPU limit below today) may be at the quiet moment
+    // GXV_AUTOQ_RECOVER=1 (calm mode only; default off, and then every decision is the one made without these four):
+    // the way back up after an overload is quicker and not held down by single frames.
+    bool recover = false;
+    double recoverHoldSec = 20.0;   // room in a row that steps up without a quiet moment (instead of upLongHoldSec)
+    double blockForgetSec = 300.0;  // the blocks' doubling starts again after this long without a block
+    double recoverFrameFrac = 1.0;  // target mode: one frame cancels a stretch of room only if its predicted work at the next rung
+                                    // exceeds this share of the budget (instead of upTarget), or its cadence missed the budget;
+                                    // the window means still have to fit upTarget
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
     static Config Legacy() {
         Config c;
@@ -227,6 +246,8 @@ public:
     unsigned Windows() const { return windows_; }
     unsigned Changes() const { return changes_; }
     const Config& Cfg() const { return cfg_; }
+    // When the block on `rung` ends (microseconds on the frames' clock; 0: not blocked): diagnostics and tests.
+    uint64_t BlockedUntilUs(int rung) const { return blockUntil_[rung + 1]; }
 
 private:
     void ResetWindow();
@@ -269,6 +290,7 @@ private:
     double blockLen_[kRungs + 1] = {};
     uint64_t belowBlockedUntil_ = 0;
     double belowBlockLen_ = 0;
+    uint64_t lastBlockAt_ = 0; // GXV_AUTOQ_RECOVER: when a rung (or a step below today) was last blocked
     // diagnostics
     double winLoad_ = 0, winCpu_ = -1, winIntervalMs_ = 0;
     double winWorkMs_ = 0;

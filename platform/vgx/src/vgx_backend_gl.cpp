@@ -58,6 +58,7 @@
 #include "vgx_sanitize.h"
 #include "vgx_coldtrace.h"
 #include "vgx_autoq.h"
+#include "vgx_copyvar.h"
 #include "vgx_resource_audit.h"
 #ifdef __vita__
 #include <psp2/kernel/processmgr.h>
@@ -168,6 +169,7 @@ long DiagnosticInt(const char* name, long fallback) { return kBackendDiagnostics
     X(clears)         /* glClear */                                                                                                  \
     X(quadClears)     /* clears drawn as a quad (partial colour mask) */                                                             \
     X(copyQuads)      /* EFB / pass -> texture copy draws */                                                                         \
+    X(quadIdentity) X(quadRgbA) X(quadConstant) X(quadGeneric) /* every copy-program quad by the form of its transform (vgx_copyvar.h): counted whether or not GXV_COPYVAR draws the dedicated program */ \
     X(draws) X(drawIndices)                                                                                                          \
     X(programUses)    /* glUseProgram */                                                                                             \
     X(uniformCalls) X(uniformBytes) /* glUniform*: all blocks */                                                                     \
@@ -2112,12 +2114,8 @@ void Upload(const TexUpload& up) {
 bool EnsureCopyProgram() {
     if (g_copyProg) return true;
     if (GlAllocBackoff()) return false;
-    static const char* vs =
-        "attribute vec4 a_pos;\nuniform vec4 u_rect;\nvarying vec2 v_uv;\n"
-        "void main() { v_uv = u_rect.xy + (a_pos.xy * 0.5 + 0.5) * u_rect.zw; gl_Position = vec4(a_pos.xy, 0.0, 1.0); }\n";
-    static const char* fs =
-        "precision mediump float;\nuniform sampler2D u_src;\nuniform mat4 u_mat;\nuniform vec4 u_add;\nvarying vec2 v_uv;\n"
-        "void main() { gl_FragColor = u_mat * texture2D(u_src, v_uv) + u_add; }\n";
+    static const char* vs = copyvar::kVertex;            // (the sources are vgx_copyvar.h's, byte for byte what was here)
+    static const char* fs = copyvar::kFragmentGeneric;
     // Keep successful work across a transient failure; recompiling costs far more than a retry.
     static GLuint v = 0, f = 0, pendingProgram = 0;
     if (!v) v = Compile(GL_VERTEX_SHADER, vs, "copy vertex");
@@ -2148,18 +2146,88 @@ bool EnsureCopyProgram() {
     return true;
 }
 
+// ---- dedicated copy programs (GXV_COPYVAR; vgx_copyvar.h)
+// GXV_COPYVAR=1 (default 0): see vgx_copyvar.h. Read once.
+bool CopyVarOn() {
+    static const bool on = EnvInt("GXV_COPYVAR", 0) == 1;
+    return on;
+}
+struct CopyVariant {
+    GLuint prog = 0;
+    GLint rect = -1, add = -1;
+    bool failed = false; // did not compile or link: the form is drawn by the generic program for good
+};
+CopyVariant g_copyVar[copyvar::kForms];
+// The program of `form`, built at its first use (the generic program is there: EnsureCopyProgram). A failure, or a GL that is
+// out of names for now, leaves the generic program in charge (the latter is tried again later).
+bool EnsureCopyVariant(copyvar::Form form) {
+    CopyVariant& v = g_copyVar[form];
+    if (v.prog) return true;
+    if (v.failed || GlAllocBackoff()) return false;
+    static GLuint sharedVertex = 0; // (one vertex shader for all the variants, as the generic program keeps its own)
+    auto fail = [&] {
+        v.failed = true;
+        autoq::Log("[vgx] GXV_COPYVAR: the %s copy program did not build; the generic one draws those copies", copyvar::Name(form));
+        return false;
+    };
+    if (!sharedVertex) {
+        sharedVertex = Compile(GL_VERTEX_SHADER, copyvar::kVertex, "copy variant vertex");
+        if (!sharedVertex) return g_compileFailed ? fail() : false; // (no name for now: tried again)
+    }
+    const GLuint fs = Compile(GL_FRAGMENT_SHADER, copyvar::FragmentSource(form), "copy variant fragment");
+    if (!fs) return g_compileFailed ? fail() : false;
+    const GLuint prog = G(glCreateProgram());
+    if (BadGlName(prog)) { g_glAllocFailSerial = g_serial; return false; } // (tried again)
+    G(glAttachShader(prog, sharedVertex));
+    G(glAttachShader(prog, fs));
+    G(glBindAttribLocation(prog, AT_POS, "a_pos"));
+    G(glLinkProgram(prog));
+    GLint ok = 0;
+    G(glGetProgramiv(prog, GL_LINK_STATUS, &ok));
+    if (!ok) {
+        G(glDeleteProgram(prog));
+        G(glDeleteShader(fs));
+        return fail();
+    }
+    UseProgram(prog);
+    v.rect = G(glGetUniformLocation(prog, "u_rect"));
+    v.add = G(glGetUniformLocation(prog, "u_add"));
+    if (copyvar::UsesTexture(form)) G(glUniform1i(glGetUniformLocation(prog, "u_src"), 0));
+    v.prog = prog;
+    return true;
+}
+
 // Draws the copy program's quad over the whole viewport: out = m * texel + add.
 // Raster state (target, viewport, scissor, masks) is the caller's.
 void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float* m16, const float* add4) {
     if (!EnsureCopyProgram()) return;
-    UseProgram(g_copyProg);
-    BindTex(0, srcTex);
-    G(glUniform4f(g_copyRect, rx, ry, rw, rh));
-    G(glUniformMatrix4fv(g_copyMat, 1, GL_FALSE, m16));
-    G(glUniform4f(g_copyAdd, add4[0], add4[1], add4[2], add4[3]));
-    C.uniformCalls += 3;
-    C.uniformBytes += 96;
-    C.ringBytes += 16 + 80;
+    // GXV_COPYVAR (vgx_copyvar.h): a transform that is the identity, the identity with a constant alpha or a constant colour is
+    // drawn by a program without the matrix product (and without the uniforms it does not read). Anything else, and a form
+    // whose program did not build, goes through the generic program as before.
+    copyvar::Form form = copyvar::kGeneric;
+    if (kBackendDiagnostics || CopyVarOn()) form = copyvar::Classify(m16, add4);
+    if (kBackendDiagnostics) ++(form == copyvar::kIdentity ? C.quadIdentity : form == copyvar::kRgbConstA ? C.quadRgbA : form == copyvar::kConstant ? C.quadConstant : C.quadGeneric);
+    const CopyVariant* var = nullptr;
+    if (form != copyvar::kGeneric && CopyVarOn() && EnsureCopyVariant(form)) var = &g_copyVar[form];
+    if (var) {
+        UseProgram(var->prog);
+        if (copyvar::UsesTexture(form)) BindTex(0, srcTex);
+        uint32_t calls = 0, bytes = 0;
+        if (copyvar::UsesRect(form)) { G(glUniform4f(var->rect, rx, ry, rw, rh)); ++calls; bytes += 16; }
+        if (copyvar::UsesAdd(form)) { G(glUniform4f(var->add, add4[0], add4[1], add4[2], add4[3])); ++calls; bytes += 16; }
+        C.uniformCalls += calls;
+        C.uniformBytes += bytes;
+        C.ringBytes += (copyvar::UsesRect(form) ? 16 : 0) + (copyvar::UsesAdd(form) ? 16 : 0);
+    } else {
+        UseProgram(g_copyProg);
+        BindTex(0, srcTex);
+        G(glUniform4f(g_copyRect, rx, ry, rw, rh));
+        G(glUniformMatrix4fv(g_copyMat, 1, GL_FALSE, m16));
+        G(glUniform4f(g_copyAdd, add4[0], add4[1], add4[2], add4[3]));
+        C.uniformCalls += 3;
+        C.uniformBytes += 96;
+        C.ringBytes += 16 + 80;
+    }
     g_uniDirtyV = g_uniDirtyF = false;
     // Position only, from the quad's own buffer (2 floats per vertex).
     if (S.layoutVbo != g_quadVbo) {
@@ -3583,6 +3651,12 @@ void AutoQualityInit() {
     cfg.minRung = static_cast<int>(EnvInt("GXV_AUTOQ_MIN", cfg.minRung));
     cfg.maxRung = std::min(static_cast<int>(EnvInt("GXV_AUTOQ_MAX", cfg.maxRung)), TopRung());
     cfg.upTarget = static_cast<double>(EnvInt("GXV_AUTOQ_UP", calm ? 70 : 78)) / 100.0;
+    // GXV_AUTOQ_RECOVER=1 (default 0; calm mode): the way back up after an overload without a pause or 120 s of room in a row
+    // (vgx_autoq.h, "Recovery"). GXV_AUTOQ_RECOVER_SEC=<5..120> (default 20): the room in a row it needs. Read once, here.
+    if (calm && EnvInt("GXV_AUTOQ_RECOVER", 0) == 1) {
+        cfg.recover = true;
+        cfg.recoverHoldSec = static_cast<double>(std::clamp<long>(EnvInt("GXV_AUTOQ_RECOVER_SEC", 20), 5, 120));
+    }
     // (testing, the emulator: at a few frames a second every frame is a "hitch" or a "load" to the controller, which then
     // never decides. GXV_AUTOQ_HITCH_MS / _GAP_MS / _SCENE_MS raise those limits: 100 / 250 / 1500 ms by default.)
     cfg.outlierMs = static_cast<double>(EnvInt("GXV_AUTOQ_HITCH_MS", 100));
@@ -3605,6 +3679,7 @@ void AutoQualityInit() {
     autoq::Log("[autoq] on: rungs %d (%s) to %d (%s), starting at %d (%s); up when the predicted GPU load is <= %.0f %% for %.1f s%s", c.minRung, lo, c.maxRung, hi,
                g_rung, st, c.upTarget * 100.0, c.upHoldSec,
                c.calm ? "; calm mode: changes of size in quiet moments (pause menu, closed fades), in play only for an overload (or after 120 s of room), against a 33 ms frame budget; each stage keeps its rung" : "");
+    if (c.recover) autoq::Log("[autoq] GXV_AUTOQ_RECOVER: a step up in play after %.0f s of room in a row, a single frame ends that stretch only when it missed the budget, blocks' doubling forgotten after %.0f s", c.recoverHoldSec, c.blockForgetSec);
     if (c.calm && (!port_screen_quiet || !port_scene_key))
         autoq::Log("[autoq] calm mode without %s%s from the game", port_screen_quiet ? "" : "quiet moments ", port_scene_key ? "" : "stage keys");
 }
