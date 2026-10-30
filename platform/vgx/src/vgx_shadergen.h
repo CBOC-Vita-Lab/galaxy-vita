@@ -64,7 +64,10 @@ struct VsKey {
 uint64_t HashKey(const void* key, size_t size);
 // Bump when the key structs or what is generated from them change: shader
 // warm-up lists written by an older generator are then discarded.
-constexpr uint32_t kShaderGenVersion = 3;
+// 2 is the 1.0 cache namespace. Keep it: the wrap modes change shader text, and vitaGL finds compiled
+// shaders by a hash of that text, so no stale binary can be reused; a new number only empties every
+// player's compiled cache and warm-up list (the 1.1 regression).
+constexpr uint32_t kShaderGenVersion = 2;
 // Uniform arrays are declared (and their blocks built) only as long as the shader needs
 // them: u_tev[9 / 11 / 28], u_lt[4 + 5 per light], u_pal[60 / 96], u_tm per texgen. On the
 // console every draw copies the program's whole uniform buffers once more.

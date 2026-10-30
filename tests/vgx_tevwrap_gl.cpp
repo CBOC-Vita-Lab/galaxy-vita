@@ -82,6 +82,13 @@ int main(int argc, char** argv) {
     const bool wrap = std::strcmp(argv[1], "on") == 0;
     vgx::FsKey k = Pass(false);
     vgx::ShaderSource initial; vgx::GenerateFragmentShader(k, initial);
+    if (std::strcmp(argv[1], "alpha") == 0) {
+        // GXV_TEVWRAP=2: the final alpha wraps (eye repair), RGB keeps the 1.0 clamp.
+        Require(initial.text.find("fin.a = vgx_wrap_final(fin.a)") != std::string::npos, "alpha-only mode wraps final alpha");
+        Require(initial.text.find("fin.rgb = vec3(vgx_wrap_final") == std::string::npos, "alpha-only mode leaves RGB clamped");
+        std::printf("PASS: alpha-only final wrap source hash %016llx\n", static_cast<unsigned long long>(vgx::HashKey(initial.text.data(), initial.text.size())));
+        return 0;
+    }
     const bool emitted = initial.text.find("vgx_wrap_final") != std::string::npos;
     Require(emitted == wrap, "switch selects final conversion");
     if (!wrap) Require(vgx::HashKey(initial.text.data(), initial.text.size()) == 0x228c375e37cc5759ull,

@@ -273,8 +273,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // scalar code; they run on the game thread). Set only when env.txt has not: NAME=0 turns one off.
     // Steady 30 (pacing, dynamic quality aimed at 30, half-size effects) is a Settings choice; the other
     // performance experiments stay off unless env.txt asks for them.
-    for (const char* name : {"GXV_TEVWRAP", "GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD", "GXV_DSPNEON", "GXV_DSPFIR", "GXV_DSPRAMP"})
+    for (const char* name : {"GXV_SETTINGS", "GXV_REMAP", "GXV_BOOTGUARD", "GXV_DSPNEON", "GXV_DSPFIR", "GXV_DSPRAMP"})
         setenv(name, "1", 0);
+    setenv("GXV_TEVWRAP", "2", 0);  // alpha-only wrap: the eye repair without wrapping RGB
     LoadInputScript(SMG_DATA "/input.txt");
     {
         // The console starts an application at 333 MHz with the GPU at half speed: ask for the

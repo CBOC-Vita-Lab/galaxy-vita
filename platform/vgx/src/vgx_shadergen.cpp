@@ -179,14 +179,18 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     Out o;
     // GXV_TEVWRAP=1 repairs out-of-range final TEV bytes before alpha testing.
     // Read once: shader code and its source-hashed compiled cache stay stable per process.
-    static const bool wrapFinal = EnvInt("GXV_TEVWRAP", 0) == 1;
+    // GXV_TEVWRAP=2 wraps only the final alpha (enough for the eye repair: its biased alpha decides the
+    // alpha test) and leaves RGB clamped as in 1.0, at a quarter of the extra per-pixel work.
+    static const long wrapMode = EnvInt("GXV_TEVWRAP", 0);
+    static const bool wrapFinal = wrapMode == 1 || wrapMode == 2;
+    static const bool wrapRgb = wrapMode == 1;
     // GXV_TEVWRAP_ELIDE is read once: 0/default keeps the original source; 1 elides only
     // proven unit-range copies; 2 independently verifies the proof with fallback.
     static const long elide = EnvInt("GXV_TEVWRAP_ELIDE", 0);
     bool unitColor = false, unitAlpha = false;
     if (wrapFinal && (elide == 1 || elide == 2)) UnitFinal(k, elide == 2, unitColor, unitAlpha);
     const FsKey::Stage& last = k.stage[k.numStages - 1];
-    const bool wrapColor = wrapFinal && !bits(last.color, 19, 1) && !unitColor;
+    const bool wrapColor = wrapRgb && !bits(last.color, 19, 1) && !unitColor;
     const bool wrapAlpha = wrapFinal && !bits(last.alpha, 19, 1) && !unitAlpha;
     uint8_t texMask = 0;
     bool usesCol[2] = {false, false};
