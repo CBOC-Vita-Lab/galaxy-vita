@@ -7,6 +7,9 @@
 #include <psp2/audioout.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
+#if defined(__vita__)
+#include <psp2/power.h>
+#endif
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -23,19 +26,53 @@ int sAudioPort = -1;
 SceUID thread = -1;
 PortVitaAudioDrain drainAudio;
 std::atomic<bool> running{false}, failed{false};
+// Output threads are numbered; one that outlives its close (blocked in the driver, see port_vita_audio_close) stops by itself
+// when it is let go instead of draining into the next thread's port.
+std::atomic<unsigned> sThreadGeneration{0};
 std::atomic<int> peak{0};       // loudest sample sent to the device since port_vita_audio_take_peak
 std::atomic<unsigned> outputs{0}, outputErrors{0};
 port::settings::HoldGate sHold;
 alignas(64) const int16_t sSilence[kFrames * 2] = {};
 
+// Resume reports.  The system tells a running application that the console woke up from sleep (or came back from the Home
+// menu) through a power callback; the callback only counts it.  The disc reader and the audio output read the count
+// (port/resume.h) and open their files and the output port afresh.  The watcher is only started with GXV_RESUME_RESET=1 (read
+// once, default off): the recovery from errors needs none (platform/src/dvd/dvd.cpp, platform/src/audio/aaudio_out.cpp).
+std::atomic<unsigned> sResumeGeneration{0};
+#if defined(__vita__)
+int powerCallback(int, int, int arg, void*) {
+    const unsigned resumed = SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME;
+    if (static_cast<unsigned>(arg) & resumed) sResumeGeneration.fetch_add(1, std::memory_order_acq_rel);
+    return 0;
+}
+int powerThread(SceSize, void*) {
+    const int callback = sceKernelCreateCallback("galaxy_power", 0, powerCallback, nullptr);
+    const int registered = callback >= 0 ? scePowerRegisterCallback(callback) : callback;
+    port_log("audio: resume watcher: callback 0x%08X, registered 0x%08X", static_cast<unsigned>(callback), static_cast<unsigned>(registered));
+    for (;;) sceKernelDelayThreadCB(500000);  // (callbacks run inside this wait)
+    return 0;
+}
+void startResumeWatcher() {
+    static bool started = false;
+    const char* e = getenv("GXV_RESUME_RESET");
+    if (started || !(e && e[0] == '1')) return;
+    started = true;
+    const SceUID watcher = sceKernelCreateThread("galaxy_power", powerThread, 0xA0, 4 * 1024, 0, 0, nullptr);
+    if (watcher >= 0) sceKernelStartThread(watcher, 0, nullptr);
+}
+#else
+void startResumeWatcher() {}
+#endif
+
 int audioThread(SceSize, void*) {
     unsigned next = 0;
     unsigned heldGeneration = 0, silentOutputs = 0;
+    const unsigned myGeneration = sThreadGeneration.load(std::memory_order_acquire);
     // GXV_AUDIO_BUFFERS=1: one buffer refilled in place, as before (for comparing by ear on the console).
     const char* nb = getenv("GXV_AUDIO_BUFFERS");
     const unsigned buffers = (nb && nb[0] == '1') ? 1u : (unsigned)kOutputBuffers;
     if (buffers == 1u) port_log("audio: one output buffer refilled in place (GXV_AUDIO_BUFFERS=1)");
-    while (running.load(std::memory_order_acquire)) {
+    while (running.load(std::memory_order_acquire) && sThreadGeneration.load(std::memory_order_acquire) == myGeneration) {
         const unsigned hold = sHold.Requested();
         if (hold != heldGeneration) { heldGeneration = hold; silentOutputs = 0; }
         const int16_t* samples = sSilence;
@@ -65,6 +102,10 @@ int audioThread(SceSize, void*) {
     return 0;
 }
 }
+
+extern "C" unsigned port_resume_generation(void) { return sResumeGeneration.load(std::memory_order_acquire); }
+// (what the power callback does; also how a host test reports a resume)
+extern "C" void port_resume_note(void) { sResumeGeneration.fetch_add(1, std::memory_order_acq_rel); }
 
 extern "C" int port_vita_audio_is_held(void) {
     const unsigned generation = sHold.Requested();
@@ -105,6 +146,7 @@ extern "C" void port_vita_audio_clock_boost(void) {
 
 extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {
     if (thread >= 0 || sAudioPort >= 0 || !drain) return 0;
+    startResumeWatcher();
     failed.store(false);
     sAudioPort = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_MAIN, kFrames,
                               SCE_AUDIO_OUT_SAMPLE_RATE_48000, SCE_AUDIO_OUT_MODE_STEREO);
@@ -126,6 +168,7 @@ extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {
         failed.store(true);
         return 0;
     }
+    sThreadGeneration.fetch_add(1, std::memory_order_acq_rel);
     running.store(true, std::memory_order_release);
     if (sceKernelStartThread(thread, 0, nullptr) < 0) {
         running.store(false);
@@ -138,12 +181,31 @@ extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {
     return 1;
 }
 
+// How long the output thread gets to leave its loop once told to.  It is in sceAudioOutOutput for at most one period (10.7 ms)
+// when the port works; after the console woke up from sleep the call has been seen to return an error, and a port the system
+// no longer serves could just as well never return.  Waiting for ever there froze the audio clock (the music never came back).
+// After the first wait the port is released, which wakes a thread blocked on it; after the second the thread is let go.
+constexpr unsigned kCloseWaitUs = 1000000;
 extern "C" void port_vita_audio_close(void) {
     running.store(false, std::memory_order_release);
     if (thread >= 0) {
-        sceKernelWaitThreadEnd(thread, nullptr, nullptr);
-        sceKernelDeleteThread(thread);
-        thread = -1;
+        unsigned timeoutUs = kCloseWaitUs;
+        int r = sceKernelWaitThreadEnd(thread, nullptr, &timeoutUs);
+        if (r == static_cast<int>(0x80028005u) /* SCE_KERNEL_ERROR_WAIT_TIMEOUT */) {
+            port_log("audio: the output thread did not stop in %u ms; releasing the port under it", kCloseWaitUs / 1000);
+            if (sAudioPort >= 0) { sceAudioOutReleasePort(sAudioPort); sAudioPort = -1; }
+            timeoutUs = kCloseWaitUs;
+            r = sceKernelWaitThreadEnd(thread, nullptr, &timeoutUs);
+            if (r == static_cast<int>(0x80028005u)) {
+                port_log("audio: the output thread is stuck; letting it go");
+                sThreadGeneration.fetch_add(1, std::memory_order_acq_rel);  // (it ends as soon as the driver lets it)
+                thread = -1;  // (its stack is kept; deleting a running thread fails)
+            }
+        }
+        if (thread >= 0) {
+            sceKernelDeleteThread(thread);
+            thread = -1;
+        }
     }
     if (sAudioPort >= 0) {
         sceAudioOutOutput(sAudioPort, nullptr);

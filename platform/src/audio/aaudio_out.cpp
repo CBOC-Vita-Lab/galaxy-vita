@@ -29,6 +29,7 @@ int port_vita_audio_failed(void);
 #include <vector>
 
 #include "port/port.h"
+#include "port/resume.h"
 #include "revolution/types.h"
 
 namespace {
@@ -43,6 +44,22 @@ SDL_AudioDeviceID sStream = 0;
 #endif
 bool sOpenFailed = false;
 std::atomic<bool> sDisconnected{false};
+#if defined(__vita__) || defined(PORT_VITA_LIKE_AUDIO)
+// A failed open of the console's output port is retried (0.25 s, 0.5 s, 1 s, then every 2 s) instead of being given up for good:
+// right after the console woke up the audio device may not be ready for a moment, and one refusal used to leave the game silent
+// until it was restarted.  GXV_AUDIO_RETRY=0 restores the single attempt (read once).
+port::ReopenGate sOpenGate;
+bool audioRetryOn() {
+    static const bool on = [] { const char* e = getenv("GXV_AUDIO_RETRY"); return !(e && e[0] == '0'); }();
+    return on;
+}
+// GXV_RESUME_RESET=1: the port is closed and opened afresh when the system reports a resume (default off, read once).
+bool audioResumeResetOn() {
+    static const bool on = [] { const char* e = getenv("GXV_RESUME_RESET"); return e && e[0] == '1'; }();
+    return on;
+}
+unsigned sResumeSeen;
+#endif
 int32_t sDeviceRate = 0;
 std::vector<s16> sLR, sOut;
 
@@ -389,6 +406,16 @@ extern "C" void port_audio_submit(const s16* rightLeft, u32 frames, u32 rate) {
 
 #if defined(__vita__) || defined(PORT_VITA_LIKE_AUDIO)
     if (sStream && port_vita_audio_failed()) sDisconnected.store(true);
+    if (audioResumeResetOn()) {
+        const unsigned generation = port::ResumeGeneration();
+        if (generation != sResumeSeen) {
+            sResumeSeen = generation;
+            if (sStream) {
+                port_log("audio: system resume %u, opening the output port afresh", generation);
+                sDisconnected.store(true);
+            }
+        }
+    }
 #endif
     if (sStream && sDisconnected.exchange(false)) {
         port_log("audio: output device disconnected, reopening");
@@ -403,9 +430,17 @@ extern "C" void port_audio_submit(const s16* rightLeft, u32 frames, u32 rate) {
         sStream = 0;
 #endif
     }
+#if defined(__vita__) || defined(PORT_VITA_LIKE_AUDIO)
+    if (!sStream && (!sOpenFailed || (audioRetryOn() && sOpenGate.Due(port_host_time_ns())))) {
+        sOpenFailed = !openStream(rate);
+        if (sOpenFailed) sOpenGate.Failed(port_host_time_ns());
+        else sOpenGate.Succeeded();
+    }
+#else
     if (!sStream && !sOpenFailed) {
         sOpenFailed = !openStream(rate);
     }
+#endif
     if (!sStream) return;
 
     const s16* out = sLR.data();
