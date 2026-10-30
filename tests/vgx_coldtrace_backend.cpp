@@ -1,6 +1,7 @@
 // Production Execute/RunWarm/Upload with Mesa and controlled wall-clock attribution.
 // These injected intervals test the recorder, not physical Vita execution time.
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
+#include "vgx_vita_vgl_stubs.h"
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #if VGX_COLDTRACE
 #include "../platform/vgx/src/vgx_coldtrace_control.h"

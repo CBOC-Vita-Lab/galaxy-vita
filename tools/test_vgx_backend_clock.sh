@@ -19,7 +19,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
             -fsyntax-only tests/vgx_backend_clock.cpp
         fi
         clang++ "${flags[@]}" -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
-          tests/vgx_backend_clock.cpp platform/vgx/src/vgx_shadergen.cpp -o /tmp/backend-clock \
+          tests/vgx_backend_clock.cpp platform/vgx/src/vgx_shadergen.cpp platform/vgx/src/vgx_autoq.cpp tests/vgx_autoq_link_stubs.cpp -o /tmp/backend-clock \
           -lGLESv2 -pthread -l:libasan.so.8 -l:libubsan.so.1
         if test "$native" = 0; then timeout 20s /tmp/backend-clock clock; continue; fi
         for mode in $CLOCK_CASES; do timeout 20s /tmp/backend-clock "$mode"; done
