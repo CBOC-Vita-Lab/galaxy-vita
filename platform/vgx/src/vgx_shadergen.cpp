@@ -24,6 +24,12 @@ bool UniformPacking() {
     static const bool on = EnvInt("GXV_UNIPACK", 1) != 0;
     return on;
 }
+// GXV_LTMERGE (read once, default 0): a lit channel whose colour and alpha parts have the same light mask, attenuation and diffuse
+// function runs each light once for a vec4 (rgb and a together) instead of twice (vec3, then float): the same sums in the same order.
+static bool LightMerge() {
+    static const bool on = EnvInt("GXV_LTMERGE", 0) != 0;
+    return on;
+}
 long FogVtxMode() {
     static const long m = EnvInt("GXV_FOGVTX", 0); // 0 per-pixel fog (as always), 1 exact vertex fog (ortho linear), 2 + perspective linear
     return m;
@@ -595,6 +601,45 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
             continue;
         }
         o("  vec4 col%d;\n  {\n", ch);
+        {
+            const VsKey::Chan& cc = k.chan[ch];
+            const VsKey::Chan& ca = k.chan[ch + 2];
+            if (LightMerge() && cc.enable && ca.enable && cc.lightMask && cc.lightMask == ca.lightMask && cc.attn == ca.attn &&
+                cc.diffuse == ca.diffuse) {
+                // Colour and alpha light the same way: one pass over the lights for rgb and a together.
+                char c0[32], c1[32];
+                std::snprintf(c0, sizeof c0, cc.ambSrcVtx ? "a_col%d" : "u_lt[%d]", ch);
+                std::snprintf(c1, sizeof c1, ca.ambSrcVtx ? "a_col%d" : "u_lt[%d]", ch);
+                if (cc.ambSrcVtx == ca.ambSrcVtx) o("    vec4 lm = %s;\n", c0);
+                else o("    vec4 lm = vec4(%s.rgb, %s.a);\n", c0, c1);
+                for (int l = 0; l < 8; ++l) {
+                    if (!(cc.lightMask & (1u << l))) continue;
+                    const int b = 4 + l * 5;
+                    o("    {\n      vec3 ld = u_lt[%d].xyz - eye;\n      float d2 = dot(ld, ld);\n      float d1 = sqrt(d2);\n"
+                      "      if (d1 > 0.0) ld = ld / d1;\n      float at = 1.0;\n", b);
+                    if (cc.attn == 2) {
+                        o("      float ca = max(0.0, dot(ld, u_lt[%d].xyz));\n", b + 1);
+                        o("      at = max(0.0, u_lt[%d].x + u_lt[%d].y * ca + u_lt[%d].z * ca * ca) / dot(u_lt[%d].xyz, vec3(1.0, d1, d2));\n", b + 3, b + 3,
+                          b + 3, b + 4);
+                    } else if (cc.attn == 1) {
+                        o("      float ca = dot(n, ld) >= 0.0 ? max(0.0, dot(n, u_lt[%d].xyz)) : 0.0;\n", b + 1);
+                        if (cc.diffuse == 0) o("      vec3 da = u_lt[%d].xyz;\n", b + 4);
+                        else o("      vec3 da = normalize(u_lt[%d].xyz);\n", b + 4);
+                        o("      at = max(0.0, dot(u_lt[%d].xyz, vec3(1.0, ca, ca * ca))) / dot(da, vec3(1.0, ca, ca * ca));\n", b + 3);
+                    }
+                    if (cc.diffuse == 1) o("      at *= dot(ld, n);\n");
+                    else if (cc.diffuse == 2) o("      at *= max(0.0, dot(ld, n));\n");
+                    o("      lm += at * u_lt[%d];\n    }\n", b + 2);
+                }
+                o("    lm = clamp(lm, 0.0, 1.0);\n");
+                if (cc.matSrcVtx) o("    col%d.rgb = a_col%d.rgb * lm.rgb;\n", ch, ch);
+                else o("    col%d.rgb = u_lt[%d].rgb * lm.rgb;\n", ch, 2 + ch);
+                if (ca.matSrcVtx) o("    col%d.a = a_col%d.a * lm.a;\n", ch, ch);
+                else o("    col%d.a = u_lt[%d].a * lm.a;\n", ch, 2 + ch);
+                o("  }\n");
+                continue;
+            }
+        }
         for (int part = 0; part < 2; ++part) { // 0 colour, 1 alpha
             const VsKey::Chan& c = k.chan[ch + part * 2];
             const char* sw = part ? "a" : "rgb";
