@@ -85,9 +85,56 @@ if(ARMHF_VGX_G)
   target_compile_options(vgx PRIVATE -g1)
 endif()
 
-add_executable(game $<TARGET_OBJECTS:decomp> $<TARGET_OBJECTS:platform> $<TARGET_OBJECTS:vgx>)
+# ---- profile-guided optimisation of the game units (tools/pgo/README.md) -----------------------------------
+# ARMHF_PGO_GEN       instrument the game units (clang IR profile, -fprofile-generate); the run writes a .profraw at exit
+#                     (armhf/pgo/pgo_exit.cpp flushes it from _exit, which the runner ends with).  Needs ARMHF_PROFILE_RT.
+# ARMHF_PROFILE_RT    libclang_rt.profile for armhf (tools/pgo/build_profile_rt.sh builds it from the LLVM 18 sources)
+# ARMHF_PGO_USE       compile the game units with this merged .profdata (-fprofile-use), as the Vita build does
+# ARMHF_DECOMP_BITCODE  game units as ThinLTO bitcode, linked by `ld.lld -r --lto-O2` into one object exactly like
+#                     tools/vgx_build/build.py (the Vita release form), then linked with the platform layer
+# All four default off: the default harness build is unchanged.
+option(ARMHF_PGO_GEN "instrument the game units for a profile run" OFF)
+set(ARMHF_PROFILE_RT "" CACHE FILEPATH "libclang_rt.profile-armhf.a (ARMHF_PGO_GEN only)")
+set(ARMHF_PGO_USE "" CACHE FILEPATH "merged .profdata the game units are compiled with")
+option(ARMHF_DECOMP_BITCODE "game units as ThinLTO bitcode in one lld-linked object" OFF)
+set(ARMHF_LTO_JOBS 2 CACHE STRING "ThinLTO backend jobs for ARMHF_DECOMP_BITCODE")
+if(ARMHF_PGO_GEN AND ARMHF_PGO_USE)
+  message(FATAL_ERROR "ARMHF_PGO_GEN and ARMHF_PGO_USE are exclusive")
+endif()
+if(ARMHF_PGO_GEN)
+  if(NOT EXISTS "${ARMHF_PROFILE_RT}")
+    message(FATAL_ERROR "ARMHF_PGO_GEN needs ARMHF_PROFILE_RT=<libclang_rt.profile-armhf.a> (tools/pgo/build_profile_rt.sh)")
+  endif()
+  target_compile_options(decomp PRIVATE -fprofile-generate)
+  target_sources(platform PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pgo/pgo_exit.cpp")
+endif()
+if(ARMHF_PGO_USE)
+  if(NOT EXISTS "${ARMHF_PGO_USE}")
+    message(FATAL_ERROR "ARMHF_PGO_USE: no such file ${ARMHF_PGO_USE}")
+  endif()
+  target_compile_options(decomp PRIVATE "-fprofile-use=${ARMHF_PGO_USE}")
+endif()
+set(GAME_UNITS $<TARGET_OBJECTS:decomp>)
+if(ARMHF_DECOMP_BITCODE)
+  target_compile_options(decomp PRIVATE -flto=thin)
+  set(LTO_OBJ "${CMAKE_BINARY_DIR}/galaxy_lto.o")
+  file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/decomp_objects.rsp" CONTENT "$<JOIN:$<TARGET_OBJECTS:decomp>,\n>\n")
+  add_custom_command(OUTPUT "${LTO_OBJ}"
+    COMMAND ld.lld -r -o "${LTO_OBJ}" --thinlto-jobs=${ARMHF_LTO_JOBS} --lto-O2 -mllvm -emulated-tls "@${CMAKE_BINARY_DIR}/decomp_objects.rsp"
+    DEPENDS $<TARGET_OBJECTS:decomp> "${CMAKE_BINARY_DIR}/decomp_objects.rsp"
+    COMMENT "ThinLTO link of the game units" VERBATIM)
+  set_source_files_properties("${LTO_OBJ}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+  set(GAME_UNITS "${LTO_OBJ}")
+endif()
+
+add_executable(game ${GAME_UNITS} $<TARGET_OBJECTS:platform> $<TARGET_OBJECTS:vgx>)
 set_target_properties(game PROPERTIES LINKER_LANGUAGE CXX)
 # Non-PIE at 0x80000000, like the Vita's fixed image address range (>= 0x40000000: os_mem.cpp requires it).
 target_link_options(game PRIVATE -static-libgcc -no-pie -Wl,-Ttext-segment=0x80000000 -Wl,--no-undefined
   -Wl,-Map,${CMAKE_BINARY_DIR}/game.map)
 target_link_libraries(game PRIVATE pthread m)
+if(ARMHF_PGO_GEN)
+  # (the clang driver adds this when it links; the GNU driver used here does not)
+  target_link_options(game PRIVATE -Wl,-u,__llvm_profile_runtime)
+  target_link_libraries(game PRIVATE "${ARMHF_PROFILE_RT}")
+endif()

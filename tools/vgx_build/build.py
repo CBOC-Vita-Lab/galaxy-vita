@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -31,7 +32,13 @@ ARTIFACTS = {
     "elf": "vita-vgx-game/galaxy_native", "velf": "vita-vgx-game/galaxy_native.velf",
     "runtime": "vita-vgx-game/eboot.bin",
 }
-OUTPUT_DIRS = ("logs", "vita-source", "vita-source-lto", "vita-vgx-runtime", "vita-vgx-game", "case-shim")
+OUTPUT_DIRS = ("logs", "vita-source", "vita-source-lto", "vita-vgx-runtime", "vita-vgx-game", "case-shim", "pgo")
+# An indexed clang profile (llvm-profdata merge output) starts with this; a .profraw or a text profile does not.
+PROFDATA_MAGIC = b"\xfflprofi\x81"
+# Functions with internal linkage are keyed in a profile by "<source path>:<name>", so a profile recorded in another
+# checkout names them with that checkout's path.
+PROFILE_PATH_RX = re.compile(rb"(/[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*)/decomp/(?:src|libs|include)/")
+PROFILE_TEXT_PATH_RX = re.compile(rb"^(/[^:\n]*?)/decomp/(?:src|libs|include)/", re.M)
 
 
 def digest(path):
@@ -79,6 +86,48 @@ def run(args, env, log=None, cwd=None):
     if result.returncode:
         raise ValueError(f"Build failed: {args[0]}; see {log}")
     print(f"Completed: {log.name}", flush=True)
+
+
+def profile_path_prefix(data):
+    """The checkout path the profile was recorded in (from the names of its internal-linkage functions), or None."""
+    found = PROFILE_PATH_RX.search(data)
+    return found.group(1).decode() if found else None
+
+
+def prepare_profile(profile, root, directory, env):
+    """The profile the game units are compiled with, as <directory>/<sha256 prefix>.profdata.
+
+    The name changes with the content, so a different profile rebuilds the units (ninja does not watch the profile).
+    A profile recorded in another checkout is rewritten to this one's path with llvm-profdata, so that the functions
+    with internal linkage still match; one without such functions, or from this checkout, is copied unchanged."""
+    data = profile.read_bytes()
+    if not data.startswith(PROFDATA_MAGIC):
+        raise ValueError(f"{profile} is not an indexed profile: merge the .profraw files with llvm-profdata merge -o")
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = profile_path_prefix(data)
+    note = "used as it is"
+    if prefix is not None and prefix != str(root):
+        tool = shutil.which("llvm-profdata", path=env["PATH"]) or shutil.which("llvm-profdata-18", path=env["PATH"])
+        if not tool:
+            raise ValueError(f"The profile was recorded in {prefix}; rewriting it for {root} needs llvm-profdata")
+        text = directory / "profile.txt"
+        run([tool, "merge", "--text", "-o", text, profile], env)
+        body = text.read_bytes()
+        found = PROFILE_TEXT_PATH_RX.search(body)
+        if found:
+            prefix = found.group(1).decode()
+            body = re.sub(rb"^" + re.escape(found.group(1)) + rb"(?=/decomp/)", str(root).encode(), body, flags=re.M)
+        text.write_bytes(body)
+        rewritten = directory / "profile-rewritten.profdata"
+        run([tool, "merge", "-o", rewritten, text], env)
+        text.unlink()
+        data = rewritten.read_bytes()
+        rewritten.unlink()
+        note = f"paths rewritten from {prefix}"
+    out = directory / (hashlib.sha256(data).hexdigest()[:12] + ".profdata")
+    out.write_bytes(data)
+    print(f"PGO profile {out.name} ({len(data)} bytes, {note})", flush=True)
+    return out
 
 
 def input_root(name):
@@ -174,6 +223,9 @@ def main():
     parser.add_argument("--no-lto", action="store_true", help="link the plain game archive instead of the ThinLTO one")
     parser.add_argument("--logging", action="store_true",
                         help="a test build that keeps the port's log (ux0:data/smg/log.txt); never for a release")
+    parser.add_argument("--pgo-profile", type=Path, default=None, metavar="FILE.profdata",
+                        help="compile the game units with this merged clang profile (-fprofile-use; tools/pgo/README.md); "
+                             "default none: the plain build")
     parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.2)")
     args = parser.parse_args()
     if not 1 <= args.jobs <= 32:
@@ -221,6 +273,15 @@ def main():
         run([sys.executable, "-I", HERE / "make_case_shim.py", ROOT, shim], env, logs / "case-shim.log")
     source_build, lto, runtime, game = (build / name for name in
                                         ("vita-source", "vita-source-lto", "vita-vgx-runtime", "vita-vgx-game"))
+    pgo = None
+    if args.pgo_profile is not None:
+        if not args.pgo_profile.is_file():
+            raise ValueError(f"--pgo-profile: no such file {args.pgo_profile}")
+        if args.stage in ("source", "all"):
+            pgo = prepare_profile(args.pgo_profile.resolve(), ROOT, build / "pgo", env)
+        elif args.stage == "lto":
+            print("Note: --pgo-profile applies when the source stage is configured; the lto stage reuses its commands",
+                  file=sys.stderr)
     if args.stage == "all":
         stages = ("source", "runtime", "link") if args.no_lto else ("source", "lto", "runtime", "link")
     else:
@@ -231,7 +292,7 @@ def main():
             run(["cmake", "-U", "CMAKE_C_FLAGS", "-U", "CMAKE_CXX_FLAGS", "-G", "Ninja",
                  "-S", ROOT / "vita", "-B", source_build,
                  f"-DCMAKE_TOOLCHAIN_FILE={ROOT}/vita/clang-vita-toolchain.cmake",
-                 f"-DVITASDK={sdk}", "-DCMAKE_BUILD_TYPE=Release"], env, logs / "source-configure.log")
+                 f"-DVITASDK={sdk}", "-DCMAKE_BUILD_TYPE=Release", f"-DVITA_PGO_PROFILE={pgo or ''}"], env, logs / "source-configure.log")
             run(["ninja", "-C", source_build, f"-j{args.jobs}", "galaxy_vita_sources"], env, logs / "source.log")
         elif stage == "lto":
             database = json.loads((source_build / "compile_commands.json").read_text())

@@ -41,7 +41,8 @@ def base_command(entry):
         if argument in ("-o", "-c", "-MF", "-MT", "-MQ"):
             index += 2
             continue
-        if argument in ("-MD", "-MMD"):
+        if argument in ("-MD", "-MMD") or argument.startswith(("-fprofile-use", "-fprofile-instr-use")):
+            # (a game-unit profile does not describe the runtime's files)
             index += 1
             continue
         command.append(argument)

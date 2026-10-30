@@ -88,6 +88,16 @@ target_compile_options(vita_source_options INTERFACE
   -Wno-language-extension-token
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 
+# Optional profile-guided optimisation of the game units (tools/pgo/README.md): a merged clang IR profile.  Empty (the
+# default): the plain build.  tools/vgx_build/build.py --pgo-profile sets it.
+set(VITA_PGO_PROFILE "" CACHE FILEPATH "Merged .profdata the game units are compiled with; empty for none")
+if(VITA_PGO_PROFILE)
+  if(NOT EXISTS "${VITA_PGO_PROFILE}")
+    message(FATAL_ERROR "VITA_PGO_PROFILE: no such file ${VITA_PGO_PROFILE}")
+  endif()
+  target_compile_options(vita_source_options INTERFACE "-fprofile-use=${VITA_PGO_PROFILE}")
+endif()
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(CMAKE_C_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_SOURCE_DIR}/record_compile.py")
 set(CMAKE_CXX_COMPILER_LAUNCHER "${CMAKE_C_COMPILER_LAUNCHER}")
