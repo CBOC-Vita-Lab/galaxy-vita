@@ -1,3 +1,36 @@
+# Version 1.2 — November 2026
+
+The smooth-play update: aiming for a steady 30 with the full picture.
+
+### Smoother play
+- **Back to 1.0's speed, and past it.** 1.1 made every player rebuild their shaders during play and added work to every frame. Both are undone: your existing shader cache is used again, and the package brings the extra shaders 1.2 needs already prepared.
+- **Steady 30 is really steady.** It holds an even 30 FPS with full-size effects and never drops to 20. Resolution only drops as a last resort, and comes back within seconds.
+- **The game and the renderer work side by side again.** Under a 30 FPS cap they had started taking turns, so each frame cost both of them added together. This was the main cause of the slow Comet Observatory.
+- **Less work every frame.** Matching pieces of scenery are drawn together, lights are worked out once instead of twice, screen copies use their own small programs, and sound mixing has moved off the game's own processor core.
+- **Movies on the Vita's video hardware.** The title video and cutscenes are decoded by the console's JPEG hardware, with the software decoder as a fallback.
+- **The newest vitaGL**, with its speed improvements.
+
+### Better picture
+- **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
+- **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.
+- **Queen Bee's fur** looks as it should.
+- **Textures as sharp or soft as the game asks for,** including the dome floors and the Dark Matter Plant, and water keeps the game's own distant detail.
+- **Trails, bump and water effects** follow the Wii's rules more closely.
+
+### Controls and gameplay
+- **Music keeps playing after sleep or the Home menu.**
+- **Dialogue no longer skips to the end** when a finger rests on the screen.
+- **Quick Square spins always count.**
+- **PS TV with a PS3 or PS4 controller:** R2 shoots Star Bits, the right stick moves the pointer, and the D-pad keeps the camera.
+- **Mouse-style aiming** for the Star Bit pointer, as an option in Settings > Controls.
+
+### Steadier start
+- **The loading screen can't hang at 99%.** If the game is running but the title isn't recognised, the title picture fades out by itself. If loading truly stalls, the screen says what it is waiting for.
+- **Clearer graphics errors.** A missing or broken shader compiler, or a graphics start-up failure, now names the exact step.
+- **Safer graphics driver.** Running out of graphics memory skips a frame instead of freezing the Vita.
+
+Updating? Install the new VPK over the old one. Your saves and settings are kept.
+
 # Version 1.1 — October 26, 2026
 
 Mario's eyes, a Settings menu, and a steadier start.
