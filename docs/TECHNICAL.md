@@ -80,8 +80,11 @@ not console timings.
   recognised by a kept copy instead of a hash (`GXV_SLBYTES`). `GXV_STATELIST=2` verified
   0 mismatches in 458,752 replays (Comet Observatory) and in emulator runs.
 - **Resolution cache** (`GXV_RSCACHE`): a hash of exactly the registers the shader keys read,
-  kept up to date by the register writers, maps to the shader ids through a 1,024-entry memo;
-  render state, texture bindings and uniform blocks are rebuilt only from what they depend on.
+  kept up to date by the register writers, maps to the shader ids through a memo (4-way, 2,048
+  sets; `GXV_KEYMEMO_WAYS`, 1 = direct-mapped; the first version had 1,024 direct-mapped entries and
+  missed 7.4% of its lookups in the Comet Observatory, 4.3% in Good Egg, now 0.01% and 0.03% over a
+  whole desktop run); render state, texture bindings and uniform blocks are rebuilt only from what
+  they depend on.
 - **Register no-op shadows** (`GXV_REGSHADOW`) for TEV colours and CP vertex formats, and a
   **texture binding memo** (`GXV_TEXMEMO`).
 - **Bigger front caches:** shader registry 64 -> 1,024 slots, texture cache 128 -> 1,024, program

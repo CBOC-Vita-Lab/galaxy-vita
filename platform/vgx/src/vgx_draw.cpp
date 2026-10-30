@@ -4,6 +4,7 @@
 #include "vgx_fixes.h"
 #include "vgx_recipe_seed.h"
 #include "vgx_variant_set.h"
+#include "vgx_keymemo.h"
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -1348,8 +1349,8 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t 
 // (XF 0x1008, written by every shape's vertex-format list, sets the catch-all xfRegDirty: all blocks and both keys again).
 // Materials repeat: the keys a picture needs are a few dozen, and the same register contents come round every picture.
 //   * Shader keys: looked up by State::keyHash (vgx_state.cpp: a hash of exactly the registers BuildFsKey / BuildVsKey read,
-//     kept up to date by the register writers) with the vertex-matrix mask and the short-palette flag, in a direct-mapped table
-//     of 1,024 entries that holds the shader ids (the keys themselves are the registry's). A changed key is copied from the
+//     kept up to date by the register writers) with the vertex-matrix mask and the short-palette flag, in a 4-way set-associative
+//     table (2,048 sets, vgx_keymemo.h) that holds the shader ids (the keys themselves are the registry's). A changed key is copied from the
 //     registry; an unchanged hash means unchanged keys, whatever the flags say.
 //   * Everything else is rebuilt on what it is really built from: the render state on the key registers, the viewport and
 //     its own registers; the texture bindings when the fragment key or a binding changed; the blocks on their own flags, not
@@ -1359,15 +1360,11 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t 
 // offsets and the uniform words appended (logged as "rscache: MISMATCH"). 0: the old path only.
 // (The hash is 64 bits; two different key-register contents with the same hash would draw with the wrong shader. The odds
 // for the few thousand contents a session sees are about 1e-12; the verify mode would show it.)
-struct KeyMemo {
-    uint64_t h = 0;          // State::keyHash
-    uint32_t vcdMtxMask = 0;
-    uint16_t fsId = 0, vsId = 0, fsIdFold = 0;
-    uint8_t spo = 0;         // short palette (only with a per-vertex position matrix)
-    uint8_t valid = 0, fsIdFoldValid = 0;
-};
-constexpr uint32_t kKeyMemoSize = 1024;
-KeyMemo g_keyMemo[kKeyMemoSize];
+//   * (The table is 2,048 sets of GXV_KEYMEMO_WAYS ways (default 4; 1 = direct-mapped). The first version was direct-mapped with 1,024
+//     entries and missed 7.5% of its lookups in the Comet Observatory, 450 draw records a frame, from conflicts alone: see
+//     vgx_keymemo.h. A miss rebuilds the keys and finds them again in the registry, so the ways only change how often that
+//     happens.)
+KeyMemoTable g_keyMemo;
 // The memo key of the keys in cur (valid: cur's keys were set by the cached path, or confirmed by the verify mode).
 struct CurKey {
     uint64_t h = 0;
@@ -1379,9 +1376,12 @@ struct CurKey {
 uint64_t g_keyMemoHits = 0, g_keyMemoMisses = 0;
 uint64_t g_rsChecked = 0, g_rsBad = 0; // (GXV_RSCACHE=2)
 
-inline uint32_t KeyMemoSlot(uint64_t h, uint32_t mask, uint8_t spo) {
-    const uint32_t x = static_cast<uint32_t>(h) ^ static_cast<uint32_t>(h >> 32) ^ (mask * 0x9E3779B1u) ^ (spo * 0x7F4A7C15u);
-    return (x ^ (x >> 15)) & (kKeyMemoSize - 1);
+inline uint32_t KeyMemoWays() {
+    static const uint32_t ways = [] { // read once: 1..4 ways per set (GXV_KEYMEMO_WAYS, default 4)
+        const long v = EnvInt("GXV_KEYMEMO_WAYS", 4);
+        return static_cast<uint32_t>(v < 1 ? 1 : v > static_cast<long>(KeyMemoTable::kMaxWays) ? KeyMemoTable::kMaxWays : v);
+    }();
+    return ways;
 }
 // The legacy path's notion of "the keys may have changed" (it also decides when it records the short-palette flag, and when
 // it rebuilds a render state whose depth comes from a Z texture: the cached path does those as it does).
@@ -1396,10 +1396,11 @@ inline bool SameCurKey(uint32_t vcdMtxMask, uint8_t spo) {
 // The keys for the current registers into cur; fsChanged / vsChanged as ResolveStateFull has them.
 void ResolveKeysCached(uint32_t vcdMtxMask, uint8_t palCls, uint8_t spo, bool& fsChanged, bool& vsChanged) {
     const uint64_t h = g.keyHash;
-    const uint32_t slot = KeyMemoSlot(h, vcdMtxMask, spo);
-    KeyMemo& m = g_keyMemo[slot];
+    const uint32_t ways = KeyMemoWays();
+    uint32_t slot = 0;
     uint16_t fsId, vsId;
-    if (m.valid && m.h == h && m.vcdMtxMask == vcdMtxMask && m.spo == spo) {
+    if (const KeyMemo* hit = g_keyMemo.Find(h, vcdMtxMask, spo, ways, slot)) {
+        const KeyMemo& m = *hit;
         fsId = m.fsId;
         vsId = m.vsId;
         ++g_keyMemoHits;
@@ -1410,8 +1411,7 @@ void ResolveKeysCached(uint32_t vcdMtxMask, uint8_t palCls, uint8_t spo, bool& f
         BuildVsKey(vs, fs.numTexGens, palCls, fs.fog);
         fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader);
         vsId = Lookup(g_vsReg, vs, false, GenerateVertexShader);
-        m = KeyMemo{};
-        m.h = h; m.vcdMtxMask = vcdMtxMask; m.spo = spo;
+        KeyMemo& m = g_keyMemo.Insert(h, vcdMtxMask, spo, ways, slot);
         m.fsId = fsId; m.vsId = vsId;
         m.valid = 1;
         ++g_keyMemoMisses;
@@ -1429,7 +1429,7 @@ void ResolveKeysCached(uint32_t vcdMtxMask, uint8_t palCls, uint8_t spo, bool& f
 
 // The register-folding variant of the current fragment shader (memoised with the keys).
 uint16_t FoldShaderCached() {
-    KeyMemo& m = g_keyMemo[g_curKey.slot];
+    KeyMemo& m = g_keyMemo.At(g_curKey.slot);
     const bool mine = g_curKey.valid && m.valid && m.h == g_curKey.h && m.vcdMtxMask == g_curKey.mask && m.spo == g_curKey.spo && m.fsId == cur.fsId;
     if (mine && m.fsIdFoldValid) return m.fsIdFold;
     FsKey fk = cur.fs;

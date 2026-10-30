@@ -102,6 +102,7 @@ extern "C" int port_screen_quiet(void) __attribute__((weak));
 extern "C" uint32_t port_scene_key(void) __attribute__((weak));
 #ifdef __VGX_VITA__
 extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __attribute__((weak));
+extern "C" void vglUseLowPrecisionFragmentOnly(GLboolean val) __attribute__((weak)); // vitaGL patch 0012 (GXV_FS_HALF)
 extern "C" GLint vglFramebufferDepthTexture(GLuint fb) __attribute__((weak)); // vitaGL built with DEPTH_SAMPLE (GXV_FXHALF): row width or 0
 extern "C" void vgxvita_uploadAuthoredI4Mips(unsigned width, unsigned height, unsigned count, const void* const* levels) __attribute__((weak));
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -825,7 +826,27 @@ bool BadGlName(GLuint id) {
     return id == 0;
 }
 
-GLuint Compile(GLenum type, const char* text, const char* what, uint32_t logicalId = ~0u, unsigned attempt = 1) {
+// GXV_FS_HALF (read once, default 0; Vita only, needs the vitaGL of patch 0012): the generated fragment shaders are translated with
+// half precision (vitaGL's float -> half header), the vertex shaders stay float. vitaGL translates both shaders of a program inside
+// glLinkProgram (its postponed mode), not at glCompileShader, so the low-precision mode is on around the link of a generated
+// program only, and only fragment shaders are affected. The translation is not part of vitaGL's compiled-shader cache key (that is a
+// hash of the GLSL text handed to glShaderSource), so a fragment shader compiled with the switch on gets a marker line in front of
+// its text: its cache entry is its own, and a cache made without the switch is not reused (nor the other way round).
+bool FsHalf() {
+    static const bool on = [] {
+#ifdef __VGX_VITA__
+        if (EnvInt("GXV_FS_HALF", 0) == 0) return false;
+        if (!vglUseLowPrecisionFragmentOnly) { VGX_ERR("GXV_FS_HALF: this vitaGL has no vglUseLowPrecisionFragmentOnly (patch 0012); fragment shaders stay float\n"); return false; }
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return on;
+}
+constexpr const char kFsHalfMarker[] = "// vgx: fragment precision half (GXV_FS_HALF)\n";
+
+GLuint Compile(GLenum type, const char* text, const char* what, uint32_t logicalId = ~0u, unsigned attempt = 1, bool half = false) {
     g_compileFailed = false;
     if (GlAllocBackoff()) return 0;
 #if VGX_COLDTRACE
@@ -838,8 +859,9 @@ GLuint Compile(GLenum type, const char* text, const char* what, uint32_t logical
             ResourcePair(type == GL_VERTEX_SHADER ? logicalId : ~0u, type == GL_FRAGMENT_SHADER ? logicalId : ~0u, attempt, "next-serial", what));
         return 0;
     }
-    const char* parts[2] = {"#version 100\n", text};
-    G(glShaderSource(s, 2, parts, nullptr));
+    const char* parts[3] = {"#version 100\n", text, nullptr};
+    if (half) { parts[1] = kFsHalfMarker; parts[2] = text; }
+    G(glShaderSource(s, half ? 3 : 2, parts, nullptr));
     G(glCompileShader(s));
     ++C.shaderCompiles;
     ++g_sw.compiles;
@@ -1138,7 +1160,7 @@ void CompileShader(bool fragment, uint32_t id) {
     coldtrace::Scope trace(coldtrace::g_recorder,coldtrace::Key{g_progFrame,CMD_SHADER,id,fragment?1u:0u,0,0},coldtrace::Origin::DirectShader);
 #endif
     const ShaderSource* s = (fragment ? g_fsSrc : g_vsSrc)[id];
-    const GLuint shader = Compile(fragment ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER, s->text.c_str(), fragment ? "fragment" : "vertex", id, attempt ? attempt->failures + 1 : 1);
+    const GLuint shader = Compile(fragment ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER, s->text.c_str(), fragment ? "fragment" : "vertex", id, attempt ? attempt->failures + 1 : 1, fragment && FsHalf());
     if (!shader) {
         // An allocation failure is retryable at once; a source error (GXV_GL_RETRY) after a delay, a bounded number of
         // times. (GXV_GL_RETRY=0: a source error still owns a shader handle and does not come here.)
@@ -1214,7 +1236,14 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
 #if VGX_COLDTRACE
             coldtrace::Scope linkTrace(coldtrace::g_recorder,coldtrace::Phase::Link);
 #endif
+#ifdef __VGX_VITA__
+            const bool half = FsHalf();
+            if (half) vglUseLowPrecisionFragmentOnly(GL_TRUE);
+#endif
             G(glLinkProgram(p.id));
+#ifdef __VGX_VITA__
+            if (half) vglUseLowPrecisionFragmentOnly(GL_FALSE);
+#endif
         }
         ++C.programLinks;
         ++g_sw.links;

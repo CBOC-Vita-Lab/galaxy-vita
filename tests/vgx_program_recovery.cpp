@@ -75,9 +75,14 @@ extern "C" void __wrap_glAttachShader(GLuint program,GLuint shader) {
     if (Invalid(program) || Invalid(shader)) ++invalidHandles;
     __real_glAttachShader(program,shader);
 }
+// GXV_FS_HALF: what the back end hands vitaGL (the weak vitaGL patch-0012 function is a recorder here)
+namespace { bool lowOn = false, lowAtLink = false, fsMarker = false; unsigned lowCalls = 0, fsParts = 0, vsParts = 0; }
+extern "C" void vglUseLowPrecisionFragmentOnly(GLboolean on) { lowOn = on; ++lowCalls; }
 extern "C" void __real_glShaderSource(GLuint,GLsizei,const GLchar* const*,const GLint*);
 extern "C" void __wrap_glShaderSource(GLuint shader,GLsizei count,const GLchar* const* parts,const GLint* lengths) {
     if (Invalid(shader)) ++invalidHandles;
+    if (count > 0 && std::strstr(parts[count - 1], "gl_FragColor")) { fsParts = count; fsMarker = count == 3 && std::strstr(parts[1], "GXV_FS_HALF") != nullptr; }
+    else if (count > 0 && std::strstr(parts[count - 1], "gl_Position")) vsParts = count;
     __real_glShaderSource(shader,count,parts,lengths);
 }
 extern "C" void __real_glCompileShader(GLuint);
@@ -89,6 +94,7 @@ extern "C" void __wrap_glCompileShader(GLuint shader) {
 extern "C" void __real_glLinkProgram(GLuint);
 extern "C" void __wrap_glLinkProgram(GLuint program) {
     ++links;
+    lowAtLink = lowOn;
     if (Invalid(program)) ++invalidHandles;
     if (failLink) { failLink = false; return; }
     if (failLinks) { --failLinks; return; }
@@ -213,6 +219,19 @@ int main(int argc,char** argv) {
             for (unsigned i=0;i<1024;++i) { draw.tex[0].texId=1000+i; Execute(commands); }
             Require(!audit || (AuditLines()<200 && AuditHas("suppressed=")),"unique fallback floods are capped with a suppression summary");
             RequireGreenPixels();
+        } else if (mode == "fs-half" || mode == "fs-half-off") {
+            // GXV_FS_HALF: off (the default) the sources are the two parts they always were and vitaGL's precision mode is never touched;
+            // on, the fragment source has the marker part in front of its text and the low-precision mode is on around the link only.
+            if (mode == "fs-half") setenv("GXV_FS_HALF","1",1); else unsetenv("GXV_FS_HALF");
+            RegisterPair(); Require(GetProgram(3,4).ok,"program links with the switch");
+            RenderRecovered();
+            Require(vsParts == 2,"the vertex source is always the two parts");
+            if (mode == "fs-half") {
+                Require(fsParts == 3 && fsMarker,"the fragment source carries the marker (its compiled-shader cache key differs)");
+                Require(lowAtLink && !lowOn && lowCalls == 2,"low precision is on during the link and off again after it");
+            } else {
+                Require(fsParts == 2 && !fsMarker && lowCalls == 0 && !lowAtLink,"switch off: no marker, vitaGL's precision mode untouched");
+            }
         } else if (mode == "audit-read-once") {
             RegisterPair(true); Require(!GetProgram(3,4).ok,"invalid source exercises first audit read");
             setenv("GXV_RESOURCE_AUDIT",audit ? "0" : "1",1);

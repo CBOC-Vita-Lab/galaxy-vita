@@ -1,0 +1,75 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 5779715..cc72fa9 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -4113,6 +4113,14 @@ void vglAddSemanticBindingHint(const GLchar *const *varying, GLenum type) {
+ 
+ void vglUseLowPrecision(GLboolean val) {
+ 	glsl_precision_low = val;
++	glsl_precision_fs_only = GL_FALSE;
++}
++
++// Low precision for the fragment shaders only: with VGL_MODE_POSTPONED the vertex and the fragment shader of a program are both
++// translated inside glLinkProgram, so vglUseLowPrecision would also turn the vertex shader's float into half (positions).
++void vglUseLowPrecisionFragmentOnly(GLboolean val) {
++	glsl_precision_low = val;
++	glsl_precision_fs_only = val;
+ }
+ 
+ void vglSetSemanticBindingMode(GLenum mode) {
+diff --git a/source/utils/glsl_utils.c b/source/utils/glsl_utils.c
+index a9e8aca..23f93b2 100644
+--- a/source/utils/glsl_utils.c
++++ b/source/utils/glsl_utils.c
+@@ -166,6 +166,7 @@ int glsl_custom_bindings_num = 0;
+ int glsl_current_ref_idx = 0;
+ GLboolean glsl_is_first_shader = GL_TRUE;
+ GLboolean glsl_precision_low = GL_FALSE;
++GLboolean glsl_precision_fs_only = GL_FALSE;
+ GLenum glsl_sema_mode = VGL_MODE_POSTPONED;
+ binds_map glsl_bindings_map;
+ #ifdef HAVE_FIXED_ATTRIBUTES
+@@ -1300,7 +1301,7 @@ void glsl_translator_process(shader *s) {
+ 	GLboolean hasPointSize = GL_FALSE, hasFragDepth = GL_FALSE, hasFrontFacing = GL_FALSE, hasFrontColor = GL_FALSE;
+ 	GLboolean hasColor = GL_FALSE;
+ 	size += strlen(glsl_hdr);
+-	if (glsl_precision_low)
++	if (glsl_precision_low && (!glsl_precision_fs_only || s->type == GL_FRAGMENT_SHADER))
+ 		size += strlen(glsl_precision_hdr);
+ #ifdef HAVE_FFP_SHADER_SUPPORT
+ 	size += strlen(glsl_ffp_hdr);
+@@ -1431,7 +1432,7 @@ void glsl_translator_process(shader *s) {
+ 			strcat(s->source, "varying in float4 gl_Color : COLOR;\n");
+ 	}
+ 	strcat(s->source, glsl_hdr);
+-	if (glsl_precision_low)
++	if (glsl_precision_low && (!glsl_precision_fs_only || s->type == GL_FRAGMENT_SHADER))
+ 		strcat(s->source, glsl_precision_hdr);
+ 	
+ #ifdef HAVE_FFP_SHADER_SUPPORT
+diff --git a/source/utils/glsl_utils.h b/source/utils/glsl_utils.h
+index f94e483..428e65d 100644
+--- a/source/utils/glsl_utils.h
++++ b/source/utils/glsl_utils.h
+@@ -39,6 +39,7 @@ extern int glsl_custom_bindings_num;
+ extern int glsl_current_ref_idx;
+ extern GLboolean glsl_is_first_shader;
+ extern GLboolean glsl_precision_low;
++extern GLboolean glsl_precision_fs_only; // low precision applies to fragment shaders only (vglUseLowPrecisionFragmentOnly)
+ extern GLenum glsl_sema_mode;
+ extern GLenum prev_shader_type;
+ 
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 9f25588..334e4b1 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1331,6 +1331,9 @@ void vglUseCachedMem(GLboolean use);
+ // Makes the GLSL translator use low precision variables (eg: float -> half).
+ void vglUseLowPrecision(GLboolean val);
+ 
++// Like vglUseLowPrecision, but only fragment shaders are translated with low precision (vertex shaders keep float).
++void vglUseLowPrecisionFragmentOnly(GLboolean val);
++
+ // Allows to swap between triple and double buffering. Default value: GL_TRUE.
+ void vglUseTripleBuffering(GLboolean usage);
+ 

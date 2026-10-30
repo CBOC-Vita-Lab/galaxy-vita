@@ -6,7 +6,7 @@ if [[ -n ${4:-} ]]; then seed+=(--mount "type=bind,source=$4,target=/recipe.bin,
 docker run --rm --name "galaxy-program-recovery-$$" --pull=never --platform linux/arm64 --network none --cpus=2 \
   ${seed[@]+"${seed[@]}"} \
   --mount "type=bind,source=$root,target=/work,readonly" -w /work \
-  -e "RECOVERY_MODES=${1:-good program-zero program-max shader-zero shader-max missing-source utility-program utility-max utility-shader utility-link init-program init-shader init-link source-error warm-program warm-shader sentinel frame-retry fragment-failure warm-demand-program warm-demand-shader warm-persistent demand-first compile-exhaustion fragment-compile-exhaustion link-exhaustion injected-link-exhaustion link-recovered compile-recovered declared-white audit-read-once}" \
+  -e "RECOVERY_MODES=${1:-good program-zero program-max shader-zero shader-max missing-source utility-program utility-max utility-shader utility-link init-program init-shader init-link source-error warm-program warm-shader sentinel frame-retry fragment-failure warm-demand-program warm-demand-shader warm-persistent demand-first compile-exhaustion fragment-compile-exhaustion link-exhaustion injected-link-exhaustion link-recovered compile-recovered declared-white audit-read-once fs-half fs-half-off}" \
   -e "RECOVERY_TRACES=${2:-0 1}" \
   -e "RECOVERY_AUDITS=${3:-unset 0 1 invalid}" \
   -e EGL_PLATFORM=surfaceless -e LIBGL_ALWAYS_SOFTWARE=1 -e GALLIUM_DRIVER=softpipe \

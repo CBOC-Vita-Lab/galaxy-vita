@@ -85,6 +85,20 @@ const waits = bufText.split('sceGxmNotificationWait(&query_fence);').length - 1;
 const guardedWaits = (bufText.match(/if \(scene_reset\(\) \|\| q->sync <= query_fence\.value\)\n\t+sceGxmNotificationWait\(&query_fence\);/g) || []).length;
 if (waits !== guardedWaits || waits < 2) fail('query fence waits are not all guarded (' + guardedWaits + ' of ' + waits + ')');
 
+// ---- audit 6 (patch 0012, when the tree has it): low precision for fragment shaders only is applied where the precision header
+// is sized and where it is written, vglUseLowPrecision keeps its old meaning, and the new call sets both flags
+{
+    const glsl = read('utils/glsl_utils.c');
+    if (/glsl_precision_fs_only/.test(glsl)) {
+        const gated = (glsl.match(/if \(glsl_precision_low && \(!glsl_precision_fs_only \|\| s->type == GL_FRAGMENT_SHADER\)\)\n\t+(size \+= strlen|strcat\(s->source,) glsl_?precision_hdr|if \(glsl_precision_low && \(!glsl_precision_fs_only \|\| s->type == GL_FRAGMENT_SHADER\)\)\n\t+(size \+= strlen\(glsl_precision_hdr\)|strcat\(s->source, glsl_precision_hdr\))/g) || []).length;
+        const bare = (glsl.match(/if \(glsl_precision_low\)\n/g) || []).length;
+        if (gated !== 2 || bare !== 0) fail('the precision header must be gated on the shader type in both places (found ' + gated + ' gated, ' + bare + ' not)');
+        const custom = files['custom_shaders.c'];
+        if (!/void vglUseLowPrecision\(GLboolean val\) \{\n\tglsl_precision_low = val;\n\tglsl_precision_fs_only = GL_FALSE;\n\}/.test(custom)) fail('vglUseLowPrecision must clear the fragment-only flag');
+        if (!/void vglUseLowPrecisionFragmentOnly\(GLboolean val\) \{\n\tglsl_precision_low = val;\n\tglsl_precision_fs_only = val;\n\}/.test(custom)) fail('vglUseLowPrecisionFragmentOnly must set both flags');
+    }
+}
+
 // ---- the fixture
 const hasMs = /init_depth_stencil_buffer_ms\(/.test(files['gxm.c']);
 const hasHint = /apply_depth_hint\(/.test(files['gxm.c']);
@@ -107,7 +121,48 @@ parts.push(functionText('draw.c', 'void glMultiDrawArrays\\([^)]*\\) \\{', 'glMu
 parts.push(functionText('draw.c', 'void glDrawArraysInstanced\\([^)]*\\) \\{', 'glDrawArraysInstanced'));
 parts.push(functionText('misc.c', 'void glClear\\(GLbitfield mask\\) \\{', 'glClear'));
 parts.push(functionText('framebuffers.c', 'void glBlitNamedFramebuffer\\([^)]*\\) \\{', 'glBlitNamedFramebuffer'));
+// ---- the GXM state cache (patch 0011), when the tree has it: the real wrapper block of shared.h and the real definitions of gxm.c go
+// in front of every driver function (so that their setter calls are the wrapped ones), and the real state-setting part of the
+// custom shader draw goes into a function of its own (tests/vitagl_scene_fail_test.cpp drives it with its world of programs and
+// textures).
+const marks = (text, name) => {
+    const b = text.indexOf('/* ' + name + ' begin */'), e = text.indexOf('/* ' + name + ' end */');
+    if (b < 0 || e < b) return null;
+    return text.slice(b, e + ('/* ' + name + ' end */').length);
+};
+const scBlock = marks(read('shared.h'), 'GXM_STATE_CACHE'), scDefs = marks(files['gxm.c'], 'GXM_STATE_CACHE');
+const hasSc = !!(scBlock && scDefs);
+let drawSlice = '';
+if (hasSc) {
+    // every setter in the tree goes through the wrappers: no file calls the sceGxm function of a cached setter behind them
+    const cached = ['sceGxmSetFragmentProgram', 'sceGxmSetVertexProgram', 'sceGxmSetFragmentTexture'];
+    for (const [name, text] of Object.entries(files)) {
+        if (name === 'splashscreen.c') continue; // (its own context, which the wrappers pass through)
+        for (const fn of cached) {
+            const re = new RegExp('[^\\n]*\\b' + fn + '\\((?!gxm_context\\b)[^\\n]*', 'g');
+            let m;
+            while ((m = re.exec(text))) fail('a ' + fn + ' call on another context than gxm_context in ' + name + ': ' + m[0].trim());
+        }
+    }
+    const fn = functionText('custom_shaders.c', 'GLboolean _glDrawElements_CustomShadersIMPL\\([^)]*\\) \\{', '_glDrawElements_CustomShadersIMPL');
+    const startMark = '\tsetup_frag_program();\n';
+    const start = fn.indexOf(startMark);
+    const end = fn.indexOf('#if defined(HAVE_VERTEX_LAYOUT_CACHE)', start);
+    if (start < 0 || end < start) fail('the custom shader draw lacks setup_frag_program() before its vertex layout cache');
+    const vpLine = fn.match(/\n\tsceGxmSetVertexProgram\(gxm_context, p->vprog\);\n/);
+    if (!vpLine) fail('the custom shader draw does not set the vertex program the expected way');
+    const msaaDefs = files['custom_shaders.c'].indexOf('#ifdef FBO_MSAA\n#define FRAG_MSAA_DIRTY'); // (the macro reads them when the tree has FBO_MSAA)
+    const setupAt = files['custom_shaders.c'].indexOf('#define setup_frag_program()');
+    const macroStart = msaaDefs >= 0 && msaaDefs < setupAt ? msaaDefs : setupAt;
+    const macroEnd = files['custom_shaders.c'].indexOf('#define align_attributes', macroStart);
+    if (macroStart < 0 || macroEnd < macroStart) fail('setup_frag_program macro not found');
+    drawSlice = files['custom_shaders.c'].slice(macroStart, macroEnd) + '\n' +
+        'static void fixture_draw_state(program *p) {\n' + fn.slice(start, end) + '\n\tp->vprog = fixture_pick_vprog(p);\n\tsceGxmSetVertexProgram(gxm_context, p->vprog);\n}\n';
+    parts.unshift(scBlock);
+    parts.unshift(scDefs);
+}
 fs.writeFileSync(output, parts.join('\n\n') + '\n');
+if (hasSc) fs.writeFileSync(output.replace(/\.inc$/, '_draw.inc'), drawSlice);
 fs.writeFileSync(output.replace(/\.inc$/, '_config.h'),
-    '#define FIXTURE_HAS_MS ' + (hasMs ? 1 : 0) + '\n#define FIXTURE_HAS_DEPTH_HINT ' + (hasHint ? 1 : 0) + '\n' + (hasMs ? '#define FBO_MSAA 1\n' : ''));
+    '#define FIXTURE_HAS_MS ' + (hasMs ? 1 : 0) + '\n#define FIXTURE_HAS_DEPTH_HINT ' + (hasHint ? 1 : 0) + '\n' + '#define FIXTURE_HAS_SC ' + (hasSc ? 1 : 0) + '\n' + (hasMs ? '#define FBO_MSAA 1\n' : ''));
 console.log('scene fixture prepared: ' + sceneResetCalls + ' scene_reset callers audited, ms=' + hasMs + ' hint=' + hasHint);
