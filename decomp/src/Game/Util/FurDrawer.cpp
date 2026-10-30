@@ -6,6 +6,7 @@
 #include <JSystem/JKernel/JKRHeap.hpp>
 #include <JSystem/JUtility/JUTTexture.hpp>
 #include <cmath>
+#include "port/fur_map.h"
 
 FurDrawer::FurDrawer(u32 numLayers, ResTIMG* pBody, ResTIMG* pIndirect)
     : mBodyTexture(), mFurTexture(), mIndirectTexture(), mNumLayers(numLayers), mLength(3.0f, 1.0f), mIndirect(0.2f, 1.5f), mBrightness(40.0f, 4.5f),
@@ -264,35 +265,11 @@ void FurDrawer::setupLayerMaterial(s32 layer) const {
 }
 
 void FurDrawer::createFurMap() {
-    u32 count;
-    u16* pPixels;
     u32 width = mFurTexture->getTexInfo()->mWidth;
     u32 height = mFurTexture->getTexInfo()->mHeight;
-    pPixels = reinterpret_cast< u16* >(mFurTexture->mImage);
-    count = height * width;
-
-    for (u32 i = 0; i < count; i++) {
-        pPixels[i] = 255;
-    }
-
-    for (u32 type = 0; type < 4; type++) {
-        for (u32 i = 0; i < f32(height) * f32(width) * mDensity[type]; i++) {
-            f32 randY = MR::getRandom(0.0f, 1.0f);
-            f32 randX = MR::getRandom(0.0f, 1.0f);
-            s32 y = f32(height) * randY;
-            s32 x = f32(width) * randX;
-
-            if (y == s32(height)) {
-                y = s32(height) - 1;
-            }
-
-            if (x == s32(width)) {
-                x = s32(width) - 1;
-            }
-
-            pPixels[x + width * y] = (u16(255.0f * mThickness[type]) << 8) | u16(255 - mLengthMap[type]);
-        }
-    }
-
-    DCStoreRange(pPixels, count * sizeof(u16));
+    // The map is a 16-bit IA8 image that GX reads big-endian (alpha, then intensity): port::fur writes it in that order on any host
+    // (GXV_FIX_FURMAP, default on; 0 keeps the host-order u16 stores).
+    port::fur::BuildMap(mFurTexture->mImage, width, height, mDensity, mThickness, mLengthMap, [](float a, float b) { return MR::getRandom(a, b); },
+                        port::fur::Enabled());
+    DCStoreRange(mFurTexture->mImage, height * width * sizeof(u16));
 }
