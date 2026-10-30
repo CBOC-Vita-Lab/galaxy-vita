@@ -10,7 +10,7 @@
     "runtimeSha256": "b1a8bbef3365e64a94605230ab1b1ffe9a6e6e9bba5785b517ad4b7a619acb84"
   },
   "source": {
-    "revision": "0c7b3eab0c9466876b3ae85550bdd45dbecfb3c2",
+    "revision": "6c77f230b3b61bf83a228a947a353ed86f44e7a8",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {
