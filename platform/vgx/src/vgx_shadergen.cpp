@@ -120,6 +120,8 @@ bool AlphaTestAlwaysPasses(uint32_t comp0, int ref0, uint32_t op, uint32_t comp1
 }
 int FsTevCount(const FsKey& k) {
     if (!UniformPacking() || k.numIndStages) return 28;
+    for (int s = 0; s < k.numStages; ++s)
+        if (k.stage[s].lodBias) return 28; // (the biases sit after the texture sizes: TEV_LODBIAS)
     return k.fog ? 11 : 9; // registers, konst, misc (+ fog parameters and colour)
 }
 int VsLightCount(const VsKey& k) {
@@ -155,7 +157,7 @@ std::string Swizzle(uint8_t swap) {
 }
 
 // UB_TEV as vec4 indices
-enum { V_REG = 0, V_KONST = 4, V_MISC = 8, V_FOG = 9, V_FOGCOL = 10, V_INDMTX = 11, V_INDSCALE = 17, V_TEXSIZE = 21 };
+enum { V_REG = 0, V_KONST = 4, V_MISC = 8, V_FOG = 9, V_FOGCOL = 10, V_INDMTX = 11, V_INDSCALE = 17, V_TEXSIZE = 21, V_LODBIAS = 25 };
 
 const char* ColorArg(uint32_t a) {
     static const char* const t[16] = {"prev.rgb", "prev.aaa", "c0.rgb", "c0.aaa", "c1.rgb", "c1.aaa", "c2.rgb", "c2.aaa",
@@ -378,7 +380,10 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
             }
             coord = "itc";
         }
-        if (st.texEnable) o("  tex = texture2D(u_tex%d, %s).%s;\n", st.texMap, coord.c_str(), Swizzle(st.texSwap).c_str());
+        if (st.texEnable && st.lodBias)
+            o("  tex = texture2D(u_tex%d, %s, u_tev[%d].%c).%s;\n", st.texMap, coord.c_str(), V_LODBIAS + st.texMap / 4, "xyzw"[st.texMap & 3],
+              Swizzle(st.texSwap).c_str());
+        else if (st.texEnable) o("  tex = texture2D(u_tex%d, %s).%s;\n", st.texMap, coord.c_str(), Swizzle(st.texSwap).c_str());
         else if (st.texOff) o("  tex = vec4(1.0);\n");
         if (st.rasChan < 2) o("  ras = v_col%d.%s;\n", st.rasChan, Swizzle(st.rasSwap).c_str());
         else o("  ras = vec4(0.0);\n");

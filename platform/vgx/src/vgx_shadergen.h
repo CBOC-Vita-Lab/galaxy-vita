@@ -34,7 +34,10 @@ struct FsKey {
         uint8_t rasSwap = 0xE4, texSwap = 0xE4; // 2 bits per output component, r in bits 0..1
         // The stage reads the texture colour but its texture is switched off (BP 0x28.. enable bit clear): GX gives white. Set only under GXV_FIX_TEXOFF.
         uint8_t texOff = 0;
-        uint8_t pad[3] = {};
+        // The stage samples its texture with the texture unit's LOD bias (GX: BP 0x80.. bits 9..16, 1/32 steps): texture2D(..., bias) with the
+        // bias from the TEV block (V_LODBIAS, one float per texmap). Set only under GXV_FIX_LODBIAS and only for a mip-mapped, non-zero bias.
+        uint8_t lodBias = 0;
+        uint8_t pad[2] = {};
     } stage[16];
     struct Ind {
         uint8_t texMap = 0, texCoord = 0, pad[2] = {};

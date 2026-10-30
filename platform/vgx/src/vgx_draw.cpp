@@ -497,6 +497,8 @@ void BuildFsKey(FsKey& k) {
             st.texEnable = 1;
             st.texMap = static_cast<uint8_t>(bits(tref, 0, 3));
             st.texSwap = SwapTable(bits(teva, 2, 2));
+            // GXV_FIX_LODBIAS: the unit mip-maps with a non-zero LOD bias (mode0 / mode1 are key registers while the switch is on: vgx_state.cpp)
+            if (FixLodBias() && fixes::LodBiasOf(g.bp[fixes::TexMode0Reg(st.texMap)], g.bp[fixes::TexMode1Reg(st.texMap)]) != 0.0f) st.lodBias = 1;
         } else if (usesTex && FixTexOff()) {
             st.texOff = 1;
         }
@@ -1011,6 +1013,12 @@ void split::BuildTevC(BlockCtx& bc, const State& g, const FsKey& fs, const uint1
             tb[TEV_TEXSIZE + m * 2 + 1] = texH[m] ? static_cast<float>(texH[m]) : 1.0f;
         }
     }
+    // GXV_FIX_LODBIAS: the bias of each texmap a stage samples with one (the shader reads u_tev[V_LODBIAS ..], FsTevCount gives such a shader 28 vec4)
+    for (int s = 0; s < fs.numStages; ++s)
+        if (fs.stage[s].lodBias) {
+            const unsigned m = fs.stage[s].texMap & 7u;
+            tb[TEV_LODBIAS + m] = fixes::LodBiasOf(g.bp[fixes::TexMode0Reg(m)], g.bp[fixes::TexMode1Reg(m)]);
+        }
     PushBlock(bc, UB_TEV, tb, tevLen);
 }
 

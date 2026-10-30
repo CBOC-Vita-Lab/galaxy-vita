@@ -86,5 +86,20 @@ inline DstAlphaPlan PlanDstAlpha(bool dstOn, unsigned constA, bool alphaWrite, b
     return p;
 }
 
+// ------------------------------------------------------------------ texture LOD bias (BP 0x80.. mode0, 0x84.. mode1)
+// A GX texture unit adds a signed bias (mode0 bits 9..16, an 8-bit two's complement number in 1/32 steps, -4 .. +3.97) to the level of
+// detail it computes, then clamps it to the unit's range. GLES2 has no per-texture bias; a fragment shader can give one to texture2D.
+// Returns the bias a stage must give when the unit mip-maps (mip filter in mode0 bits 5..6 and a maximum LOD of at least 1, the same test
+// BpTexSlotSync makes), and 0 when it does not (the bias then changes nothing).
+inline float LodBiasOf(uint32_t mode0, uint32_t mode1) {
+    const uint32_t hwMin = (mode0 >> 5) & 7;
+    const float maxLod = static_cast<float>((mode1 >> 8) & 0xFF) / 16.0f;
+    if ((hwMin & 3) == 0 || maxLod < 1.0f) return 0.0f;
+    return static_cast<float>(static_cast<int8_t>((mode0 >> 9) & 0xFF)) / 32.0f;
+}
+// The mode0 / mode1 registers of texmap m.
+inline unsigned TexMode0Reg(unsigned m) { return m < 4 ? 0x80 + m : 0xA0 + (m - 4); }
+inline unsigned TexMode1Reg(unsigned m) { return TexMode0Reg(m) + 4; }
+
 } // namespace fixes
 } // namespace vgx

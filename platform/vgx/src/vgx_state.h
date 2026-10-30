@@ -24,6 +24,9 @@ struct GuestHooks {
 };
 void SetGuestHooks(const GuestHooks& h);
 const GuestHooks& Hooks();
+// GXV_FIX_LODBIAS (default 0, read once): stages sample with the texture unit's LOD bias (FsKey::Stage::lodBias, vgx_fixes.h LodBiasOf). With it on, the
+// texture unit's mode0 / mode1 registers feed the shader key hash and mark the keys dirty.
+bool FixLodBias();
 bool StaticCrowdEnabled();
 void QueueCrowdSnapshot(const staticcrowd::Tag* tags, uint32_t count, bool valid);
 void ResetCrowdTags();

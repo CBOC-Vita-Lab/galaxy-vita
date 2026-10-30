@@ -80,6 +80,7 @@ enum : int {
     TEV_INDMTX = 44,  // 3 x {vec4 (m00,m01,m02,scale), vec4 (m10,m11,m12,0)}
     TEV_INDSCALE = 68, // 4 x vec4: (coordScaleS, coordScaleT, 1/texW, 1/texH) per indirect stage
     TEV_TEXSIZE = 84,  // 4 x vec4: (w, h) of texmap 2n in xy, of texmap 2n+1 in zw
+    TEV_LODBIAS = 100, // 2 x vec4: the LOD bias of texmap 0..7 (GXV_FIX_LODBIAS; only a shader with FsKey::Stage::lodBias reads them)
 };
 
 // ------------------------------------------------------------ render state

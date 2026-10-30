@@ -14,6 +14,10 @@ namespace vgx {
 State g;
 
 static GuestHooks g_hooks;
+bool FixLodBias() {
+    static const bool on = EnvInt("GXV_FIX_LODBIAS", 0) != 0;
+    return on;
+}
 void SetGuestHooks(const GuestHooks& h) { g_hooks = h; }
 const GuestHooks& Hooks() { return g_hooks; }
 
@@ -47,6 +51,8 @@ static constexpr bool IsKeyBP(uint32_t reg) {
     return reg == 0x00 || (reg >= 0x10 && reg <= 0x1F) || (reg >= 0x27 && reg <= 0x2F) || (reg >= 0x41 && reg <= 0x43) || (reg >= 0xC0 && reg <= 0xDF) ||
            reg == 0xF1 || reg == 0xF3 || (reg >= 0xF5 && reg <= 0xFD);
 }
+// GXV_FIX_LODBIAS: the texture units' mode0 (0x80..0x83, 0xA0..0xA3) and mode1 (0x84..0x87, 0xA4..0xA7) registers are read by BuildFsKey / BuildTevC.
+static constexpr bool IsLodReg(uint32_t reg) { return (reg >= 0x80 && reg <= 0x87) || (reg >= 0xA0 && reg <= 0xA7); }
 static constexpr bool IsKeyXF(uint32_t r) { return r == 0x09 || (r >= 0x0E && r <= 0x12) || (r >= 0x40 && r <= 0x47) || (r >= 0x50 && r <= 0x57); }
 // KeyZ(i, v) for register i (BP 0..255, XF 0x100 + r): two 32-bit lanes, each a multiply-xorshift of the value keyed by a
 // random word per register (the console's processor has no 64-bit multiply; the keys come from a fixed splitmix sequence).
@@ -84,6 +90,9 @@ uint64_t KeyHashOf(const State& s) {
     uint64_t h = 0;
     for (uint32_t r = 0; r < 256; ++r)
         if (IsKeyBP(r)) h ^= KeyZ(r, s.bp[r]);
+    if (FixLodBias())
+        for (uint32_t r = 0x80; r < 0xA8; ++r)
+            if (IsLodReg(r)) h ^= KeyZ(r, s.bp[r]);
     for (uint32_t r = 0; r < 0x58; ++r)
         if (IsKeyXF(r)) h ^= KeyZ(0x100u + r, s.xfReg[r]);
     return h;
@@ -122,6 +131,13 @@ struct BpMarkTable {
     }
 };
 constexpr BpMarkTable kBpMark;
+// GXV_FIX_LODBIAS: a change of a texture unit's mode0 / mode1 builds the shader key and the TEV block again.
+static inline void LodRegChanged(uint32_t reg, uint32_t oldv, uint32_t newv) {
+    if (!IsLodReg(reg) || !FixLodBias()) return;
+    KeyHashBP(reg, oldv, newv);
+    g.bpKeyDirty = true;
+    g.bpDirty = true;
+}
 static inline __attribute__((always_inline)) void MarkBP(uint8_t reg, uint32_t oldv, uint32_t newv) {
     const uint8_t c = kBpMark.t[reg];
     if (!c) return;
@@ -248,7 +264,9 @@ void WriteBP(uint32_t rv) {
             // the texture cache and mean nothing here). The game's GX library repeats them for
             // every material: only a change makes the unit's binding stale.
             if (g.bp[reg] != nv) {
+                const uint32_t ov = g.bp[reg];
                 g.bp[reg] = nv;
+                LodRegChanged(reg, ov, nv);
                 const int base = reg >= 0xA0 ? 0xA0 : 0x80;
                 const int kind = (reg - base) >> 2; // mode0 mode1 image0 image1 image2 image3 tlut
                 if (kind != 3 && kind != 4 && kind != 7) {
@@ -1695,6 +1713,7 @@ void SlReplay(const SlEntry& e, int bpFast) {
                         MarkBP(static_cast<uint8_t>(reg), ov, nv);
                     } else if (reg >= 0x80 && reg <= 0xBB) { // (WriteBP's texture-unit path, inline)
                         g.bp[reg] = nv;
+                        LodRegChanged(reg, ov, nv);
                         if (const uint8_t bit = kBpPlain.tex[reg]) {
                             g.texDirty = true;
                             g.texSlotDirty |= bit;

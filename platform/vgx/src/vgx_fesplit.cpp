@@ -14,6 +14,7 @@
 //              vertices it was told to transform (the player does not touch them again in this frame).
 // At the frame's end the player waits until the finishing thread has done everything, then takes its arenas.
 #include "vgx_fesplit.h"
+#include "vgx_fixes.h"
 
 #include <algorithm>
 #include <atomic>
@@ -337,6 +338,11 @@ void Run(uint32_t type, const uint32_t* p) {
         CopyWords(&s.bp[0xEE], p + 53, 7);
         s.xfReg[0x1C] = p[60];
         s.xfReg[0x1F] = p[61];
+        if (FixLodBias()) // (GXV_FIX_LODBIAS: the texture units' mode0 and mode1)
+            for (unsigned m = 0; m < 8; ++m) {
+                s.bp[fixes::TexMode0Reg(m)] = p[62 + m];
+                s.bp[fixes::TexMode1Reg(m)] = p[70 + m];
+            }
         BlockCtx c = FinBlocks(stale);
         BuildTevC(c, s, F->fs, texW, texH, fold);
         break;
@@ -662,7 +668,7 @@ void Light(uint16_t vsId, const VsKey& vs, bool stale) {
 
 void Tev(uint16_t fsId, const FsKey& fs, const uint16_t texW[8], const uint16_t texH[8], bool fold, bool stale) {
     SendFs(fsId, fs);
-    constexpr uint32_t n = 62;
+    const uint32_t n = FixLodBias() ? 78u : 62u;
     uint32_t* p = Begin(OP_TEV, n);
     p[0] = (fold ? 1u : 0u) | (stale ? 2u : 0u);
     for (int m = 0; m < 8; ++m) p[1 + m] = texW[m] | (static_cast<uint32_t>(texH[m]) << 16);
@@ -675,6 +681,11 @@ void Tev(uint16_t fsId, const FsKey& fs, const uint16_t texW[8], const uint16_t 
     CopyWords(p + 53, &g.bp[0xEE], 7);
     p[60] = g.xfReg[0x1C]; // (viewport z scale and offset: the vertex-fog coefficients, GXV_FOGVTX)
     p[61] = g.xfReg[0x1F];
+    if (FixLodBias())
+        for (unsigned m = 0; m < 8; ++m) {
+            p[62 + m] = g.bp[fixes::TexMode0Reg(m)];
+            p[70 + m] = g.bp[fixes::TexMode1Reg(m)];
+        }
     End(n);
     if (Verify()) {
         BlockCtx c = ShadowBlocks(stale);
