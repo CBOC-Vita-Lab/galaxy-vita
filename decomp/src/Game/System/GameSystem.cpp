@@ -343,7 +343,14 @@ void GameSystem::draw() {
 #endif
 }
 
+#ifdef TARGET_PC
+extern "C" void port_gx_drawdone_settle(int point);  // GXV_DRAWDONE_DEFER: platform/src/port/perf.cpp, MainLoopFramework.cpp
+#endif
+
 void GameSystem::update() {
+#ifdef TARGET_PC
+    port_gx_drawdone_settle(1);
+#endif
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_UPDATE_RESET);
     SingletonHolder< GameSystemResetAndPowerProcess >::get()->movement();
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_UPDATE_SCENE);
@@ -403,6 +410,9 @@ void GameSystem::updateSceneController() {
 }
 
 void GameSystem::calcAnim() {
+#ifdef TARGET_PC
+    port_gx_drawdone_settle(2);
+#endif
     mSceneController->calcAnimScene();
 
     if (mSystemWipeHolder != nullptr) {

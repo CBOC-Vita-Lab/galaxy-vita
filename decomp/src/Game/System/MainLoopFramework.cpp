@@ -12,6 +12,16 @@
 #include <revolution/gx/GXRegs.h>
 #include <runtime.h>
 
+#if defined(TARGET_PC)
+// GXV_DRAWDONE_DEFER (platform/include/port/drawdone_defer.h, platform/src/port/perf.cpp): the end-of-turn wait for the front end may be made later.
+extern "C" int port_gx_drawdone_defer_mode(void);
+extern "C" void port_gx_drawdone_armed(void);
+extern "C" int port_gx_drawdone_must_wait(int point);
+extern "C" void port_gx_drawdone_waited(int64_t ns);
+extern "C" void port_gx_drawdone_settle(int point);
+extern "C" void GXWaitDrawDone(void);
+#endif
+
 MainLoopFramework* MainLoopFramework::sManager;
 
 MR::BothDirList< MainLoopFrameworkAlarm > MainLoopFrameworkAlarm::sList(false);
@@ -481,6 +491,17 @@ namespace {
     }
 
     void waitDrawDoneAndSetAlarm() {
+#if defined(TARGET_PC)
+        if (port_gx_drawdone_defer_mode() != 0) {
+            // The command is written and flushed; the wait for the front end's finish is made by port_gx_drawdone_settle at the start of
+            // the next turn's update() or calcAnim() (or before the next GXSetDrawDone, which settles an older one itself). The abort
+            // alarm below is an hour long on the port and is not used for the deferred wait.
+            PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_DRAW_DONE);
+            GXSetDrawDone();
+            port_gx_drawdone_armed();
+            return;
+        }
+#endif
         PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_ALARM_CREATE);
         MainLoopFrameworkAlarm alarm;
         {
@@ -527,3 +548,18 @@ namespace {
         DrawSyncManager::prepareReset();
     }
 };  // namespace
+
+#if defined(TARGET_PC)
+// The deferred wait (GXV_DRAWDONE_DEFER). `point`: 0 before a GXSetDrawDone, 1 at the start of GameSystem::update, 2 at the start of
+// GameSystem::calcAnim. Game thread only.
+extern "C" void port_gx_drawdone_settle(int point) {
+    if (!port_gx_drawdone_must_wait(point)) {
+        return;
+    }
+    const int64_t begin = port_host_time_ns();
+    GXWaitDrawDone();
+    PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_RESET_SYNC);
+    DrawSyncManager::resetIfAborted();
+    port_gx_drawdone_waited(port_host_time_ns() - begin);
+}
+#endif
