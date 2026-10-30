@@ -2,7 +2,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 sdk=${VITASDK:-/opt/vitasdk}
-expected_pin=${AUDIT_EXPECT_GAME_PIN:-0}
+# The game thread has been pinned to core 0 by default since 1.0; AUDIT_EXPECT_GAME_PIN=0 checks the unpinned layout.
+expected_pin=${AUDIT_EXPECT_GAME_PIN:-1}
 [[ $expected_pin == 0 || $expected_pin == 1 ]]
 mkdir -p "$root/local/scheduling-audit"
 docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
