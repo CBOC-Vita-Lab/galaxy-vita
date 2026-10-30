@@ -304,6 +304,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
     setenv("GXV_PAD_DEFAULTS", "1", 0);
+    // The loading screen (the title picture with the loading bar) can never sit at 99 %: if the game has been running pictures in
+    // the last loading stage for 60 s without the title logo being recognised, the screen fades out and the game's own picture shows.
+    setenv("GXV_BOOT_TITLE_FALLBACK", "60", 0);
     // Consecutive rigid draws that differ only in their matrix drawn as one, through the 10-matrix palette (GXV_RIGIDMERGE=1;
     // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs) stays a test switch.
     setenv("GXV_RIGIDMERGE", "1", 0);
