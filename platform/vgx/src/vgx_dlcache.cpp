@@ -18,6 +18,7 @@
 //   GXV_DLCACHE=0       off: every call is decoded
 //   GXV_DLCACHE=verify  hash on every call and report an entry whose
 //                           bytes changed without a write notification
+//   GXV_DLCACHE_BOUNDS_GUARD=1  do not cache decodes with unreadable indexed elements (default off)
 // Counters: per frame in the CSV (dlHit, dlBuild, dlRehash, dlBypass), totals in vgx_stats.txt.
 #include "vgx_guestmem.h"
 #include "vgx_state.h"
@@ -215,6 +216,7 @@ PtrMap<Bypass> g_bypass; // lists not worth caching for now (state inside, volat
 
 int g_mode = -1; // 0 off, 1 on, 2 verify
 bool g_static = true;   // GXV_STATICBUF=0: never promote (decoded vertices are copied into the arena every time)
+bool g_boundsGuard = false;
 bool g_keepCopy = false; // GXV_HASH=2: keep the bytes of promoted entries for hashing
 struct Counters {
     uint64_t hits = 0, builds = 0, rehashOk = 0, rehashChanged = 0, bypassed = 0, uncacheable = 0, staleNoNotify = 0, evicted = 0;
@@ -311,6 +313,8 @@ void Init() {
     if (m && !std::strcmp(m, "verify")) g_mode = 2;
     else g_mode = (m && *m == '0') ? 0 : 1;
     g_static = EnvInt("GXV_STATICBUF", 1) != 0;
+    // Default off: reject cached decodes with incompletely readable indexed data.
+    g_boundsGuard = EnvInt("GXV_DLCACHE_BOUNDS_GUARD", 0) != 0;
     g_keepCopy = diag::Int("GXV_HASH", 0) == 2;
 }
 
@@ -361,7 +365,10 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
             if (count > 0xFFFF) e.promotable = false;
             vertexBytes += static_cast<size_t>(count) * plan.layout.stride;
             if (vertexBytes > 0xFFFFFFFFu) return false;
-            const ArraySpans sp = MeasureArraySpans(plan, p, count);
+            bool complete = true;
+            const ArraySpans sp = MeasureArraySpans(plan, p, count, g_boundsGuard ? &complete : nullptr);
+            // Fallback-zero elements are absent from the spans, so they cannot safely define a cache entry.
+            if (g_boundsGuard && !complete) return false;
             for (int a = 9; a <= 20; ++a)
                 if (sp.mask & (1u << a)) {
                     e.idxMask |= 1u << a;

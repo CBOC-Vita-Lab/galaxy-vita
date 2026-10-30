@@ -9,6 +9,8 @@ constexpr unsigned kVs = 20, kFs = 150, kPairs = kVs * kFs;
 unsigned frames = 0;
 bool deferred = false;
 bool truncatedVariant = false;
+bool alphaZero = false;
+unsigned Blend(unsigned pair) { return 0xC01u | ((alphaZero && (pair & 1u)) ? 0x1000u : 0u); }
 void Require(bool ok, const char* why) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
 }
@@ -38,7 +40,7 @@ std::vector<uint8_t> Recipe() {
         for (unsigned vs = 0; vs != kVs; ++vs)
             for (unsigned fs = 0; fs != kFs; ++fs) {
                 Bytes(out, type); Bytes(out, vs); Bytes(out, fs);
-                if (type == 4) { Bytes(out, 0u); Bytes(out, 0xC01u); }
+                if (type == 4) { Bytes(out, 0u); Bytes(out, Blend(vs * kFs + fs)); }
             }
     return out;
 }
@@ -61,7 +63,7 @@ void Observe(vgx::CmdBuf& buf) {
             const unsigned pair = i - kVs - kFs - kPairs;
             Require(c.type == vgx::CMD_VARIANT, "all variants replay after their program dependencies");
             const auto& v = buf.variants.at(c.arg);
-            Require(v.vsId == pair / kFs && v.fsId == pair % kFs && v.layoutMask == 0 && v.blendKey == 0xC01,
+            Require(v.vsId == pair / kFs && v.fsId == pair % kFs && v.layoutMask == 0 && v.blendKey == Blend(pair),
                     "shader IDs sharing layout/blend remain distinct and in the same replay order");
         }
     }
@@ -77,10 +79,11 @@ void SubmitToBackend(CmdBuf& b) { backend::Execute(b); }
 int main(int argc, char** argv) {
     Require(argc == 3, "supply clean/duplicate and deferred flag");
     deferred = std::atoi(argv[2]) != 0;
+    const std::string mode = argv[1];
+    alphaZero = mode == "alpha-zero" || mode == "alpha-zero-duplicate";
     const auto expected = Recipe();
     auto canonical = expected, input = expected;
-    const std::string mode = argv[1];
-    if (mode == "duplicate") input.insert(input.end(), expected.end() - 20, expected.end());
+    if (mode == "duplicate" || mode == "alpha-zero-duplicate") input.insert(input.end(), expected.end() - 20, expected.end());
     else if (mode.rfind("tail-", 0) == 0) {
         const unsigned n = std::stoul(mode.substr(5));
         Require(n >= 1 && n <= 3, "tail fixture is an incomplete record type");
@@ -89,7 +92,7 @@ int main(int argc, char** argv) {
         truncatedVariant = true;
         input.resize(input.size() - 7);
         canonical.resize(canonical.size() - 20);
-    } else Require(mode == "clean", "known replay/recovery scenario");
+    } else Require(mode == "clean" || mode == "alpha-zero", "known replay/recovery scenario");
     char path[] = "/tmp/vgx-recipe-XXXXXX";
     const int fd = mkstemp(path);
     Require(fd >= 0, "test owns a unique temporary recipe");

@@ -57,6 +57,7 @@
 #include "vgx_validate.h"
 #include "vgx_coldtrace.h"
 #include "vgx_autoq.h"
+#include "vgx_resource_audit.h"
 #ifdef __vita__
 #include <psp2/kernel/processmgr.h>
 #endif
@@ -100,6 +101,7 @@ extern "C" uint32_t port_scene_key(void) __attribute__((weak));
 #ifdef __VGX_VITA__
 extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __attribute__((weak));
 extern "C" GLint vglFramebufferDepthTexture(GLuint fb) __attribute__((weak)); // vitaGL built with DEPTH_SAMPLE (GXV_FXHALF): row width or 0
+extern "C" void vgxvita_uploadAuthoredI4Mips(unsigned width, unsigned height, unsigned count, const void* const* levels) __attribute__((weak));
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // The first few times something of the gpupass section happens: one line in the console's log (the back end's stderr does not reach it).
 #define GPUPASS_NOTE(n, ...) do { static int gp_cnt_ = 0; if (gp_cnt_ < (n)) { ++gp_cnt_; port_log("[vgx] " __VA_ARGS__); } } while (0)
@@ -134,6 +136,10 @@ const Caps& GetCaps() {
         c.mipGen = EnvInt("GXV_MIPGEN", vita) != 0;
         c.mipClamp = EnvInt("GXV_MIPCLAMP", vita) != 0;
         c.la88 = EnvInt("GXV_LA88", vita) != 0;
+#ifdef __VGX_VITA__
+        // Read once; off until the authored storage/LOD path has native validation.
+        c.authoredI4Mips = EnvInt("GXV_AUTHORED_I4_MIPS", 0) != 0 && c.mipClamp && vgxvita_uploadAuthoredI4Mips;
+#endif
         return c;
     }();
     return caps;
@@ -360,6 +366,7 @@ struct GlState {
     int sc[4] = {-1, -1, -1, -1}, vp[4] = {-1, -1, -1, -1};
     float zn = -1, zf = -1, lineWidth = -1;
     int blendEq = -1, blendSrc = -1, blendDst = -1, depthFunc = -1, cullFace = -1;
+    int8_t blendAlphaZero = -1;
     // vertex arrays
     uint32_t attrEnabled = 0, attrConstSet = 0;
     GLuint layoutVbo = ~0u; // the attribute pointers describe this buffer ...
@@ -618,13 +625,15 @@ inline void SetBlendOff() {
     ++C.stateCalls;
     S.blendOn = 0;
 }
-inline void SetBlend(GLenum eq, GLenum src, GLenum dst) {
+inline void SetBlend(GLenum eq, GLenum src, GLenum dst, bool alphaZero = false) {
     if (S.blendOn != 1) { G(glEnable(GL_BLEND)); ++C.stateCalls; S.blendOn = 1; }
     if (S.blendEq != static_cast<int>(eq)) { G(glBlendEquation(eq)); ++C.stateCalls; S.blendEq = static_cast<int>(eq); }
-    if (S.blendSrc != static_cast<int>(src) || S.blendDst != static_cast<int>(dst)) {
-        G(glBlendFunc(src, dst));
+    if (S.blendSrc != static_cast<int>(src) || S.blendDst != static_cast<int>(dst) || S.blendAlphaZero != static_cast<int8_t>(alphaZero)) {
+        if (alphaZero) G(glBlendFuncSeparate(src, dst, GL_ZERO, GL_ZERO));
+        else G(glBlendFunc(src, dst));
         ++C.stateCalls;
         S.blendSrc = static_cast<int>(src); S.blendDst = static_cast<int>(dst);
+        S.blendAlphaZero = static_cast<int8_t>(alphaZero);
     }
 }
 inline void SetDepthTest(bool on, GLenum func = GL_ALWAYS) {
@@ -725,6 +734,64 @@ bool GlRetry() {
 }
 constexpr uint8_t kGlMaxAttempts = 4;
 inline uint64_t GlRetryDelay(uint8_t failures) { return 60ull << (failures - 1); }
+// GXV_RESOURCE_AUDIT=1: bounded basic-log evidence, including quiet player builds.
+// Read once, default off. This does not change allocation, retry or draw policy.
+bool ResourceAuditOn() {
+    return resourceaudit::Enabled();
+}
+enum class ResourceStage { CreateShader, CompileVertex, CompileFragment, CreateProgram, Link, MissingSource, DrawSkip, WhiteFallback, CopyLink, Count };
+struct ResourceRecord {
+    uint32_t vs = ~0u, fs = ~0u, texture = 0;
+    uint64_t vsHash = 0, fsHash = 0;
+    unsigned attempt = 0, slot = 0;
+    const char* disposition = "-";
+    const char* reason = "-";
+};
+struct ResourceCategory {
+    ResourceRecord records[16]{};
+    unsigned emitted = 0;
+    uint64_t suppressed = 0;
+};
+ResourceCategory g_resourceAudit[static_cast<unsigned>(ResourceStage::Count)];
+uint64_t ResourceHash(bool fragment, uint32_t id) {
+    const auto& sources = fragment ? g_fsSrc : g_vsSrc;
+    return id < sources.size() && sources[id] ? sources[id]->keyHash : 0;
+}
+void ResourceAudit(ResourceStage stage, ResourceRecord record, const char* info = nullptr) {
+    if (!ResourceAuditOn()) return;
+    static const char* names[] = {"create-shader", "compile-vertex", "compile-fragment", "create-program", "link", "missing-source", "draw-skip", "declared-white", "copy-link"};
+    auto& category = g_resourceAudit[static_cast<unsigned>(stage)];
+    bool duplicate = false;
+    for (unsigned i = 0; i < category.emitted; ++i) {
+        const auto& old = category.records[i];
+        if (old.vs == record.vs && old.fs == record.fs && old.texture == record.texture &&
+            old.vsHash == record.vsHash && old.fsHash == record.fsHash && old.attempt == record.attempt && old.slot == record.slot &&
+            !std::strcmp(old.disposition, record.disposition) && !std::strcmp(old.reason, record.reason)) { duplicate = true; break; }
+    }
+    if (duplicate || category.emitted == 16) {
+        // At most 64 summaries per category over its lifetime, even for a persistent bad draw.
+        if (category.suppressed != ~uint64_t{0}) ++category.suppressed;
+        const auto count = category.suppressed;
+        if (count && !(count & (count - 1)))
+            autoq::Log("[resource-audit] stage=%s frame=%llu serial=%llu emitted=%u suppressed=%llu",
+                       names[static_cast<unsigned>(stage)], static_cast<unsigned long long>(g_progFrame),
+                       static_cast<unsigned long long>(g_serial), category.emitted, static_cast<unsigned long long>(count));
+        return;
+    }
+    category.records[category.emitted++] = record;
+    char excerpt[97] = {};
+    if (info) for (unsigned i = 0; i < sizeof excerpt - 1 && info[i]; ++i) excerpt[i] = info[i] < ' ' ? ' ' : info[i];
+    autoq::Log("[resource-audit] stage=%s frame=%llu serial=%llu vs=%u fs=%u vhash=%016llx fhash=%016llx attempt=%u disposition=%s slot=%u texture=%u reason=%s info=%.96s",
+               names[static_cast<unsigned>(stage)], static_cast<unsigned long long>(g_progFrame), static_cast<unsigned long long>(g_serial),
+               record.vs, record.fs, static_cast<unsigned long long>(record.vsHash), static_cast<unsigned long long>(record.fsHash),
+               record.attempt, record.disposition, record.slot, record.texture, record.reason, excerpt);
+}
+ResourceRecord ResourcePair(uint32_t vs, uint32_t fs, unsigned attempt, const char* disposition, const char* reason) {
+    ResourceRecord r;
+    r.vs = vs; r.fs = fs; r.vsHash = ResourceHash(false, vs); r.fsHash = ResourceHash(true, fs);
+    r.attempt = attempt; r.disposition = disposition; r.reason = reason;
+    return r;
+}
 bool g_compileFailed = false; // the last Compile returned 0 because the source did not compile (GXV_GL_RETRY), not for an allocation
 bool BadGlName(GLuint id) {
     // The frozen vitaGL can return UINT_MAX when its program table is full.
@@ -734,14 +801,19 @@ bool BadGlName(GLuint id) {
     return id == 0;
 }
 
-GLuint Compile(GLenum type, const char* text, const char* what) {
+GLuint Compile(GLenum type, const char* text, const char* what, uint32_t logicalId = ~0u, unsigned attempt = 1) {
     g_compileFailed = false;
     if (GlAllocBackoff()) return 0;
 #if VGX_COLDTRACE
     coldtrace::Scope trace(coldtrace::g_recorder,coldtrace::Phase::Compile,coldtrace::IoClass::None,{g_progFrame,0x10000u,type,0,0,0},coldtrace::Origin::Utility);
 #endif
     const GLuint s = G(glCreateShader(type));
-    if (BadGlName(s)) { g_glAllocFailSerial = g_serial; return 0; }
+    if (BadGlName(s)) {
+        g_glAllocFailSerial = g_serial;
+        if (ResourceAuditOn()) ResourceAudit(ResourceStage::CreateShader,
+            ResourcePair(type == GL_VERTEX_SHADER ? logicalId : ~0u, type == GL_FRAGMENT_SHADER ? logicalId : ~0u, attempt, "next-serial", what));
+        return 0;
+    }
     const char* parts[2] = {"#version 100\n", text};
     G(glShaderSource(s, 2, parts, nullptr));
     G(glCompileShader(s));
@@ -755,6 +827,9 @@ GLuint Compile(GLenum type, const char* text, const char* what) {
         char log[2048] = {};
         glGetShaderInfoLog(s, sizeof log, nullptr, log);
         VGX_ERR("%s shader compile failed:\n%s\n---- source ----\n%s\n", what, log, text);
+        if (ResourceAuditOn()) ResourceAudit(type == GL_VERTEX_SHADER ? ResourceStage::CompileVertex : ResourceStage::CompileFragment,
+            ResourcePair(type == GL_VERTEX_SHADER ? logicalId : ~0u, type == GL_FRAGMENT_SHADER ? logicalId : ~0u, attempt,
+                         logicalId == ~0u ? "caller-policy" : !GlRetry() ? "retained" : attempt >= kGlMaxAttempts ? "exhausted" : "retry", what), log);
         if (GlRetry()) {
             G(glDeleteShader(s));
             g_compileFailed = true;
@@ -796,6 +871,18 @@ bool BoundTexHasStorage(int w, int h) {
 }
 void RetireTexture(GLuint id, int w = 0, int h = 0);
 
+bool EfbCreateGuard() {
+    // GXV_EFB_CREATE_GUARD=1 refuses exhausted EFB names before replacing a valid target; default off.
+    static const bool enabled = EnvInt("GXV_EFB_CREATE_GUARD", 0) == 1;
+    return enabled;
+}
+void EfbNameFailure(const char* resource, int w, int h) {
+    static unsigned reported = 0;
+    if (reported >= 8) return;
+    ++reported;
+    autoq::Log("[efb-create] no %s name for %dx%d target; previous target retained", resource, w, h);
+}
+
 // GXV_KEEP_RT (Vita3K): a render target is never deleted (see DeleteTex), so every change of rung used to leave the old
 // EFB colour and every resampled texture behind for good; a run that changed the rung every 8 s filled vitaGL's video
 // memory after about 30 changes (an allocation failed, then the emulator crashed). The textures retired by a change go to
@@ -826,6 +913,10 @@ bool CreateTarget() {
     GLuint color = KeepRenderTargets() ? TakeRtSpare(w, h) : 0;
     if (!color) {
         G(glGenTextures(1, &color));
+        if (EfbCreateGuard() && !color) {
+            EfbNameFailure("texture", w, h);
+            return false;
+        }
         BindTexForEdit(color);
         G(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
     }
@@ -836,6 +927,15 @@ bool CreateTarget() {
         return false;
     }
     SetupNewTexture(GL_LINEAR);
+    GLuint preparedFbo = 0;
+    if (EfbCreateGuard() && (!g_efbFbo || KeepRenderTargets())) {
+        G(glGenFramebuffers(1, &preparedFbo));
+        if (!preparedFbo) {
+            RetireTexture(color, w, h);
+            EfbNameFailure("framebuffer", w, h);
+            return false;
+        }
+    }
     EfbDropSamples(); // (the desktop's multisampled objects are of the old size)
     const int oldW = g_rtW, oldH = g_rtH;
     g_rtW = w;
@@ -855,7 +955,10 @@ bool CreateTarget() {
         g_efbFbo = g_efbColor = g_efbDepthRb = g_efbDepthTex = 0;
         oldColor = 0; // (forgotten above, never deleted)
     }
-    if (!g_efbFbo) G(glGenFramebuffers(1, &g_efbFbo));
+    if (!g_efbFbo) {
+        if (preparedFbo) g_efbFbo = preparedFbo;
+        else G(glGenFramebuffers(1, &g_efbFbo));
+    }
     g_efbColor = color;
     BindFbo(g_efbFbo);
     AttachColor(g_efbColor);
@@ -1011,7 +1114,7 @@ void CompileShader(bool fragment, uint32_t id) {
     coldtrace::Scope trace(coldtrace::g_recorder,coldtrace::Key{g_progFrame,CMD_SHADER,id,fragment?1u:0u,0,0},coldtrace::Origin::DirectShader);
 #endif
     const ShaderSource* s = (fragment ? g_fsSrc : g_vsSrc)[id];
-    const GLuint shader = Compile(fragment ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER, s->text.c_str(), fragment ? "fragment" : "vertex");
+    const GLuint shader = Compile(fragment ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER, s->text.c_str(), fragment ? "fragment" : "vertex", id, attempt ? attempt->failures + 1 : 1);
     if (!shader) {
         // An allocation failure is retryable at once; a source error (GXV_GL_RETRY) after a delay, a bounded number of
         // times. (GXV_GL_RETRY=0: a source error still owns a shader handle and does not come here.)
@@ -1024,6 +1127,8 @@ void CompileShader(bool fragment, uint32_t id) {
         return;
     }
     (fragment ? g_fs : g_vs)[id] = shader;
+    if (ResourceAuditOn() && attempt && attempt->failures) ResourceAudit(fragment ? ResourceStage::CompileFragment : ResourceStage::CompileVertex,
+        ResourcePair(fragment ? ~0u : id, fragment ? id : ~0u, attempt->failures + 1, "recovered", "compiled"));
     pend[id] = 0;
     if (fragment) ++g_stats.fragmentShaders; else ++g_stats.vertexShaders;
 }
@@ -1062,7 +1167,11 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
     if (vsId < g_vs.size() && fsId < g_fs.size() && g_vs[vsId] && g_fs[fsId]) {
         if (it != g_programs.end()) g_programRetryFrame = g_serial;
         p.id = G(glCreateProgram());
-        if (BadGlName(p.id)) { g_glAllocFailSerial = g_serial; return UnavailableProgram(); }
+        if (BadGlName(p.id)) {
+            g_glAllocFailSerial = g_serial;
+            if (ResourceAuditOn()) ResourceAudit(ResourceStage::CreateProgram, ResourcePair(vsId, fsId, failures + 1, "next-serial", "invalid-gl-name"));
+            return UnavailableProgram();
+        }
         p.linkSerial = g_serial;
         G(glAttachShader(p.id, g_vs[vsId]));
         G(glAttachShader(p.id, g_fs[fsId]));
@@ -1093,6 +1202,8 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
             glGetProgramInfoLog(p.id, sizeof log, nullptr, log);
             VGX_ERR("program link failed (vs %u, fs %u):\n%s\n---- vs ----\n%s\n---- fs ----\n%s\n", vsId, fsId, log,
                     g_vsSrc[vsId]->text.c_str(), g_fsSrc[fsId]->text.c_str());
+            if (ResourceAuditOn()) ResourceAudit(ResourceStage::Link,
+                ResourcePair(vsId, fsId, failures + 1, !GlRetry() ? "retained" : failures + 1 >= kGlMaxAttempts ? "exhausted" : "retry", "false-link-status"), log);
             if (GlRetry()) {
                 // (the program slot is given back; the entry remembers the failure and when to try again)
                 G(glDeleteProgram(p.id));
@@ -1104,6 +1215,7 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
             }
         } else {
             p.ok = true;
+            if (ResourceAuditOn() && failures) ResourceAudit(ResourceStage::Link, ResourcePair(vsId, fsId, failures + 1, "recovered", "linked"));
             UseProgram(p.id);
             const ShaderSource& vs = *g_vsSrc[vsId];
             // What the shader text declares (vec4 elements per array).
@@ -1153,7 +1265,11 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
 #endif
         }
         if (p.id) ++g_stats.programs; // (GXV_GL_RETRY: a failed link holds no GL program)
-    } else return UnavailableProgram();
+    } else {
+        if (ResourceAuditOn() && (vsId >= g_vsSrc.size() || !g_vsSrc[vsId] || fsId >= g_fsSrc.size() || !g_fsSrc[fsId]))
+            ResourceAudit(ResourceStage::MissingSource, ResourcePair(vsId, fsId, 0, "await-registration", "unregistered"));
+        return UnavailableProgram();
+    }
     if (it != g_programs.end()) {
         // (a retried link: the entry keeps its address, which g_programFront may hold)
         it->second = p;
@@ -1212,7 +1328,7 @@ bool ApplyRenderState(const RenderState& rs) {
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     SetViewport(Rnd(rs.vpX * sx) - ox, Rnd(rs.vpY * sy) - oy, Rnd(rs.vpW * sx), Rnd(rs.vpH * sy));
     SetDepthRange(rs.zNear, rs.zFar);
-    if (rs.blend) SetBlend(rs.blendEq == BE_REVSUB ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend(rs.blendSrc), MapBlend(rs.blendDst));
+    if (rs.blend) SetBlend(rs.blendEq == BE_REVSUB ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend(rs.blendSrc), MapBlend(rs.blendDst), rs.dstAlphaZero != 0);
     else SetBlendOff();
     if (rs.depthTest) {
         SetDepthTest(true, kCmp[rs.depthFunc & 7]);
@@ -1298,7 +1414,7 @@ void SetLayout(GLuint vbo, uint32_t layoutMask, uint32_t base) {
 // vertex program cache for (vertex shader, attributes, streams) on every draw
 // (vglCreateVertexProgram). A combination that was never used before is built there and then.
 #if !defined(PORT_RUNTIME_DIAGNOSTICS) || PORT_RUNTIME_DIAGNOSTICS
-std::unordered_set<uint32_t> g_fragVariants; // vsId << 22 ^ fsId << 12 ^ blend key (the patcher also keys on the vertex shader the fragment program links to)
+std::unordered_set<uint64_t> g_fragVariants; // legacy folded ID below bit 32; zero-alpha override at bit 32
 std::unordered_set<uint32_t> g_vtxVariants;  // vsId << 12 | layout mask
 #endif
 inline void NoteVariant(Program& p, uint16_t vsId, uint16_t fsId, uint32_t layoutMask, uint32_t blendKey, bool warmCompatible) {
@@ -1319,7 +1435,8 @@ inline void NoteVariant(Program& p, uint16_t vsId, uint16_t fsId, uint32_t layou
         if (p.blendKey != ~0u) ++C.fragSwitches;
         p.blendKey = blendKey;
 #if !defined(PORT_RUNTIME_DIAGNOSTICS) || PORT_RUNTIME_DIAGNOSTICS
-        if (g_fragVariants.insert((static_cast<uint32_t>(vsId) << 22) ^ (static_cast<uint32_t>(fsId) << 12) ^ blendKey).second) ++C.fragVariants;
+        const uint32_t legacy = (static_cast<uint32_t>(vsId) << 22) ^ (static_cast<uint32_t>(fsId) << 12) ^ (blendKey & 0xFFFu);
+        if (g_fragVariants.insert(static_cast<uint64_t>(legacy) | (static_cast<uint64_t>(blendKey & 0x1000u) << 20)).second) ++C.fragVariants;
 #endif
     }
     if (p.layout != layoutMask) {
@@ -1354,7 +1471,7 @@ void WarmVariant(const VariantCmd& v) {
         G(glBufferData(GL_ELEMENT_ARRAY_BUFFER, 6, zeros, GL_STATIC_DRAW));
     }
     UseProgram(p.id);
-    if (v.blendKey & 1u) SetBlend((v.blendKey & 2u) ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend((v.blendKey >> 2) & 15u), MapBlend((v.blendKey >> 6) & 15u));
+    if (v.blendKey & 1u) SetBlend((v.blendKey & 2u) ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend((v.blendKey >> 2) & 15u), MapBlend((v.blendKey >> 6) & 15u), (v.blendKey & (1u << 12)) != 0);
     else SetBlendOff();
     SetColorMask((v.blendKey & (1u << 10)) != 0, (v.blendKey & (1u << 11)) != 0);
     for (int m = 0; m < 8; ++m) BindTex(m, g_whiteTex);
@@ -1537,7 +1654,15 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     if (g_dprofOn) g_dprofT = DNow();
     Program& p = GetProgram(r.vsId, r.fsId);
     DP(0);
-    if (!p.ok || r.idxCount == 0) return;
+    if (!p.ok || r.idxCount == 0) {
+        if (!p.ok && r.idxCount && ResourceAuditOn()) {
+            unsigned failures = p.failures;
+            if (r.vsId < g_vsAttempts.size()) failures = std::max(failures, unsigned(g_vsAttempts[r.vsId].failures));
+            if (r.fsId < g_fsAttempts.size()) failures = std::max(failures, unsigned(g_fsAttempts[r.fsId].failures));
+            ResourceAudit(ResourceStage::DrawSkip, ResourcePair(r.vsId, r.fsId, failures, failures >= kGlMaxAttempts ? "exhausted" : "unavailable", "program-not-ready"));
+        }
+        return;
+    }
     if (g_validateFrame) ValidateDraw(buf, r, p);
     if (g_noCache) {
         S.program = ~0u;
@@ -1549,6 +1674,7 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
             S.sc[2] = S.vp[2] = -1;
             S.zn = -1;
             S.blendEq = S.blendSrc = S.depthFunc = S.cullFace = -1;
+            S.blendAlphaZero = -1;
         }
     }
     GLuint vbo, ibo;
@@ -1627,7 +1753,18 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
 
     DP(2);
     for (int m = 0; m < 8; ++m)
-        if (r.texMask & (1u << m)) BindTexture(m, r.tex[m]);
+        if (r.texMask & (1u << m)) {
+            if (ResourceAuditOn()) {
+                const uint32_t id = r.tex[m].texId;
+                const char* reason = id == 0 ? "zero-id" : id >= g_tex.size() ? "out-of-range" : !g_tex[id].id ? "no-gl-name" : nullptr;
+                if (reason) {
+                    auto record = ResourcePair(r.vsId, r.fsId, 0, "white-fallback", reason);
+                    record.slot = m; record.texture = id;
+                    ResourceAudit(ResourceStage::WhiteFallback, record);
+                }
+            }
+            BindTexture(m, r.tex[m]);
+        }
     DP(3);
 
     SetLayout(vbo, r.layoutMask, r.vtxOffset);
@@ -1818,6 +1955,19 @@ void Upload(const TexUpload& up) {
     const bool lastSecond = false;
 #endif
     std::vector<uint8_t> tmp;
+#if defined(__VGX_VITA__)
+    const bool preserveI4 = up.preserveI4Mips && GetCaps().authoredI4Mips && up.format == TF_RGBA8 && !up.genMips
+        && up.width == up.height && up.width > 1 && up.width <= 4096 && !(up.width & (up.width - 1u)) && up.levels.size() > 1
+        && up.levels.size() <= 32u - static_cast<uint32_t>(__builtin_clz(up.width)) && up.levels.size() <= 13;
+    if (preserveI4) {
+        const void* levels[13];
+        for (size_t l = 0; l < up.levels.size(); ++l) levels[l] = up.levels[l].data();
+        G(vgxvita_uploadAuthoredI4Mips(up.width, up.height, static_cast<unsigned>(up.levels.size()), levels));
+        C.glCalls += static_cast<uint32_t>(up.levels.size()); // helper: base + allocation + count-1 subimages
+    }
+#else
+    const bool preserveI4 = false;
+#endif
     for (size_t i = 0; i < up.levels.size(); ++i) {
         const size_t l = !lastSecond || i == 0 ? i : (i == 1 ? up.levels.size() - 1 : i - 1);
         const uint32_t w = l == 0 ? up.width : (l < 32 ? std::max(1u, uint32_t(up.width) >> l) : 1u);
@@ -1835,8 +1985,8 @@ void Upload(const TexUpload& up) {
             if (up.format == TF_DXT5) { DecodeDxt5(lv.data(), w, h, tmp); px = tmp.data(); }
             const GLenum format = up.format == TF_LA88 ? GL_LUMINANCE_ALPHA : GL_RGBA;
             const uint64_t bytes = static_cast<uint64_t>(w) * h * (up.format == TF_LA88 ? 2u : 4u);
-            G(glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), format, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, format,
-                           GL_UNSIGNED_BYTE, px));
+            if (!preserveI4) G(glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), format, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, format,
+                                           GL_UNSIGNED_BYTE, px));
             g_stats.textureBytes += bytes;
             C.texUploadBytes += static_cast<uint32_t>(bytes);
         }
@@ -1892,7 +2042,11 @@ bool EnsureCopyProgram() {
     G(glLinkProgram(pendingProgram));
     GLint ok = 0;
     G(glGetProgramiv(pendingProgram, GL_LINK_STATUS, &ok));
-    if (!ok) { g_glAllocFailSerial = g_serial; return false; }
+    if (!ok) {
+        g_glAllocFailSerial = g_serial;
+        if (ResourceAuditOn()) ResourceAudit(ResourceStage::CopyLink, ResourcePair(~0u, ~0u, 0, "next-serial", "false-link-status"));
+        return false;
+    }
     g_copyProg = pendingProgram;
     pendingProgram = 0;
     UseProgram(g_copyProg);
@@ -2116,7 +2270,7 @@ void ClearEfb(const ClearSpec& c, const EfbRect& r) {
 // taken first and not attached to again: on vitaGL attaching to the object in use ends the
 // scene (shared.h _glFramebufferTexture2D), so draws that follow each other into one
 // texture (the passes of one atlas) stay one scene only this way.
-int AcquireFbo(int w, int h, GLuint tex, bool wantDepth) {
+int AcquireFbo(int w, int h, GLuint tex, bool wantDepth, bool guardName = false) {
     // (GXV_KEEP_RT, see DeleteTex: vitaGL gives every framebuffer object a hidden depth buffer
     // at its first scene and frees it when a depth attachment is made (framebuffers.c,
     // glFramebufferRenderbuffer); the emulator then shows that freed buffer's depth, as red, in
@@ -2126,19 +2280,20 @@ int AcquireFbo(int w, int h, GLuint tex, bool wantDepth) {
     int idx = -1;
     if (tex) {
         for (size_t i = 0; i < g_pool.size(); ++i)
-            if (g_pool[i].attached == tex && g_pool[i].w == w && g_pool[i].h == h && (g_pool[i].uses < g_fboMaxUses || g_inUseFbo == g_pool[i].fbo)) {
+            if ((!guardName || g_pool[i].fbo) && g_pool[i].attached == tex && g_pool[i].w == w && g_pool[i].h == h && (g_pool[i].uses < g_fboMaxUses || g_inUseFbo == g_pool[i].fbo)) {
                 idx = static_cast<int>(i);
                 break;
             }
     }
     if (idx < 0)
         for (size_t i = 0; i < g_pool.size(); ++i)
-            if (g_pool[i].w == w && g_pool[i].h == h && g_pool[i].uses < g_fboMaxUses) { idx = static_cast<int>(i); break; }
+            if ((!guardName || g_pool[i].fbo) && g_pool[i].w == w && g_pool[i].h == h && g_pool[i].uses < g_fboMaxUses) { idx = static_cast<int>(i); break; }
     if (idx < 0) {
         PoolFbo f;
         f.w = w;
         f.h = h;
         G(glGenFramebuffers(1, &f.fbo));
+        if (guardName && !f.fbo) return -1;
         g_pool.push_back(f);
         idx = static_cast<int>(g_pool.size() - 1);
         VGX_LOG("framebuffer object %dx%d created (%u pooled)\n", w, h, static_cast<unsigned>(g_pool.size()));
@@ -2203,6 +2358,57 @@ Tex& CopyTexture(uint32_t texId, int w, int h, int ew, int eh) {
     t.ew = static_cast<uint16_t>(ew);
     t.eh = static_cast<uint16_t>(eh);
     return t;
+}
+
+bool CopyAllocationGuard() {
+    // GXV_RT_ALLOC_GUARD=1 guards ordinary non-fill copy allocations and keeps the previous target
+    // on failure. Experimental, read once, default OFF pending physical-Vita validation.
+    static const bool on = EnvInt("GXV_RT_ALLOC_GUARD", 0) != 0;
+    return on;
+}
+
+// Ordinary non-fill copies only. Allocate and acquire before replacing the last usable picture.
+// BeginPass/depth allocations and ApplyRung retain their existing behavior.
+int AcquireCopyTarget(uint32_t texId, int w, int h, int ew, int eh, bool guard) {
+    if (!guard) return AcquireFbo(w, h, CopyTexture(texId, w, h, ew, eh).id, false);
+    Tex& t = TexSlotFor(texId);
+    if (t.id && t.renderTarget && !t.efbBuf && t.w == w && t.h == h) {
+        BindTexForEdit(t.id);
+        if (BoundTexHasStorage(w, h)) {
+            const int target = AcquireFbo(w, h, t.id, false, true);
+            if (target >= 0) { t.ew = static_cast<uint16_t>(ew); t.eh = static_cast<uint16_t>(eh); }
+            return target;
+        }
+    }
+    GLuint fresh = 0;
+    G(glGenTextures(1, &fresh));
+    if (!fresh) return -1;
+    BindTexForEdit(fresh);
+    G(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+    if (!BoundTexHasStorage(w, h)) {
+        G(glDeleteTextures(1, &fresh));
+        ForgetTex(fresh);
+        ++C.texDeletes;
+        return -1;
+    }
+    SetupNewTexture(GL_LINEAR);
+    const int target = AcquireFbo(w, h, fresh, false, true);
+    if (target < 0) {
+        G(glDeleteTextures(1, &fresh));
+        ForgetTex(fresh);
+        ++C.texDeletes;
+        return -1;
+    }
+    if (!t.id) ++g_stats.textures;
+    DeleteTex(t);
+    t.id = fresh;
+    t.w = static_cast<uint16_t>(w); t.h = static_cast<uint16_t>(h);
+    t.ew = static_cast<uint16_t>(ew); t.eh = static_cast<uint16_t>(eh);
+    t.renderTarget = true;
+    t.wrapS = t.wrapT = WRAP_CLAMP;
+    t.minF = t.magF = FILT_LINEAR;
+    BindFbo(g_pool[target].fbo);
+    return target;
 }
 
 // CMD_PASS_BEGIN: the draws up to the next copy go to a target of the pass
@@ -2316,15 +2522,28 @@ void CopyTex(const CopyTexCmd& c) {
     // (The pass that this copy ends keeps its object: g_pass still names it while it is sampled.)
     const GLuint passColor = (c.fromPass && g_pass >= 0)
         ? (g_passDirectTex ? (g_passDirectTex < g_tex.size() ? g_tex[g_passDirectTex].id : 0) : g_pool[g_pass].color) : 0;
+    // Fill copies can be elided across frames by the frontend; without a retry signal their failed
+    // first allocation cannot recover here. Keep those on the existing path for this experiment.
+    const bool guard = CopyAllocationGuard() && !c.fill;
+    auto failedTarget = [&] {
+        dplan::g_valid = false; // No copy scene happened: use conservative depth hints for the remaining frame.
+        static unsigned failureNotes = 0;
+        if (failureNotes < 4) {
+            ++failureNotes;
+            autoq::Log("GXV_RT_ALLOC_GUARD: copy texture %u (%dx%d) skipped: no replacement target; previous capture kept when available\n", c.texId, w, h);
+        }
+        if (c.srcTex) { BindFbo(g_efbFbo); g_rsValid = false; return; }
+        if (c.passMore && c.fromPass && g_pass >= 0) { g_rsValid = false; return; }
+        EndPass();
+        Clear(c.clear, c.src);
+    };
     if (c.dstTexW) {
         // Into a rectangle of an atlas texture.
         const int tw = Rnd(c.dstTexW * sx), th = Rnd(c.dstTexH * sy);
-        Tex& t = CopyTexture(c.texId, tw, th, c.dstTexW, c.dstTexH);
-        AcquireFbo(tw, th, t.id, false);
+        if (AcquireCopyTarget(c.texId, tw, th, c.dstTexW, c.dstTexH, guard) < 0) { failedTarget(); return; }
         SetViewport(Rnd(c.dstX * sx), Rnd(c.dstY * sy), w, h);
     } else {
-        Tex& t = CopyTexture(c.texId, w, h, c.dstW, c.dstH);
-        AcquireFbo(w, h, t.id, false);
+        if (AcquireCopyTarget(c.texId, w, h, c.dstW, c.dstH, guard) < 0) { failedTarget(); return; }
         SetViewport(0, 0, w, h);
     }
     SetScissor(false);
@@ -3885,7 +4104,7 @@ bool Init(int renderWidth, int renderHeight) {
     G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
     g_tex.resize(256);
     AutoQualityInit();
-    CreateTarget();
+    if (!CreateTarget() && EfbCreateGuard()) return false;
     if (!EnsureCopyProgram()) return false; // compiled here, not at the first copy that needs it
 #if !defined(__VGX_VITA__)
     MakeProgressDumpDisplay();
@@ -4044,12 +4263,12 @@ void PlanFrame(const CmdBuf& buf) {
             if (rs.blend) {
                 const bool dstAlpha = rs.blendSrc == BF_DST_ALPHA || rs.blendSrc == BF_INV_DST_ALPHA || rs.blendDst == BF_DST_ALPHA || rs.blendDst == BF_INV_DST_ALPHA;
                 if (rs.colorWrite) g_ev[p0] |= EV_RC;
-                if (rs.alphaWrite || rs.dstAlphaPass || dstAlpha) g_ev[p0] |= EV_RA;
+                if (rs.alphaWrite || rs.dstAlphaZero || dstAlpha) g_ev[p0] |= EV_RA;
             }
             // (DrawRec::cover: its first primitive writes every pixel of its box, unblended)
             if (d.cover && d.exX <= 0 && d.exY <= 0 && d.exX + d.exW >= g_efbW && d.exY + d.exH >= g_efbH) {
                 if (rs.colorWrite) g_ev[p0] |= EV_FC;
-                if (rs.alphaWrite || rs.dstAlphaPass) g_ev[p0] |= EV_FA;
+                if (rs.alphaWrite || rs.dstAlphaZero) g_ev[p0] |= EV_FA;
             }
             break;
         }
@@ -4199,7 +4418,7 @@ bool LateDirect(const CmdBuf& buf, size_t begin, PassCmd& ps, float f) {
         if (alphaConst) {
             const RenderState& rs = d.rs;
             const bool dstAlpha = rs.blend && (rs.blendSrc == BF_DST_ALPHA || rs.blendSrc == BF_INV_DST_ALPHA || rs.blendDst == BF_DST_ALPHA || rs.blendDst == BF_INV_DST_ALPHA);
-            if (rs.alphaWrite || rs.dstAlphaPass || dstAlpha) return false;
+            if (rs.alphaWrite || rs.dstAlphaZero || dstAlpha) return false;
         }
     }
     // Further copies of the pass (made from the destination texture now): they must not read its alpha.
@@ -4401,7 +4620,7 @@ int FxDiv() {
 bool FxEligible(const DrawRec& d) {
     const RenderState& rs = d.rs;
     return rs.blend && rs.blendEq != BE_REVSUB && rs.blendDst == BF_ONE && (rs.blendSrc == BF_SRC_ALPHA || rs.blendSrc == BF_ONE) && rs.colorWrite &&
-           !(rs.depthTest && rs.depthWrite) && !rs.dstAlphaPass && d.idxCount > 0;
+           !(rs.depthTest && rs.depthWrite) && !rs.dstAlphaZero && d.idxCount > 0;
 }
 inline bool FxNeutral(uint8_t t) { return t == CMD_TEX_UPLOAD || t == CMD_TEX_FREE || t == CMD_BUF_UPLOAD || t == CMD_BUF_FREE; }
 std::vector<uint8_t> g_fxCmd; // per command: a draw of a run drawn at the reduced size
@@ -4796,6 +5015,9 @@ bool EfbSwap(const CopyTexCmd& c) {
             // (the console reports no error when vitaGL has no memory for it: a framebuffer with such a texture attached crashes
             // the next scene. The EFB keeps its buffer; `t` was emptied above, so the ordinary copy makes it afresh.)
             G(glDeleteTextures(1, &fresh));
+            // Read once, default off: a reused name must be rebound after deletion unbinds it in the driver.
+            static const bool rebindGuard = EnvInt("GXV_EFB_REBIND_GUARD", 0) != 0;
+            if (rebindGuard) ForgetTex(fresh);
             ++C.texDeletes;
             VGX_LOG_N(8, "GXV_EFBSWAP: no memory for a %dx%d colour buffer: ordinary copy\n", g_rtW, g_rtH);
             return false;

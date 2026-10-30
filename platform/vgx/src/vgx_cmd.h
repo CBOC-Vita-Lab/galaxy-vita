@@ -91,7 +91,7 @@ struct RenderState {
     uint8_t blend = 0, blendSrc = BF_ONE, blendDst = BF_ZERO, blendEq = BE_ADD;
     uint8_t depthTest = 0, depthFunc = CMP_LEQUAL, depthWrite = 0, cull = CULL_NONE;
     uint8_t colorWrite = 1, alphaWrite = 1;
-    uint8_t dstAlphaPass = 0; // second, alpha-only pass with constant alpha (blend + GXSetDstAlpha)
+    uint8_t dstAlphaZero = 0; // blended RGB with independent ZERO/ZERO alpha factors
     uint8_t lineWidth6 = 6;   // GX line width / point size in 1/6 pixel
     // Scissor and viewport in EFB pixels, origin top-left. The back end scales
     // them to the render target.
@@ -100,13 +100,13 @@ struct RenderState {
 };
 
 // What the target GPU's shader patcher keys a fragment program on besides the shaders:
-// the blend function (or none) and the colour mask. 12 bits. (vitaGL: blend_info in
+// the blend function (or none), colour mask and zero-alpha override. 13 bits. (vitaGL: blend_info in
 // blending.c, compared per draw in setup_frag_program, custom_shaders.c.)
 inline uint32_t BlendKey(const RenderState& rs) {
     return (rs.blend ? 1u | (static_cast<uint32_t>(rs.blendEq & 1u) << 1) | (static_cast<uint32_t>(rs.blendSrc & 15u) << 2) |
                            (static_cast<uint32_t>(rs.blendDst & 15u) << 6)
                      : 0u) |
-           (rs.colorWrite ? 1u << 10 : 0u) | (rs.alphaWrite ? 1u << 11 : 0u);
+           (rs.colorWrite ? 1u << 10 : 0u) | (rs.alphaWrite ? 1u << 11 : 0u) | (rs.dstAlphaZero ? 1u << 12 : 0u);
 }
 // CMD_VARIANT: this program will be drawn with this vertex layout, blend function and
 // colour mask. On the console a patched vertex program exists per (vertex shader, layout)
@@ -193,6 +193,7 @@ struct TexUpload {
     // (backend::Caps::mipGen; RGBA8 only).
     uint8_t authored = 1;
     bool genMips = false;
+    bool preserveI4Mips = false; // opt-in Vita lossless authored I4 chain, never generated
     std::vector<std::vector<uint8_t>> levels;
 };
 // Geometry that outlives the frame (a cached display list): created or
@@ -502,6 +503,7 @@ struct Caps {
     bool mipGen = false;   // RGBA8 mip chains: send level 0 only, the back end generates the rest (GXV_MIPGEN)
     bool mipClamp = false; // send only the authored levels of a mip chain (GXV_MIPCLAMP)
     bool la88 = false;     // non-mipmapped I/IA uploads (GXV_LA88, default on for Vita)
+    bool authoredI4Mips = false; // default-off, requires the Vita host's synchronized authored upload
 };
 const Caps& GetCaps();
 }

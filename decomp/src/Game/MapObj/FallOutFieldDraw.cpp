@@ -11,6 +11,9 @@
 #include "Game/Util/JMapUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
+#if defined(TARGET_PC)
+#include <cstdlib>
+#endif
 
 void FallOutFieldDraw_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -20,6 +23,13 @@ void FallOutFieldDraw_FORCE_MATCH_SDATA2() {
 }
 
 namespace {
+#if defined(TARGET_PC)
+    long EnvInt(const char* name, long fallback) {
+        const char* value = std::getenv(name);
+        return (value && *value) ? std::strtol(value, nullptr, 0) : fallback;
+    }
+#endif
+
     inline void drawFillScreen(GXColor color) {
         GXSetTevColor(GX_TEVREG0, color);
         ImageEffectLocalUtil::sendTextureVertex(1, 0);
@@ -115,7 +125,14 @@ void FallOutFieldDraw::draw() const {
     JUTTexture* pScreenAlphaTexture3 = MR::getScreenAlphaTexture(3);
     JUTTexture* pScreenAlphaTexture4 = MR::getScreenAlphaTexture(4);
 
+#if defined(TARGET_PC)
+    // The original argument order divides by zero in capture(). Keep the
+    // correction opt-in until the affected room has been verified on hardware.
+    static const bool clipCaptureFix = EnvInt("GXV_CLIP_CAPTURE_FIX", 0) == 1;
+    ImageEffectLocalUtil::capture(pScreenAlphaTexture2, clipCaptureFix ? 1 : 0, clipCaptureFix ? 0 : 1, GX_CTF_A8, true, 0);
+#else
     ImageEffectLocalUtil::capture(pScreenAlphaTexture2, 0, 1, GX_CTF_A8, true, 0);
+#endif
 
     GXSetTevKColor(GX_KCOLOR0, Color8(0, 0, 0, 1));
     GXSetTevKAlphaSel(GX_TEVSTAGE0, GX_TEV_KASEL_K0_A);

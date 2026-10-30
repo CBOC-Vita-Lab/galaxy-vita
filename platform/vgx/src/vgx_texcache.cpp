@@ -373,7 +373,11 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
             DecodeTextureLA88(data, o.width, o.height, fmt, up.levels.back().data());
         } else {
             // RGBA8. A back end that makes its own mip levels (mipGen) only gets level 0.
-            up.genMips = wantMips && caps.mipGen;
+            // Authored I4 alpha can differ completely from a downsample of level zero.
+            // Keep this opt-in square/POT path separate from compact, HD and patched textures.
+            up.preserveI4Mips = caps.authoredI4Mips && wantMips && fmt == 0 && o.width == o.height && o.width <= 4096
+                && !(g_texPatchHook && (!g_texPatchNeedsRgba || g_texPatchNeedsRgba(e.contentHash, o.width, o.height)));
+            up.genMips = wantMips && caps.mipGen && !up.preserveI4Mips;
             if (up.genMips) authored = 1;
             const uint8_t* src = data;
             uint32_t w = o.width, h = o.height;

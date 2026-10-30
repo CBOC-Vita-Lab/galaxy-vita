@@ -136,6 +136,7 @@ extern "C" void port_language_set(const char*) {}
 extern "C" void port_host_alloc_scope_enter() {}
 extern "C" void port_host_alloc_scope_leave() {}
 extern "C" void port_log_summary(const char* message,...) {if(std::strstr(message,"gameplay resumed"))++fixture::resumed;}
+namespace GameSystemFunction { bool isPrepareResetSaveDataHandleSequence() { return true; } }
 namespace port::settings {
 RunResult Run(SettingsSession& session) {
     ++fixture::menus;

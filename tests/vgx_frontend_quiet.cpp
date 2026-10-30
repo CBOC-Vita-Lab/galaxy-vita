@@ -41,7 +41,7 @@ void Observe(vgx::CmdBuf& b) {
     const uint32_t state[] = {d.layoutMask,d.prim,d.vsId,d.fsId,d.texMask,d.idxCount,d.vtxCount};
     Mix(state, sizeof state); Mix(d.ublock, sizeof d.ublock);
     const uint32_t pipeline[] = {d.rs.blend,d.rs.blendSrc,d.rs.blendDst,d.rs.blendEq,d.rs.depthTest,d.rs.depthFunc,
-                                d.rs.depthWrite,d.rs.cull,d.rs.colorWrite,d.rs.alphaWrite,d.rs.dstAlphaPass,d.rs.lineWidth6};
+                                d.rs.depthWrite,d.rs.cull,d.rs.colorWrite,d.rs.alphaWrite,d.rs.dstAlphaZero,d.rs.lineWidth6};
     const int16_t scissor[] = {d.rs.scX,d.rs.scY,d.rs.scW,d.rs.scH};
     const float viewport[] = {d.rs.vpX,d.rs.vpY,d.rs.vpW,d.rs.vpH,d.rs.zNear,d.rs.zFar};
     Mix(pipeline,sizeof pipeline); Mix(scissor,sizeof scissor); Mix(viewport,sizeof viewport);

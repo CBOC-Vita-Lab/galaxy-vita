@@ -244,7 +244,7 @@ struct ArraySpans {
     uint32_t lo[12] = {}, hi[12] = {};
 };
 const Plan& CurrentPlan(int fmt); // the player's plan for a vertex format under the current descriptor
-ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count);
+ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count, bool* complete = nullptr);
 void DecodeVertices(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out, ArraySpans* spans);
 uint32_t StreamVertexSize(int fmt);
 void DrawDecoded(uint8_t prim, uint32_t layoutMask, const uint8_t* verts, uint32_t count); // vertices already in the decoded layout

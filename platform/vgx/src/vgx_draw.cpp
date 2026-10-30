@@ -64,7 +64,8 @@ std::unordered_set<uint32_t> g_progSeen;
 VariantSet g_varSeen;
 uint64_t g_lastVariant = ~0ull;         // of the last draw (most draws repeat it)
 inline uint64_t VariantKey(uint32_t vsId, uint32_t fsId, uint32_t layoutMask, uint32_t blendKey) {
-    return (static_cast<uint64_t>((vsId << 16) | fsId) << 32) | ((layoutMask & 0xFFFu) << 12) | (blendKey & 0xFFFu);
+    // Preserve legacy identities; the new blend bit occupies the formerly unused bit 24.
+    return (static_cast<uint64_t>((vsId << 16) | fsId) << 32) | ((layoutMask & 0xFFFu) << 12) | (blendKey & 0xFFFu) | ((blendKey & 0x1000u) << 12);
 }
 void EnsureShaderList();
 bool ListQueue(uint32_t type, const void* p, size_t n);
@@ -313,7 +314,7 @@ void EnsureShaderList() {
                     else rewrite = true;
                 } else if (type == 4) {
                     uint32_t v[4];
-                    if (std::fread(v, sizeof v, 1, f) != 1 || v[0] >= vsIds.size() || v[1] >= fsIds.size() || v[2] > 0xFFFu || v[3] > 0xFFFu) { rewrite = true; break; }
+                    if (std::fread(v, sizeof v, 1, f) != 1 || v[0] >= vsIds.size() || v[1] >= fsIds.size() || v[2] > 0xFFFu || v[3] > 0x1FFFu) { rewrite = true; break; }
                     if (g_varSeen.insert(VariantKey(vsIds[v[0]], fsIds[v[1]], v[2], v[3])).second) {
                         g_buf.variants.push_back(VariantCmd{vsIds[v[0]], fsIds[v[1]], static_cast<uint16_t>(v[2]), static_cast<uint16_t>(v[3])});
                         ReplayCmds().push_back(Cmd{CMD_VARIANT, static_cast<uint32_t>(g_buf.variants.size() - 1)});
@@ -360,7 +361,7 @@ void EnsureShaderList() {
             for (uint64_t vk : vars) {
                 if (!written) break;
                 const uint32_t rec[5] = {4u, static_cast<uint32_t>(vk >> 48), static_cast<uint32_t>(vk >> 32) & 0xFFFFu, static_cast<uint32_t>(vk >> 12) & 0xFFFu,
-                                         static_cast<uint32_t>(vk) & 0xFFFu};
+                                         (static_cast<uint32_t>(vk) & 0xFFFu) | (static_cast<uint32_t>(vk >> 12) & 0x1000u)};
                 written = std::fwrite(rec, sizeof rec, 1, f) == 1;
             }
             const bool closed = std::fclose(f) == 0;
@@ -414,6 +415,11 @@ int g_lastDraw = -1; // index of the draw that may still be merged into
 uint32_t g_lastRecSerial = 0; // Resolved::stateSerial of the state that draw was recorded (or last merged) with
 
 inline bool EfbHasAlpha() { return (g.bp[0x43] & 7) == 1; }
+inline bool DstAlphaZeroEnabled() {
+    // Zero-only blended destination alpha; opt-in, read once, default off.
+    static const bool enabled = EnvInt("GXV_DSTALPHA_ZERO", 0) == 1;
+    return enabled;
+}
 
 uint8_t SwapTable(int t) {
     const uint32_t rg = g.bp[0xF6 + 2 * t], ba = g.bp[0xF7 + 2 * t];
@@ -498,7 +504,8 @@ void BuildFsKey(FsKey& k) {
     const bool blending = bits(cm0, 0, 1) || bits(cm0, 11, 1);
     if (bits(g.bp[0x42], 8, 1) && EfbHasAlpha() && bits(cm0, 4, 1)) {
         if (!blending) k.dstAlpha = 1;
-        else stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
+        else if (!DstAlphaZeroEnabled() || bits(g.bp[0x42], 0, 8) != 0)
+            stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
     }
 }
 
@@ -608,6 +615,12 @@ void BuildRenderState(RenderState& rs) {
     }
     rs.colorWrite = static_cast<uint8_t>(bits(cm0, 3, 1));
     rs.alphaWrite = static_cast<uint8_t>(bits(cm0, 4, 1) && hasAlpha);
+    if ((bits(cm0, 0, 1) || bits(cm0, 11, 1)) && rs.alphaWrite && bits(g.bp[0x42], 8, 1) &&
+        bits(g.bp[0x42], 0, 8) == 0 && DstAlphaZeroEnabled()) {
+        rs.dstAlphaZero = 1;
+        // ONE/ZERO is normally unblended, but its alpha still needs the override.
+        rs.blend = 1;
+    }
     if (bits(zm, 0, 1)) {
         rs.depthTest = 1;
         rs.depthFunc = static_cast<uint8_t>(bits(zm, 1, 3));
@@ -3033,7 +3046,7 @@ inline uint8_t ClearMask(const ClearSpec& c) {
 }
 // Planes a draw changes, and planes whose previous contents its result depends on.
 inline uint8_t DrawWrites(const RenderState& rs) {
-    return static_cast<uint8_t>((rs.colorWrite ? CH_C : 0) | ((rs.alphaWrite || rs.dstAlphaPass) ? CH_A : 0) | ((rs.depthTest && rs.depthWrite) ? CH_Z : 0));
+    return static_cast<uint8_t>((rs.colorWrite ? CH_C : 0) | ((rs.alphaWrite || rs.dstAlphaZero) ? CH_A : 0) | ((rs.depthTest && rs.depthWrite) ? CH_Z : 0));
 }
 inline uint8_t DrawReads(const RenderState& rs) {
     uint8_t m = 0;
@@ -3043,7 +3056,7 @@ inline uint8_t DrawReads(const RenderState& rs) {
         // alpha plane also when it is one of the blend factors.
         const bool dstAlphaFactor = rs.blendSrc == BF_DST_ALPHA || rs.blendSrc == BF_INV_DST_ALPHA || rs.blendDst == BF_DST_ALPHA || rs.blendDst == BF_INV_DST_ALPHA;
         if (rs.colorWrite) m |= CH_C;
-        if (rs.alphaWrite || rs.dstAlphaPass || dstAlphaFactor) m |= CH_A;
+        if (rs.alphaWrite || rs.dstAlphaZero || dstAlphaFactor) m |= CH_A;
     }
     return m;
 }

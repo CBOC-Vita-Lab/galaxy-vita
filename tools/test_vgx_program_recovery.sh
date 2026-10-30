@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
+seed=()
+if [[ -n ${4:-} ]]; then seed+=(--mount "type=bind,source=$4,target=/recipe.bin,readonly" -e RECOVERY_SEED_FILE=/recipe.bin); fi
+docker run --rm --name "galaxy-program-recovery-$$" --pull=never --platform linux/arm64 --network none --cpus=2 \
+  ${seed[@]+"${seed[@]}"} \
   --mount "type=bind,source=$root,target=/work,readonly" -w /work \
-  -e "RECOVERY_MODES=${1:-good program-zero program-max shader-zero shader-max missing-source utility-program utility-max utility-shader utility-link init-program init-shader init-link source-error warm-program warm-shader sentinel frame-retry fragment-failure warm-demand-program warm-demand-shader warm-persistent demand-first}" \
+  -e "RECOVERY_MODES=${1:-good program-zero program-max shader-zero shader-max missing-source utility-program utility-max utility-shader utility-link init-program init-shader init-link source-error warm-program warm-shader sentinel frame-retry fragment-failure warm-demand-program warm-demand-shader warm-persistent demand-first compile-exhaustion fragment-compile-exhaustion link-exhaustion injected-link-exhaustion link-recovered compile-recovered declared-white audit-read-once}" \
   -e "RECOVERY_TRACES=${2:-0 1}" \
+  -e "RECOVERY_AUDITS=${3:-unset 0 1 invalid}" \
   -e EGL_PLATFORM=surfaceless -e LIBGL_ALWAYS_SOFTWARE=1 -e GALLIUM_DRIVER=softpipe \
   codex-galaxy-native:20261007-arm64 bash -euo pipefail -c '
     result=0
@@ -14,13 +18,16 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
       -Wl,--wrap=glDrawElements,--wrap=glFinish,--wrap=glGetError,--wrap=glReadPixels,--wrap=getenv \
       -Wl,--wrap=glCreateProgram,--wrap=glCreateShader,--wrap=glAttachShader,--wrap=glShaderSource,--wrap=glCompileShader,--wrap=glLinkProgram,--wrap=glDrawArrays \
       -Wl,--wrap=printf,--wrap=vprintf,--wrap=fprintf,--wrap=vfprintf,--wrap=puts,--wrap=putchar,--wrap=fputs,--wrap=fputc,--wrap=putc,--wrap=fwrite \
-      -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party \
+      -Itests/autoq_clock_stubs -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party \
       -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
       tests/vgx_program_recovery.cpp platform/vgx/src/vgx_shadergen.cpp vita/vgx-game/silent_stdio.cpp \
       -o /tmp/program-recovery -lEGL -lGLESv2 -pthread -l:libasan.so.8 -l:libubsan.so.1
     export LD_PRELOAD=libasan.so.8 ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1
+    for audit in $RECOVERY_AUDITS; do
     for mode in $RECOVERY_MODES; do
-      if timeout 30s /tmp/program-recovery "$mode"; then :; else result=1; fi
+      if [[ $audit == unset ]]; then setting=(env -u GXV_RESOURCE_AUDIT); else setting=(env "GXV_RESOURCE_AUDIT=$audit"); fi
+      if "${setting[@]}" timeout 180s /tmp/program-recovery "$mode"; then :; else result=1; fi
+    done
     done
     done
     exit "$result"

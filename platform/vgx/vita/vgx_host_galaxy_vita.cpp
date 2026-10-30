@@ -51,6 +51,7 @@
 
 #include "loading_screen.h"
 #include "vgx_common.h"
+#include "vgx_resource_audit.h"
 #include "vgx_display_rect.h"
 #include "vgx_shadergen.h"
 #include "vgx_coldtrace.h"
@@ -1926,6 +1927,19 @@ extern "C" void vgxvita_glGenerateMipmap(GLenum target) {
     if (UploadSync()) sceGxmTransferFinish();
 }
 
+extern "C" void vgxvita_uploadAuthoredI4Mips(unsigned width, unsigned height, unsigned count, const void* const* levels) {
+    // The backend admits only square POT RGBA8 I4 chains. Asking for the last level
+    // allocates the chain once; ordinary higher-level TexImage discards its pixels.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, levels[0]);
+    const unsigned last = count - 1;
+    glTexImage2D(GL_TEXTURE_2D, last, GL_RGBA, width >> last, height >> last, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    // Mandatory even when the diagnostic upload-sync switch is off: CPU writes
+    // below must not race the temporary downscales issued by the allocation call.
+    sceGxmTransferFinish();
+    for (unsigned l = 1; l < count; ++l)
+        glTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, width >> l, height >> l, GL_RGBA, GL_UNSIGNED_BYTE, levels[l]);
+}
+
 // ---- vitaGL's cache folders, made when they are needed
 // vitaGL stores a compiled shader as <cache>/v2/{v,f}/<HH>/<hash>.gxp, hash = XXH3_64bits of the
 // source text as handed to glShaderSource, <HH> = its top byte. The frozen library expects
@@ -2043,6 +2057,7 @@ extern "C" int msc_vgl_printf(const char* format, ...) {
     va_start(args, format);
     std::vsnprintf(text, sizeof(text), format, args);
     va_end(args);
+    vgx::resourceaudit::DriverMessage(text); // Separate bounded basic-log path before ordinary warning/rate limits.
     if (std::strstr(text, "Shader Compiler: W]")) {
         if (++compilerWarnings > 6) return 0;
         if (compilerWarnings == 6) port_log("[vitaGL] (further shader compiler warnings are not logged)");

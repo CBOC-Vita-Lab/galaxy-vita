@@ -22,6 +22,9 @@ upwards). The word therefore still says "every scene up to this value is done" -
 written it, never earlier: UNIFORM_PINGPONG and occlusion queries keep their meaning. (A GPU write of a later untimed scene's value
 racing with the watcher's write can leave the word one step behind for a moment; that only delays, never advances, the verdict.)
 Scenes the watcher cannot keep up with (more than 48 behind) are ended with query_fence as before and counted as untimed.
+With the opt-in ring guard, a full metadata ring is not overwritten: excess scenes use query_fence without a timer record.
+After any such drop, timer samples remain unavailable until restart rather than undercounting GPU work. Rendering does not wait
+for the watcher. The host configures this before starting the watcher through vglRtSetRingGuard.
 
 Also (only with -DANISO_SWITCH), the Strikers port's experimental anisotropic switch, OFF unless asked for:
   vglSetAnisotropicFilter(f)   f = 2 or 3: a trilinear texture (minification LINEAR with the mip filter on) gets this minification
@@ -74,13 +77,25 @@ static uint32_t rt_frame = 0; // render thread: frames (vglSwapBuffers) so far
 static vglRtGpuFrame rt_gpu_frames[RT_FRAMES];
 static volatile uint32_t rt_gpu_frame_head = 0;
 static volatile uint32_t rt_scenes_timed = 0, rt_scenes_untimed = 0, rt_scenes_late = 0;
+static GLboolean rt_ring_guard = GL_FALSE;
+static volatile uint32_t rt_ring_drops = 0;
 GLboolean vgl_rt_gpu_on = GL_FALSE;
 
 static inline uint32_t rt_now(void) { return sceKernelGetProcessTimeLow(); }
 
+void vglRtSetRingGuard(uint32_t enabled) { if (rt_thread < 0) rt_ring_guard = enabled != 0; }
+uint32_t vglRtRingDrops(void) { return rt_ring_drops; }
+
 // gxm.c scene_end, query_fence.value already counting this scene: sceGxmEndScene with the scene's own fragment notification.
 void vgl_rt_end_scene(SceGxmContext *ctx) {
 	const uint32_t seq = rt_produced;
+	if (rt_ring_guard && seq - rt_consumed >= RT_SCENES) {
+		// A watcher can still hold the oldest record while blocked in NotificationWait.
+		// Replacing its fence can incorrectly certify future GPU work as complete.
+		sceGxmEndScene(ctx, NULL, &query_fence);
+		if (rt_ring_drops != UINT32_MAX) rt_ring_drops++;
+		return;
+	}
 	rt_scene_rec *r = &rt_ring[seq % RT_SCENES];
 	r->frame = rt_frame;
 	r->done_us = 0;
@@ -199,6 +214,8 @@ uint32_t vglRtLastGpuFrame(vglRtGpuFrame *out) {
 		return 0;
 	__sync_synchronize();
 	*out = rt_gpu_frames[(h - 1) % RT_FRAMES];
+	// Lost records make busy time incomplete, so never offer it as a valid sample.
+	if (rt_ring_guard && rt_ring_drops) out->timed = 0;
 	return h;
 }
 
@@ -263,6 +280,8 @@ edit('vitaGL.h', [
 // ---- GPU timers (builds with GPU_TIMERS only: source/rt_gpu.c; the names follow the Strikers port's vitaGL) ----
 #define VGL_RT_GPU_TIMERS 0x8 // a fragment notification per scene and a watcher thread (priority, affinity): GPU completion of every scene
 void vglRtSetup(uint32_t flags, int watcher_priority, int watcher_affinity);
+void vglRtSetRingGuard(uint32_t enabled); // configure before vglRtSetup; default off
+uint32_t vglRtRingDrops(void); // dropped timing records; no rendering commands are dropped
 typedef struct {
 	uint32_t busy_us, span_us, tail_us; // GPU busy time, first submission to last completion, last submission to last completion
 	uint16_t scenes, timed;

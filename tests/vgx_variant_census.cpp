@@ -1,4 +1,11 @@
 // Count allocations in the real variant bookkeeping, not a GPU benchmark.
+#include <cstddef>
+#include <GLES2/gl2.h>
+// Native-only queries are parsed but never linked or called by this census.
+constexpr int VGL_MEM_VRAM = 0;
+size_t vglMemFree(int);
+size_t vglMemTotal(int);
+void* vglGetTexDataPointer(GLenum);
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #include <cstdio>

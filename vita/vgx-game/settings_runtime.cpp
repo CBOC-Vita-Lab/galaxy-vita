@@ -32,6 +32,7 @@ extern "C" int port_vgx_vita_fixed_cap_supported(void);
 extern "C" void port_input_settings_rearm(void);
 extern "C" void port_log_summary(const char*, ...);
 extern "C" const char* port_dvd_root(void);
+namespace GameSystemFunction { bool isPrepareResetSaveDataHandleSequence(); }
 
 namespace {
 using namespace port::settings;
@@ -399,6 +400,11 @@ extern "C" int port_settings_input_service(void) {
 }
 extern "C" void port_settings_game_boundary(int safe) {
     if (!Enabled() || !safe || !sRequested.load(std::memory_order_acquire) || !port_boot_title_is_visible() || port_vgx_vita_splash_active() || Now() < sRetryAfter) return;
+    // GXV_SETTINGS_SAVE_GUARD=1 defers entry during saves; default off for A/B.
+    static const bool saveGuard = vgx::EnvInt("GXV_SETTINGS_SAVE_GUARD", 0) != 0;
+    // Keep the request pending while guest turns finish an active save. Waiting
+    // after the lease freezes interrupts would prevent that sequence finishing.
+    if (saveGuard && !GameSystemFunction::isPrepareResetSaveDataHandleSequence()) return;
     PortHostAllocScope allocations;
     RuntimeLease context;
     Hooks hooks{&context, RuntimeLease::Acquire, RuntimeLease::Release};

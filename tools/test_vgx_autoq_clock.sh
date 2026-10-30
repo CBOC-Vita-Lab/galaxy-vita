@@ -13,7 +13,7 @@ for diagnostics in 0 1; do
   for target in unset 0 15 30; do
     expected=0
     if [[ $target == 30 ]]; then expected=30; fi
-    for mode in ${AUTOQ_CLOCK_CASES:-coverage recovery hint hint-play ring trace}; do
+    for mode in ${AUTOQ_CLOCK_CASES:-coverage recovery hint hint-play ring trace timer-guard}; do
       log="$out/$diagnostics-$target-$mode.txt"
       status=0
       if [[ $target == unset ]]; then

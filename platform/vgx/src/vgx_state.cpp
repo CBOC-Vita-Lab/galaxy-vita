@@ -975,8 +975,9 @@ static void FinishDirectPlan(Plan& p) {
 }
 
 // Inspect indices without reading the array bytes, so caches can snapshot them before decoding.
-ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count) {
+ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count, bool* complete) {
     ArraySpans spans;
+    if (complete) *complete = true;
     for (int i = 0; i < p.n; ++i) {
         const AttrPlan& a = p.a[i];
         if (a.attr < A_POS || a.mode == T_DIRECT) continue;
@@ -988,7 +989,10 @@ ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count) 
         for (uint32_t v = 0; v < count; ++v, s += p.streamSize) {
             const uint32_t idx = a.mode == T_INDEX16 ? be16(s) : s[0];
             const uint64_t off = static_cast<uint64_t>(idx) * ar.stride;
-            if (off + elem > size) continue;
+            if (off + elem > size) {
+                if (complete) *complete = false;
+                continue;
+            }
             if (idx < lo) lo = idx;
             if (idx > hi) hi = idx;
         }

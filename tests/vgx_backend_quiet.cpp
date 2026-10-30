@@ -1,10 +1,38 @@
 // Exercise stale diagnostic settings against real Mesa and the Vita stdio wrappers.
+#include <cstddef>
+#include <GLES2/gl2.h>
+// Mesa owns real textures; these Vita-only memory queries have no host equivalent.
+constexpr int VGL_MEM_VRAM = 0;
+size_t vglMemFree(int) { return 128u << 20; }
+size_t vglMemTotal(int) { return 128u << 20; }
+void* vglGetTexDataPointer(GLenum) { static unsigned char storage; return &storage; }
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
+#include "../platform/vgx/src/vgx_autoq.cpp"
 #include <EGL/egl.h>
 #include <array>
 #include <sys/stat.h>
 #include <unistd.h>
+
+namespace fixture { std::vector<std::string> summaryLines; }
+// Actual autoq::Log selects this basic-log boundary in quiet Vita builds.
+extern "C" {
+void port_log(const char*, ...) {}
+void port_log_summary(const char* format, ...) {
+    char text[512]; va_list args; va_start(args, format);
+    std::vsnprintf(text, sizeof text, format, args); va_end(args);
+    fixture::summaryLines.emplace_back(text);
+}
+std::uint64_t sceKernelGetProcessTimeWide() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+SceUID sceKernelCreateSema(const char*, unsigned, int, int, const void*) { return -1; }
+int sceKernelWaitSema(SceUID, int, SceUInt*) { std::abort(); }
+int sceKernelSignalSema(SceUID, int) { std::abort(); }
+SceUID sceKernelCreateThread(const char*, int (*)(SceSize, void*), int, SceSize, unsigned, int, const void*) { std::abort(); }
+int sceKernelStartThread(SceUID, SceSize, void*) { std::abort(); }
+int sceKernelDelayThread(SceUInt) { std::abort(); }
+}
 
 namespace vgx { bool LogEnabled() { return false; } }
 namespace {
@@ -18,10 +46,16 @@ constexpr const char* diagnosticNames[] = {
     "GXV_GLMEM", "GXV_PROGRESS_DUMP", "GXV_SIM_COMPILE_SLEEP"
 };
 constexpr const char* functionalNames[] = {
-    "GXV_VITA", "GXV_DXT1", "GXV_MIPGEN", "GXV_MIPCLAMP", "GXV_LA88", "GXV_DEPTH_SKIP", "GXV_DEPTH_TEX",
-    "GXV_S3TC", "GXV_QUADCLEAR", "GXV_GLCACHE", "GXV_FBO_USES", "GXV_STATIC_USAGE", "GXV_EFB0", "GXV_KEEP_RT",
+    "GXV_VITA", "GXV_DXT1", "GXV_MIPGEN", "GXV_MIPCLAMP", "GXV_LA88", "GXV_AUTHORED_I4_MIPS", "GXV_DEPTH_SKIP", "GXV_DEPTH_TEX",
+    "GXV_S3TC", "GXV_QUADCLEAR", "GXV_GLCACHE", "GXV_FBO_USES", "GXV_STATIC_USAGE", "GXV_EFB0", "GXV_KEEP_RT", "GXV_EFB_CREATE_GUARD",
     "GXV_MAXPROGRAMS", "GXV_WARM_DEDUP", "GXV_WARM_BACKOFF", "GXV_WARM_BACKOFF_MS", "GXV_PROGRESS",
-    "GXV_PROGRESS_STARTUP", "GXV_PROGRESS_AFTER_MS", "GXV_PASSDIRECT", "GXV_COLDTRACE", "GXV_UNIFORM_REUSE"
+    "GXV_PROGRESS_STARTUP", "GXV_PROGRESS_AFTER_MS", "GXV_PASSDIRECT", "GXV_COLDTRACE", "GXV_UNIFORM_REUSE",
+    "GXV_RESOURCE_AUDIT", "GXV_GL_RETRY", "GXV_DEPTHPLAN", "GXV_KEEP_TARGETS", "GXV_DETACH_DELETE",
+    "GXV_AUTOQ_TARGET", "GXV_AUTOQ_LOG", "GXV_AUTOQ_CYCLE", "GXV_AUTOQ_LEVEL", "GXV_AUTOQ", "GXV_AUTOQ_CALM",
+    "GXV_AUTOQ_BUDGET_MS", "GXV_AUTOQ_MIN", "GXV_AUTOQ_MAX", "GXV_AUTOQ_UP", "GXV_AUTOQ_HITCH_MS",
+    "GXV_AUTOQ_GAP_MS", "GXV_AUTOQ_SCENE_MS", "GXV_AUTOQ_SPACING", "GXV_AUTOQ_VRAM_KIB", "GXV_AUTOQ_MSAA",
+    "GXV_POOL_IDLE", "GXV_PASSDIRECT2", "GXV_PASSHOIST", "GXV_PASSHALF", "GXV_FXHALF", "GXV_FXHALF_MIN", "GXV_FXSCANFAST", "GXV_EFBSWAP",
+    "GXV_GPUPASS_MEMLOG", "GXV_CHARAA", "GXV_RENDER_SIZE", "GXV_GPUPASS_OFF", "GXV_SHARPEN"
 };
 void Require(bool good, const char* why) {
     if (good) return;
@@ -93,7 +127,7 @@ void UniformBlocks(vgx::CmdBuf b, bool reuse) {
     g_programs.emplace(3u<<16,p);
     b.uni.clear(); std::array<uint32_t,UB_COUNT> offsets{};
     for (int block=0;block<UB_COUNT;++block) {
-        offsets[block]=b.uni.size(); b.uni.resize(b.uni.size()+kUbSize[block]);
+        offsets[block]=b.uni.size(); b.uni.resize(b.uni.size()+kUbSize[block], 0.0f);
     }
     const auto projection=offsets[UB_PROJ];
     for (unsigned i=0;i<4;++i) b.uni[projection+5*i]=1;

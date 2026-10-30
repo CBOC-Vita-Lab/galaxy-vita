@@ -31,6 +31,8 @@ struct VgxRtGpuFrame {
     uint16_t scenes, timed;
 }; // (vitaGL's vglRtGpuFrame)
 void vglRtSetup(uint32_t flags, int watcher_priority, int watcher_affinity) __attribute__((weak));
+void vglRtSetRingGuard(uint32_t enabled) __attribute__((weak));
+uint32_t vglRtRingDrops(void) __attribute__((weak));
 uint32_t vglRtLastGpuFrame(VgxRtGpuFrame* out) __attribute__((weak));
 void vglRtGpuCounters(uint32_t* timed, uint32_t* untimed, uint32_t* late, uint32_t* pending) __attribute__((weak));
 }
@@ -625,6 +627,7 @@ SceUID g_sema = -1;
 volatile unsigned int* g_addr = nullptr;
 long g_pollUs = 500;
 bool g_timers = false;    // the GPU timers clock (vitaGL GPU_TIMERS) instead of the frame fence
+bool g_timerRingGuard = false, g_timerRingDropReported = false;
 uint32_t g_rtHead = 0;    // frames the GPU timers had finished at the last present
 
 bool Reached(uint32_t fence) { return static_cast<int32_t>(*g_addr - fence) >= 0; } // (wrapping: it counts every scene since start-up)
@@ -670,6 +673,11 @@ uint64_t NowUs() { return sceKernelGetProcessTimeWide(); }
 bool Start() {
     const char* te = std::getenv("GXV_AUTOQ_TIMERS");
     if (vglRtSetup && vglRtLastGpuFrame && !(te && *te == '0')) {
+        // GXV_GPU_TIMER_GUARD=1 prevents timer-ring overwrite and rejects timing after overflow; default off for A/B.
+        static const bool guard = EnvInt("GXV_GPU_TIMER_GUARD", 0) != 0;
+        g_timerRingGuard = guard && vglRtSetRingGuard && vglRtRingDrops;
+        if (g_timerRingGuard) vglRtSetRingGuard(1);
+        if (guard) Log("[autoq] GPU timer ring guard: %s", g_timerRingGuard ? "on" : "unavailable in this driver");
         vglRtSetup(kVglRtGpuTimers, 0x60, 0x20000);
         g_timers = true;
         Log("[autoq] GPU clock: vitaGL's GPU timers (a notification per scene, watcher on core 1)");
@@ -711,11 +719,16 @@ void FramePresented() {
         // after which no new frame was finished carries none (the controller averages busy over the frames that have one).
         VgxRtGpuFrame g{};
         const uint32_t n = vglRtLastGpuFrame(&g);
+        const bool dropped = g_timerRingGuard && vglRtRingDrops() != 0;
+        if (dropped && !g_timerRingDropReported) {
+            g_timerRingDropReported = true;
+            Log("[autoq] GPU timer ring overflow: GPU fence protected; incomplete GPU timings ignored until restart");
+        }
         if (n != 0 && n != g_rtHead) {
             g_rtHead = n;
             // Target30 must not mistake dropped scene timings for GPU headroom.
             // Consume incomplete publications once, but leave their cost unknown.
-            if (!Target30Enabled() || (g.scenes != 0 && g.timed == g.scenes)) {
+            if (!dropped && (!Target30Enabled() || (g.scenes != 0 && g.timed == g.scenes))) {
                 e.known = true;
                 e.busy = g.busy_us;
             }
