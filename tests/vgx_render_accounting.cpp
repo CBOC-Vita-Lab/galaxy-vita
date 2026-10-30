@@ -1,5 +1,6 @@
 // Exercise the real render loop with a deterministic GPU boundary and clock.
 #include "../platform/src/gx/vgx_galaxy.cpp"
+#include "vgx_galaxy_host_stubs.h"
 
 namespace {
 struct Finished {};

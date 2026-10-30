@@ -1,4 +1,6 @@
 #include "../platform/src/gx/vgx_galaxy.cpp"
+#include "vgx_galaxy_host_stubs.h"
+namespace vgx::backend { Stats GetStats() { return {}; } }
 #include <cstdarg>
 #undef vsnprintf
 
