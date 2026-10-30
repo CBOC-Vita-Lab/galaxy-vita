@@ -19,6 +19,16 @@ static u32 sPrevHold[4];
 // (a stage load, a first-time draw: 50-400 ms); a tap that begins and ends inside one would never be seen.  The next read
 // reports such a button as held once, so the game sees the press and, on the read after, the release.
 static u32 sPressedSinceRead[4];
+// The same for a shake (the handhelds' Square and R press: the port sets the remote's acceleration while the button is down).
+// Mario's spin is a swing the game sees as the remote's acceleration changing between two reads; a press that began and
+// ended between two reads left no sample and no spin.  GXV_SHAKE_LATCH=1 (read once, default off): the next read reports the
+// acceleration of a shake that started since the last read once, even if it has stopped.
+static float sShakeSinceRead[4][3];
+static bool sShakeLatched[4];
+static bool shakeLatchOn() {
+    static const bool on = [] { const char* e = getenv("GXV_SHAKE_LATCH"); return e && e[0] == '1'; }();
+    return on;
+}
 static WPADConnectCallback sConnectCb[4];
 static WPADExtensionCallback sExtCb[4];
 static int sReportedConnected[4];
@@ -52,6 +62,16 @@ extern "C" void port_input_set(int chan, const PortPadState* state) {
     }
     const u32 risen = state->buttons & ~sPad[chan].buttons & 0xFFFF;
     sPressedSinceRead[chan] |= risen;
+    if (shakeLatchOn()) {
+        const bool shaking = state->accX != 0.0f || state->accY != 0.0f || state->accZ != 0.0f;
+        const bool wasShaking = sPad[chan].accX != 0.0f || sPad[chan].accY != 0.0f || sPad[chan].accZ != 0.0f;
+        if (shaking && !wasShaking) {
+            sShakeSinceRead[chan][0] = state->accX;
+            sShakeSinceRead[chan][1] = state->accY;
+            sShakeSinceRead[chan][2] = state->accZ;
+            sShakeLatched[chan] = true;
+        }
+    }
     if (chan == 0 && (risen & kLatButtons) && sLatFrame.load(std::memory_order_relaxed) == 0 && latLogOn()) {
         sLatPollNs.store(port_host_time_ns(), std::memory_order_relaxed);
     }
@@ -85,6 +105,7 @@ extern "C" void port_input_settings_rearm(void) {
     sPad[0] = {};
     sPad[0].connected = connected;
     sPressedSinceRead[0] = 0;
+    sShakeLatched[0] = false;
     sPrevHold[0] = 0;
     sPauseRequestAt.store(0);
     sLatPollNs.store(0);
@@ -153,7 +174,16 @@ static PortPadState snapshotForRead(int chan, u32* pressedSince) {
     std::lock_guard<std::mutex> lk(sInputMutex);
     *pressedSince = sPressedSinceRead[chan];
     sPressedSinceRead[chan] = 0;
-    return sPad[chan];
+    PortPadState s = sPad[chan];
+    if (sShakeLatched[chan]) {
+        sShakeLatched[chan] = false;
+        if (s.accX == 0.0f && s.accY == 0.0f && s.accZ == 0.0f) {  // (it began and ended between two reads)
+            s.accX = sShakeSinceRead[chan][0];
+            s.accY = sShakeSinceRead[chan][1];
+            s.accZ = sShakeSinceRead[chan][2];
+        }
+    }
+    return s;
 }
 
 // Reports connection and Nunchuk changes through the registered callbacks,
