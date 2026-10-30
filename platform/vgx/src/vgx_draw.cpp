@@ -486,14 +486,20 @@ void BuildFsKey(FsKey& k) {
     const uint32_t ac = g.bp[0xF3];
     const uint32_t c0 = bits(ac, 16, 3), c1 = bits(ac, 19, 3), op = bits(ac, 22, 2);
     // Fold the cases that always pass.
-    const bool pass = (op == 0 && c0 == 7 && c1 == 7) || (op == 1 && (c0 == 7 || c1 == 7)) || (op == 3 && c0 == 7 && c1 == 7) ||
+    bool pass = (op == 0 && c0 == 7 && c1 == 7) || (op == 1 && (c0 == 7 || c1 == 7)) || (op == 3 && c0 == 7 && c1 == 7) ||
                       (op == 2 && ((c0 == 7 && c1 == 0) || (c0 == 0 && c1 == 7)));
+    // GXV_NODISCARD: also the tests the references make constant (GEQUAL 0, LEQUAL 255, ...): no alpha test, no `discard`
+    // (the references are in BP 0xF3, a key register, so a change of them builds the key again)
+    if (!pass && NoDiscard()) pass = AlphaTestAlwaysPasses(c0, static_cast<int>(bits(ac, 0, 8)), op, c1, static_cast<int>(bits(ac, 8, 8)));
     if (!pass) {
         k.alphaTestOn = 1;
         k.alphaTest = static_cast<uint8_t>(c0 | (c1 << 3) | (op << 6));
     }
     const uint32_t fsel = bits(g.bp[0xF1], 21, 3);
     if (fsel) k.fog = static_cast<uint8_t>(fsel | (bits(g.bp[0xF1], 20, 1) << 3));
+    // GXV_FOGVTX: linear fog from the vertex shader (not with a Z-texture replacing the depth: the factor is made from the
+    // depth range, which that draw sets to one value)
+    if (k.fog && bits(g.bp[0xF5], 2, 2) != 2 && FogVtxEligible(k.fog)) k.fog |= kFogVtxBit;
     const uint32_t zop = bits(g.bp[0xF5], 2, 2);
     if (zop == 1) {
         stats::Note("z-texture (GXSetZTexture GX_ZT_ADD) requested: NOT implemented");
@@ -509,9 +515,10 @@ void BuildFsKey(FsKey& k) {
     }
 }
 
-void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk) {
+void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk, uint8_t fsFog) {
     std::memset(&k, 0, sizeof k);
     k.numTexGens = numTexGens;
+    if (fsFog & kFogVtxBit) k.fogVtx = static_cast<uint8_t>((fsFog & 8) ? 3 : 1); // (the fragment key's fog bits: GXV_FOGVTX)
     k.numChans = static_cast<uint8_t>(g.xfReg[0x09] & 3);
     if (k.numChans > 2) k.numChans = 2;
     k.perVtxPos = g.vcd[0] ? 1 : 0;
@@ -921,6 +928,21 @@ void split::BuildTevC(BlockCtx& bc, const State& g, const FsKey& fs, const uint1
         if (fs.fog & 8) { tb[TEV_FOG + 0] = a; tb[TEV_FOG + 1] = 0; }
         else { tb[TEV_FOG + 0] = a * sh; tb[TEV_FOG + 1] = bm * sh / 16777216.0f; }
         tb[TEV_FOG + 2] = FogFloat(g.bp[0xF1]);
+        if (fs.fog & kFogVtxBit) {
+            // GXV_FOGVTX: the fragment shader gets c1 (x) and c0 (w) of clamp(c1 * v_fog + c0): FogVtxCoeffs. The depth range is
+            // the one BuildRenderState gives glDepthRange; the projection's parameters travel with the projection block (split:
+            // OP_PROJ), the viewport's z scale and offset with this one (split: OP_TEV).
+            const float sz = u2f(g.xfReg[0x1C]), oz = u2f(g.xfReg[0x1F]);
+            float zf = oz / 16777215.0f, zn = (oz - sz) / 16777215.0f;
+            if (zn < 0) zn = 0;
+            if (zf > 1) zf = 1;
+            const FogVtxCoef c = FogVtxCoeffs(tb[TEV_FOG + 0], tb[TEV_FOG + 1], tb[TEV_FOG + 2], u2f(g.xfReg[0x24]), u2f(g.xfReg[0x25]), zn, zf,
+                                              (fs.fog & 8) != 0);
+            tb[TEV_FOG + 0] = c.c1;
+            tb[TEV_FOG + 1] = 0.0f;
+            tb[TEV_FOG + 2] = 0.0f;
+            tb[TEV_FOG + 3] = c.c0;
+        }
         tb[TEV_FOGCOL + 0] = static_cast<float>(bits(g.bp[0xF2], 16, 8)) / 255.0f;
         tb[TEV_FOGCOL + 1] = static_cast<float>(bits(g.bp[0xF2], 8, 8)) / 255.0f;
         tb[TEV_FOGCOL + 2] = static_cast<float>(bits(g.bp[0xF2], 0, 8)) / 255.0f;
@@ -1181,7 +1203,7 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk);
+        BuildVsKey(vs, fs.numTexGens, shortPalOk, fs.fog);
         cur.shortPalOk = shortPalOk;
         fsChanged = !cur.valid || !SameStruct(fs, cur.fs);
         vsChanged = !cur.valid || !SameStruct(vs, cur.vs);
@@ -1318,7 +1340,7 @@ void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& 
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk);
+        BuildVsKey(vs, fs.numTexGens, shortPalOk, fs.fog);
         fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader);
         vsId = Lookup(g_vsReg, vs, false, GenerateVertexShader);
         m = KeyMemo{};

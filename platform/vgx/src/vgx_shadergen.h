@@ -13,7 +13,7 @@ struct FsKey {
     uint8_t texProjMask = 0;  // texcoord k is projective (divide by q)
     uint8_t alphaTestOn = 0;
     uint8_t alphaTest = 0;    // comp0 | comp1 << 3 | op << 6
-    uint8_t fog = 0;          // fsel | ortho << 3 (0 = off)
+    uint8_t fog = 0;          // fsel | ortho << 3 | kFogVtxBit (0 = off); kFogVtxBit: the factor comes from the vertex shader's v_fog
     uint8_t dstAlpha = 0;     // write the constant destination alpha
     uint8_t numIndStages = 0;
     uint8_t ztex = 0;         // op << 2 | fmt (0 = off)
@@ -41,7 +41,9 @@ struct VsKey {
     uint8_t numTexGens = 0;
     uint8_t numChans = 0;   // 0..2 lit colour channels produced
     uint8_t perVtxPos = 0;  // position/normal matrix row comes from a_pos.w (2: no row above 27 is used, the palette is the short one)
-    uint8_t pad = 0;
+    // (was padding: 0 unless GXV_FOGVTX is on) bit 0: write the varying v_fog for the fragment shader's vertex fog
+    // (FsKey::fog & kFogVtxBit), bit 1: from clip z (orthographic fog) instead of clip w (perspective fog)
+    uint8_t fogVtx = 0;
     // Per channel control: [0] colour0, [1] colour1, [2] alpha0, [3] alpha1.
     struct Chan {
         uint8_t enable = 0, matSrcVtx = 0, ambSrcVtx = 0;
@@ -60,6 +62,34 @@ struct VsKey {
         uint8_t pad[2] = {};
     } tg[8];
 };
+
+// FsKey::fog bit: the (unclamped) fog factor is an affine function of clip w (perspective) or clip z (orthographic), made in
+// the vertex shader and interpolated: GXV_FOGVTX. The bit and VsKey::fogVtx are set only with the switch on, so with it off
+// every key (and every generated source) is the one that was made before. sizeof(FsKey) / sizeof(VsKey) are unchanged.
+constexpr uint8_t kFogVtxBit = 0x10;
+// GXV_FOGVTX (read once, default 0): 0 off; 1 linear fog with the orthographic fog flag (exact: see FogVtxCoeffs);
+// 2 also linear fog with the perspective flag (a straight line through the factor's 0 and 1 points: NOT exact, see below)
+long FogVtxMode();
+// Whether a draw whose BP 0xF1 gave this fog value (fsel | ortho << 3) takes the vertex fog.
+bool FogVtxEligible(uint8_t fog);
+// The two numbers the vertex-fog fragment shader needs, from what the per-pixel one reads. Inputs are the fog block's
+// A' (a * 2^b_s for the perspective form, a for the orthographic), B' and C as BuildTevC writes them, the projection's
+// GX parameters p4 and p5 (XF 0x24, 0x25), the depth range glDepthRange gets (zn, zf), and the orthographic flag.
+// The fragment shader then computes clamp(c1 * v_fog + c0, 0, 1).
+//   ortho: gl_FragCoord.z = zn + (zf - zn) / 2 * (z_clip + 1) is affine in the interpolated clip z, so the factor is the
+//          same number: exact (equal up to the order of float operations).
+//   persp: the per-pixel factor is A' / (B' - z) - C with z = a + b / w: affine in w only if B' equals a constant the
+//          projection fixes. GX's own fog set-up (GXSetFog) multiplies B by 8388638 / 2^23, so it never does, and the
+//          factor is slightly curved in w. c1 and c0 are the line through the points where the factor is 0 and 1 (so a
+//          fog ramp has its right start and end); between them the line is off by a small bow (see tests/vgx_fogvtx_gl.cpp
+//          for its measured size).
+struct FogVtxCoef { float c1, c0; };
+FogVtxCoef FogVtxCoeffs(double a, double b, double c, double p4, double p5, double zn, double zf, bool ortho);
+// GXV_NODISCARD (read once, default 0): no `discard` in a fragment shader whose alpha test cannot fail.
+bool NoDiscard();
+// Whether alpha compare (comp0 ref0 op comp1 ref1; GX encodings, op 0 AND 1 OR 2 XOR 3 XNOR) is true for every 8-bit alpha. A
+// negative ref means "not known" (only ALWAYS / NEVER and equal comparisons are then used).
+bool AlphaTestAlwaysPasses(uint32_t comp0, int ref0, uint32_t op, uint32_t comp1, int ref1);
 
 uint64_t HashKey(const void* key, size_t size);
 // Bump when the key structs or what is generated from them change: shader

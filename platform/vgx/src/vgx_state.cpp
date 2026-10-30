@@ -134,9 +134,15 @@ static inline __attribute__((always_inline)) void MarkBP(uint8_t reg, uint32_t o
     // (everything else: copy set-up 0x49-0x54, read when a copy is made; texture and TLUT
     // registers, bound through GXLoadTexObj; coordinate scales; performance counters)
 }
+static inline bool FogVtxTrack() {
+    static const bool on = EnvInt("GXV_FOGVTX", 0) != 0; // (the same switch as FogVtxMode in vgx_shadergen.cpp; not called: more than one test links this file alone)
+    return on;
+}
 static inline __attribute__((always_inline)) void MarkXFReg(uint32_t r, uint32_t oldv, uint32_t newv) { // r = address - 0x1000
     KeyHashXF(r, oldv, newv);
     if (r == 0x18 || r == 0x19) return;                   // matrix indices: xfMtxDirty (set by the caller)
+    // GXV_FOGVTX: the vertex-fog coefficients in the TEV block come from the projection and the viewport's z range
+    if (r - 0x1Cu <= 0xAu && FogVtxTrack()) g.bpDirty = true;
     if (r >= 0x1A && r <= 0x1F) g.xfViewDirty = true;
     else if (r >= 0x20 && r <= 0x26) g.xfProjDirty = true;
     else if (r >= 0x0A && r <= 0x0D) g.xfColorDirty = true;

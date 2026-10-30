@@ -12,6 +12,8 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdarg>
 
 namespace vgx {
@@ -21,6 +23,90 @@ uint64_t HashKey(const void* key, size_t size) { return XXH3_64bits(key, size); 
 bool UniformPacking() {
     static const bool on = EnvInt("GXV_UNIPACK", 1) != 0;
     return on;
+}
+long FogVtxMode() {
+    static const long m = EnvInt("GXV_FOGVTX", 0); // 0 per-pixel fog (as always), 1 exact vertex fog (ortho linear), 2 + perspective linear
+    return m;
+}
+bool FogVtxEligible(uint8_t fog) {
+    const long m = FogVtxMode();
+    if (m < 1 || (fog & 7) != 2) return false; // linear only: the exp variants keep their per-pixel curve
+    return (fog & 8) ? m >= 1 : m >= 2;
+}
+FogVtxCoef FogVtxCoeffs(double a, double b, double c, double p4, double p5, double zn, double zf, bool ortho) {
+    const double hd = (zf - zn) * 0.5;
+    if (ortho) {
+        // fg = a * z_window - c, z_window = zn + hd * (z_clip + 1)
+        return {static_cast<float>(a * hd), static_cast<float>(a * (zn + hd) - c)};
+    }
+    // z_window = zn + hd * (z_clip / w + 1), z_clip = m10 * ze + m14, w = -ze (BuildProjC), so with
+    // q(w) = b - z_window = kc - mq / w:   fg = a / max(q, 1e-6) - c
+    const double m10 = 2.0 * p4 - 1.0, m14 = 2.0 * p5;
+    const double kc = b - zn - hd * (1.0 - m10), mq = hd * m14;
+    auto Finish = [](double c1, double c0) { return FogVtxCoef{static_cast<float>(c1), static_cast<float>(c0)}; };
+    if (!(a > 0.0) || !(mq < 0.0) || !std::isfinite(kc) || !std::isfinite(mq)) return Finish(0.0, std::min(1.0, std::max(0.0, -c)));
+    // w where the factor (before the clamp) reaches t: a / q = c + t, q = kc - mq / w
+    auto WAt = [&](double t, double& w) {
+        const double want = c + t;
+        if (!(want > 0.0)) return false;
+        const double den = kc - a / want;
+        if (!(den * mq > 0.0)) return false; // never reached for w > 0
+        w = mq / den;
+        return w > 0.0 && std::isfinite(w);
+    };
+    double wb = 0.0, wa = 0.0, fa = -c;
+    if (!WAt(1.0, wb)) return Finish(0.0, std::min(1.0, std::max(0.0, -c))); // does not reach 1: ramp not representable
+    if (c > 0.0) {
+        fa = 0.0;
+        if (!WAt(0.0, wa) || !(wa < wb)) return Finish(0.0, 0.0);
+    } else if (c <= -1.0) {
+        return Finish(0.0, 1.0);
+    }
+    const double c1 = (1.0 - fa) / (wb - wa);
+    double c0 = fa - c1 * wa;
+    // The chord is on one side of the curve between its two points: lower the line by half of the largest gap (the
+    // best straight line in the least-maximum-error sense), so that the error is shared by both sides.
+    double lo = 0.0, hi = 0.0;
+    for (int i = 1; i < 64; ++i) {
+        const double w = wa + (wb - wa) * i / 64.0;
+        const double q = kc - mq / w;
+        const double truth = a / std::max(q, 1e-6) - c;
+        const double gap = (c1 * w + c0) - truth;
+        lo = std::min(lo, gap);
+        hi = std::max(hi, gap);
+    }
+    c0 -= 0.5 * (lo + hi);
+    return Finish(c1, c0);
+}
+bool NoDiscard() {
+    static const bool on = EnvInt("GXV_NODISCARD", 0) != 0; // 0: `discard` for every alpha test, as before
+    return on;
+}
+bool AlphaTestAlwaysPasses(uint32_t comp0, int ref0, uint32_t op, uint32_t comp1, int ref1) {
+    enum { F = 0, T = 1, V = 2 };
+    auto Val = [](uint32_t c, int ref) {
+        if (c == 7) return T;
+        if (c == 0) return F;
+        if (ref < 0) return V;
+        if (c == 6 && ref == 0) return T;   // alpha >= 0
+        if (c == 3 && ref >= 255) return T; // alpha <= 255
+        if (c == 1 && ref <= 0) return F;   // alpha < 0
+        if (c == 4 && ref >= 255) return F; // alpha > 255
+        return V;
+    };
+    const int x = Val(comp0, ref0), y = Val(comp1, ref1);
+    if (x != V && y != V) {
+        switch (op & 3) {
+        case 0: return x && y;
+        case 1: return x || y;
+        case 2: return x != y;
+        default: return x == y;
+        }
+    }
+    if ((op & 3) == 0) return false; // AND: only both true passes
+    if ((op & 3) == 1) return x == T || y == T;
+    // XOR / XNOR of the same comparison with the same reference: XNOR is always true
+    return (op & 3) == 3 && comp0 == comp1 && ref0 == ref1 && ref0 >= 0;
 }
 int FsTevCount(const FsKey& k) {
     if (!UniformPacking() || k.numIndStages) return 28;
@@ -215,6 +301,7 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     if (usesCol[0] || (k.regFromVtx & 1)) o("varying vec4 v_col0;\n");
     if (usesCol[1] || (k.regFromVtx & 2)) o("varying vec4 v_col1;\n");
     for (int i = 0; i < k.numTexGens; ++i) o("varying vec3 v_tex%d;\n", i);
+    if (k.fog & kFogVtxBit) o("varying float v_fog;\n");
     o("void main() {\n");
     o("  vec4 prev = u_tev[0], c0 = %s, c1 = %s, c2 = u_tev[3];\n", (k.regFromVtx & 1) ? "v_col0" : "u_tev[1]", (k.regFromVtx & 2) ? "v_col1" : "u_tev[2]");
     o("  vec4 tex = vec4(1.0), ras = vec4(0.0);\n  vec3 kc = vec3(1.0);\n  float ka = 1.0;\n");
@@ -342,7 +429,11 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     } else {
         o("  vec4 fin = clamp(vec4(%s.rgb, %s.a), 0.0, 1.0);\n", RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)));
     }
-    if (k.alphaTestOn) {
+    // GXV_NODISCARD: a test that cannot fail leaves no `discard` in the shader. (On the console's GPU any discard in a shader
+    // turns off hidden-surface removal for the draws that use it; the front end already drops the combinations of ALWAYS and
+    // NEVER, and with the switch on also the ones its references make constant: BuildFsKey. A key written by an older run
+    // can still carry them.)
+    if (k.alphaTestOn && !(NoDiscard() && AlphaTestAlwaysPasses(k.alphaTest & 7, -1, (k.alphaTest >> 6) & 3, (k.alphaTest >> 3) & 7, -1))) {
         char b0[96], b1[96], r0[32], r1[32];
         std::snprintf(r0, sizeof r0, "u_tev[%d].x", V_MISC);
         std::snprintf(r1, sizeof r1, "u_tev[%d].y", V_MISC);
@@ -354,9 +445,14 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     }
     if (k.fog) {
         const int fsel = k.fog & 7;
-        if (k.fog & 8) o("  float fg = u_tev[%d].x * gl_FragCoord.z;\n", V_FOG);
-        else o("  float fg = u_tev[%d].x / max(u_tev[%d].y - gl_FragCoord.z, 0.000001);\n", V_FOG, V_FOG);
-        o("  fg = clamp(fg - u_tev[%d].z, 0.0, 1.0);\n", V_FOG);
+        if (k.fog & kFogVtxBit) {
+            // (GXV_FOGVTX: linear fog only; the vertex shader's v_fog is affine in clip w / z, u_tev[V_FOG] = c1, -, -, c0: FogVtxCoeffs)
+            o("  float fg = clamp(u_tev[%d].x * v_fog + u_tev[%d].w, 0.0, 1.0);\n", V_FOG, V_FOG);
+        } else {
+            if (k.fog & 8) o("  float fg = u_tev[%d].x * gl_FragCoord.z;\n", V_FOG);
+            else o("  float fg = u_tev[%d].x / max(u_tev[%d].y - gl_FragCoord.z, 0.000001);\n", V_FOG, V_FOG);
+            o("  fg = clamp(fg - u_tev[%d].z, 0.0, 1.0);\n", V_FOG);
+        }
         switch (fsel) {
         case 4: o("  fg = 1.0 - exp2(-8.0 * fg);\n"); break;
         case 5: o("  fg = 1.0 - exp2(-8.0 * fg * fg);\n"); break;
@@ -456,6 +552,7 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     o("uniform vec4 u_lt[%d];\n", 4 + (maxLight + 1) * 5);
     o("varying vec4 v_col0;\nvarying vec4 v_col1;\n");
     for (int i = 0; i < k.numTexGens; ++i) o("varying vec3 v_tex%d;\n", i);
+    if (k.fogVtx & 1) o("varying float v_fog;\n");
     o("void main() {\n  vec4 p = vec4(a_pos.xyz, 1.0);\n");
     if (k.perVtxPos) {
         RowIndex(o, "  ", "pi", "a_pos.w");
@@ -473,6 +570,7 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     }
     if (needNrm) o("  float nl = length(n);\n  if (nl > 0.0) n = n / nl;\n");
     o("  gl_Position = u_proj * vec4(eye, 1.0);\n");
+    if (k.fogVtx & 1) o("  v_fog = gl_Position.%c;\n", (k.fogVtx & 2) ? 'z' : 'w');
 
     // Lighting channels.
     for (int ch = 0; ch < 2; ++ch) {
