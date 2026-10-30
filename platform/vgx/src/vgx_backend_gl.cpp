@@ -109,6 +109,8 @@ extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 
 #define GPUPASS_NOTE(n, ...) VGX_LOG_N(n, __VA_ARGS__)
 #endif
 
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));  // the basic log, when the platform layer has one
+
 namespace vgx::backend {
 
 namespace {
@@ -4105,8 +4107,16 @@ bool Init(int renderWidth, int renderHeight) {
     G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
     g_tex.resize(256);
     AutoQualityInit();
-    if (!CreateTarget() && EfbCreateGuard()) return false;
-    if (!EnsureCopyProgram()) return false; // compiled here, not at the first copy that needs it
+    if (!CreateTarget() && EfbCreateGuard()) {
+        std::fprintf(stderr, "[vgx] back end set-up failed: the EFB render target could not be created\n");
+        if (port_log_summary) port_log_summary("[vgx] back end set-up failed: the EFB render target could not be created");
+        return false;
+    }
+    if (!EnsureCopyProgram()) { // compiled here, not at the first copy that needs it
+        std::fprintf(stderr, "[vgx] back end set-up failed: the display copy program did not compile or link\n");
+        if (port_log_summary) port_log_summary("[vgx] back end set-up failed: the display copy program did not compile or link");
+        return false;
+    }
 #if !defined(__VGX_VITA__)
     MakeProgressDumpDisplay();
 #endif

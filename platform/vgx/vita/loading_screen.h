@@ -30,6 +30,7 @@ struct State {
     const char* caption = "";
     int tip = 0;
     const char* footer = nullptr;
+    const char* footer2 = nullptr;  // an optional second line under the footer (error texts)
     bool alert = false;
     float fade = 0;
     bool titleReady = false;
@@ -155,6 +156,7 @@ inline void Render(uint32_t* frame, double, const State& st) {
     DrawText(frame, st.caption, bx, bx + bw - 64, 395, false, 235, 247, 255);
     DrawText(frame, percent, bx + bw - 52, bx + bw, 395, false, 174, 233, 250);
     DrawText(frame, st.footer, 192, 768, 448, true, st.alert ? 255 : 186, st.alert ? 200 : 219, st.alert ? 170 : 234);
+    if (st.footer2) DrawText(frame, st.footer2, 192, 768, 466, true, st.alert ? 255 : 186, st.alert ? 200 : 219, st.alert ? 170 : 234);
 
     if (st.fade > 0.0f) {
         const float fade = st.fade > 1.0f ? 1.0f : st.fade;

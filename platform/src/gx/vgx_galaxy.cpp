@@ -27,6 +27,7 @@
 #include "vgx_hle.h"
 #include "vgx_state.h"
 #include "vgx_workload.h"
+#include "../../vgx/vita/vgx_boot_watch.h"
 
 extern "C" volatile uint32_t __PortGXPERegs[0x400];
 extern "C" void port_headless_write_png(const char* path, const unsigned char* rgba, int w, int h);
@@ -60,6 +61,9 @@ extern "C" void port_vgx_vita_idle_gap(unsigned gapUs);  // (the same, not soone
 extern "C" void port_vgx_vita_prepare(void);       // the host's file work and settings for the front end, before the render thread starts
 extern "C" int port_vgx_vita_settings_finish(unsigned timeoutMs);
 extern "C" void port_vgx_vita_settings_resume(void);
+extern "C" int port_vgx_vita_error_shown(void);     // 1 when a start-up failure is on the loading screen
+extern "C" int port_vgx_vita_fail(const char* message);  // put a start-up failure on the loading screen (1: shown)
+extern "C" void port_vgx_vita_backend_failed(void); // the back end's own set-up failed: say so on the loading screen
 #endif
 
 namespace vgx {
@@ -453,6 +457,9 @@ void RenderMain() {
         int w = 0, h = 0;
         if (const char* rs = getenv("GXV_RENDER_SIZE")) sscanf(rs, "%dx%d", &w, &h);
         ok = vgx::backend::Init(w, h);
+#if defined(__vita__)
+        if (!ok) port_vgx_vita_backend_failed();  // (the graphics themselves started: without this the screen would still say "Starting")
+#endif
     }
     {
         std::lock_guard<std::mutex> lk(sMtx);
@@ -612,6 +619,34 @@ void* RenderEntry(void*) {
     return nullptr;
 }
 
+// A start-up failure that has its reason on the loading screen (the host's splash::Fail) stays on that screen: the game thread
+// parks, and the player closes the game. Without it the process aborted within a moment and the reason was gone.
+// GXV_BOOT_PARK=0 aborts as before. Read once. Only start-up failures that are already on screen reach the parking branch.
+[[noreturn]] void GraphicsFailed(const char* why) {
+#if defined(__vita__)
+    static const bool park = vgx::EnvInt("GXV_BOOT_PARK", 1) != 0;
+    if (vgx::bootwatch::ParkOnError(park, port_vgx_vita_error_shown() != 0)) {
+        if (port_log_summary) port_log_summary("boot: %s; the reason is on the loading screen, which stays up (close the game)", why);
+        for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+#endif
+    port_fatal("vgx: %s", why);
+}
+constexpr const char* kNoContext = "no graphics context for the renderer's back end";
+
+// Seconds the game's thread waits for the render thread's graphics before it says so on the loading screen. Read once.
+// GXV_BOOT_WAIT_SEC=0: wait without a limit, as before.
+double GraphicsWaitLimitSeconds() {
+    static const double limit = static_cast<double>(vgx::EnvInt("GXV_BOOT_WAIT_SEC", 120));
+    return limit;
+}
+void GraphicsWaitTimedOut(const char* where, double seconds) {
+    if (port_log_summary) port_log_summary("boot: the render thread's graphics did not start within %.0f s (%s)", seconds, where);
+#if defined(__vita__)
+    port_vgx_vita_fail("The graphics did not start within two minutes.\nClose the game and start it again. If this repeats, send ux0:data/smg/log.txt.");
+#endif
+}
+
 // wait: return when the render thread has its graphics up (otherwise at once: the front end can fill its frames meanwhile, they wait in the
 // queue, and FrameSink watches for a thread that failed to start).
 bool EnsureThread(bool wait = true) {
@@ -630,7 +665,17 @@ bool EnsureThread(bool wait = true) {
         pthread_attr_destroy(&attr);
     }
     if (!wait) return true;
-    sCv.wait(lk, [] { return sStarted; });
+    const double limit = GraphicsWaitLimitSeconds();
+    if (limit <= 0.0) {
+        sCv.wait(lk, [] { return sStarted; });
+        return sStartOk;
+    }
+    // A bounded wait: after the limit the loading screen says so (the host's Fail) and the game's thread stays parked on it.
+    if (!sCv.wait_for(lk, std::chrono::milliseconds(static_cast<long long>(limit * 1000.0)), [] { return sStarted; })) {
+        lk.unlock();
+        GraphicsWaitTimedOut("EnsureThread", limit);
+        GraphicsFailed("the graphics did not start in time");
+    }
     return sStartOk;
 }
 
@@ -639,9 +684,20 @@ void FrameSink(vgx::CmdBuf& buf) {
     std::unique_lock<std::mutex> lk(sMtx);
     {
         vgx::workload::Scope observation(vgx::workload::FrontQueue);
+        const double limit = GraphicsWaitLimitSeconds();
+        const int64_t waitStart = port_host_time_ns();
         while (!sCv.wait_for(lk, std::chrono::milliseconds(20), [] { return !sFree.empty() && sJobs.size() < sQueueLimit; })) {
             // (time limit: see RenderMain)
-            if (sStarted && !sStartOk) port_fatal("vgx: no graphics context for the renderer's back end");
+            if (sStarted && !sStartOk) {
+                lk.unlock();
+                GraphicsFailed(kNoContext);
+            }
+            // The queue is full because the render thread has not started its graphics, and has not for the limit: say so.
+            if (!sStarted && limit > 0.0 && static_cast<double>(port_host_time_ns() - waitStart) / 1e9 >= limit) {
+                lk.unlock();
+                GraphicsWaitTimedOut("FrameSink", limit);
+                GraphicsFailed("the graphics did not start in time");
+            }
         }
     }
     vgx::CmdBuf* b = sFree.back();
@@ -1114,10 +1170,10 @@ extern "C" void port_gx_select_backend(void) {
     // game goes on (GXV_RENDER_ASYNC=0: wait for it here). What the front end takes from the host is set first, on this thread.
     port_vgx_vita_prepare();
     const bool asyncStart = vgx::EnvInt("GXV_RENDER_ASYNC", 1) != 0;
-    if (!EnsureThread(!asyncStart)) port_fatal("vgx: no graphics context for the renderer's back end");
+    if (!EnsureThread(!asyncStart)) GraphicsFailed(kNoContext);
     if (asyncStart) port_log("gx: the render thread starts the graphics while the game boots");
 #else
-    if (!EnsureThread()) port_fatal("vgx: no graphics context for the renderer's back end");
+    if (!EnsureThread()) GraphicsFailed(kNoContext);
 #endif
     vgx::ResetState();
     vgx::GuestHooks hooks;

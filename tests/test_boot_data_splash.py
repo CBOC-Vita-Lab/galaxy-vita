@@ -29,6 +29,8 @@ HARNESS = r'''
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include "vgx_boot_watch.h"
+#define GXV_BASIC_LOG(...) port_log(__VA_ARGS__)
 bool enabled;
 unsigned finishes, pictures;
 uint32_t pixel;
@@ -37,6 +39,7 @@ uint64_t NowUs() { return 1000000; }
 unsigned NowMs() { return 1000; }
 void port_log(const char*, ...) {}
 void EnvLong(const char*, long&, long, long) {}
+@SECONDS@
 namespace loading::direct { void* g_base = &pixel; void Close() {} }
 namespace vgx::backend {
 unsigned WarmPending() { return 0; }
@@ -53,6 +56,7 @@ char g_failText[200] = "";
 int g_thread = 1, g_blackPresents = 0;
 uint32_t* g_pic[2] = {&pixel, &pixel};
 bool g_heldForShaders = false, g_warmAfterTitle = false;
+uint64_t g_holdSinceUs = 0;
 uint64_t g_lastPresentUs = 0, g_freeBlockAtUs = 0;
 void TaskProgress(const char*, int, int, bool = true) {}
 @FAIL@
@@ -93,6 +97,8 @@ class BootDataSplashTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         host = HOST.read_text()
         code = HARNESS.replace("@PHASES@", re.search(r"enum Phase \{[^}]+\};", host)[0])
+        # The limits' reader (GXV_WARM_HOLD_MAX_SEC, GXV_BOOT_FINISH_SEC) is compiled as it is, over the harness's EnvLong stub.
+        code = code.replace("@SECONDS@", function(host, "long ReadSeconds(const char* name, long fallback)"))
         for tag, signature in (
             ("FAIL", "void Fail(const char* what)"),
             ("TITLE", "void NoteTitleVisible(const char* how)"),
@@ -107,7 +113,7 @@ class BootDataSplashTests(unittest.TestCase):
         source.write_text(code)
         cls.binary = source.with_suffix("")
         result = subprocess.run([cxx, "-std=c++17", "-O1", "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                                 str(source), "-o", str(cls.binary)], capture_output=True, text=True)
+                                 "-I" + str(ROOT / "platform/vgx/vita"), str(source), "-o", str(cls.binary)], capture_output=True, text=True)
         if result.returncode:
             raise AssertionError(result.stderr)
 

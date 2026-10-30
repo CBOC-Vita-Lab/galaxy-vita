@@ -33,6 +33,8 @@ HARNESS = r'''
 #include <mutex>
 #include <string>
 #include "vgx_common.h"
+#include "vgx_boot_watch.h"
+#define GXV_BASIC_LOG(...) port_log(__VA_ARGS__)
 #if !defined(LEGACY) && __has_include("port/boot_dialog.h")
 #include "port/boot_dialog.h"
 #else
@@ -71,6 +73,7 @@ uint64_t NowUs() { return 1000000; }
 unsigned NowMs() { return 1000; }
 void port_log(const char*, ...) {}
 @ENV_LONG@
+@SECONDS@
 constexpr int GL_FALSE = 0;
 void vglSwapBuffers(int) { ++swaps; }
 namespace loading {
@@ -92,6 +95,7 @@ std::atomic<int> g_phase{kGl}, g_stagePermille{0}, g_stage{0};
 std::atomic<bool> g_titleSeen{false}, g_failed{false}, g_faded{false};
 std::atomic<uint64_t> g_titleSeenUs{0};
 bool g_heldForShaders = false, g_warmAfterTitle = false;
+uint64_t g_holdSinceUs = 0;
 std::atomic<uint32_t> g_frameId{1};
 std::mutex g_picLock;
 uint32_t* g_pic[2]{};
@@ -259,6 +263,7 @@ class BootDialogTests(unittest.TestCase):
             code = code.replace("@PHASES@", re.search(r"enum Phase \{[^}]+\};", host)[0])
             for tag, signature, fallback in (
                 ("ENV_LONG", "void EnvLong(const char* name, long& value, long lo, long hi)", ""),
+                ("SECONDS", "long ReadSeconds(const char* name, long fallback)", ""),
                 ("ACTIVE", "inline bool Active()", ""),
                 ("TITLE", "void NoteTitleVisible(const char* how)", ""),
                 ("CONFIGURE", "void ConfigureDialog()", "void ConfigureDialog() {}"),
@@ -282,7 +287,7 @@ class BootDialogTests(unittest.TestCase):
             binary = source.with_suffix("")
             command = [cxx, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-DTARGET_PC",
                        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I" + str(ROOT / "platform/include"),
-                       "-I" + str(ROOT / "platform/vgx/src"), str(source), str(other), "-o", str(binary)]
+                       "-I" + str(ROOT / "platform/vgx/src"), "-I" + str(ROOT / "platform/vgx/vita"), str(source), str(other), "-o", str(binary)]
             if revision == "legacy":
                 command.append("-DLEGACY")
             result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)

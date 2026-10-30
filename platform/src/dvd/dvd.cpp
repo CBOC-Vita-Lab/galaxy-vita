@@ -21,6 +21,7 @@
 #include <unordered_map>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <array>
 #include <chrono>
@@ -103,11 +104,35 @@ static void reportDvdError(DvdError operation, u32 entry, int result, int error)
     errno = savedErrno;
 }
 
+// Start-up watchdog inputs (vita/vgx loading screen): bytes the drive worker has read for the game, the number of operations
+// that failed, and the first failing path. Plain counters and one write-once string; no behaviour depends on them here.
+static std::atomic<uint64_t> sDvdBytesRead{0};
+static std::atomic<unsigned> sDvdFailures{0};
+static std::atomic<int> sDvdFirstFailureState{0};  // 0 none, 1 being written, 2 readable
+static char sDvdFirstFailure[200];
+static void noteDvdFailure(const char* operation, const char* path, int error) {
+    sDvdFailures.fetch_add(1, std::memory_order_relaxed);
+    int expected = 0;
+    if (!sDvdFirstFailureState.compare_exchange_strong(expected, 1)) return;
+    snprintf(sDvdFirstFailure, sizeof(sDvdFirstFailure), "%s %s (errno %d)", operation, path ? path : "?", error);
+    sDvdFirstFailureState.store(2, std::memory_order_release);
+    port_log_summary("dvd: first failure: %s", sDvdFirstFailure);
+}
+extern "C" uint64_t port_dvd_bytes_read(void) { return sDvdBytesRead.load(std::memory_order_relaxed); }
+extern "C" unsigned port_dvd_failures(void) { return sDvdFailures.load(std::memory_order_relaxed); }
+// Copies "<operation> <path> (errno n)" of the first failed operation; 0 when nothing has failed.
+extern "C" int port_dvd_first_failure(char* out, size_t size) {
+    if (!out || !size || sDvdFirstFailureState.load(std::memory_order_acquire) != 2) return 0;
+    snprintf(out, size, "%s", sDvdFirstFailure);
+    return 1;
+}
+
 // Opt-in startup guard, not a replacement for the game's audio preparation. The known
 // title basename is shared by the supported data layout; regional sound-table mapping
 // remains a validation prerequisite before enabling this by default.
 static constexpr const char* kBootTitle = "AudioRes/Stream/SMG_title_strm.ast";
 static u32 sBootTitleEntry = ~0u, sBootTitleBytes = 0;
+static std::atomic<bool> sFstReady{false};
 namespace AudParams { extern const int streamBlockSize, numStreamChannels; }
 extern "C" int port_boot_data_error(const char*) __attribute__((weak));
 
@@ -733,11 +758,13 @@ static bool loadFst() {
         presetSizesFromListings(dirPath);
     }
 #endif
+    sFstReady.store(true, std::memory_order_release);  // (host paths are final: the stall report may read them)
     return true;
 }
 
-static const char* validateBootTitle() {
-    if (!port_boot_data_enabled()) return nullptr;
+// `force`: check although GXV_BOOTDATA is off (the loading screen's stall report asks, once, after a minute without progress).
+static const char* validateBootTitleImpl(bool force) {
+    if (!force && !port_boot_data_enabled()) return nullptr;
     if (sBootTitleEntry >= sFst.size()) {
         port_log_summary("boot-data: missing title entry in sys/fst.bin: %s", kBootTitle);
         return "missing from file list";
@@ -769,6 +796,16 @@ static const char* validateBootTitle() {
     if (loopEnd <= 0 || (le16(14) && (loopStart < 0 || loopStart >= loopEnd))) return fail("invalid loop bounds");
     // No payload scan or stride-modulus test: the last AST block may be rounded past EOF.
     return nullptr;
+}
+
+static const char* validateBootTitle() { return validateBootTitleImpl(false); }
+
+// Stall report: "" when the title audio file looks fine or the file table is not loaded yet, else the reason (a static string).
+// Reads 64 bytes of one file; the file table is not changed after loadFst, which sets sFstReady last.
+extern "C" const char* port_boot_title_audio_problem(void) {
+    if (!sFstReady.load(std::memory_order_acquire)) return "";
+    const char* reason = validateBootTitleImpl(true);
+    return reason ? reason : "";
 }
 
 static s64 entrySize(u32 entry) {
@@ -915,7 +952,9 @@ static int openEntry(u32 entry) {
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         sLastOpenErrno = errno;
-        reportDvdError(DvdError::Open, entry, fd, errno);
+        reportDvdError(DvdError::Open, entry, fd, sLastOpenErrno);
+        noteDvdFailure("open", path.c_str(), sLastOpenErrno);
+        errno = sLastOpenErrno;
         port_log("dvd: open %s failed: %s (errno=%d)", path.c_str(), strerror(errno), errno);
         errno = sLastOpenErrno;
         return -1;
@@ -1260,6 +1299,7 @@ static void workerMain() {
                 readEnd = port_host_time_ns();
                 result = -1;
                 reportDvdError(DvdError::Read, req.entry, result, error);
+                noteDvdFailure("read", sFst[req.entry].hostPath.c_str(), error);
             } else {
                 readEnd = port_host_time_ns();
                 if ((size_t)got < want) {
@@ -1267,6 +1307,7 @@ static void workerMain() {
                 }
                 b->transferredSize = b->length;
                 result = (s32)b->length;
+                sDvdBytesRead.fetch_add((uint64_t)want, std::memory_order_relaxed);
                 const int64_t hookStart = port_host_time_ns();
                 port_gpu_memory_written(dst, (uint32_t)want);  // models, textures, display lists: see vgx_galaxy.h
                 sTraceGpuNs = port_host_time_ns() - hookStart;

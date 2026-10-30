@@ -26,7 +26,12 @@ def warm_adapter(source):
     begin = source.index("bool g_heldForShaders = false;")
     end = source.index("\nvoid Fail(", begin)
     title = "\nnamespace splash {\n" + source[begin:end] + "\n}\n"
-    return env_long + title + options
+    # Later revisions bound the hold with ReadSeconds (GXV_WARM_HOLD_MAX_SEC); the public base has no such helper.
+    seconds = ""
+    if "long ReadSeconds(" in source:
+        begin = source.index("long ReadSeconds(")
+        seconds = source[begin:source.index("\n}\n", begin) + 3]
+    return env_long + seconds + title + options
 
 
 HARNESS = r'''
@@ -42,6 +47,8 @@ HARNESS = r'''
 #if __has_include("vgx_boot_guard.h")
 #include "vgx_boot_guard.h"
 #endif
+#include "vgx_boot_watch.h"
+#define GXV_BASIC_LOG(...) port_log(__VA_ARGS__)
 
 namespace splash {
 enum { kOff, kGl };

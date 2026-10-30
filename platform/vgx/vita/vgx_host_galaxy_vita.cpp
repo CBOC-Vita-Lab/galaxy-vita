@@ -50,6 +50,7 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include "loading_screen.h"
+#include "vgx_boot_watch.h"
 #include "vgx_common.h"
 #include "vgx_resource_audit.h"
 #include "vgx_display_rect.h"
@@ -91,6 +92,14 @@ extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built
 extern "C" unsigned long long port_game_frames(void); // vgx_galaxy.cpp: frames the game has finished
 extern "C" int port_boot_title_is_visible(void); // perf.cpp: the title screen has appeared (decomp/.../TitleSequenceProduct.cpp)
 extern "C" void vglSetAnisotropicFilter(uint32_t sceFilter) __attribute__((weak)); // vitaGL with ANISO_SWITCH (GXV_ANISO)
+// Start-up watchdog inputs: platform/src/dvd/dvd.cpp
+extern "C" uint64_t port_dvd_bytes_read(void) __attribute__((weak));
+extern "C" unsigned port_dvd_failures(void) __attribute__((weak));
+extern "C" int port_dvd_first_failure(char* out, size_t size) __attribute__((weak));
+extern "C" const char* port_boot_title_audio_problem(void) __attribute__((weak));
+// The shader compiler's loader (vitaShaRK, inside vitaGL) and vitaGL's own flag for its outcome at start-up.
+extern "C" int shark_init(const char* path) __attribute__((weak));
+extern "C" unsigned char is_shark_online __attribute__((weak));
 // The title's data folder (also named in vita/vgx-game/entry.cpp and the notes).
 #ifndef GXV_VITA_DATA_DEVICE
 #define GXV_VITA_DATA_DEVICE "ux0:data/smg"
@@ -190,11 +199,34 @@ void EnvLong(const char* name, long& value, long lo, long hi) {
     if (value > hi) value = hi;
 }
 
+// The basic log (ux0:data/smg/log.txt) in every build; port_log only reaches it in a diagnostic build.
+#define GXV_BASIC_LOG(...) do { if (port_log_summary) port_log_summary(__VA_ARGS__); else port_log(__VA_ARGS__); } while (0)
+
+// A whole number of seconds from the environment, `fallback` when unset; 0 is a value (the limit is off).
+long ReadSeconds(const char* name, long fallback) {
+    long value = fallback;
+    EnvLong(name, value, 0, 86400);
+    return value;
+}
+
+// What a status call and a read-only open say about a file (the shader compiler module is loaded by the system from there).
+vgx::bootwatch::FileProbe ProbeFile(const char* path) {
+    vgx::bootwatch::FileProbe probe;
+    SceIoStat st;
+    std::memset(&st, 0, sizeof(st));
+    probe.stat = sceIoGetstat(path, &st);
+    const SceUID f = sceIoOpen(path, SCE_O_RDONLY, 0);
+    probe.open = f;
+    if (f >= 0) sceIoClose(f);
+    return probe;
+}
+
 // ---- shader-compiler self-test: a trivial GLSL pair through GLSL -> Cg -> libshacccg -> link.
 // If this fails nothing the renderer generates can work, and the reason is in the returned text.
+const char* const kSelfTestVs = "attribute vec4 a_pos;\nvarying vec2 v_uv;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n";
+const char* const kSelfTestFs = "precision mediump float;\nvarying vec2 v_uv;\nuniform vec4 u_add;\nvoid main() { gl_FragColor = vec4(v_uv, 0.0, 1.0) + u_add; }\n";
 bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
-    static const char* vs = "attribute vec4 a_pos;\nvarying vec2 v_uv;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n";
-    static const char* fs = "precision mediump float;\nvarying vec2 v_uv;\nuniform vec4 u_add;\nvoid main() { gl_FragColor = vec4(v_uv, 0.0, 1.0) + u_add; }\n";
+    const char* const sources[2] = {kSelfTestVs, kSelfTestFs};
     const uint64_t t0 = NowUs();
     char log[1024] = "";
     GLuint shaders[2] = {0, 0};
@@ -202,14 +234,17 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
         // (through the host's entry points, like the back end's shaders: they make the cache's
         // bucket folder for this text if it is not there yet, see vgxvita_glShaderSource)
         shaders[i] = vgxvita_glCreateShader(i == 0 ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
-        const char* text = i == 0 ? vs : fs;
+        const char* text = sources[i];
         vgxvita_glShaderSource(shaders[i], 1, &text, nullptr);
         glCompileShader(shaders[i]);
         GLint ok = 0;
         glGetShaderiv(shaders[i], GL_COMPILE_STATUS, &ok);
         if (!ok) {
+            const unsigned glError = static_cast<unsigned>(glGetError());
             glGetShaderInfoLog(shaders[i], sizeof(log), nullptr, log);
-            std::snprintf(error, errorSize, "the %s test shader did not compile:\n%s", i == 0 ? "vertex" : "fragment", log);
+            std::snprintf(error, errorSize, "the %s test shader did not compile (GL error 0x%X, compiler %s):\n%s", i == 0 ? "vertex" : "fragment", glError,
+                          (&is_shark_online != nullptr && is_shark_online) ? "loaded" : "not loaded", log);
+            for (int j = 0; j <= i; ++j) glDeleteShader(shaders[j]);
             return false;
         }
     }
@@ -221,8 +256,12 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
     GLint linked = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &linked);
     if (!linked) {
+        const unsigned glError = static_cast<unsigned>(glGetError());
         glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        std::snprintf(error, errorSize, "the test program did not link:\n%s", log);
+        std::snprintf(error, errorSize, "the test program did not link (GL error 0x%X):\n%s", glError, log);
+        glDeleteProgram(program);
+        glDeleteShader(shaders[0]);
+        glDeleteShader(shaders[1]);
         return false;
     }
     port_log("[vgx-vita] shader compiler self-test passed in %u ms (u_add at location %d)", static_cast<unsigned>((NowUs() - t0) / 1000u),
@@ -231,6 +270,23 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
     glDeleteShader(shaders[0]);
     glDeleteShader(shaders[1]);
     return true;
+}
+
+// A cached compiled form of a self-test shader that vitaGL cannot use (a file from another library version, cut short by a full
+// card) fails the test with nothing wrong in the compiler. The two test shaders' cache files are removed so that the retry compiles
+// them afresh; returns how many files were removed.
+unsigned RemoveSelfTestCacheFiles() {
+    if (&vgl_shader_cache_path[0] == nullptr || !vgl_shader_cache_path[0]) return 0;
+    unsigned removed = 0;
+    for (int i = 0; i < 2; ++i) {
+        const char* text = i == 0 ? kSelfTestVs : kSelfTestFs;
+        char path[320];
+        if (!vgx::bootwatch::ShaderCachePath(path, sizeof(path), vgl_shader_cache_path, i == 1, XXH3_64bits(text, std::strlen(text)))) continue;
+        const int r = sceIoRemove(path);
+        GXV_BASIC_LOG("[vgx-vita] self-test shader cache file %s: %s", path, r >= 0 ? "removed" : (static_cast<uint32_t>(r) == 0x80010002u ? "not there" : "could not be removed"));
+        if (r >= 0) ++removed;
+    }
+    return removed;
 }
 
 void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
@@ -294,6 +350,7 @@ uint64_t g_freeBlockAtUs = 0;
 uint64_t g_lastPresentUs = 0;              // render thread only
 unsigned g_frames = 0;                     // ticker only, for the closing line
 uint64_t g_renderUsSum = 0, g_renderUsWorst = 0;
+std::atomic<uint64_t> g_contentTick{0};    // what the renderer has been given so far (written by the render thread; moves while the game loads)
 
 inline bool Active() { return g_phase.load(std::memory_order_acquire) == kGl; }
 
@@ -370,6 +427,7 @@ void TaskProgress(const char* label, int done, int total, bool counts = true) {
     g_stagePermille.store(static_cast<int>(static_cast<int64_t>(done) * 1000 / total));
 }
 bool g_heldForShaders = false;
+uint64_t g_holdSinceUs = 0;  // when a GXV_WARM_HOLD hold began
 bool g_warmAfterTitle = false;  // the warm-up's slices have not begun: they wait for the title
 void NoteTitleVisible(const char* how) {
     if (g_phase.load() == kOff || g_failed.load() || g_titleSeen.load()) return;
@@ -380,9 +438,21 @@ void NoteTitleVisible(const char* how) {
     // the warm-up goes on behind it at GXV_WARM_TITLE_MS (default 10) ms a frame; GXV_WARM_HOLD=1 holds the screen as before.
     static const bool hold = std::getenv("GXV_WARM_HOLD") && std::getenv("GXV_WARM_HOLD")[0] == '1';
     if (left > 0 && all > 0) {
-        if (hold) {
-            if (!g_heldForShaders) port_log("[vgx-vita] t=%u ms the title is up, but the shader warm-up has %u of %u units left: the loading screen waits for it", NowMs(), left, all);
+        bool held = hold;
+        if (held) {
+            // GXV_WARM_HOLD_MAX_SEC (default 90, 0 = no limit): a hold ends after that long, whatever the warm-up says, so that a
+            // warm-up that never finishes cannot keep the screen up for good (the hold itself is off unless GXV_WARM_HOLD=1).
+            static const long holdLimit = ReadSeconds("GXV_WARM_HOLD_MAX_SEC", 90);
+            if (!g_heldForShaders) {
+                g_holdSinceUs = NowUs();
+                port_log("[vgx-vita] t=%u ms the title is up, but the shader warm-up has %u of %u units left: the loading screen waits for it", NowMs(), left, all);
+            } else if (vgx::bootwatch::HoldExpired(g_holdSinceUs, NowUs(), static_cast<double>(holdLimit))) {
+                held = false;
+                GXV_BASIC_LOG("loading: the shader warm-up hold ended after %ld s with %u of %u units left (GXV_WARM_HOLD_MAX_SEC)", holdLimit, left, all);
+            }
             g_heldForShaders = true;
+        }
+        if (held) {
             TaskProgress("Preparing shaders", static_cast<int>(all - left), static_cast<int>(all), false);
             return;
         }
@@ -441,13 +511,40 @@ int TickerMain(SceSize, void*) {
     loading::Init();
     const uint64_t t0 = NowUs();
     float progress = 0.0f, progressAtTitle = 0.0f;
-    char caption[128], footer[200];
+    char caption[128], footer[100], footer2[100];
     int loggedStage = -1;
-    bool loggedStall = false, loggedTitle = false;
+    bool loggedStall = false, loggedTitle = false, loggedTitleFallback = false;
+    // Sign of life: GXV_BOOT_STALL_SEC (default 60, 0 = off): this long without any change of the start-up's counters, of what the
+    // renderer has been given and of the bytes read from the card, and the screen says so (it goes away if the start-up goes on).
+    static const long stallLimit = ReadSeconds("GXV_BOOT_STALL_SEC", 60);
+    // GXV_BOOT_TITLE_FALLBACK=<s> (default 0 = off): this long in the last stage with the game thread running pictures, and the
+    // title is taken as seen without its logo (the screen fades out; the game's own picture, whatever it shows, is then visible).
+    static const long titleFallback = ReadSeconds("GXV_BOOT_TITLE_FALLBACK", 0);
+    vgx::bootwatch::StallWatch watch(static_cast<double>(stallLimit));
+    unsigned long long framesSample = 0;
+    uint64_t framesSampleUs = t0;
+    double advancingSeconds = 0.0;
+    char audioProblem[48] = "";  // the title audio file's check, made once per stall (it opens the file)
     for (;;) {
         const uint64_t f0 = NowUs();
         if (g_phase.load() == kDone) break;
         if (!g_titleSeen.load() && port_boot_title_is_visible()) NoteTitleVisible("title logo");
+        // The game thread's pictures per second, sampled about once a second: part of the stall text and of the opt-in fallback.
+        if (f0 - framesSampleUs >= 1000000u) {
+            const unsigned long long frames = port_game_frames();
+            const double dt = (f0 - framesSampleUs) / 1e6;
+            advancingSeconds = vgx::bootwatch::FramesAdvancing(framesSample, frames, dt, 20.0) ? advancingSeconds + dt : 0.0;
+            framesSample = frames;
+            framesSampleUs = f0;
+        }
+        if (!g_titleSeen.load() && !g_failed.load() && g_stage.load() == kTitle &&
+            vgx::bootwatch::TitleFallbackDue(static_cast<double>(titleFallback), (f0 - g_stageStartUs.load()) / 1e6, advancingSeconds, false)) {
+            if (!loggedTitleFallback && port_log_summary) {
+                loggedTitleFallback = true;
+                port_log_summary("loading: no title logo after %.0f s of running pictures (GXV_BOOT_TITLE_FALLBACK): the screen is taken down", (f0 - g_stageStartUs.load()) / 1e6);
+            }
+            NoteTitleVisible("fallback after running pictures without the title logo");
+        }
         // The basic log (log.txt) gets the loading milestones, so that a start that never reaches the title can be read.
         if (port_log_summary) {
             const int now = g_stage.load();
@@ -465,8 +562,10 @@ int TickerMain(SceSize, void*) {
         st.tip = static_cast<int>((f0 - t0) / 4500000u);
         if (g_failed.load()) {
             st.caption = "The game could not start";
-            std::snprintf(footer, sizeof(footer), "%.150s", g_failText);
+            // (two lines of about 90 characters: a longer text used to be cut off at the end of the first)
+            vgx::bootwatch::WrapTwoLines(g_failText, footer, sizeof(footer), footer2, sizeof(footer2));
             st.footer = footer;
+            if (footer2[0]) st.footer2 = footer2;
             st.alert = true;
             progress = Progress(f0, progress);
         } else if (g_taskTotal.load() > 0) {
@@ -489,11 +588,48 @@ int TickerMain(SceSize, void*) {
             // A stage that has gone on for far longer than it ever takes: say so, and say what to check.
             const double inStage = (f0 - g_stageStartUs.load()) / 1e6;
             if (!g_titleSeen.load() && inStage > 90.0 && stage != kUnpack) {
-                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game, then see Known Issues on the project page.";
+                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game.";
+                st.footer2 = "See Known Issues on the project page.";
                 if (!loggedStall && port_log_summary) {
                     loggedStall = true;
                     port_log_summary("loading: still in \"%s\" after %.0f s without reaching the title (see KNOWN-ISSUES.md)", kCaption[stage], inStage);
                 }
+            }
+        }
+        if (!g_failed.load() && !g_titleSeen.load()) {
+            const uint64_t sign[7] = {static_cast<uint64_t>(stage), static_cast<uint64_t>(g_stagePermille.load() + 1), static_cast<uint64_t>(g_unpackDone.load()),
+                                      static_cast<uint64_t>(g_taskDone.load()), static_cast<uint64_t>(vgx::backend::WarmPending()), g_contentTick.load(),
+                                      port_dvd_bytes_read ? port_dvd_bytes_read() : 0u};
+            const vgx::bootwatch::StallWatch::Result quiet = watch.Update(f0, sign, 7);
+            if (quiet.stalled) {
+                char problem[200] = "";
+                const bool diskFailure = port_dvd_first_failure && port_dvd_first_failure(problem, sizeof(problem));
+                if (quiet.becameStalled) std::snprintf(audioProblem, sizeof(audioProblem), "%s", port_boot_title_audio_problem ? port_boot_title_audio_problem() : "");
+                const char* audio = audioProblem;
+                if (quiet.becameStalled && port_log_summary)
+                    port_log_summary("loading: no sign of life for %.0f s in \"%s\": game pictures %llu (%s), disc bytes read %llu, failed disc operations %u, first failure: %s, "
+                                     "title audio file: %s, shader warm-up units left %u; the screen says so and goes on waiting",
+                                     quiet.quietSeconds, kCaption[stage], static_cast<unsigned long long>(port_game_frames()), advancingSeconds >= 5.0 ? "still running" : "not running",
+                                     static_cast<unsigned long long>(port_dvd_bytes_read ? port_dvd_bytes_read() : 0u), port_dvd_failures ? port_dvd_failures() : 0u,
+                                     diskFailure ? problem : "none", audio && *audio ? audio : "no problem found", vgx::backend::WarmPending());
+                if (advancingSeconds >= 5.0)
+                    std::snprintf(footer, sizeof(footer), "The game is running but has not shown its title for %.0f s.", quiet.quietSeconds);
+                else
+                    std::snprintf(footer, sizeof(footer), "Nothing has loaded for %.0f s.", quiet.quietSeconds);
+                if (diskFailure) {
+                    char tail[100];
+                    vgx::bootwatch::PathTail(tail, sizeof(tail), problem, 84);
+                    std::snprintf(footer2, sizeof(footer2), "File problem: %.84s", tail);
+                } else if (audio && *audio) {
+                    std::snprintf(footer2, sizeof(footer2), "Title audio file (SMG_title_strm.ast): %.40s. Restore the game files.", audio);
+                } else {
+                    std::snprintf(footer2, sizeof(footer2), "Close the game and start it again. If this repeats, send log.txt.");
+                }
+                st.footer = footer;
+                st.footer2 = footer2;
+                st.alert = true;
+            } else if (quiet.resumed && port_log_summary) {
+                port_log_summary("loading: the start-up went on after a pause (\"%s\")", kCaption[stage]);
             }
         }
         if (g_titleSeen.load() && !g_failed.load()) {
@@ -618,6 +754,15 @@ void Service(uint64_t minGapUs = 0) {
     if (HandleDialog()) return;
     if (!Active()) return;
     const uint64_t now = NowUs();
+    // The title appeared but the screen has not faded out and gone (a picture that could not be shown, a swap that never came):
+    // end it after GXV_BOOT_FINISH_SEC (default 5, 0 = never) so that the game underneath is not hidden for good.
+    static const long finishLimit = ReadSeconds("GXV_BOOT_FINISH_SEC", 5);
+    if (!g_failed.load() && g_titleSeen.load() && vgx::bootwatch::ForceFinishDue(g_titleSeenUs.load(), now, static_cast<double>(finishLimit))) {
+        GXV_BASIC_LOG("loading: the screen did not fade out within %ld s of the title (faded %d, pictures shown dark %d): ending it now", finishLimit,
+                      g_faded.load() ? 1 : 0, g_blackPresents);
+        Finish();
+        return;
+    }
     if (minGapUs && now - g_lastPresentUs < minGapUs) return;
     const bool shown = PresentFrame(false);
     if (shown) g_lastPresentUs = now;
@@ -1196,13 +1341,18 @@ void PrepareFrontEnd() {
 bool StartGl(char* error, size_t errorSize) {
     // The shader compiler module is the user's own copy of a system file; all of the renderer's
     // shaders are compiled with it on first use.
-    const bool compilerA = Exists("ur0:data/libshacccg.suprx"), compilerB = Exists("ur0:data/external/libshacccg.suprx");
-    port_log("[vgx-vita] shader compiler module: ur0:data/libshacccg.suprx %s, ur0:data/external/libshacccg.suprx %s", compilerA ? "present" : "absent",
-             compilerB ? "present" : "absent");
-    if (!compilerA && !compilerB) {
-        std::snprintf(error, errorSize, "The shader compiler module (libshacccg.suprx) is missing from ur0:data/.");
+    // Both calls are made and both results logged (the basic log too): a status call that fails is not proof that the file is
+    // missing, and the codes say which of the two was refused and why. Only when neither call reaches either file is it "missing".
+    const vgx::bootwatch::FileProbe compilerA = ProbeFile("ur0:data/libshacccg.suprx"), compilerB = ProbeFile("ur0:data/external/libshacccg.suprx");
+    GXV_BASIC_LOG("[vgx-vita] shader compiler module: ur0:data/libshacccg.suprx stat 0x%08X open 0x%08X, ur0:data/external/libshacccg.suprx stat 0x%08X open 0x%08X",
+                  static_cast<unsigned>(compilerA.stat), static_cast<unsigned>(compilerA.open), static_cast<unsigned>(compilerB.stat),
+                  static_cast<unsigned>(compilerB.open));
+    if (vgx::bootwatch::CompilerMissing(compilerA, compilerB)) {
+        vgx::bootwatch::FormatCompilerMissing(error, errorSize, compilerA, compilerB);
         return false;
     }
+    if ((compilerA.stat >= 0) != (compilerA.open >= 0) || (compilerB.stat >= 0) != (compilerB.open >= 0))
+        GXV_BASIC_LOG("[vgx-vita] the status call and the open disagree about a shader compiler module: going on (the load decides)");
 
     LogMemory("before vitaGL (game arenas allocated)");
     SceKernelFreeMemorySizeInfo free;
@@ -1336,7 +1486,7 @@ bool StartGl(char* error, size_t errorSize) {
         }
     }
     if (vglMemTotal(VGL_MEM_VRAM) == 0 && vglMemTotal(VGL_MEM_RAM) == 0) {
-        std::snprintf(error, errorSize, "vitaGL started without any memory pool (see the [vitaGL] lines in the log).");
+        std::snprintf(error, errorSize, "vitaGL started without any memory pool (vglInit gave none).\nRestart the Vita. If this repeats, send log.txt (the [vitaGL] lines).");
         return false;
     }
     LogMemory("after vitaGL");
@@ -1357,7 +1507,7 @@ bool StartGl(char* error, size_t errorSize) {
         const bool realBudget = free.size_cdram > 0 && free.size_cdram <= 160u * 1024u * 1024u;
         const int64_t taken = static_cast<int64_t>(free.size_cdram) - static_cast<int64_t>(after.size_cdram);
         if (realBudget && cdram > 0 && taken < cdram / 2) {
-            std::snprintf(error, errorSize, "vitaGL could not allocate its video memory pool (%u KiB asked, %u KiB of video memory still free); raise GXV_VITA_CDRAM_RESERVE_MIB.",
+            std::snprintf(error, errorSize, "vitaGL could not allocate its video memory pool (%u KiB asked, %u KiB free).\nRestart the Vita; close other applications. See GXV_VITA_CDRAM_RESERVE_MIB.",
                           static_cast<unsigned>(cdram / 1024), static_cast<unsigned>(after.size_cdram / 1024));
             return false;
         }
@@ -1398,9 +1548,35 @@ bool StartGl(char* error, size_t errorSize) {
                      : "[vgx-vita] GXV_VITA_MASK_GUARD=1: every draw and clear is preceded by a mask update under depth function NEVER (Vita3K Vulkan only)");
     }
 
+    // vitaGL loads the shader compiler module during its own start-up and says nothing when that fails (a log line at best, and not the
+    // result code): ask again here, name both results, and stop with a message that names the step. A load that works now (the first
+    // had failed) is kept: vitaGL asks vitaShaRK again at its first compile and finds it ready.
+    if (&is_shark_online != nullptr && !is_shark_online && shark_init) {
+        const int viaData = shark_init(nullptr);  // vitaGL's own first path: ur0:/data/libshacccg.suprx
+        const int viaExternal = viaData >= 0 ? 0 : shark_init("ur0:data/external/libshacccg.suprx");
+        GXV_BASIC_LOG("[vgx-vita] shader compiler load (vitaGL's attempt during its start-up had not worked): ur0:/data/libshacccg.suprx 0x%08X, "
+                      "ur0:data/external/libshacccg.suprx 0x%08X (0 = loaded)", static_cast<unsigned>(viaData), static_cast<unsigned>(viaExternal));
+        if (viaData < 0 && viaExternal < 0) {
+            vgx::bootwatch::FormatCompilerLoadFailure(error, errorSize, viaData, viaExternal);
+            return false;
+        }
+    }
     char testError[400] = "";
-    if (!ShaderCompilerSelfTest(testError, sizeof(testError))) {
-        std::snprintf(error, errorSize, "Run-time shader compilation does not work:\n%s", testError);
+    bool testOk = ShaderCompilerSelfTest(testError, sizeof(testError));
+    if (!testOk) {
+        GXV_BASIC_LOG("[vgx-vita] shader compiler self-test failed: %s", testError);
+        // GXV_SELFTEST_RETRY=0 stops at the first failure. Failure path only: a start that passes the test never gets here.
+        if (vgx::EnvInt("GXV_SELFTEST_RETRY", 1) != 0) {
+            const unsigned removed = RemoveSelfTestCacheFiles();
+            testError[0] = 0;
+            testOk = ShaderCompilerSelfTest(testError, sizeof(testError));
+            GXV_BASIC_LOG("[vgx-vita] shader compiler self-test again after removing %u cached file(s): %s", removed, testOk ? "passed" : testError);
+        }
+    }
+    if (!testOk) {
+        char reason[120];
+        vgx::bootwatch::FirstLine(reason, sizeof(reason), testError, 56);
+        std::snprintf(error, errorSize, "Shader compile test failed: %.56s\nDelete ux0:data/smg/shadercache and restart; if it repeats, send log.txt.", reason);
         return false;
     }
     // Static geometry goes to vitaGL's MAIN-memory pool (hint GL_DYNAMIC_DRAW): less video memory.
@@ -1508,6 +1684,12 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         }
     }
     if (g_presented == 5 || g_presented == 30 || g_presented == 120 || g_presented % 600 == 0) PinLibraryThreads(false, g_presented == 120 || g_presented == 9000);
+    if (splash::Active()) {
+        // What the renderer has been given so far moves while the game loads: one of the loading screen's signs of life.
+        splash::g_contentTick.store(static_cast<uint64_t>(stats.textures) * 7u + static_cast<uint64_t>(stats.programs) * 13u +
+                                    static_cast<uint64_t>(stats.shaderCompiles) * 17u + static_cast<uint64_t>(stats.programLinks) * 19u +
+                                    static_cast<uint64_t>(stats.textureBytes / 4096u), std::memory_order_relaxed);
+    }
     g_lastPresentUs = now;
     g_lastStats = stats;
 
@@ -1625,6 +1807,12 @@ extern "C" int port_vgx_vita_start(void) {
 
 // ---- the loading screen, as the rest of the program sees it
 extern "C" int port_boot_data_enabled(void) __attribute__((weak));
+// A message put on the loading screen can be seen: the screen is up and something is drawing it.
+static bool CanShowError() {
+    using namespace splash;
+    const int phase = g_phase.load();
+    return !(phase == kOff || phase == kDone || g_thread < 0 || !g_pic[0] || !g_pic[1] || (phase == kDirect && !loading::direct::g_base));
+}
 extern "C" int port_boot_data_error(const char* message) {
     using namespace splash;
     if (!port_boot_data_enabled || !port_boot_data_enabled()) return 0;
@@ -1633,6 +1821,19 @@ extern "C" int port_boot_data_error(const char* message) {
         (phase == kDirect && !loading::direct::g_base)) return 0;
     Fail(message);
     return 1;
+}
+// vgx_galaxy.cpp: a start-up failure that is already on the loading screen stays there (the game's thread parks) instead of aborting.
+extern "C" int port_vgx_vita_error_shown(void) { return splash::g_failed.load() && CanShowError() ? 1 : 0; }
+// vgx_galaxy.cpp: a start-up failure with a text for the screen ("line one\nline two"). 1 when the screen can show it.
+extern "C" int port_vgx_vita_fail(const char* message) {
+    if (!CanShowError()) return 0;
+    splash::Fail(message);
+    return 1;
+}
+// vgx_galaxy.cpp: the renderer's own set-up (its picture buffer, its copy shader) failed after the graphics had started.
+extern "C" void port_vgx_vita_backend_failed(void) {
+    GXV_BASIC_LOG("[vgx-vita] the renderer's set-up failed after the graphics had started (picture buffer or copy shader; see the lines above)");
+    port_vgx_vita_fail("The renderer could not set up its picture buffer or copy shader.\nRestart the Vita and start the game again. If this repeats, send log.txt.");
 }
 
 // vita/vgx-game/entry.cpp, once, first thing after the environment file and the clocks.
