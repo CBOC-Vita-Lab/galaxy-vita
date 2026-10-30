@@ -18752,7 +18752,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "6dcab3bf27758a717b608eb376275d5a96c9c5c00806bf73810c305906270de0"
+      "sha256": "c25f76ff145e14e44160e2ef9a6f571db776b8fc42f59f821bdc1e7cd61894c4"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
@@ -19068,19 +19068,19 @@
     },
     {
       "path": "platform/vgx/src/vgx_dlcache.cpp",
-      "sha256": "3614459686f840f09714a0576709b57cbb0651e880c9dec6e564f5ce8b3e2f44"
+      "sha256": "30fcd0893d997a2432ba7b0eb801530bd0b54b89d682caea2beb7c4cae99c335"
     },
     {
       "path": "platform/vgx/src/vgx_draw.cpp",
-      "sha256": "7d4d1daeb54f52d7c2619ebe8d5ff488f9d3fb02de6abb345f51124ece553067"
+      "sha256": "61abd8036eaa7ab9bcc0cf672e2891efd9521a439647b7d4d80280a446355fd6"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.cpp",
-      "sha256": "20c20afd669213d13d088cd35a328120606c3ffaadf943a38ae60292028e928a"
+      "sha256": "6c590fe3ed54c907e78187021a08c098948fbeca71a84608dae3f21c08ab9620"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.h",
-      "sha256": "f50a11098c4f5bddfa680d5df3a08426facb016271f592ae518aa207c3baf7f1"
+      "sha256": "e8e83db20c8dfcfe8ccc5eb286d997d125c6f8a019c3d23ff35656976b4a6537"
     },
     {
       "path": "platform/vgx/src/vgx_fixes.h",
@@ -19132,7 +19132,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_state.h",
-      "sha256": "9d0c7fdbc46450d4bd9eba2bb16411d8bf20100b99974074847ef062154e4105"
+      "sha256": "9752082212132a012bf7fe0087f367ce838a4f52525cd8a8143339f5160f22f6"
     },
     {
       "path": "platform/vgx/src/vgx_static_crowd.h",
@@ -19720,7 +19720,7 @@
     },
     {
       "path": "tests/vgx_dlcache.cpp",
-      "sha256": "6d28a1d26254e5f029dc113f883c1f5a0c19ecfd50df0eb46a2226b3af0d6317"
+      "sha256": "dd42cf0f7e47ec907a5048608b2579051f3f8d2a59c14a7518e3a85c9cfaddf7"
     },
     {
       "path": "tests/vgx_dlcache_bounds_guard.cpp",
@@ -19845,6 +19845,10 @@
     {
       "path": "tests/vgx_resource_driver.cpp",
       "sha256": "eb5fda35b00a14d2ab3d50a1b44d94d16364439a78ce78f335d53cf4bfd63b03"
+    },
+    {
+      "path": "tests/vgx_rigidmerge_gl.cpp",
+      "sha256": "13419995eb4ed1c280a9fbaaec766999280e52f43b091904c05be17fab5225c1"
     },
     {
       "path": "tests/vgx_sanitize.cpp",
@@ -20796,7 +20800,7 @@
     },
     {
       "path": "tools/test_vgx_dlcache.sh",
-      "sha256": "ac8269babcfde456c1b207f605a18541448033404a82ff0e4dcacf3eb9601c3c"
+      "sha256": "8711f1db543db51678823b8bd287b35408186853ac15df48cf58aa26152e766a"
     },
     {
       "path": "tools/test_vgx_dlcache_bounds_guard.sh",
@@ -20897,6 +20901,10 @@
     {
       "path": "tools/test_vgx_resource_driver.sh",
       "sha256": "70d9279770acdbb5a14d0ae993a1c82f792d2a98a9152aa8c7d685b07d99a534"
+    },
+    {
+      "path": "tools/test_vgx_rigidmerge_gl.sh",
+      "sha256": "f0932555f1ff8d937ff4523eaaeec9d57a4fa5bb5dee3fff5539883f21806bf8"
     },
     {
       "path": "tools/test_vgx_sanitize.sh",
@@ -21408,7 +21416,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "18ab837fbed3932e3fc321f77a91b60eb8406c0ec98da8115663773141b2a429"
+      "sha256": "35cbe0ca7901e865bdd2780ebb7de2d40118734d3e6c9e25b13ce9a75c1619e4"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
