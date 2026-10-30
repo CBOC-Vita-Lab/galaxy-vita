@@ -10,7 +10,11 @@ that exact library.
 2. **[patches/](patches/)**, applied in order: fixes first made for the Mario Strikers Charged port
    (uniform pool lifetime and blit flip, allocation recovery, title ID buffer, shader cache and
    shader/program robustness, shader source length) and the shader cache file names the port's
-   compiled-shader seed uses.
+   compiled-shader seed uses, then the two fail-closed fixes for the console freezes: `0009` (a scene that
+   cannot begin is reported by `scene_reset`, every submitting caller stops, no `sceGxmEndScene` follows,
+   bounded retry then fail-stop) and `0010` (depth/stencil creation returns a checked result, frees only its
+   own unsubmitted partial allocations and never publishes an incomplete surface). Host tests:
+   `tools/test_vitagl_scene_fail.sh --vitagl-source <patched tree>`.
 3. **[gpu_timers.py](gpu_timers.py)**: `GPU_TIMERS`, the per-scene GPU time the automatic picture
    quality reads, and `ANISO_SWITCH` (off unless the game asks for it).
 4. **[fbo_msaa.py](fbo_msaa.py)**: `FBO_MSAA`, multisampling per framebuffer object, for the automatic

@@ -1,0 +1,323 @@
+diff --git a/source/buffers.c b/source/buffers.c
+--- a/source/buffers.c
++++ b/source/buffers.c
+@@ -183,8 +183,9 @@ void glGetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
+ 	case GL_QUERY_RESULT:
+ 		if (q->sync > *query_fence.address) {
+ 			dirty_query = GL_TRUE;
+-			scene_reset();
+-			sceGxmNotificationWait(&query_fence);
++			// If no scene began, wait only when a scene end that reaches this query was already issued: otherwise the fence never advances
++			if (scene_reset() || q->sync <= query_fence.value)
++				sceGxmNotificationWait(&query_fence);
+ 		}
+ 		*params = queries_buffer[q->id] + queries_buffer[q->id + MAX_QUERIES_NUM] + queries_buffer[q->id + MAX_QUERIES_NUM * 2] + queries_buffer[q->id + MAX_QUERIES_NUM * 3];
+ 		if (q->mode != GL_SAMPLES_PASSED) {
+@@ -219,8 +220,9 @@ void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
+ 	case GL_QUERY_RESULT:
+ 		if (q->sync > *query_fence.address) {
+ 			dirty_query = GL_TRUE;
+-			scene_reset();
+-			sceGxmNotificationWait(&query_fence);
++			// If no scene began, wait only when a scene end that reaches this query was already issued: otherwise the fence never advances
++			if (scene_reset() || q->sync <= query_fence.value)
++				sceGxmNotificationWait(&query_fence);
+ 		}
+ 		*params = queries_buffer[q->id] + queries_buffer[q->id + MAX_QUERIES_NUM] + queries_buffer[q->id + MAX_QUERIES_NUM * 2] + queries_buffer[q->id + MAX_QUERIES_NUM * 3];
+ 		if (q->mode != GL_SAMPLES_PASSED) {
+diff --git a/source/draw.c b/source/draw.c
+--- a/source/draw.c
++++ b/source/draw.c
+@@ -175,7 +175,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+ #endif
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	if (cur_program != 0)
+@@ -231,7 +234,8 @@ void glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GL
+ 	}
+ #endif
+ 
+-	scene_reset();
++	if (!scene_reset())
++		return; // No scene began: nothing may be submitted
+ 	
+ 	GLint lowest = 0x7FFFFFFF;
+ 	GLsizei highest = 0, highest_count = 0;
+@@ -295,7 +299,10 @@ void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei prim
+ #endif
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = _glDrawArrays_CustomShadersIMPL(first, count, GL_TRUE);
+ 
+ #ifndef SKIP_ERROR_HANDLING
+@@ -354,7 +361,10 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *gl_in
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+@@ -408,7 +418,10 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const GLv
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+@@ -455,7 +468,10 @@ void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, G
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+@@ -500,7 +516,10 @@ void glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsize
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 	GLboolean is_draw_legal = GL_TRUE;
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+@@ -547,7 +566,10 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 
+ 	vbo *gpu_buf = (vbo *)cur_vao->index_array_unit;
+ 	uint16_t *src = gpu_buf ? (uint16_t *)((uint8_t *)gpu_buf->ptr + (uint32_t)gl_indices) : (uint16_t *)gl_indices;
+@@ -584,7 +606,10 @@ void vglDrawObjects(GLenum mode, GLsizei count) {
+ 
+ 	SceGxmPrimitiveType gxm_p;
+ 	gl_primitive_to_gxm(mode, gxm_p, count);
+-	scene_reset();
++	if (!scene_reset()) { // No scene began: nothing may be submitted, the polygon mode set above is put back
++		restore_polygon_mode(gxm_p);
++		return;
++	}
+ 
+ 	texture_unit *tex_unit = &texture_units[0];
+ 	if (cur_program != 0) {
+diff --git a/source/ffp.c b/source/ffp.c
+--- a/source/ffp.c
++++ b/source/ffp.c
+@@ -74,6 +74,7 @@ uint8_t ffp_texcoord_binds[3] = {FFP_ATTRIB_TEX0, FFP_ATTRIB_TEX1, FFP_ATTRIB_TE
+ 
+ // Internal stuffs
+ static uint32_t vertex_count = 0; // Vertex counter for vertex list
++static GLboolean ffp_scene_began = GL_TRUE; // Whether glBegin got a scene (if not, glEnd drops the vertices and submits nothing)
+ static SceGxmPrimitiveType prim; // Current in use primitive for rendering
+ 
+ #ifdef HAVE_UNPURE_TEXCOORDS
+@@ -2710,7 +2711,7 @@ void glBegin(GLenum mode) {
+ #endif
+ 
+ 	// Performing a scene reset if necessary
+-	scene_reset();
++	ffp_scene_began = scene_reset();
+ 
+ 	// Tracking desired primitive
+ 	ffp_mode = mode;
+@@ -2737,6 +2738,12 @@ void glEnd(void) {
+ 	phase = NONE;
+ #endif
+ 
++	// No scene began at glBegin: dropping the vertices, nothing is submitted
++	if (!ffp_scene_began) {
++		legacy_pool_ptr = legacy_pool;
++		return;
++	}
++
+ 	// Translating primitive to sceGxm one
+ 	gl_primitive_to_gxm(ffp_mode, prim, vertex_count);
+ 
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -685,7 +685,8 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
+ 	// If the current active framebuffer is the same of the source one for the read, we force a scene reset so that in-flight draws are executed
+ 	if (in_use_framebuffer == active_read_fb) {
+ 		dirty_framebuffer = GL_TRUE;
+-		scene_reset();
++		GLboolean began = scene_reset(); // On failure the old scene is already ended; the finish needs no new scene
++		(void)began;
+ 		sceGxmFinish(gxm_context);
+ 	}
+ #endif
+@@ -822,7 +823,10 @@ void glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLin
+ 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_OPERATION, mask)
+ 	}
+ 
+-	scene_reset();
++	if (!scene_reset()) {
++		active_write_fb = real_write_fb; // No scene began: nothing may be submitted
++		return;
++	}
+ 
+ 	// Invalidating viewport and culling
+ 	invalidate_viewport();
+diff --git a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -644,8 +644,40 @@ void vglResumeUniformPoolScene(GLboolean resume) {
+ #endif
+ }
+ 
+-void scene_reset(void) {
++// A scene that could not be begun (depth/target allocation or sceGxmBeginScene failed) must not receive a single draw, clear or
++// blit, and must never be ended: scene_reset reports it with GL_FALSE and every caller returns before it submits anything.
++// Bounded retry: at most VGL_SCENE_TRIES_PER_FRAME attempts a frame (so a failing allocator is not hammered by every draw call);
++// after VGL_SCENE_FAIL_LIMIT failed attempts in a row it is a fail-stop (log, abort) instead of a hung console.
++#ifndef VGL_SCENE_TRIES_PER_FRAME
++#define VGL_SCENE_TRIES_PER_FRAME 3
++#endif
++#ifndef VGL_SCENE_FAIL_LIMIT
++#define VGL_SCENE_FAIL_LIMIT 360
++#endif
++static uint32_t scene_fail_frame = 0; // Frame of the latest failed scene begin
++static uint32_t scene_fail_tries = 0; // Failed attempts in that frame
++static uint32_t scene_fail_streak = 0; // Failed attempts since the last scene that began
++
++static GLboolean scene_begin_failed(void) {
++	needs_end_scene = GL_FALSE; // No scene is open: sceGxmEndScene must not follow
++	needs_scene_reset = GL_TRUE; // The next call starts the scene again
++	if (scene_fail_streak == 0 || scene_fail_frame != vgl_framecount) {
++		scene_fail_frame = vgl_framecount;
++		scene_fail_tries = 0;
++	}
++	scene_fail_tries++;
++	if (++scene_fail_streak > VGL_SCENE_FAIL_LIMIT) {
++		vgl_log("%s:%d Scene could not be started %u times in a row: stopping instead of freezing the console.\n", __FILE__, __LINE__, scene_fail_streak - 1);
++		abort();
++	}
++	return GL_FALSE;
++}
++
++GLboolean scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
++		// The attempts of this frame are used up: nothing is touched, nothing is submitted
++		if (scene_fail_streak && scene_fail_frame == vgl_framecount && scene_fail_tries >= VGL_SCENE_TRIES_PER_FRAME)
++			return GL_FALSE;
+ 		scene_not_flushed = GL_TRUE;
+ 		dirty_framebuffer = GL_FALSE;
+ 		dirty_query = GL_FALSE;
+@@ -697,6 +729,8 @@ void scene_reset(void) {
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on display.\n", __FILE__, __LINE__, get_gxm_error_literal(r));
+ 			}
+ #endif
++			if (r)
++				return scene_begin_failed();
+ 		} else {
+ 			// Double check that colorsurface and target texture are synced
+ 			if (sceGxmColorSurfaceGetData(&active_write_fb->colorbuffer) != active_write_fb->tex->data) {
+@@ -732,6 +766,8 @@ void scene_reset(void) {
+ 				}
+ 			}
+ #endif
++			if (!active_write_fb->target)
++				return scene_begin_failed(); // No render target (allocation failed): there is nothing to begin a scene on
+ #ifdef HAVE_SHARED_RENDERTARGETS
+ 			render_target *fbo_rt = (render_target *)active_write_fb->target;
+ #ifdef RECYCLE_RENDERTARGETS
+@@ -748,8 +784,12 @@ void scene_reset(void) {
+ 			if (r)
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on framebuffer 0x%08X.\n", __FILE__, __LINE__, get_gxm_error_literal(r), active_write_fb);
+ #endif
++			if (r)
++				return scene_begin_failed();
+ 		}
+ 
++		scene_fail_streak = 0; // The scene began
++
+ 		// Setting back current viewport if enabled cause sceGxm will reset it at sceGxmEndScene call
+ 		if (old_framebuffer != in_use_framebuffer) {
+ 			dirty_scissor_state = GL_TRUE;
+@@ -780,6 +820,7 @@ void scene_reset(void) {
+ 	if (dirty_scissor_state) {
+ 		update_scissor_test();
+ 	}
++	return GL_TRUE;
+ }
+ 
+ /*
+@@ -1074,7 +1115,8 @@ void glFinish(void) {
+ 	// Waiting for GPU to finish drawing jobs
+ 	if (scene_not_flushed) {
+ 		dirty_framebuffer = GL_TRUE;
+-		scene_reset();
++		GLboolean began = scene_reset(); // On failure the old scene is already ended; finishing it needs no new scene
++		(void)began;
+ 		sceGxmFinish(gxm_context);
+ 		scene_not_flushed = GL_FALSE;
+ 	}
+@@ -1094,7 +1136,8 @@ void glFlush(void) {
+ 	
+ 	if (scene_not_flushed) {
+ 		dirty_framebuffer = GL_TRUE;
+-		scene_reset();
++		GLboolean began = scene_reset(); // On failure the old scene is already ended and submitted
++		(void)began;
+ 		scene_not_flushed = GL_FALSE;
+ 	}
+ }
+diff --git a/source/misc.c b/source/misc.c
+--- a/source/misc.c
++++ b/source/misc.c
+@@ -648,7 +648,8 @@ void glClear(GLbitfield mask) {
+ 		SET_GL_ERROR(GL_INVALID_VALUE);
+ 	}
+ #endif
+-	scene_reset();
++	if (!scene_reset())
++		return; // No scene began: nothing may be submitted
+ 
+ 	// Invalidating viewport and culling
+ 	invalidate_viewport();
+diff --git a/source/shared.h b/source/shared.h
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -1216,7 +1216,7 @@ void init_display_color_surfaces(GLboolean is_swap); // Creates color surfaces f
+ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces
+ void init_display_depth_stencil_surfaces(void); // Creates depth and stencil surfaces for the display
+ void start_shader_patcher(void); // Creates a shader patcher instance
+-void scene_reset(void); // Resets drawing scene if required
++GLboolean scene_reset(void); // Resets drawing scene if required: GL_FALSE means no scene began, so the caller must submit nothing
+ GLboolean start_shader_compiler(void); // Starts a shader compiler instance
+ 
+ /* framebuffers.c */

@@ -332,6 +332,7 @@ static GLboolean depth_hint_valid = GL_FALSE;
 sub(g, """	if (dirty_scissor_state) {
 		update_scissor_test();
 	}
+	return GL_TRUE;
 }
 """, """	if (dirty_scissor_state) {
 		update_scissor_test();
@@ -339,6 +340,7 @@ sub(g, """	if (dirty_scissor_state) {
 #ifdef MASK_SKIP
 	vgl_mask_skip_next = GL_FALSE; // (only for the update at the start of the scene that set it)
 #endif
+	return GL_TRUE;
 }
 """)
 t = d + "/tests.c"

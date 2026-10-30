@@ -64,9 +64,9 @@ sub('shared.h', '''		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_tex
 			msaa_mode == SCE_GXM_MULTISAMPLE_NONE ? SCE_GXM_COLOR_SURFACE_SCALE_NONE : SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE,''',
     '''		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_texture(fmt), SCE_GXM_COLOR_SURFACE_LINEAR,
 			FB_MSAA(fb) == SCE_GXM_MULTISAMPLE_NONE ? SCE_GXM_COLOR_SURFACE_SCALE_NONE : SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE,''')
-sub('shared.h', 'void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces',
-    '''void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces
-void init_depth_stencil_buffer_ms(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil, SceGxmMultisampleMode mode); // ... with a given multisample mode''')
+sub('shared.h', 'GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces; GL_FALSE: allocation failed, *surface untouched',
+    '''GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces; GL_FALSE: allocation failed, *surface untouched
+GLboolean init_depth_stencil_buffer_ms(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil, SceGxmMultisampleMode mode); // ... with a given multisample mode''')
 
 # ---- gxm.c: cur_msaa, render targets and depth buffers of a framebuffer's own mode
 sub('gxm.c', 'GLboolean is_fbo_float = GL_FALSE; // Current framebuffer mode\n', '''GLboolean is_fbo_float = GL_FALSE; // Current framebuffer mode
@@ -89,14 +89,14 @@ static inline __attribute__((always_inline)) int setup_render_target(SceGxmRende
 	return setup_render_target_ms(rt, w, h, refs, msaa_mode);
 }
 ''')
-sub('gxm.c', 'void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {\n',
-    'void init_depth_stencil_buffer_ms(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil, SceGxmMultisampleMode mode) {\n')
+sub('gxm.c', 'GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {\n',
+    'GLboolean init_depth_stencil_buffer_ms(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil, SceGxmMultisampleMode mode) {\n')
 sub('gxm.c', '	if (msaa_mode == SCE_GXM_MULTISAMPLE_2X)\n		depth_stencil_samples *= 2;\n	else if (msaa_mode == SCE_GXM_MULTISAMPLE_4X)\n',
     '	if (mode == SCE_GXM_MULTISAMPLE_2X)\n		depth_stencil_samples *= 2;\n	else if (mode == SCE_GXM_MULTISAMPLE_4X)\n')
 sub('gxm.c', '		msaa_mode == SCE_GXM_MULTISAMPLE_4X ? depth_stencil_width * 2 : depth_stencil_width,\n',
     '		mode == SCE_GXM_MULTISAMPLE_4X ? depth_stencil_width * 2 : depth_stencil_width,\n')
-sub('gxm.c', 'void init_display_depth_stencil_surfaces(void) {\n', '''void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {
-	init_depth_stencil_buffer_ms(w, h, surface, has_stencil, msaa_mode);
+sub('gxm.c', 'void init_display_depth_stencil_surfaces(void) {\n', '''GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {
+	return init_depth_stencil_buffer_ms(w, h, surface, has_stencil, msaa_mode);
 }
 
 void init_display_depth_stencil_surfaces(void) {
@@ -106,8 +106,8 @@ sub('gxm.c', '		is_fbo_float = in_use_framebuffer ? in_use_framebuffer->is_float
 		cur_msaa = in_use_framebuffer ? in_use_framebuffer->msaa : msaa_mode;
 #endif
 ''')
-sub('gxm.c', '				init_depth_stencil_buffer(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL);\n',
-    '				init_depth_stencil_buffer_ms(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL, FB_MSAA(active_write_fb));\n')
+sub('gxm.c', '				if (!init_depth_stencil_buffer(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL))\n',
+    '				if (!init_depth_stencil_buffer_ms(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL, FB_MSAA(active_write_fb)))\n')
 sub('gxm.c', '				int r = setup_render_target(&active_write_fb->target, active_write_fb->width, active_write_fb->height, gxm_fbo_rt_size);\n',
     '				int r = setup_render_target_ms(&active_write_fb->target, active_write_fb->width, active_write_fb->height, gxm_fbo_rt_size, FB_MSAA(active_write_fb));\n')
 
