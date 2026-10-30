@@ -1,6 +1,7 @@
 // Front end: turns the register state into self-contained draw records.
 #include "vgx_state.h"
 #include "vgx_fesplit.h"
+#include "vgx_fixes.h"
 #include "vgx_recipe_seed.h"
 #include "vgx_variant_set.h"
 
@@ -420,6 +421,33 @@ inline bool DstAlphaZeroEnabled() {
     static const bool enabled = EnvInt("GXV_DSTALPHA_ZERO", 0) == 1;
     return enabled;
 }
+// GXV_FIX_DSTA (default 0): GXSetDstAlpha(TRUE, a) with blending or GX_BM_SUBTRACT writes the constant a to the framebuffer
+// alpha for every constant (GXV_DSTALPHA_ZERO covers only a = 0 and needs a colour write), see vgx_fixes.h PlanDstAlpha. Galaxy's volume
+// lights, search light and dark mask use it as a mask plane. 1 includes what GXV_DSTALPHA_ZERO does.
+inline bool FixDstA() {
+    static const bool on = EnvInt("GXV_FIX_DSTA", 0) != 0;
+    return on;
+}
+// GXV_FIX_LOGICOP (default 0): GX logic-op blend (BP 0x41 bit 1) uses blend factors that reproduce the op on 0/255 channels
+// (vgx_fixes.h LogicOpPlan) instead of the table in LegacyLogicOpFactors, which is right for 7 of the 16 ops.
+inline bool FixLogicOp() {
+    static const bool on = EnvInt("GXV_FIX_LOGICOP", 0) != 0;
+    return on;
+}
+// GXV_FIX_TEXOFF (default 0): a TEV stage that reads the texture colour while its texture is switched off in BP 0x28.. reads white
+// (as GX does) instead of whatever an earlier stage sampled.
+inline bool FixTexOff() {
+    static const bool on = EnvInt("GXV_FIX_TEXOFF", 0) != 0;
+    return on;
+}
+uint8_t MapSrcFactor(uint32_t f, bool hasAlpha);
+uint8_t MapDstFactor(uint32_t f, bool hasAlpha);
+inline fixes::DstAlphaPlan DstAlphaPlanNow() {
+    const uint32_t cm0 = g.bp[0x41];
+    const bool hasAlpha = EfbHasAlpha();
+    return fixes::PlanDstAlpha(bits(g.bp[0x42], 8, 1) != 0, bits(g.bp[0x42], 0, 8), bits(cm0, 4, 1) != 0 && hasAlpha, bits(cm0, 3, 1) != 0,
+                               bits(cm0, 0, 1) != 0, bits(cm0, 11, 1) != 0, MapSrcFactor(bits(cm0, 8, 3), hasAlpha), MapDstFactor(bits(cm0, 5, 3), hasAlpha));
+}
 
 uint8_t SwapTable(int t) {
     const uint32_t rg = g.bp[0xF6 + 2 * t], ba = g.bp[0xF7 + 2 * t];
@@ -469,6 +497,8 @@ void BuildFsKey(FsKey& k) {
             st.texEnable = 1;
             st.texMap = static_cast<uint8_t>(bits(tref, 0, 3));
             st.texSwap = SwapTable(bits(teva, 2, 2));
+        } else if (usesTex && FixTexOff()) {
+            st.texOff = 1;
         }
         if (usesRas) {
             st.rasChan = static_cast<uint8_t>(bits(tref, 7, 3));
@@ -508,11 +538,16 @@ void BuildFsKey(FsKey& k) {
         if (bits(g.xfReg[0x40 + i], 1, 1)) k.texProjMask |= static_cast<uint8_t>(1u << i);
     const uint32_t cm0 = g.bp[0x41];
     const bool blending = bits(cm0, 0, 1) || bits(cm0, 11, 1);
-    if (bits(g.bp[0x42], 8, 1) && EfbHasAlpha() && bits(cm0, 4, 1)) {
+    if (FixDstA()) {
+        const fixes::DstAlphaPlan p = DstAlphaPlanNow();
+        k.dstAlpha = p.fsConst ? 1 : 0;
+        if (p.unresolved) stats::Note("GXSetDstAlpha constant with a source-alpha blend factor: constant alpha NOT written (needs a second pass)");
+    } else if (bits(g.bp[0x42], 8, 1) && EfbHasAlpha() && bits(cm0, 4, 1)) {
         if (!blending) k.dstAlpha = 1;
         else if (!DstAlphaZeroEnabled() || bits(g.bp[0x42], 0, 8) != 0)
             stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
     }
+    if (FixLogicOp() && !blending && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3) k.logicSrc = fixes::LogicOpPlan(bits(cm0, 12, 4)).src;
 }
 
 void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk, uint8_t fsFog) {
@@ -607,22 +642,26 @@ void BuildRenderState(RenderState& rs) {
         if (rs.blendSrc == BF_ONE && rs.blendDst == BF_ZERO) rs.blend = 0;
     } else if (bits(cm0, 1, 1)) {
         // Logic ops do not exist on the target GPU API; approximate with blending
-        // (same table Dolphin uses for back ends without logic op support).
-        static const uint8_t lo[16][2] = {
-            {BF_ZERO, BF_ZERO}, {BF_DST_COLOR, BF_ZERO}, {BF_ONE, BF_INV_SRC_COLOR}, {BF_ONE, BF_ZERO},
-            {BF_DST_COLOR, BF_ONE}, {BF_ZERO, BF_ONE}, {BF_INV_DST_COLOR, BF_INV_SRC_COLOR}, {BF_INV_DST_COLOR, BF_ONE},
-            {BF_INV_SRC_COLOR, BF_INV_DST_COLOR}, {BF_INV_SRC_COLOR, BF_SRC_COLOR}, {BF_INV_DST_COLOR, BF_INV_DST_COLOR},
-            {BF_ONE, BF_INV_DST_ALPHA}, {BF_INV_SRC_COLOR, BF_INV_SRC_COLOR}, {BF_INV_SRC_COLOR, BF_ONE},
-            {BF_INV_DST_COLOR, BF_INV_SRC_COLOR}, {BF_ONE, BF_ONE}};
+        // (same table Dolphin uses for back ends without logic op support; GXV_FIX_LOGICOP: a table that is exact on 0/255 channels).
         const uint32_t op = bits(cm0, 12, 4);
         if (op != 3) {
-            rs.blend = 1; rs.blendSrc = lo[op][0]; rs.blendDst = lo[op][1];
+            rs.blend = 1;
+            if (FixLogicOp()) {
+                const fixes::LogicPlan lp = fixes::LogicOpPlan(op);
+                rs.blendSrc = lp.sf; rs.blendDst = lp.df;
+            } else {
+                fixes::LegacyLogicOpFactors(op, rs.blendSrc, rs.blendDst);
+            }
             stats::Note("logic-op blend mode used (approximated with blend factors)");
         }
     }
     rs.colorWrite = static_cast<uint8_t>(bits(cm0, 3, 1));
     rs.alphaWrite = static_cast<uint8_t>(bits(cm0, 4, 1) && hasAlpha);
-    if ((bits(cm0, 0, 1) || bits(cm0, 11, 1)) && rs.alphaWrite && bits(g.bp[0x42], 8, 1) &&
+    if (FixDstA()) {
+        const fixes::DstAlphaPlan p = DstAlphaPlanNow();
+        if (p.dropBlend) { rs.blend = 0; rs.blendSrc = BF_ONE; rs.blendDst = BF_ZERO; rs.blendEq = BE_ADD; }
+        rs.dstAlphaZero = p.rsMode;
+    } else if ((bits(cm0, 0, 1) || bits(cm0, 11, 1)) && rs.alphaWrite && bits(g.bp[0x42], 8, 1) &&
         bits(g.bp[0x42], 0, 8) == 0 && DstAlphaZeroEnabled()) {
         rs.dstAlphaZero = 1;
         // ONE/ZERO is normally unblended, but its alpha still needs the override.

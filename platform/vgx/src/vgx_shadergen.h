@@ -22,7 +22,9 @@ struct FsKey {
     // the front end writes the register values into the vertices, so that draws which
     // differ only in them (particles fading out) merge into one. See FoldRegs in vgx_draw.cpp.
     uint8_t regFromVtx = 0;
-    uint8_t pad[2] = {};
+    // GX logic op emulated by blending (vgx_fixes.h LogicOpPlan): 0 the colour as it is, 1 inverted, 2 white. Set only under GXV_FIX_LOGICOP.
+    uint8_t logicSrc = 0;
+    uint8_t pad[1] = {};
     struct Stage {
         uint32_t color = 0; // BP 0xC0+2n bits 0..23
         uint32_t alpha = 0; // BP 0xC1+2n bits 4..23 (swap selects stripped)
@@ -30,7 +32,9 @@ struct FsKey {
         uint8_t texEnable = 0, texMap = 0, texCoord = 0, rasChan = 7; // 0, 1, 5/6 (bump alpha), 7 = zero
         uint8_t kcsel = 0, kasel = 0;
         uint8_t rasSwap = 0xE4, texSwap = 0xE4; // 2 bits per output component, r in bits 0..1
-        uint8_t pad[4] = {};
+        // The stage reads the texture colour but its texture is switched off (BP 0x28.. enable bit clear): GX gives white. Set only under GXV_FIX_TEXOFF.
+        uint8_t texOff = 0;
+        uint8_t pad[3] = {};
     } stage[16];
     struct Ind {
         uint8_t texMap = 0, texCoord = 0, pad[2] = {};

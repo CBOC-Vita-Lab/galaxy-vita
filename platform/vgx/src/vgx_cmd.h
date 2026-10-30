@@ -91,7 +91,7 @@ struct RenderState {
     uint8_t blend = 0, blendSrc = BF_ONE, blendDst = BF_ZERO, blendEq = BE_ADD;
     uint8_t depthTest = 0, depthFunc = CMP_LEQUAL, depthWrite = 0, cull = CULL_NONE;
     uint8_t colorWrite = 1, alphaWrite = 1;
-    uint8_t dstAlphaZero = 0; // blended RGB with independent ZERO/ZERO alpha factors
+    uint8_t dstAlphaZero = 0; // blended RGB with independent alpha factors: 1 ZERO/ZERO, 2 ONE/ZERO (GXV_FIX_DSTA: the shader writes the constant)
     uint8_t lineWidth6 = 6;   // GX line width / point size in 1/6 pixel
     // Scissor and viewport in EFB pixels, origin top-left. The back end scales
     // them to the render target.

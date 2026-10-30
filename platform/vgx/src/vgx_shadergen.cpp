@@ -273,6 +273,14 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     // GXV_TEVWRAP_ELIDE is read once: 0/default keeps the original source; 1 elides only
     // proven unit-range copies; 2 independently verifies the proof with fallback.
     static const long elide = EnvInt("GXV_TEVWRAP_ELIDE", 0);
+    // GXV_FIX_INDPREV (default 0 until seen on the console: it changes the text of add-previous keys, whose compiled shaders are then not in the shipped cache; 1 = the fix): an indirect stage that adds the previous stage's coordinate
+    // (BP 0x10+n bit 20, GX_ITB addprev) adds it in texels, as GX does. The old text added the previous stage's
+    // already-normalised coordinate to texel units, so the carried-over part was ~1/texture-size of what it should be.
+    static const bool indPrevOn = EnvInt("GXV_FIX_INDPREV", 0) != 0;
+    // (only a shader with an add-previous stage changes text; every other indirect shader keeps its source and compiled cache)
+    bool indPrev = false;
+    for (int s = 0; indPrevOn && s < k.numStages; ++s)
+        if (k.stage[s].ind && bits(k.stage[s].ind, 20, 1)) indPrev = true;
     bool unitColor = false, unitAlpha = false;
     if (wrapFinal && (elide == 1 || elide == 2)) UnitFinal(k, elide == 2, unitColor, unitAlpha);
     const FsKey::Stage& last = k.stage[k.numStages - 1];
@@ -319,7 +327,7 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
         o("  vec3 ind%d = texture2D(u_tex%d, %s * u_tev[%d].xy).abg * 255.0;\n", i, k.ind[i].texMap, Uv(k.ind[i].texCoord).c_str(),
           V_INDSCALE + i);
     }
-    if (k.numIndStages) o("  vec2 itc = vec2(0.0);\n");
+    if (k.numIndStages) o(indPrev ? "  vec2 itc = vec2(0.0), itx = vec2(0.0);\n" : "  vec2 itc = vec2(0.0);\n");
 
     for (int s = 0; s < k.numStages; ++s) {
         const FsKey::Stage& st = k.stage[s];
@@ -350,12 +358,18 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
             else if (sw) o("    tcx.x = tcx.x - %.1f * floor(tcx.x / %.1f);\n", kWrap[sw], kWrap[sw]);
             if (tw == 6) o("    tcx.y = 0.0;\n");
             else if (tw) o("    tcx.y = tcx.y - %.1f * floor(tcx.y / %.1f);\n", kWrap[tw], kWrap[tw]);
-            if (addPrev) o("    itc = tcx + io + itc;\n");
-            else o("    itc = tcx + io;\n");
-            o("    itc = itc / tsz;\n  }\n");
+            if (indPrev) {
+                o(addPrev ? "    itx = tcx + io + itx;\n" : "    itx = tcx + io;\n");
+                o("    itc = itx / tsz;\n  }\n");
+            } else {
+                if (addPrev) o("    itc = tcx + io + itc;\n");
+                else o("    itc = tcx + io;\n");
+                o("    itc = itc / tsz;\n  }\n");
+            }
             coord = "itc";
         }
         if (st.texEnable) o("  tex = texture2D(u_tex%d, %s).%s;\n", st.texMap, coord.c_str(), Swizzle(st.texSwap).c_str());
+        else if (st.texOff) o("  tex = vec4(1.0);\n");
         if (st.rasChan < 2) o("  ras = v_col%d.%s;\n", st.rasChan, Swizzle(st.rasSwap).c_str());
         else o("  ras = vec4(0.0);\n");
         const uint32_t tc = st.color, ta = st.alpha;
@@ -463,6 +477,8 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
         o("  fin.rgb = mix(fin.rgb, u_tev[%d].rgb, fg);\n", V_FOGCOL);
     }
     if (k.dstAlpha) o("  fin.a = u_tev[%d].z;\n", V_MISC);
+    if (k.logicSrc == 1) o("  fin.rgb = vec3(1.0) - fin.rgb;\n");
+    else if (k.logicSrc == 2) o("  fin.rgb = vec3(1.0);\n");
     o("  gl_FragColor = fin;\n}\n");
     src.text = std::move(o.s);
     src.texMask = texMask;

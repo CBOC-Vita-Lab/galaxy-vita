@@ -634,15 +634,17 @@ inline void SetBlendOff() {
     ++C.stateCalls;
     S.blendOn = 0;
 }
-inline void SetBlend(GLenum eq, GLenum src, GLenum dst, bool alphaZero = false) {
+// alphaMode: 0 the colour factors for alpha too; 1 alpha factors ZERO/ZERO (writes 0); 2 alpha factors ONE/ZERO (RenderState::dstAlphaZero)
+inline void SetBlend(GLenum eq, GLenum src, GLenum dst, int alphaMode = 0) {
     if (S.blendOn != 1) { G(glEnable(GL_BLEND)); ++C.stateCalls; S.blendOn = 1; }
     if (S.blendEq != static_cast<int>(eq)) { G(glBlendEquation(eq)); ++C.stateCalls; S.blendEq = static_cast<int>(eq); }
-    if (S.blendSrc != static_cast<int>(src) || S.blendDst != static_cast<int>(dst) || S.blendAlphaZero != static_cast<int8_t>(alphaZero)) {
-        if (alphaZero) G(glBlendFuncSeparate(src, dst, GL_ZERO, GL_ZERO));
+    if (S.blendSrc != static_cast<int>(src) || S.blendDst != static_cast<int>(dst) || S.blendAlphaZero != static_cast<int8_t>(alphaMode)) {
+        if (alphaMode == 1) G(glBlendFuncSeparate(src, dst, GL_ZERO, GL_ZERO));
+        else if (alphaMode == 2) G(glBlendFuncSeparate(src, dst, GL_ONE, GL_ZERO));
         else G(glBlendFunc(src, dst));
         ++C.stateCalls;
         S.blendSrc = static_cast<int>(src); S.blendDst = static_cast<int>(dst);
-        S.blendAlphaZero = static_cast<int8_t>(alphaZero);
+        S.blendAlphaZero = static_cast<int8_t>(alphaMode);
     }
 }
 inline void SetDepthTest(bool on, GLenum func = GL_ALWAYS) {
@@ -1350,7 +1352,7 @@ bool ApplyRenderState(const RenderState& rs) {
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     SetViewport(Rnd(rs.vpX * sx) - ox, Rnd(rs.vpY * sy) - oy, Rnd(rs.vpW * sx), Rnd(rs.vpH * sy));
     SetDepthRange(zNear, zFar);
-    if (rs.blend) SetBlend(rs.blendEq == BE_REVSUB ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend(rs.blendSrc), MapBlend(rs.blendDst), rs.dstAlphaZero != 0);
+    if (rs.blend) SetBlend(rs.blendEq == BE_REVSUB ? GL_FUNC_REVERSE_SUBTRACT : GL_FUNC_ADD, MapBlend(rs.blendSrc), MapBlend(rs.blendDst), rs.dstAlphaZero == 2 ? 2 : (rs.dstAlphaZero ? 1 : 0));
     else SetBlendOff();
     if (rs.depthTest) {
         SetDepthTest(true, kCmp[rs.depthFunc & 7]);
