@@ -307,8 +307,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Frame pipeline (1.2): the game thread alone on core 0 (every other thread on cores 1-2); under a frame cap the queue depth
     // follows the back end's own CPU time, not its wall time (which includes the display wait and kept the queue at one frame,
     // so the game and the renderer stopped overlapping); a vblank wait that returned counts as a passed vblank.
-    // GXV_CORE3_IO (disc and movie work on the system core) stays a test switch.
-    for (const char* name : {"GXV_CORE0_ALONE", "GXV_FIXED_DEPTH", "GXV_PACE_VBLANK_COUNT"}) setenv(name, "1", 0);
+    // The console DSP's mixing on its own thread off core 0 (bit-identical PCM). GXV_CORE3_IO (disc and movie work on the
+    // system core) and GXV_DRAWDONE_DEFER (end-of-turn draw-done wait moved later) stay test switches.
+    for (const char* name : {"GXV_CORE0_ALONE", "GXV_FIXED_DEPTH", "GXV_PACE_VBLANK_COUNT", "GXV_AUDIO_THREAD"}) setenv(name, "1", 0);
     // This thread, which started with no restriction, leaves core 0 as soon as GXV_CORE0_ALONE is known.
     port_vita_thread_helper();
     LoadInputScript(SMG_DATA "/input.txt");
