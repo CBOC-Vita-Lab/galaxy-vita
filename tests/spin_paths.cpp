@@ -1,7 +1,7 @@
 // Square (and R) must reach the game as a shake in every situation the player meets: production vita/runtime/input.cpp and
 // platform/src/input/wpad.cpp (what KPADRead hands the game), SDK calls faked.  The game's own swing test
 // (WPadHVSwing::updateSwing: distance between the current acceleration and the one 20 reads ago, at least 1) runs on the
-// result.  Argument: remap (0/1), then the latch switch (0/1).
+// result.  Arguments: remap (0/1), the latch switch (0/1), and optionally GXV_SHAKE_PULSE (0/1).
 #include "input.h"
 #include "revolution/kpad.h"
 #include <psp2/ctrl.h>
@@ -91,8 +91,9 @@ static int pressSquare(Swing& g, unsigned button, int frames, int polls = 4) {
 }
 
 int main(int argc, char** argv) {
-    assert(argc == 3);
-    const bool remap = std::atoi(argv[1]) != 0, latch = std::atoi(argv[2]) != 0;
+    assert(argc == 3 || argc == 4);
+    const bool remap = std::atoi(argv[1]) != 0, latch = std::atoi(argv[2]) != 0, pulse = argc == 4 && std::atoi(argv[3]) != 0;
+    setenv("GXV_SHAKE_PULSE", pulse ? "1" : "0", 1);
     setenv("GXV_REMAP", remap ? "1" : "0", 1);
     setenv("GXV_SHAKE_LATCH", latch ? "1" : "0", 1);
     raw.lx = raw.ly = raw.rx = raw.ry = 128;
@@ -121,9 +122,9 @@ int main(int argc, char** argv) {
     }
 
     // Right after the settings screen: a press that comes after the return spins; one held across it waits for the release.
-    raw.buttons = 0; step(); port_vita_input_settings_rearm(); step(); g.read();
+    raw.buttons = 0; step(); port_input_settings_rearm(); port_vita_input_settings_rearm(); step(); g.read();
     assert(pressSquare(g, SCE_CTRL_SQUARE, 6) >= 1); rest(g, 40);
-    raw.buttons = SCE_CTRL_SQUARE; step(); port_vita_input_settings_rearm();
+    raw.buttons = SCE_CTRL_SQUARE; step(); port_input_settings_rearm(); port_vita_input_settings_rearm();
     step(); g.read();
     assert(kpad.acc.x == 0.0f && kpad.acc.y == -1.0f);   // held across: not delivered
     rest(g, 40);
@@ -138,9 +139,10 @@ int main(int argc, char** argv) {
         port_vita_input_poll(0.004f, &pad); port_input_set(0, &pad);
         assert(KPADRead(0, &kpad, 1) == 1);
         const bool seen = std::fabs(kpad.acc.x) > 1.0f;
-        assert(seen == latch);
-        assert(KPADRead(0, &kpad, 1) == 1 && kpad.acc.x == 0.0f);   // once only
+        assert(seen == (latch || pulse));
+        // once only: the latch reports the shake on one read; the pulse shaping goes on for its 20 reads
+        assert(KPADRead(0, &kpad, 1) == 1 && (pulse ? std::fabs(kpad.acc.x) > 1.0f : kpad.acc.x == 0.0f));
     }
     port_vita_input_shutdown();
-    std::printf("PASS: Square and R spin paths remap=%d latch=%d\n", remap, latch);
+    std::printf("PASS: Square and R spin paths remap=%d latch=%d pulse=%d\n", remap, latch, pulse);
 }

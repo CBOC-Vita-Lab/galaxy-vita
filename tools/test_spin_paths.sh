@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Square/R spin reaches the game as a shake in play, menus, touch, tilt, zoom menu and after Settings; shake latch (GXV_SHAKE_LATCH).
+# Square/R spin reaches the game as a shake in play, menus, touch, tilt, zoom menu and after Settings; shake latch (GXV_SHAKE_LATCH), pulse shaping (GXV_SHAKE_PULSE).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 sdk=${VITASDK:-/opt/vitasdk}
@@ -14,4 +14,4 @@ done
   -I"$root/platform/include" -I"$root/vita/runtime" -I"$root/decomp/libs/RVL_SDK/include" \
   "$root/tests/spin_paths.cpp" "$root/vita/runtime/input.cpp" \
   "$root/platform/src/input/control_bindings.cpp" "$root/platform/src/input/wpad.cpp" -o "$out/test"
-for remap in 0 1; do for latch in 0 1; do "$out/test" "$remap" "$latch"; done; done
+for remap in 0 1; do for latch in 0 1; do for pulse in 0 1; do "$out/test" "$remap" "$latch" "$pulse"; done; done; done
