@@ -194,10 +194,11 @@ bool ParseGameFontArchive(const void* data,size_t bytes,FontBundle& out,const ch
     if(!haveMenu)error="Menu font unavailable; message font retained";else if(!haveMessage)error="Message font unavailable; menu font retained";
     out=std::move(bundle);return true;
 }
-uint32_t NextFontCodepoint(const std::string& text,size_t& offset) {
-    if(offset>=text.size())return 0;
+uint32_t NextFontCodepoint(const std::string& text,size_t& offset) {return NextFontCodepoint(text.data(),text.size(),offset);}
+uint32_t NextFontCodepoint(const char* text,size_t length,size_t& offset) {
+    if(offset>=length)return 0;
     const size_t start=offset;unsigned first=static_cast<unsigned char>(text[offset++]);if(first<0x80)return first;
-    unsigned count=first>=0xc2&&first<=0xdf?2:first>=0xe0&&first<=0xef?3:first>=0xf0&&first<=0xf4?4:0;if(!count||text.size()-start<count)return 0xfffd;
+    unsigned count=first>=0xc2&&first<=0xdf?2:first>=0xe0&&first<=0xef?3:first>=0xf0&&first<=0xf4?4:0;if(!count||length-start<count)return 0xfffd;
     uint32_t code=first&((1u<<(7-count))-1);
     for(unsigned i=1;i<count;++i) {unsigned next=static_cast<unsigned char>(text[start+i]);if((next&0xc0)!=0x80)return 0xfffd;code=(code<<6)|(next&0x3f);}
     if(code<(count==2?0x80u:count==3?0x800u:0x10000u)||code>0x10ffff||(code>=0xd800&&code<=0xdfff))return 0xfffd;

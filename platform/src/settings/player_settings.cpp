@@ -32,7 +32,10 @@ bool KnownAction(const controls::ControlApi& api,const std::string& s) {
     return false;
 }
 // Keys 1.1 files do not have: absent means the default, and (profile_chosen) marks a file written before the 1.2 pad defaults.
-bool IsOptionalKey(const std::string& key) {return key=="mouse_aim"||key=="profile_chosen";}
+bool IsOptionalKey(const std::string& key) {
+    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan"})if(key==k)return true;
+    return false;
+}
 bool Managed(const std::string& key,const controls::ControlApi& api) {
     if(key=="schema"||key=="fps_limit"||key=="auto_quality"||key=="profile"||key=="language"||key=="reduced_motion"||IsOptionalKey(key)) return true;
     for(const auto* p:{"bind.handheld.","bind.playstation."})
@@ -41,7 +44,8 @@ bool Managed(const std::string& key,const controls::ControlApi& api) {
 }
 StoreResult Error(StoreStatus s,const std::string& message) { return {s,message}; }
 bool ValidConfig(const Config& c,const controls::ControlApi& api,std::string& error) {
-    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1) {error="Invalid settings value";return false;}
+    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1 ||
+       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1) {error="Invalid settings value";return false;}
     if(c.language.size()>64 || std::any_of(c.language.begin(),c.language.end(),[](unsigned char ch){return ch<32||ch>126||ch=='=';})) {error="Invalid language name";return false;}
     for(unsigned i=0;i<2;++i) if(!api.validate(c.profiles[i],static_cast<controls::ProfileId>(i),controls::NominalCaps(static_cast<controls::ProfileId>(i)),error)) return false;
     return true;
@@ -50,7 +54,10 @@ std::map<std::string,std::string> Values(const Config& c) {
     std::map<std::string,std::string> v{{"schema","1"},{"fps_limit",c.fpsLimit==kSteady30?std::string("steady30"):std::to_string(c.fpsLimit)},
         {"auto_quality",c.autoQuality==AutoQuality::Default?"default":c.autoQuality==AutoQuality::Enabled?"on":"off"},
         {"profile",c.profile==controls::ProfileId::Handheld?"handheld":"playstation"},
-        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"},{"mouse_aim",c.mouseAim?"1":"0"},{"profile_chosen",c.profileChosen?"1":"0"}};
+        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"},{"mouse_aim",c.mouseAim?"1":"0"},{"profile_chosen",c.profileChosen?"1":"0"},
+        {"above_native",c.aboveNative?"1":"0"},{"mario_first",c.prioritizeMario?"1":"0"},{"anti_aliasing",c.antiAliasing==AntiAliasing::Auto?"auto":"off"},
+        {"picture_sharpness",c.sharpness==Sharpness::Auto?"auto":c.sharpness==Sharpness::Off?"off":"strong"},{"hd_textures",c.hdTextures?"1":"0"},
+        {"effects_quality",c.effects==EffectsQuality::Adaptive?"adaptive":"full"},{"depth_of_field",c.depthOfField?"1":"0"},{"core_plan",c.coreHelp?"auto":"off"}};
     for(unsigned i=0;i<2;++i) for(const auto& b:c.profiles[i].bindings)
         v[std::string("bind.")+(i?"playstation.":"handheld.")+b.action]=b.buttons[0]+(b.buttons[1].empty()?"":","+b.buttons[1]);
     return v;
@@ -58,6 +65,24 @@ std::map<std::string,std::string> Values(const Config& c) {
 }
 Config DefaultConfig(const controls::ControlApi& api) {
     Config c; for(unsigned i=0;i<2;++i)c.profiles[i]=api.defaults(static_cast<controls::ProfileId>(i));return c;
+}
+void ApplyPreset(Config& c,Preset preset) {
+    if(preset==Preset::Custom)return;
+    c.autoQuality=AutoQuality::Default;c.prioritizeMario=true;c.effects=EffectsQuality::Adaptive;
+    c.aboveNative=preset==Preset::BestPicture;
+    c.antiAliasing=preset==Preset::Performance?AntiAliasing::Off:AntiAliasing::Auto;
+    c.sharpness=preset==Preset::Performance?Sharpness::Off:Sharpness::Auto;
+    c.depthOfField=preset!=Preset::Performance;
+}
+Preset PresetOf(const Config& c) {
+    for(const auto preset:{Preset::BestPicture,Preset::Balanced,Preset::Performance}) {
+        Config want=c;ApplyPreset(want,preset);
+        // Dynamic resolution "On" and the default are the same choice on the console, so either reads as a preset's.
+        const bool on=c.autoQuality!=AutoQuality::Disabled;
+        if(on&&c.aboveNative==want.aboveNative&&c.prioritizeMario==want.prioritizeMario&&c.antiAliasing==want.antiAliasing&&c.sharpness==want.sharpness&&
+           c.effects==want.effects&&c.depthOfField==want.depthOfField)return preset;
+    }
+    return Preset::Custom;
 }
 bool ApplyPadDefaults(Config& c,bool externalPad) {
     if(!controls::PadDefaultsEnabled()||!externalPad||c.profileChosen||c.profile!=controls::ProfileId::Handheld)return false;
@@ -93,6 +118,14 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
         else if(k=="language") d.config.language=v;
         else if(k=="reduced_motion") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid reduced motion");d.config.reducedMotion=v=="1"; }
         else if(k=="mouse_aim") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid mouse aim");d.config.mouseAim=v=="1"; }
+        else if(k=="above_native") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid Sharper when possible");d.config.aboveNative=v=="1"; }
+        else if(k=="mario_first") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid Prioritize Mario");d.config.prioritizeMario=v=="1"; }
+        else if(k=="anti_aliasing") { if(v!="auto"&&v!="off")return Error(StoreStatus::Malformed,"Invalid anti-aliasing");d.config.antiAliasing=v=="auto"?AntiAliasing::Auto:AntiAliasing::Off; }
+        else if(k=="picture_sharpness") { if(v!="auto"&&v!="off"&&v!="strong")return Error(StoreStatus::Malformed,"Invalid sharpness");d.config.sharpness=v=="auto"?Sharpness::Auto:v=="off"?Sharpness::Off:Sharpness::Strong; }
+        else if(k=="hd_textures") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid HD textures");d.config.hdTextures=v=="1"; }
+        else if(k=="effects_quality") { if(v!="adaptive"&&v!="full")return Error(StoreStatus::Malformed,"Invalid effects quality");d.config.effects=v=="adaptive"?EffectsQuality::Adaptive:EffectsQuality::Full; }
+        else if(k=="depth_of_field") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid depth of field");d.config.depthOfField=v=="1"; }
+        else if(k=="core_plan") { if(v!="auto"&&v!="off")return Error(StoreStatus::Malformed,"Invalid core plan");d.config.coreHelp=v=="auto"; }
         else if(k=="profile_chosen") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid profile choice");d.config.profileChosen=v=="1"; }
         else if(Managed(k,api)&&k.compare(0,5,"bind.")==0) {
             const bool ps=k.compare(5,12,"playstation.")==0;

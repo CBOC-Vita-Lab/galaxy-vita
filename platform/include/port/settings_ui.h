@@ -40,6 +40,13 @@ struct SettingsSession {
     // and darkened. Null: the plain gradient. The caller owns the pixels for the life of the session.
     const uint32_t* backdrop=nullptr;
     unsigned backdropW=0, backdropH=0;
+    // Optional 960x544 scratch picture the menu keeps its unchanging parts in (backdrop, header band and heading), built on first
+    // draw and again when the page changes, so a frame starts with one copy instead of the picture's per-pixel work. The caller
+    // owns the pixels; null: everything is drawn every frame. (The array is written through this pointer by Draw.)
+    uint32_t* layer=nullptr;
+    mutable int layerPage=-1;
+    // False when the HD texture pack (ux0:data/smg/hdtex.pack, or GXV_HDTEX_PATH) is not installed: the HD textures row says so.
+    bool hdtexPack=true;
 };
 enum class Page : uint8_t { Display, Controls };
 enum class Modal : uint8_t { None, Discard, Restart, Capture, Conflict, ButtonPicker, ResetProfile, Overrides };
@@ -63,6 +70,17 @@ struct UiState {
 void Begin(UiState&, const SettingsSession&);
 void Step(UiState&, const UiInput&, uint64_t);
 void Draw(const UiState&, const SettingsSession&, Surface, uint64_t);
+// The Display page's rows, in order, and what each shows. The text is all static or built in the view's own buffer: drawing a
+// frame allocates nothing.
+constexpr unsigned kDisplayRows=13;
+enum DisplayRow : unsigned { RowPreset, RowRate, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowSharpness, RowHdTextures, RowEffects, RowDepthOfField, RowCorePlan, RowMotion, RowLanguage };
+struct RowView { const char* label=""; char value[72]={}; const char* help1=""; const char* help2=""; };
+void DisplayRowView(const UiState&, unsigned row, RowView&);
+// Controls page rows: row 0 the profile, then one per action, then the pointer-aiming option.
+void ControlsRowView(const UiState&, unsigned row, RowView&);
+// Settings rows of the current page; the command rows (save, restart or exit, cancel) follow them.
+unsigned SettingRows(const UiState&);
+void CommandView(const UiState&, unsigned index, const char*& label, const char*& help1, const char*& help2);
 struct DrawAudit { unsigned textRuns=0, truncatedRuns=0; int minX=960, minY=544, maxX=0, maxY=0; };
 struct TextExtent { int advance=0, minX=0, maxX=0, height=0; };
 TextExtent MeasureMenuText(const SettingsSession&,const std::string&,bool small=false,unsigned scale=1);

@@ -10,6 +10,16 @@ constexpr size_t kDocumentLimit = 16384;
 // Config::fpsLimit: 0 up to 60, 30 fixed 30, kSteady30 adaptive pacing with dynamic quality aimed at 30.
 constexpr int kSteady30 = -30;
 enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
+// Picture and speed choices of the Display page (all optional keys of the file: absent means the default). Each maps to existing
+// start-up switches in ApplyStartup. Anti-aliasing: Auto lets dynamic resolution use its multisampled rungs, Off removes them.
+enum class AntiAliasing : uint8_t { Auto, Off };
+enum class Sharpness : uint8_t { Auto, Off, Strong };
+enum class EffectsQuality : uint8_t { Adaptive, Full };
+// Keys: above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan. (Every optional
+// key sorts before "schema" and "reduced_motion" stays the last line of a fresh file, so a cut-short write is still caught as incomplete.)
+// The Preset row is not stored: it is read from the rows a preset covers (Dynamic resolution, Sharper when possible, Prioritize
+// Mario, Anti-aliasing, Sharpness, Effects quality, Depth of field); any other combination reads Custom.
+enum class Preset : uint8_t { BestPicture, Balanced, Performance, Custom };
 struct Config {
     uint32_t version = 1;
     int fpsLimit = 0;
@@ -23,6 +33,14 @@ struct Config {
     // The profile row was changed by hand in the Settings menu; until then a pad on a PS TV gets the PlayStation profile (see
     // ApplyPadDefaults). Optional key profile_chosen.
     bool profileChosen = false;
+    bool aboveNative = true;               // Sharper when possible: dynamic resolution may climb above the game's 640x456 (keys: above_native)
+    bool prioritizeMario = true;           // Mario-first ladder and Mario/Luigi edge smoothing (mario_first)
+    AntiAliasing antiAliasing = AntiAliasing::Auto;  // anti_aliasing
+    Sharpness sharpness = Sharpness::Auto;            // sharpness
+    bool hdTextures = true;                // hd_textures (matters only when the HD pack is installed)
+    EffectsQuality effects = EffectsQuality::Adaptive; // effects_quality
+    bool depthOfField = true;              // depth_of_field: the game's own depth-of-field blur
+    bool coreHelp = true;                  // core_plan: Auto (true) lets disc read-ahead and a movie decoder use the system core
     std::array<controls::ProfileMapping, 2> profiles;
 };
 enum class StoreStatus : uint8_t { Ok, Missing, Recovered, Malformed, UnsupportedVersion, TooLarge, IoError };
@@ -42,6 +60,9 @@ struct FileOps {
     int (*remove)(void*, const char*);
 };
 Config DefaultConfig(const controls::ControlApi&);
+// The rows a preset covers, set together; the other settings are left alone.
+void ApplyPreset(Config&, Preset);
+Preset PresetOf(const Config&);
 // With an external pad (PS TV: DS3 or DS4) connected and the profile never chosen by hand, a Handheld profile that still holds
 // the default buttons is switched to the PlayStation profile, so the pad gets its own default layout. Returns true if it switched.
 // Does nothing with GXV_PAD_DEFAULTS=0.

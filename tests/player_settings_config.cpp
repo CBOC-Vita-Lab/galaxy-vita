@@ -18,6 +18,27 @@ int main() {
             assert(b.action != "menu_accept" && b.action != "menu_back");
         }
     }
+    // Display page choices: the defaults are today's best picture; the preset is read from the covered rows, never stored.
+    assert(c.aboveNative&&c.prioritizeMario&&c.antiAliasing==settings::AntiAliasing::Auto&&c.sharpness==settings::Sharpness::Auto&&c.hdTextures&&
+           c.effects==settings::EffectsQuality::Adaptive&&c.depthOfField&&c.coreHelp);
+    assert(settings::PresetOf(c)==settings::Preset::BestPicture);
+    {
+        const settings::Preset presets[]={settings::Preset::BestPicture,settings::Preset::Balanced,settings::Preset::Performance};
+        for(const auto p:presets) {auto x=c;settings::ApplyPreset(x,p);assert(settings::PresetOf(x)==p);}
+        auto balanced=c;settings::ApplyPreset(balanced,settings::Preset::Balanced);assert(!balanced.aboveNative&&balanced.antiAliasing==settings::AntiAliasing::Auto&&balanced.sharpness==settings::Sharpness::Auto&&balanced.depthOfField);
+        auto perf=c;settings::ApplyPreset(perf,settings::Preset::Performance);assert(!perf.aboveNative&&perf.antiAliasing==settings::AntiAliasing::Off&&perf.sharpness==settings::Sharpness::Off&&!perf.depthOfField&&perf.prioritizeMario&&perf.effects==settings::EffectsQuality::Adaptive);
+        // A preset touches only its covered rows.
+        auto mixed=c;mixed.hdTextures=false;mixed.coreHelp=false;mixed.fpsLimit=30;mixed.reducedMotion=true;mixed.language="French";settings::ApplyPreset(mixed,settings::Preset::Performance);
+        assert(!mixed.hdTextures&&!mixed.coreHelp&&mixed.fpsLimit==30&&mixed.reducedMotion&&mixed.language=="French"&&settings::PresetOf(mixed)==settings::Preset::Performance);
+        // Any covered row edited reads Custom; "dynamic resolution on" (forced) and the default are the same choice.
+        auto edited=c;edited.antiAliasing=settings::AntiAliasing::Off;assert(settings::PresetOf(edited)==settings::Preset::Custom);
+        edited=c;edited.effects=settings::EffectsQuality::Full;assert(settings::PresetOf(edited)==settings::Preset::Custom);
+        edited=c;edited.prioritizeMario=false;assert(settings::PresetOf(edited)==settings::Preset::Custom);
+        edited=c;edited.autoQuality=settings::AutoQuality::Disabled;assert(settings::PresetOf(edited)==settings::Preset::Custom);
+        edited=c;edited.autoQuality=settings::AutoQuality::Enabled;assert(settings::PresetOf(edited)==settings::Preset::BestPicture);
+        edited=c;edited.hdTextures=false;edited.coreHelp=false;assert(settings::PresetOf(edited)==settings::Preset::BestPicture);   // not covered
+        settings::ApplyPreset(edited,settings::Preset::Custom);assert(!edited.hdTextures);                                           // Custom changes nothing
+    }
     settings::Document d;
     settings::Document original{c,"",true};auto full=c;full.fpsLimit=30;std::string serialized;
     assert(settings::SerializeDocument(original,full,api,serialized).status==settings::StoreStatus::Ok);

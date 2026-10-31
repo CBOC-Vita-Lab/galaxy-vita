@@ -22,9 +22,12 @@ int main(int argc,char** argv) {
     std::vector<uint32_t> pixels(960*544);std::ofstream report(directory+"/bounds.txt");
     // Where frames go: the plain frames in `directory`, backdrop frames in a subdirectory of their own, with their own report.
     std::string outDir=directory;std::ofstream* out=&report;bool legible=true;double worstContrast=1e9;
+    unsigned frames=0;
     auto render=[&](const char* name,UiState state,uint64_t time=150000) {
-        DrawAudit audit;DrawChecked(state,session,{pixels.data(),960,544,960},time,audit);
+        DrawAudit audit;DrawChecked(state,session,{pixels.data(),960,544,960},time,audit);++frames;
         if(audit.minX<32||audit.minY<32||audit.maxX>928||audit.maxY>512)return false;
+        // No frame of the menu itself may cut a text with "..." (modal bodies and an error message are the exceptions).
+        if(audit.truncatedRuns&&state.modal==Modal::None&&state.message.empty()){std::cerr<<name<<": "<<audit.truncatedRuns<<" truncated text run(s)\n";return false;}
         // With a backdrop, every opaque glyph pixel must keep contrast >= 4.5 against the picture behind it.
         if(session.backdrop&&state.modal==Modal::None) {
             const auto check=backdrop_check::CheckText(pixels,session.backdrop,session.backdropW,session.backdropH,4.5);
@@ -40,10 +43,21 @@ int main(int argc,char** argv) {
     session.features={true,true};session.overrides.clear();session.languages.names={"English","French","German","Spanish","Italian"};
     UiState state;Begin(state,session);
     if(!render("display-cold",state))return false;
-    state.working.fpsLimit=30;state.working.autoQuality=AutoQuality::Enabled;state.working.language="French";state.row=2;
+    state.working.fpsLimit=30;state.working.autoQuality=AutoQuality::Disabled;state.working.language="French";state.row=RowLanguage;
     if(!render("display-edited",state))return false;
-    // The Reduced motion row focused, off and on: its one-line note must stay inside the safe text bounds and not be truncated.
-    state.row=3;if(!render("display-reduced-motion-row",state))return false;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return false;state.working.reducedMotion=false;state.row=2;
+    // Every Display row focused, then every command: its help must stay inside the safe text bounds and not be truncated.
+    {const auto saved=state.working;state.working=session.document.config;
+     for(unsigned row=0;row<kDisplayRows+3;++row) {state.row=row;char name[40];std::snprintf(name,sizeof name,"display-row-%02u",row);if(!render(name,state))return false;}
+     // The presets, and a row changed by hand.
+     const char* presets[]={"best","balanced","performance"};
+     for(unsigned i=0;i<3;++i) {state.working=session.document.config;ApplyPreset(state.working,static_cast<Preset>(i));state.row=RowPreset;char name[40];std::snprintf(name,sizeof name,"display-preset-%s",presets[i]);if(!render(name,state))return false;}
+     state.working.sharpness=Sharpness::Strong;state.row=RowSharpness;if(!render("display-custom",state))return false;
+     // The HD pack missing, and the scrolled-down list.
+     state.working=session.document.config;session.hdtexPack=false;state.row=RowHdTextures;if(!render("display-hd-not-installed",state))return false;session.hdtexPack=true;
+     state.working=session.document.config;state.row=RowLanguage;if(!render("display-scrolled",state))return false;
+     state.working=saved;}
+    // The Reduced motion row focused, off and on.
+    state.row=RowMotion;if(!render("display-reduced-motion-row",state))return false;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return false;state.working.reducedMotion=false;state.row=RowLanguage;
     session.mode=OpenMode::Running;Begin(state,session);state.modal=Modal::Restart;
     if(!render("restart-cancel",state))return false;state.modalChoice=1;if(!render("restart-confirm",state))return false;
     state.modal=Modal::Discard;if(!render("discard",state))return false;
@@ -54,6 +68,8 @@ int main(int argc,char** argv) {
     state.row=6;if(!render("controls-playstation-start",state))return false;
     state.row=7;if(!render("controls-playstation-select",state))return false;
     state.row=11;if(!render("controls-scrolled",state))return false;
+    for(unsigned row=0;row<=15;++row) {state.row=row;char name[40];std::snprintf(name,sizeof name,"controls-row-%02u",row);if(!render(name,state))return false;}
+    state.row=11;
     {std::string conflict;auto caps=port::controls::NominalCaps(port::controls::ProfileId::PlayStation);
      if(session.controls->bind(state.working.profiles[1],"star_bits",0,"r2",true,caps,conflict)!=port::controls::BindResult::Applied)return false;
      state.row=2;if(!render("controls-playstation-r2",state))return false;
@@ -64,10 +80,10 @@ int main(int argc,char** argv) {
     state.modal=Modal::Conflict;state.candidateButton="circle";state.conflictAction="star_bits";state.modalChoice=0;if(!render("conflict-cancel",state))return false;
     state.modalChoice=1;if(!render("conflict-swap",state))return false;
     state.modal=Modal::ResetProfile;if(!render("reset-profile",state))return false;
-    state.modal=Modal::None;state.page=Page::Display;state.row=4;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return false;
+    state.modal=Modal::None;state.page=Page::Display;state.row=RowEffects;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return false;
     session.document.editable=false;Begin(state,session);if(!render("newer-readonly",state))return false;
-    session.document.editable=true;session.document.config.language="Unavailable language";Begin(state,session);state.row=2;if(!render("language-unavailable",state))return false;
-    session.document.config.language="";session.languages.names.clear();Begin(state,session);state.row=2;if(!render("game-data-unavailable",state))return false;
+    session.document.editable=true;session.document.config.language="Unavailable language";Begin(state,session);state.row=RowLanguage;if(!render("language-unavailable",state))return false;
+    session.document.config.language="";session.languages.names.clear();Begin(state,session);state.row=RowLanguage;if(!render("game-data-unavailable",state))return false;
     session.languages.names={"English","French","German","Spanish","Italian"};
     session.overrides={{"GXV_FPS_LIMIT","invalid","Existing picture-rate path"},{"GXV_AUTOQ","1","1"},{"GXV_AUTOQ_LEVEL","2","2"},{"GXV_AUTOQ_CYCLE","1","1"},{"PETARI_LANGUAGE","japanese","japanese"},{"GXV_REMAP","0","Remapping disabled"}};
     state.modal=Modal::Overrides;if(!render("developer-overrides",state))return false;
@@ -78,7 +94,7 @@ int main(int argc,char** argv) {
     return true;
     };
     if(!scenes())return 1;
-    std::cout<<"preview: 32 native-size PPM frames and safe text bounds generated\n";
+    std::cout<<"preview: "<<frames<<" native-size PPM frames and safe text bounds generated\n";
     // Backdrop frames: a synthetic picture, then a title capture when one is given as the third argument (read only, loaded
     // through the same downsampler as the device; the package carries none, the game makes its own on the console). Each full scene set, with every text pixel's contrast against the picture checked.
     std::vector<uint32_t> synthetic(kBackdropPixels);

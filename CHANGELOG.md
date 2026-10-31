@@ -15,6 +15,9 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 ### Your own pictures
 - **No game artwork in the package.** The first time you reach the title screen, the game saves that picture on your card (`ux0:data/smg/art`) and makes the loading screen, the Settings background and the home-screen bubble and LiveArea pictures from it. Until then the loading screen is a plain starfield. The new bubble shows after the console's home screen refreshes (a restart). `GXV_TITLEART=0` turns it off.
 
+### Settings
+- **A fuller Settings menu.** The Display page now has a **Preset** (Best picture, Balanced, Performance; any covered row you change reads Custom), **Dynamic resolution**, **Sharper when possible**, **Prioritize Mario**, **Anti-aliasing**, **Sharpness** (Auto, Off, Strong), **HD textures** (it says when the pack is not installed), **Effects quality**, **Depth of field**, **Core plan**, Reduced motion and Game language, each with a two-line explanation at the bottom and a button legend. The Controls page shows a table of what every button does in the current layout, and the moves that use them. The heading is drawn in the game's own menu font, over the title picture.
+
 ### Better picture
 - **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
 - **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.

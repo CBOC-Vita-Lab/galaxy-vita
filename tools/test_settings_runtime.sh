@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 : "${VITASDK:?Set VITASDK to existing headers for native-adapter host tests}"
-modes=(off cold cold-playstation stale allocation-failure present-failure restart-failure running running-prior running-failure running-scanout-failure running-restore-set-failure running-restore-wait-failure running-restart running-font-oom font-flat font-bucket font-cased font-missing font-corrupt font-short-read font-eof font-read-error font-close-error font-ambiguous font-oversized font-bounded font-bucket-limit font-directory-read-error font-directory-close-error backdrop-ok backdrop-missing backdrop-legacy-path backdrop-short backdrop-oversized backdrop-short-read backdrop-eof backdrop-read-error backdrop-close-error backdrop-alloc running-backdrop running-backdrop-alloc)
+modes=(off cold cold-playstation stale allocation-failure present-failure restart-failure running running-prior running-failure running-scanout-failure running-restore-set-failure running-restore-wait-failure running-restart running-font-oom font-flat font-bucket font-cased font-missing font-corrupt font-short-read font-eof font-read-error font-close-error font-ambiguous font-oversized font-bounded font-bucket-limit font-directory-read-error font-directory-close-error backdrop-ok backdrop-missing backdrop-legacy-path backdrop-short backdrop-oversized backdrop-short-read backdrop-eof backdrop-read-error backdrop-close-error backdrop-alloc running-backdrop running-backdrop-alloc hdtex-present hdtex-missing hdtex-empty hdtex-path hdtex-path-missing hdtex-dir)
 if (($#)); then modes=("$@"); fi
 docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
   --mount "type=bind,source=$root,target=/work,readonly" \

@@ -29,7 +29,7 @@ namespace fixture {
 // The contract: the player's own capture, made by the game (port/title_art.h); nothing is read from the package.
 const std::string backdropPath="ux0:data/smg/art/title.rgba";
 const std::string legacyBackdropPath="app0:/sce_sys/loading-title.rgba";
-bool backdropExpected=false, exerciseBackdropFailures=false;
+bool backdropExpected=false, exerciseBackdropFailures=false, hdPackExpected=false;
 size_t maxBackdropRead=0, backdropReads=0;
 // A deterministic 960x544 RGBA8 picture whose 2x2 averages are easy to recompute.
 std::vector<uint8_t> BackdropFile() {
@@ -194,6 +194,9 @@ RunResult Run(SettingsSession& session) {
         }
         assert(fixture::maxBackdropRead<=32*960*4 && fixture::backdropReads>=17);
     }
+    // The menu's unchanging-picture scratch layer is there and a whole 960x544 picture; the HD pack row follows the one stat of the pack's path.
+    assert(session.layer!=nullptr);session.layer[0]=1;session.layer[960*544-1]=2;
+    assert(session.hdtexPack==fixture::hdPackExpected);
     assert(session.statusMessage.find("ackdrop")==std::string::npos && session.statusMessage.find("title")==std::string::npos);
     if(fixture::exerciseBackdropFailures) {
         const auto file=fixture::BackdropFile();
@@ -259,6 +262,14 @@ int main(int argc,char** argv) {
         fixture::exerciseBackdropFailures=mode=="backdrop-alloc" || mode=="running-backdrop-alloc";
         fixture::backdropExpected=!wrongSize && mode!="backdrop-missing" && mode!="backdrop-legacy-path" && mode!="backdrop-eof" && mode!="backdrop-read-error" && mode!="backdrop-close-error";
     }
+    if(mode.rfind("hdtex-",0)==0) {
+        // Present: the default pack. Missing: none. Empty: a zero-byte file is not a pack. Path: GXV_HDTEX_PATH names the pack (and the default one is not looked at).
+        if(mode=="hdtex-present")fixture::files["ux0:data/smg/hdtex.pack"]={1,2,3,4};
+        if(mode=="hdtex-empty")fixture::files["ux0:data/smg/hdtex.pack"]={};
+        if(mode=="hdtex-path"||mode=="hdtex-path-missing") {setenv("GXV_HDTEX_PATH","ux0:data/other.pack",1);if(mode=="hdtex-path")fixture::files["ux0:data/other.pack"]={1,2,3,4};fixture::files["ux0:data/smg/hdtex.pack"]={1,2,3,4};}
+        if(mode=="hdtex-dir")fixture::directories["ux0:data/smg/hdtex.pack"]={};
+        fixture::hdPackExpected=mode=="hdtex-present"||mode=="hdtex-path";
+    }
     if(mode=="running-font-oom") {
         fixture::directories["ux0:data/smg/game/files"]={"LayoutData"};
         fixture::directories["ux0:data/smg/game/files/LayoutData"]={"Font.arc"};
@@ -318,7 +329,7 @@ int main(int argc,char** argv) {
     } else if(mode=="present-failure") {
         fixture::failPresent=true;
         assert(port_settings_startup(0,nullptr));assert(fixture::menus==1 && fixture::frees==1);
-    } else if(mode=="cold" || mode=="cold-playstation") {
+    } else if(mode=="cold" || mode=="cold-playstation" || mode.rfind("hdtex-",0)==0) {
         fixture::playStation=mode=="cold-playstation";
         assert(port_settings_startup(0,nullptr));assert(fixture::menus==1 && fixture::discProbes==1 && fixture::frees==1);
     } else if(mode=="stale") {

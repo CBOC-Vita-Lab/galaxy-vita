@@ -208,6 +208,15 @@ FontBuffer<uint32_t> LoadBackdrop(const FontAllocator& allocator = {}) {
     return backdrop;
 }
 
+// The HD texture pack (GXV_HDTEX_PATH, default ux0:data/smg/hdtex.pack, as vgx_hdtex.cpp reads it): one stat, so the HD textures row can say
+// when there is nothing to turn on.
+bool HdPackInstalled() {
+    const char* path = std::getenv("GXV_HDTEX_PATH");
+    if (!path || !*path) path = "ux0:data/smg/hdtex.pack";
+    FileInfo info{};
+    return Stat(nullptr, path, info) >= 0 && info.regular && info.size > 0;
+}
+
 struct Screen {
     SceUID memory = -1;
     void* base = nullptr;
@@ -309,6 +318,11 @@ RunResult Menu(Screen& screen, OpenMode mode) {
     // Freed when the menu closes (end of this function), in both LiveArea and in-game modes.
     const auto backdrop = LoadBackdrop();
     if (backdrop.size() == kBackdropPixels) { session.backdrop = backdrop.begin(); session.backdropW = kBackdropWidth; session.backdropH = kBackdropHeight; }
+    // The menu's unchanging picture (backdrop, header band, heading) is built once into one scratch picture and copied each frame; with no
+    // memory for it the menu simply draws it every frame. Freed with the backdrop when the menu closes.
+    FontBuffer<uint32_t> layer;
+    if (layer.Allocate(kPixels, FontAllocator{})) session.layer = layer.begin();
+    session.hdtexPack = HdPackInstalled();
     if (mode == OpenMode::Running && port::controls::RemapEnabled() && !port_vita_input_mapping_available())
         session.overrides.push_back({"Controller", "", "Active mapping needs a different controller"});
     sStatus.clear();

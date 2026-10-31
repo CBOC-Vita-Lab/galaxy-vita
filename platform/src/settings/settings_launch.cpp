@@ -8,6 +8,39 @@
 namespace port::settings {
 namespace {
 bool Space(char c) {return c==' '||c=='\t'||c=='\r'||c=='\n'||c=='\v'||c=='\f';}
+// The Display page's picture and speed choices. `want` is the value the choice needs (null: the game's own default, nothing to set);
+// `neutral` is what the switch reads as when it is left alone, so an env.txt value equal to it agrees with that choice. `startup`
+// is a value the game's start-up code (vita/vgx-game/entry.cpp) sets itself before Settings runs: seeing exactly that value means
+// "not set by env.txt", so the menu's choice may replace it; any other value is env.txt's and wins, as an override.
+struct Choice {const char* key; const char* neutral; const char* startup; const char* (*want)(const Config&);};
+// Rung 2 is the game's own 640x456 picture (vgx_autoq.h kToday): the ladder's highest step when Sharper when possible is off.
+const char* WantMax(const Config& c) {return c.aboveNative?nullptr:"2";}
+const char* WantMsaa(const Config& c) {return c.antiAliasing==AntiAliasing::Off?"0":nullptr;}
+const char* WantSharpen(const Config& c) {return c.sharpness==Sharpness::Off?"off":c.sharpness==Sharpness::Strong?"0.8":nullptr;} // 0.8: the largest amount "auto" ever uses
+const char* WantHd(const Config& c) {return c.hdTextures?nullptr:"0";}
+const char* WantFxStep(const Config& c) {return c.prioritizeMario&&c.effects==EffectsQuality::Adaptive?nullptr:"0";}
+const char* WantCharaAuto(const Config& c) {return c.prioritizeMario?nullptr:"0";}
+const char* WantDof(const Config& c) {return c.depthOfField?nullptr:"0";}
+const char* WantCore(const Config& c) {return c.coreHelp?nullptr:"0";}
+constexpr Choice kChoices[]={
+    {"GXV_AUTOQ_MAX","8",nullptr,WantMax},{"GXV_AUTOQ_MSAA","1",nullptr,WantMsaa},{"GXV_SHARPEN","auto",nullptr,WantSharpen},{"GXV_HDTEX","1",nullptr,WantHd},
+    {"GXV_AUTOQ_FXSTEP","2","2",WantFxStep},{"GXV_CHARAA_AUTO","2","2",WantCharaAuto},{"GXV_DOF","1",nullptr,WantDof},{"GXV_CORE3_IO","1","1",WantCore}};
+bool SameValue(const char* a,const char* b) {
+    if(std::strcmp(a,b)==0)return true;
+    char* ea=nullptr;char* eb=nullptr;const long x=std::strtol(a,&ea,0),y=std::strtol(b,&eb,0);
+    return ea!=a&&eb!=b&&!*ea&&!*eb&&x==y;
+}
+std::string ChoiceLabel(const char* key,const char* raw) {
+    const std::string r=raw;
+    if(!std::strcmp(key,"GXV_AUTOQ_MAX"))return "Highest picture size step "+r;
+    if(!std::strcmp(key,"GXV_AUTOQ_MSAA"))return r=="0"?"No multisampling":"Multisampling allowed";
+    if(!std::strcmp(key,"GXV_SHARPEN"))return "Sharpening "+r;
+    if(!std::strcmp(key,"GXV_HDTEX"))return r=="0"?"HD textures off":"HD textures "+r;
+    if(!std::strcmp(key,"GXV_AUTOQ_FXSTEP"))return "Load steps "+r;
+    if(!std::strcmp(key,"GXV_CHARAA_AUTO"))return r=="0"?"Mario edge smoothing off":"Mario edge smoothing "+r;
+    if(!std::strcmp(key,"GXV_DOF"))return r=="0"?"Depth of field off":"Depth of field "+r;
+    return r=="0"?"System core help off":"System core help "+r;
+}
 bool Tokens(const char* p,size_t length,std::vector<std::string>& out) {
     std::string token;char quote=0;bool started=false;
     for(size_t i=0;i<length;++i) {
@@ -65,6 +98,16 @@ std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
             if(std::strcmp(key,"GXV_REMAP")==0) effective=std::strcmp(raw,"0")==0?"Remapping disabled":"Remapping off (unknown value)";
             overrides.push_back({key,raw,effective});
         }
+    }
+    // Picture and speed choices: one start-up pass over the table. Env values the menu agrees with are not overrides.
+    for(const auto& choice:kChoices) {
+        const char* raw=std::getenv(choice.key);const char* want=choice.want(config);
+        const bool fromStartup=raw&&choice.startup&&std::strcmp(raw,choice.startup)==0;
+        if(raw&&!fromStartup) {
+            if(!SameValue(raw,want?want:choice.neutral))overrides.push_back({choice.key,raw,ChoiceLabel(choice.key,raw)});
+            continue;
+        }
+        if(want)setenv(choice.key,want,1);
     }
     if(!std::getenv("GXV_FPS_LIMIT")&&config.fpsLimit==30)setenv("GXV_FPS_LIMIT","30",0);
     // Steady 30, the aggressive opt-in mode: the fixed 30 FPS ceiling (never the 30/20 adaptive cadence),
