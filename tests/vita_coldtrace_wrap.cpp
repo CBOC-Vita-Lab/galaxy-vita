@@ -32,6 +32,10 @@ void port_vgx_coldtrace_runtime_link_guard_v3() {}
 void vgxvita_prepareShaderCacheWrite_v1(const char*, int, SceMode) {
     Require(false,"unrelated SDK opens do not enter private shader-cache preparation");
 }
+SceUID vgxvita_openShaderCacheFallback_v1(const char*, SceUID failed) {
+    Require(false,"unrelated SDK opens do not enter the shader-cache seed lookup");
+    return failed;
+}
 int sceIoMkdir(const char* p,SceMode m) {Require(p==path && m==0777,"mkdir args unchanged");Leaf(Mkdir);return -7;}
 SceUID sceIoOpen(const char* p,int f,SceMode m) {Require(p==path && f==0x723 && m==0641,"open args unchanged");Leaf(Open);return 17;}
 SceOff sceIoLseek(SceUID f,SceOff o,int w) {Require(f==17 && o==0x100000007ll && w==2,"seek preserves 64-bit offset");Leaf(Seek);return -0x100000002ll;}

@@ -32,7 +32,9 @@
 //   GXV_NO_SHADERLIST=1           do not use the shader warm-up list
 //   PETARI_SCRIPT_ANCHOR_DRAWS=<n> (test harness) port_vgx_vita_rich_frame() reports the game frame of the first
 //                                 picture with at least n draw calls (the title screen has ~1000, a loading screen < 10)
-//   GXV_VITA_SEED=app0            vitaGL reads a shader cache packed in the VPK in place;  =off: the packed cache is not used
+//   GXV_VITA_SEED=copy            copy the shader cache packed in the VPK to the card once (before 1.2; default: read it in place
+//                                 behind the card's own cache);  =app0: vitaGL uses only the packed cache (nothing it compiles is
+//                                 kept);  =off: the packed cache is not used
 #if defined(__vita__)
 
 #define VGX_VITA_NO_GL_ROUTING
@@ -144,6 +146,52 @@ constexpr const char* kVglCacheVersionDir = GXV_VGL_CACHE_DIR;
 } // namespace (an extern "C" variable belongs at global scope: declared inside the anonymous namespace, GCC finds it ambiguous with later global declarations)
 extern "C" char vgl_shader_cache_path[256] __attribute__((weak)); // (vitaGL vgl.c, set in vglInit*)
 namespace {
+// A file name in vitaGL's private shader cache: <root>/{v,f}/<HH>/<hash>.gxp, spelled exactly as vitaGL spells it
+// (source/custom_shaders.c: "%s/%s/%02X/%llX.gxp", the hash in upper-case hex without leading zeros, <HH> its top byte).
+// Returns the length of `root` when `path` is such a name under it (kind 'v' or 'f', bucket = HH), else 0. Nothing is read or
+// written: shared by the write preparation and the read-only seed lookup below.
+int CacheHex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+size_t CacheFileUnder(const char* root, const char* path, char* kind, unsigned* bucketOut) {
+    if (!root || !root[0] || !path) return 0;
+    const size_t rootSize = strnlen(root, 256);
+    const size_t pathSize = strnlen(path, 320);
+    if (rootSize == 256 || pathSize < rootSize + 11 || pathSize > rootSize + 26 || std::strncmp(path, root, rootSize) != 0) return 0;
+    const char* suffix = path + rootSize;
+    if (suffix[0] != '/' || (suffix[1] != 'v' && suffix[1] != 'f') || suffix[2] != '/' || suffix[5] != '/') return 0;
+    const int hi = CacheHex(suffix[3]), lo = CacheHex(suffix[4]);
+    if (hi < 0 || lo < 0) return 0;
+    const unsigned bucket = static_cast<unsigned>((hi << 4) | lo);
+    const size_t digits = pathSize - rootSize - 10;
+    if (std::memcmp(suffix + 6 + digits, ".gxp", 4) != 0) return 0;
+    uint64_t hash = 0;
+    for (size_t i = 0; i < digits; ++i) {
+        const int digit = CacheHex(suffix[6 + i]);
+        if (digit < 0) return 0;
+        hash = (hash << 4) | static_cast<unsigned>(digit);
+    }
+    if (static_cast<unsigned>(hash >> 56) != bucket) return 0;
+    if (kind) *kind = suffix[1];
+    if (bucketOut) *bucketOut = bucket;
+    return rootSize;
+}
+
+// ---- the package's compiled shaders as a read-only second level of vitaGL's cache
+// vitaGL looks a shader up with sceIoOpen(<cache>/{v,f}/<HH>/<hash>.gxp, SCE_O_RDONLY, 0777) when it is compiled or linked (never per
+// draw), and writes a new compile into the same writable <cache> on the card. The game is linked with --wrap=sceIoOpen
+// (vita/vgx-game/coldtrace_wrap.cpp): when such a lookup fails, vgxvita_openShaderCacheFallback_v1 opens the same name under the
+// package's seed (app0:shadercache/<key>/v<n>) instead, read-only. So the card's own compiles win (a program the card compiled again,
+// e.g. because the packaged file was refused, replaces the seed's for good), the seed answers everything else, and nothing has to be
+// copied on the first start (a copy of ~2,100 files into ~470 new folders took ~100 s on a memory card). The cost is one failed open
+// on the card per program that comes from the seed, at its compile/link only.
+// g_seedFallback is set once by SeedShaderCache on the game thread before vitaGL's thread is created; g_seedFallbackOn is cleared
+// (on the GL thread) when the compiler self-test fails with no file of the card's own to blame (RemoveSelfTestCacheFiles).
+char g_seedFallback[200] = "";
+std::atomic<bool> g_seedFallbackOn{false};
+std::atomic<unsigned> g_seedFallbackHits{0}, g_seedFallbackMisses{0};
 // Decoded guest textures the renderer keeps (RGBA8 bytes). Galaxy's castle frame references
 // ~6.5 MiB of distinct images (desktop statistics); a budget of 32 MiB keeps the whole working
 // set of a scene plus its neighbours and is what the Strikers port ran with.
@@ -294,7 +342,8 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
 
 // A cached compiled form of a self-test shader that vitaGL cannot use (a file from another library version, cut short by a full
 // card) fails the test with nothing wrong in the compiler. The two test shaders' cache files are removed so that the retry compiles
-// them afresh; returns how many files were removed.
+// them afresh; returns how many files were removed. When the card had none of them, the files the test read can only have come from
+// the package's seed (read in place, it cannot be removed): the seed is then not used for the rest of this session.
 unsigned RemoveSelfTestCacheFiles() {
     if (&vgl_shader_cache_path[0] == nullptr || !vgl_shader_cache_path[0]) return 0;
     unsigned removed = 0;
@@ -306,6 +355,7 @@ unsigned RemoveSelfTestCacheFiles() {
         GXV_BASIC_LOG("[vgx-vita] self-test shader cache file %s: %s", path, r >= 0 ? "removed" : (static_cast<uint32_t>(r) == 0x80010002u ? "not there" : "could not be removed"));
         if (r >= 0) ++removed;
     }
+    if (removed == 0 && g_seedFallbackOn.exchange(false)) GXV_BASIC_LOG("[vgx-vita] the package's compiled shaders (%s) are not used for the rest of this start", g_seedFallback);
     return removed;
 }
 
@@ -745,6 +795,10 @@ void Finish() {
              NowMs(), g_frames, g_frames ? g_renderUsSum / 1000.0 / g_frames : 0.0, g_renderUsWorst / 1000.0, static_cast<unsigned>(g_durUs[kStart] / 1000u),
              static_cast<unsigned>(g_durUs[kUnpack] / 1000u), static_cast<unsigned>(g_durUs[kGraphics] / 1000u), static_cast<unsigned>(g_durUs[kGame] / 1000u),
              static_cast<unsigned>(g_durUs[kShaders] / 1000u), static_cast<unsigned>(g_durUs[kTitle] / 1000u));
+    if (g_seedFallback[0])
+        port_log("[vgx-vita] compiled shaders read from the package in place so far: %u (%u looked for there and not found)%s",
+                 g_seedFallbackHits.load(std::memory_order_relaxed), g_seedFallbackMisses.load(std::memory_order_relaxed),
+                 g_seedFallbackOn.load(std::memory_order_relaxed) ? "" : "; switched off after the compiler self-test");
 }
 
 bool HandleDialog() {
@@ -859,8 +913,9 @@ void ShowProgressBar(uint32_t done, uint32_t total) {
 }
 
 // ---- a shader cache that came with the package (app0:shadercache/<key>/v<n>/{v,f}/<HH>/<hash>.gxp
-// and vgx_shaderlist.bin), copied once into the writable cache folder. The seed is only found by
-// a package whose <key> (above) is the same.
+// and vgx_shaderlist.bin). The seed is only found by a package whose <key> (above) is the same. By default it is read in place as the
+// second level of vitaGL's cache (g_seedFallback above) and only the warm-up list is copied; GXV_VITA_SEED=copy copies the compiled
+// shaders once into the writable cache folder instead (what every package before 1.2 did: ~100 s on the first start of 1.2).
 constexpr unsigned kSeedMaxFiles = 4096;
 constexpr size_t kSeedMaxListBytes = 4u * 1024u * 1024u;
 constexpr uint32_t kIoNotFound = 0x80010002u;
@@ -990,12 +1045,15 @@ unsigned CountTree(const char* from, int depth) {
     sceIoDclose(dir);
     return n;
 }
-// <cache>/v2/v/00 (and f/00): with the first of them present vitaGL does not create its 512
-// bucket folders at start-up; a missing bucket is made only when vitaGL writes a cache miss.
+// <cache>/v<n>, its stage folders v and f, and for vitaGL's v1/v2 layout also v/00 and f/00: with the first of them present those
+// versions did not create their 512 bucket folders at start-up. vitaGL v3 never does (it makes a bucket when it writes a miss into it,
+// and v, f only together with a new v3), so v/00 and f/00 are left out there: two folder creations fewer on the first start.
 void MakeFirstBuckets(const char* folder, SeedCopyStats& st) {
     static const char* const kParts[] = {"", "/v", "/v/00", "/f", "/f/00"};
+    const bool legacyLayout = std::strcmp(kVglCacheVersionDir, "v1") == 0 || std::strcmp(kVglCacheVersionDir, "v2") == 0;
     const uint64_t t0 = NowUs();
     for (const char* part : kParts) {
+        if (!legacyLayout && std::strstr(part, "/00")) continue;
         char path[320];
         if (std::snprintf(path, sizeof(path), "%s/%s%s", folder, kVglCacheVersionDir, part) >= static_cast<int>(sizeof(path))) return;
         if (sceIoMkdir(path, 0777) >= 0) ++st.folders;
@@ -1033,13 +1091,23 @@ bool PackageStamp(char* out, size_t n, uint64_t* listSize = nullptr) {
     if (listSize) *listSize = total;
     return true;
 }
+// The marker <cache>/seeded holds the package list's fingerprint (PackageStamp) once this card has taken what it needs from that
+// package: "<stamp>" after a copy of the compiled shaders (GXV_VITA_SEED=copy), "<stamp> lookup" when they are read in place. A copy
+// marker also satisfies the lookup (the card then has the files itself); a lookup marker does not satisfy the copy, so switching to
+// GXV_VITA_SEED=copy copies once. Either way a changed fingerprint means a new package: its warm-up list replaces the card's.
+constexpr const char* kSeedLookupSuffix = " lookup";
 struct SeedMarker { bool matches = false, readError = false, replaceList = false; };
-SeedMarker CheckSeedMarker(const char* marker, const char* stamp, uint64_t size) {
+SeedMarker CheckSeedMarker(const char* marker, const char* stamp, uint64_t size, bool lookup = false) {
     std::vector<uint8_t> bytes;
     const SeedRead result = ReadSeedBytes(marker, bytes, 80);
     if (result != SeedRead::Ok) return {false, result == SeedRead::Error, false};
-    const std::string text(bytes.begin(), bytes.end());
+    std::string text(bytes.begin(), bytes.end());
     if (text == stamp) return {true, false, false};
+    const size_t suffix = std::strlen(kSeedLookupSuffix);
+    if (text.size() > suffix && text.compare(text.size() - suffix, suffix, kSeedLookupSuffix) == 0) {
+        text.resize(text.size() - suffix);
+        if (text == stamp) return {lookup, false, false};
+    }
     unsigned long long oldSize = 0, digest = 0;
     int used = 0;
     const bool fingerprint = std::sscanf(text.c_str(), "list2 %llu %16llx%n", &oldSize, &digest, &used) == 2 &&
@@ -1132,6 +1200,41 @@ void MigrateOldShaderCaches(const char* folder, const char* cur) {
 }
 bool g_seedIsNew = false;
 char g_seedPendingStamp[80] = {}, g_seedPendingMarker[200] = {};
+// The marker is written now, or (a new package whose warm-up list is to replace the card's) by SeedShaderList once the list is in
+// place: the old fingerprint is kept until then, so that an adoption cut short is done again at the next start.
+void CommitSeedMarker(const char* marker, const char* stamp, const char* suffix, bool replaceList) {
+    char text[sizeof g_seedPendingStamp];
+    const int n = std::snprintf(text, sizeof text, "%s%s", stamp, suffix);
+    if (n < 0 || n >= static_cast<int>(sizeof text)) return;
+    if (replaceList && !std::getenv("GXV_SHADERLIST") && !std::getenv("GXV_NO_SHADERLIST")) {
+        std::snprintf(g_seedPendingStamp, sizeof g_seedPendingStamp, "%s", text);
+        std::snprintf(g_seedPendingMarker, sizeof g_seedPendingMarker, "%s", marker);
+        g_seedIsNew = true;
+    } else {
+        const std::vector<uint8_t> bytes(text, text + n);
+        if (!WriteSeedBytes(marker, bytes)) sceIoRemove(marker);
+    }
+}
+// The package's version folder under app0:shadercache/<key>: the one of the vitaGL linked in (v3), else any v<n> (the files are the
+// same, only vitaGL's folder name changed; CopyTree renames it the same way). One stat at a normal start.
+bool SeedVersionFolder(const char* seed, char* out, size_t size) {
+    if (std::snprintf(out, size, "%s/%s", seed, kVglCacheVersionDir) < static_cast<int>(size) && Exists(out)) return true;
+    out[0] = 0;
+    const SceUID dir = sceIoDopen(seed);
+    if (dir < 0) return false;
+    SceIoDirent entry;
+    bool found = false;
+    for (;;) {
+        std::memset(&entry, 0, sizeof(entry));
+        if (sceIoDread(dir, &entry) <= 0) break;
+        const char* name = entry.d_name;
+        if (SCE_S_ISDIR(entry.d_stat.st_mode) && name[0] == 'v' && name[1] >= '0' && name[1] <= '9' && std::strspn(name + 1, "0123456789") == std::strlen(name + 1) &&
+            std::snprintf(out, size, "%s/%s", seed, name) < static_cast<int>(size)) { found = true; break; }
+    }
+    sceIoDclose(dir);
+    if (!found) out[0] = 0;
+    return found;
+}
 // Returns the folder vitaGL is to use as its cache.
 const char* SeedShaderCache(const char* folder) {
     g_seedIsNew = false;
@@ -1156,10 +1259,24 @@ const char* SeedShaderCache(const char* folder) {
         port_log("[vgx-vita] GXV_VITA_SEED=app0: vitaGL reads the package's compiled shaders in place (%s)", seed);
         return seed;
     }
+    const char* mode = std::getenv("GXV_VITA_SEED");
+    const bool copy = mode && std::strcmp(mode, "copy") == 0;
     char stamp[80];
     uint64_t listSize = 0;
     const bool stamped = PackageStamp(stamp, sizeof(stamp), &listSize);
-    const SeedMarker previous = stamped ? CheckSeedMarker(marker, stamp, listSize) : SeedMarker{};
+    const SeedMarker previous = stamped ? CheckSeedMarker(marker, stamp, listSize, !copy) : SeedMarker{};
+    if (!copy) {
+        // Read in place, behind the card's own cache (g_seedFallback): nothing is copied. What is left to do once per package is the
+        // warm-up list (SeedShaderList) and vitaGL's top folders.
+        const bool found = SeedVersionFolder(seed, g_seedFallback, sizeof g_seedFallback);
+        g_seedFallbackOn.store(found, std::memory_order_release);
+        if (previous.matches) return folder;
+        MakeFirstBuckets(folder, st);
+        port_log("[vgx-vita] compiled shaders of the package %s: %s (read in place after %s; nothing copied, %u folders made)", seed,
+                 found ? "found" : "NOT FOUND (no v<n> folder), shaders are compiled on this console", folder, st.folders);
+        if (found && stamped && !previous.readError) CommitSeedMarker(marker, stamp, kSeedLookupSuffix, previous.replaceList);
+        return folder;
+    }
     if (previous.matches) return folder;
     const uint64_t t0 = NowUs();
     st.total = CountTree(seed, 0);
@@ -1168,17 +1285,7 @@ const char* SeedShaderCache(const char* folder) {
     MakeFirstBuckets(folder, st);
     port_log("[vgx-vita] compiled shaders from the package copied to %s: %u files (%u KiB), %u already there, %u failed; %u folders; %u ms in all", folder,
              st.files - st.kept, st.bytes / 1024u, st.kept, st.failed, st.folders, static_cast<unsigned>((NowUs() - t0) / 1000u));
-    if (st.failed == 0 && stamped && !previous.readError) {
-        if (previous.replaceList && !std::getenv("GXV_SHADERLIST") && !std::getenv("GXV_NO_SHADERLIST")) {
-            // Keep the old fingerprint until list adoption succeeds, including across process restarts.
-            std::snprintf(g_seedPendingStamp, sizeof g_seedPendingStamp, "%s", stamp);
-            std::snprintf(g_seedPendingMarker, sizeof g_seedPendingMarker, "%s", marker);
-            g_seedIsNew = true;
-        } else {
-            const std::vector<uint8_t> bytes(stamp, stamp + std::strlen(stamp));
-            if (!WriteSeedBytes(marker, bytes)) sceIoRemove(marker);
-        }
-    }
+    if (st.failed == 0 && stamped && !previous.readError) CommitSeedMarker(marker, stamp, "", previous.replaceList);
     return folder;
 }
 void SeedShaderList() {
@@ -1765,6 +1872,8 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         unsigned made = 0, ms = 0;
         vgxvita_cacheFolderStats(&made, &ms);
         if (made != 0) port_log("[vgx-vita] shader cache: %u bucket folders made as shaders needed them, %u ms in all", made, ms);
+        if (g_seedFallback[0]) port_log("[vgx-vita] shader cache: %u compiled shaders read from the package in place, %u not there either", g_seedFallbackHits.load(std::memory_order_relaxed),
+                                        g_seedFallbackMisses.load(std::memory_order_relaxed));
         if (g_presented % 600 == 0 || g_presented == 1) {
             LogPools("now");
             LogMemory("now");
@@ -2262,33 +2371,14 @@ std::vector<uint8_t> g_shaderKind; // Probe-only shader identities, owned by the
 #endif
 unsigned g_bucketsMade = 0;
 uint64_t g_bucketUs = 0;
-int CacheHex(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
 } // namespace
 extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, SceMode mode) {
     if (flags != (SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC) || mode != 0777 || !path) return;
     if (&vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) return;
-    const size_t rootSize = strnlen(vgl_shader_cache_path, sizeof(vgl_shader_cache_path));
-    const size_t pathSize = strnlen(path, 320);
-    if (rootSize == sizeof(vgl_shader_cache_path) || pathSize < rootSize + 11 || pathSize > rootSize + 26 ||
-        std::strncmp(path, vgl_shader_cache_path, rootSize) != 0) return;
-    const char* suffix = path + rootSize;
-    if (suffix[0] != '/' || (suffix[1] != 'v' && suffix[1] != 'f') || suffix[2] != '/' || suffix[5] != '/') return;
-    const int hi = CacheHex(suffix[3]), lo = CacheHex(suffix[4]);
-    if (hi < 0 || lo < 0) return;
-    const unsigned bucket = static_cast<unsigned>((hi << 4) | lo);
-    const size_t digits = pathSize - rootSize - 10;
-    if (std::memcmp(suffix + 6 + digits, ".gxp", 4) != 0) return;
-    uint64_t hash = 0;
-    for (size_t i = 0; i < digits; ++i) {
-        const int digit = CacheHex(suffix[6 + i]);
-        if (digit < 0) return;
-        hash = (hash << 4) | static_cast<unsigned>(digit);
-    }
-    if (static_cast<unsigned>(hash >> 56) != bucket) return;
+    char kind = 0;
+    unsigned bucket = 0;
+    const size_t rootSize = CacheFileUnder(vgl_shader_cache_path, path, &kind, &bucket);
+    if (!rootSize) return;
 
     // vitaGL changes the root only while its GL owner is quiescent. Serialize our own
     // memoized state in case another SDK caller writes a matching private cache file.
@@ -2297,11 +2387,11 @@ extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, 
         std::memcpy(g_bucketRoot, vgl_shader_cache_path, rootSize + 1);
         std::memset(g_bucketSeen, 0, sizeof(g_bucketSeen));
     }
-    uint8_t& bits = g_bucketSeen[suffix[1] == 'f'][bucket >> 3];
+    uint8_t& bits = g_bucketSeen[kind == 'f'][bucket >> 3];
     const uint8_t bit = static_cast<uint8_t>(1u << (bucket & 7u));
     if (bits & bit) return;
     char bucketPath[320];
-    const int n = std::snprintf(bucketPath, sizeof(bucketPath), "%s/%c/%02X", g_bucketRoot, suffix[1], bucket);
+    const int n = std::snprintf(bucketPath, sizeof(bucketPath), "%s/%c/%02X", g_bucketRoot, kind, bucket);
     if (n < 0 || n >= static_cast<int>(sizeof(bucketPath))) return;
     const uint64_t t0 = (PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) ? NowUs() : 0;
     const int result = sceIoMkdir(bucketPath, 0777);
@@ -2309,6 +2399,22 @@ extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, 
     // Vita filesystem EEXIST: a transient mkdir failure must not poison future misses.
     if (result >= 0 || result == static_cast<int>(0x80010011u)) bits |= bit;
     if (PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) g_bucketUs += NowUs() - t0;
+}
+// The read-only second level of the shader cache (see g_seedFallback). Called by __wrap_sceIoOpen only after an open with vitaGL's
+// cache-lookup shape (SCE_O_RDONLY, mode 0777) has failed with `failed`: when `path` is a cache file name under vitaGL's cache folder,
+// the same name under the package's seed is opened (read-only, mode 0, so this open does not come back here). Returns that handle,
+// or `failed` unchanged.
+extern "C" SceUID vgxvita_openShaderCacheFallback_v1(const char* path, SceUID failed) {
+    if (!g_seedFallbackOn.load(std::memory_order_acquire)) return failed;
+    if (&vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) return failed;
+    const size_t rootSize = CacheFileUnder(vgl_shader_cache_path, path, nullptr, nullptr);
+    if (!rootSize) return failed;
+    char seeded[256];
+    const int n = std::snprintf(seeded, sizeof(seeded), "%s%s", g_seedFallback, path + rootSize);
+    if (n < 0 || n >= static_cast<int>(sizeof(seeded))) return failed;
+    const SceUID fd = sceIoOpen(seeded, SCE_O_RDONLY, 0);
+    (fd >= 0 ? g_seedFallbackHits : g_seedFallbackMisses).fetch_add(1, std::memory_order_relaxed);
+    return fd >= 0 ? fd : failed;
 }
 extern "C" GLuint vgxvita_glCreateShader(GLenum type) {
     const GLuint shader = glCreateShader(type);

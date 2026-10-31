@@ -1,6 +1,7 @@
 // Real Vita host; only the external SceIo boundary is an in-memory filesystem.
 #include "../platform/vgx/vita/vgx_host_galaxy_vita.cpp"
 #include "../platform/vgx/src/vgx_coldtrace.h"
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -34,9 +35,13 @@ void File(const std::string& name, std::vector<uint8_t> data) {
     files[name] = std::move(data); Directory(name.substr(0,name.rfind('/')));
 }
 std::vector<uint8_t> Text(const std::string& value) { return {value.begin(),value.end()}; }
+// GXV_VITA_SEED=copy runs the scenarios against the copy of the seed (the behaviour before 1.2; its seed is laid out as v2, which the
+// copy renames); without it they run against the default, the seed read in place (laid out as v3, the folder of the vitaGL in use).
+bool copyMode = false;
+std::vector<uint8_t> MarkerText(const std::string& stamp) { return Text(copyMode ? stamp : stamp + " lookup"); }
 void Fixture() {
     File(packageList, std::vector<uint8_t>(100, 0x31));
-    File(seed + "/v2/v/00/111.gxp", {1,2,3,4});
+    File(seed + (copyMode ? "/v2" : "/v3") + "/v/00/111.gxp", {1,2,3,4});
     File(std::string(cache) + "/v2/f/02/personal.gxp", {9,8,7,6});
     File(kShaderListFile, Text("personal learned shader list"));
 }
@@ -55,6 +60,8 @@ std::vector<std::string> Children(const std::string& parent) {
 }
 
 extern "C" void port_log(const char*, ...) {}
+// vita/vgx-game/coldtrace_wrap.cpp, linked with --wrap=sceIoOpen: what vitaGL's own (undefined, so wrapped) sceIoOpen calls reach.
+extern "C" SceUID __wrap_sceIoOpen(const char* path, int flags, SceMode mode);
 extern "C" { char vgl_shader_cache_path[256] = ""; }
 extern "C" GLuint glCreateShader(GLenum) { static GLuint shader = 16; return ++shader; }
 extern "C" void glShaderSource(GLuint, GLsizei count, const GLchar* const* text, const GLint* length) {
@@ -134,7 +141,8 @@ extern "C" int sceIoDread(SceUID id, SceIoDirent* out) {
 extern "C" int sceIoDclose(SceUID id) { return sceIoClose(id); }
 
 int main(int argc, char** argv) {
-    Require(argc==2,"supply seed-cache scenario"); const std::string mode=argv[1]; Fixture();
+    Require(argc==2,"supply seed-cache scenario"); const std::string mode=argv[1];
+    copyMode=std::getenv("GXV_VITA_SEED") && std::strcmp(std::getenv("GXV_VITA_SEED"),"copy")==0; Fixture();
     const auto personal=files.at(kShaderListFile), personalGxp=files.at(std::string(cache)+"/v2/f/02/personal.gxp");
     if(mode=="bucket-early" || mode=="bucket-lengths") {
 #if VGX_COLDTRACE
@@ -240,8 +248,8 @@ int main(int argc, char** argv) {
         const unsigned beforeWrites=personalOutputOpens;
         writeError.clear(); directoryOpens=0; SeedShaderCache(cache); SeedShaderList();
         Require(files.at(kShaderListFile)==files.at(packageList),"a restart recovers the regenerable list after rollback or marker failure");
-        if(mode=="adopt-marker-fail")Require(directoryOpens>0 && personalOutputOpens==beforeWrites,"marker repair validates cache without re-adopting an already updated list");
-        char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==Text(stamp),"recovered startup commits the current fingerprint");
+        if(mode=="adopt-marker-fail")Require((directoryOpens>0 || !copyMode) && personalOutputOpens==beforeWrites,"marker repair validates cache (a copy walks the seed again) without re-adopting an already updated list");
+        char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==MarkerText(stamp),"recovered startup commits the current fingerprint");
     } else if(mode=="adopt-retry" || mode=="adopt-close-retry" || mode=="adopt-crash-before-list" || mode=="adopt-large") {
         if(mode=="adopt-large")File(kShaderListFile,std::vector<uint8_t>(kSeedMaxListBytes+1u,0x8e));
         const auto before=files.at(kShaderListFile);
@@ -261,7 +269,7 @@ int main(int argc, char** argv) {
         g_seedIsNew=false; directoryOpens=0; SeedShaderCache(cache); SeedShaderList();
         if(mode=="adopt-large")Require(directoryOpens==0 && files.at(kShaderListFile)==before,"oversized personal list does not cause a seed traversal on every boot");
         else Require(files.at(kShaderListFile)==files.at(packageList),"failed or interrupted adoption is retried after the next startup");
-        char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==Text(stamp),"completed adoption publishes the current fingerprint");
+        char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==MarkerText(stamp),"completed adoption publishes the current fingerprint");
     } else if(mode=="adopt-read-error" || mode=="adopt-write-error" || mode=="adopt-close-error" || mode=="adopt-preread-close-error" ||
               mode=="adopt-stat-error" || mode=="adopt-missing") {
         // A valid prior marker from a different package makes this a real content update, not a format migration.
@@ -305,6 +313,73 @@ int main(int argc, char** argv) {
         if(mode=="stamp-read-error"){readError=packageList;readChunk=3;}else closeError=packageList;
         files[packageList][50]^=1; SeedShaderCache(cache);
         Require(!g_seedIsNew && files.at(marker)==good,"uncertain package fingerprint cannot publish new-copy status or a new marker");
+    } else if(mode.rfind("lookup",0)==0) {
+        // The default since 1.2: the package's compiled shaders are read in place behind the card's cache, nothing is copied.
+        Require(!copyMode,"lookup scenarios run without GXV_VITA_SEED=copy");
+        const std::string v3=std::string(cache)+"/v3";
+        // XXH3_64bits("abc") = 78af5f94892f3950: vitaGL's name for that vertex shader, in the card's cache and in the package
+        const std::string name=v3+"/v/78/78AF5F94892F3950.gxp", seeded=seed+"/v3/v/78/78AF5F94892F3950.gxp";
+        File(seeded,{7,7,7});
+        auto open=[](const std::string& path,int flags=SCE_O_RDONLY,SceMode bits=0777) {
+            errno=E2BIG; const SceUID fd=__wrap_sceIoOpen(path.c_str(),flags,bits);
+            Require(errno==E2BIG,"the lookup keeps errno"); return fd;
+        };
+        auto readAll=[](SceUID fd) {
+            std::vector<uint8_t> out; uint8_t buffer[64];
+            for(;;){const auto n=sceIoRead(fd,buffer,sizeof buffer); if(n<=0)break; out.insert(out.end(),buffer,buffer+n);}
+            sceIoClose(fd); return out;
+        };
+        if(mode=="lookup-first") {
+            const unsigned writesBefore=outputOpens; const size_t filesBefore=files.size();
+            SeedShaderCache(cache); SeedShaderList();
+            char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==MarkerText(stamp),"the first start records the package's fingerprint");
+            Require(outputOpens==writesBefore+1 && files.size()==filesBefore+1,"the first start writes the marker only: no compiled shader is copied, the card's list is kept");
+            for(const auto& f:files) Require(f.first.rfind(v3,0)!=0,"nothing is written into the card's compiled-shader folder");
+            Require(dirs.count(v3+"/v") && dirs.count(v3+"/f") && !dirs.count(v3+"/v/00") && !dirs.count(v3+"/f/00"),"only vitaGL's top folders are made, no bucket folder");
+            Require(g_seedFallbackOn.load() && g_seedFallback==seed+"/v3","the package's version folder is the read-only second level");
+            const size_t dirsBefore=dirs.size(); directoryOpens=0; const unsigned writes=outputOpens;
+            SeedShaderCache(cache); SeedShaderList();
+            Require(directoryOpens==0 && outputOpens==writes && dirs.size()==dirsBefore && g_seedFallbackOn.load(),"a normal start reads the marker only and keeps the lookup");
+        } else if(mode=="lookup-open") {
+            SeedShaderCache(cache); std::snprintf(vgl_shader_cache_path,sizeof vgl_shader_cache_path,"%s",v3.c_str());
+            unsigned before=inputOpens; SceUID fd=open(name);
+            Require(fd>=0 && inputOpens==before+2 && readAll(fd)==std::vector<uint8_t>{7,7,7} && g_seedFallbackHits==1,"a miss in the card's cache is read from the package");
+            File(name,{1}); before=inputOpens; fd=open(name);
+            Require(fd>=0 && inputOpens==before+1 && readAll(fd)==std::vector<uint8_t>{1} && g_seedFallbackHits==1,"the card's own compile wins, with no package lookup");
+            files.erase(name); files.erase(seeded); fd=open(name);
+            Require(fd==static_cast<int>(0x80010002) && g_seedFallbackMisses==1,"a miss in both gives the card's error: vitaGL compiles and writes to the card");
+            File(seeded,{7,7,7}); before=inputOpens;
+            for(const std::string& other:{std::string(cache)+"/other.bin", v3+"/v/78/78af5f94892f3950.gxp", v3+"/v/79/78AF5F94892F3950.gxp",
+                                          v3+"/x/78/78AF5F94892F3950.gxp", name+".tmp", v3+"x/v/78/78AF5F94892F3950.gxp", seed+"/v3/v/78/missing.gxp"})
+                Require(open(other)<0,"other names are not redirected");
+            Require(open(name,SCE_O_RDONLY,0666)<0 && open(name,SCE_O_RDONLY,0)<0,"only vitaGL's lookup shape is redirected");
+            Require(inputOpens==before+9 && g_seedFallbackHits==1 && g_seedFallbackMisses==1,"nothing else is looked for in the package");
+            Require(RemoveSelfTestCacheFiles()==0 && !g_seedFallbackOn.load() && open(name)<0,"a failed self-test with no file of the card's own switches the package lookup off");
+        } else if(mode=="lookup-switches") {
+            for(const char* value:{"app0","off"}) {
+                setenv("GXV_VITA_SEED",value,1); const char* folder=SeedShaderCache(cache);
+                Require(!g_seedFallbackOn.load() && (std::strcmp(value,"app0")==0 ? folder==seed : folder==std::string(cache)),"app0 and off keep their own behaviour");
+            }
+            unsetenv("GXV_VITA_SEED"); SeedShaderCache(cache); SeedShaderList();
+            Require(g_seedFallbackOn.load() && files.count(marker),"default: lookup");
+            setenv("GXV_VITA_SEED","copy",1); g_seedFallbackOn=false; SeedShaderCache(cache);
+            char stamp[80]; Require(PackageStamp(stamp,sizeof stamp),"fingerprint");
+            Require(files.count(v3+"/v/00/111.gxp") && files.count(name) && files.at(marker)==Text(stamp) && !g_seedFallbackOn.load(),
+                    "GXV_VITA_SEED=copy after lookup starts still copies once");
+            unsetenv("GXV_VITA_SEED"); directoryOpens=0; const unsigned writes=outputOpens; SeedShaderCache(cache);
+            Require(directoryOpens==0 && outputOpens==writes && g_seedFallbackOn.load(),"a copy marker satisfies the lookup: nothing more to do");
+        } else if(mode=="lookup-legacy-seed" || mode=="lookup-no-version") {
+            for(auto it=files.begin();it!=files.end();) it=it->first.rfind(seed+"/v3",0)==0 ? files.erase(it) : std::next(it);
+            for(auto it=dirs.begin();it!=dirs.end();) it=it->rfind(seed+"/v3",0)==0 ? dirs.erase(it) : std::next(it);
+            if(mode=="lookup-legacy-seed") File(seed+"/v2/v/78/78AF5F94892F3950.gxp",{5});
+            SeedShaderCache(cache); std::snprintf(vgl_shader_cache_path,sizeof vgl_shader_cache_path,"%s",v3.c_str());
+            if(mode=="lookup-legacy-seed") {
+                Require(g_seedFallback==seed+"/v2","a seed laid out by an older vitaGL (v2) is found: the files are the same");
+                const SceUID fd=open(name); Require(fd>=0 && readAll(fd)==std::vector<uint8_t>{5},"its programs are read under the card's v3 names");
+            } else {
+                Require(!g_seedFallbackOn.load() && !files.count(marker) && open(name)<0,"a seed without a version folder is not used, and not recorded as done");
+            }
+        } else Require(false,"known lookup scenario");
     } else Require(false,"known seed-cache scenario");
     Require(files.at(std::string(cache)+"/v2/f/02/personal.gxp")==personalGxp,"existing personal compiled shaders are retained");
     Require(handles.empty(),"all opened file/directory handles are closed");
