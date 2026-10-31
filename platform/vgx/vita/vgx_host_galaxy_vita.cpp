@@ -796,7 +796,7 @@ void Finish() {
              static_cast<unsigned>(g_durUs[kUnpack] / 1000u), static_cast<unsigned>(g_durUs[kGraphics] / 1000u), static_cast<unsigned>(g_durUs[kGame] / 1000u),
              static_cast<unsigned>(g_durUs[kShaders] / 1000u), static_cast<unsigned>(g_durUs[kTitle] / 1000u));
     if (g_seedFallback[0])
-        port_log("[vgx-vita] compiled shaders read from the package in place so far: %u (%u looked for there and not found)%s",
+        GXV_BASIC_LOG("[vgx-vita] compiled shaders read from the package in place so far: %u (%u looked for there and not found)%s",
                  g_seedFallbackHits.load(std::memory_order_relaxed), g_seedFallbackMisses.load(std::memory_order_relaxed),
                  g_seedFallbackOn.load(std::memory_order_relaxed) ? "" : "; switched off after the compiler self-test");
 }
@@ -1272,7 +1272,7 @@ const char* SeedShaderCache(const char* folder) {
         g_seedFallbackOn.store(found, std::memory_order_release);
         if (previous.matches) return folder;
         MakeFirstBuckets(folder, st);
-        port_log("[vgx-vita] compiled shaders of the package %s: %s (read in place after %s; nothing copied, %u folders made)", seed,
+        GXV_BASIC_LOG("[vgx-vita] compiled shaders of the package %s: %s (read in place after %s; nothing copied, %u folders made)", seed,
                  found ? "found" : "NOT FOUND (no v<n> folder), shaders are compiled on this console", folder, st.folders);
         if (found && stamped && !previous.readError) CommitSeedMarker(marker, stamp, kSeedLookupSuffix, previous.replaceList);
         return folder;
