@@ -72,6 +72,19 @@ struct VsKey {
         uint8_t perVtxMtx = 0; // matrix row from the per-vertex TEXnMTXIDX
         uint8_t pad[2] = {};
     } tg[8];
+    // GXV_FIX_LINES: the vertex shader widens a GX line (lpMode 1) or point (lpMode 2) into a quad, as GX rasterises it. The expanded
+    // vertices carry, in texture coordinate slots lpBase.. that nothing else reads (3 slots for a line: the other end point's a_pos
+    // as two vec2, then the corner; 1 for a point: the corner), the corner's NDC offset (+-width / viewport size per axis, a quad
+    // corner or the side of the line). lpAmount is the GX_TO_* code of GXSetLineWidth / GXSetPointSize (texture coordinate offsets,
+    // 0 = none) and lpTexMask the texgens whose GXEnableTexOffsets bit is set. Kept in the padding of chan[0] and chan[1], so
+    // sizeof(VsKey) and every key with lpMode 0 are unchanged.
+    uint8_t lpMode() const { return chan[0].pad[0]; }
+    uint8_t lpBase() const { return chan[0].pad[1]; }
+    uint8_t lpAmount() const { return chan[1].pad[0]; }
+    uint8_t lpTexMask() const { return chan[1].pad[1]; }
+    void setLp(uint8_t mode, uint8_t base, uint8_t amount, uint8_t texMask) {
+        chan[0].pad[0] = mode; chan[0].pad[1] = base; chan[1].pad[0] = amount; chan[1].pad[1] = texMask;
+    }
 };
 
 // FsKey::fog bit: the (unclamped) fog factor is an affine function of clip w (perspective) or clip z (orthographic), made in

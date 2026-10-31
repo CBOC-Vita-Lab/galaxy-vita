@@ -2714,8 +2714,8 @@ static inline split::FinishCtx MainFinishCtx() {
 }
 static inline split::DrawStateRef CurStateRef() { return split::DrawStateRef{cur.vsId, cur.useFs, cur.texMask, cur.stateSerial, &cur.rs, cur.tex}; }
 // The record part of a draw: here, or (front-end split) a placeholder command and a job for the finishing thread.
-static inline void FinishOrSend(const split::DrawJob& j) {
-    const split::DrawStateRef st = CurStateRef();
+static inline void FinishOrSend(const split::DrawJob& j, const split::DrawStateRef* over = nullptr) {
+    const split::DrawStateRef st = over ? *over : CurStateRef();
     if (j.vsTwin != 0xFFFF) {
         // (GXV_RIGIDMERGE: the palette twin of the key may be what a record is drawn with: its variant goes on the warm-up list too)
         static struct { uint32_t ids = ~0u, layout = 0, serial = 0; } lastTwin;
@@ -2751,14 +2751,110 @@ static inline void FinishOrSend(const split::DrawJob& j) {
     else split::FinishDraw(c, j, st);
 }
 
+// ================================================================ GX lines and points as quads (GXV_FIX_LINES)
+// GX rasterises a line as a parallelogram widened by width/6 EFB pixels along the minor axis of its screen-space direction, and a point as a square of
+// size/6 pixels (vgx_fixes.h). vitaGL ignores glLineWidth for custom shaders and the generated vertex shader writes no point size, so with GXV_FIX_LINES=1
+// an immediate line or point primitive is widened into quads here and in the vertex shader (VsKey::lpMode, vgx_shadergen.cpp): every segment becomes four
+// vertices (each end point twice, its own attributes), which carry in three free texture-coordinate slots the other end point's position and the corner's
+// NDC offset (+-width / viewport size), or for a point in one slot the corner. The draw is then an ordinary quad list, drawn without culling (GX does not
+// cull lines). Lines and points of a display list the cache keeps as a static buffer (EmitStaticDraw / EmitStaticRun) are not touched.
+static bool LinesFix() {
+    static const bool on = EnvInt("GXV_FIX_LINES", 0) != 0; // read once; default 0 (off): lines are 1 pixel, points of an undefined size, as before
+    return on;
+}
+struct LpResult {
+    uint16_t vsId = 0;
+    uint32_t mask = 0, count = 0;
+};
+// 0: not expanded (the pending vertices are as they were), 1: expanded (the pending vertices are the quads, `r` says how), 2: the arena refused the vertices
+// (the draw is lost).
+static int ExpandLinePoints(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, LpResult& r) {
+    const uint32_t kind = gxPrim & 0xF8u;
+    const bool pts = kind == 0xB8u;
+    const uint32_t nSeg = pts ? count : (kind == 0xA8u ? count / 2 : (count >= 2 ? count - 1 : 0));
+    if (nSeg == 0 || nSeg * 4u > 0xFFFFu) return 0;
+    const RenderState& rs = cur.rs;
+    if (!(rs.vpW > 0.0f && rs.vpH > 0.0f)) return 0;
+    const uint32_t lps = g.bp[0x22];
+    const uint32_t w6 = fixes::LinePointSize6(lps, pts);
+    if (w6 == 0) return 0;
+    uint32_t used = (layoutMask >> 3) & 0xFFu; // (the tex slots the layout has, then the ones a texgen of the key reads)
+    for (int i = 0; i < cur.vs.numTexGens; ++i) {
+        const VsKey::TexGen& t = cur.vs.tg[i];
+        if (t.type < 2 && t.src >= 5 && t.src <= 12) used |= 1u << (t.src - 5);
+    }
+    const int need = pts ? 1 : 3;
+    const int base = fixes::LinePointFreeSlots(used, need);
+    if (base < 0) return 0;
+    uint32_t code = fixes::LinePointTexCode(lps, pts), texMask = 0;
+    if (code)
+        for (int i = 0; i < cur.vs.numTexGens; ++i)
+            if (fixes::LinePointTexEnabled(g.bp[0x30 + 2 * i], pts)) texMask |= 1u << i;
+    if (!texMask) code = 0;
+    VsKey k = cur.vs;
+    k.setLp(pts ? 2 : 1, static_cast<uint8_t>(base), static_cast<uint8_t>(code), static_cast<uint8_t>(texMask));
+    r.vsId = Lookup(g_vsReg, k, false, GenerateVertexShader);
+    r.mask = layoutMask | (((1u << need) - 1u) << (3 + base));
+    r.count = nSeg * 4u;
+
+    const VtxLayout oL = LayoutOf(layoutMask);
+    const VtxLayout nL = LayoutOf(r.mask);
+    static std::vector<uint8_t> tmp; // (the player thread only)
+    tmp.assign(g_buf.vtx.data() + g_pendingVtxStart, g_buf.vtx.data() + g_pendingVtxStart + static_cast<size_t>(count) * oL.stride);
+    RestoreBvSnapshot();
+    uint8_t* out = BeginVertices(r.mask, r.count);
+    if (!out) {
+        out = BeginVertices(layoutMask, count);
+        if (!out) return 2;
+        std::memcpy(out, tmp.data(), tmp.size());
+        return 0;
+    }
+    const float px = static_cast<float>(w6) / 6.0f;
+    const float ox = px / rs.vpW, oy = px / rs.vpH;
+    const uint32_t nS = oL.stride, nT = nL.stride;
+    const uint8_t* sv = tmp.data();
+    const auto copyVtx = [&](uint8_t* d, const uint8_t* v) {
+        std::memcpy(d, v, 16);
+        if (layoutMask & VL_NRM) std::memcpy(d + nL.offNrm, v + oL.offNrm, 12);
+        if (layoutMask & VL_COL0) std::memcpy(d + nL.offCol0, v + oL.offCol0, 4);
+        if (layoutMask & VL_COL1) std::memcpy(d + nL.offCol1, v + oL.offCol1, 4);
+        for (int t = 0; t < 8; ++t)
+            if (layoutMask & (VL_TEX0 << t)) std::memcpy(d + nL.offTex[t], v + oL.offTex[t], 8);
+        if (layoutMask & VL_TMI) std::memcpy(d + nL.offTmi, v + oL.offTmi, 8);
+    };
+    static const int8_t kPt[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}; // (left/right, top/bottom: GL y is down the picture, see BuildProjC)
+    for (uint32_t s = 0; s < nSeg; ++s) {
+        const uint32_t a = pts ? s : (kind == 0xA8u ? 2 * s : s), b = pts ? s : a + 1;
+        for (int c = 0; c < 4; ++c) {
+            uint8_t* d = out + static_cast<size_t>(4 * s + c) * nT;
+            const uint32_t own = c < 2 ? a : b, other = c < 2 ? b : a;
+            copyVtx(d, sv + static_cast<size_t>(own) * nS);
+            float lc[2];
+            if (pts) {
+                lc[0] = kPt[c][0] * ox;
+                lc[1] = kPt[c][1] * oy;
+                std::memcpy(d + nL.offTex[base], lc, 8);
+            } else {
+                const float side = (c == 0 || c == 3) ? -1.0f : 1.0f;
+                lc[0] = side * ox;
+                lc[1] = side * oy;
+                std::memcpy(d + nL.offTex[base], sv + static_cast<size_t>(other) * nS, 16);
+                std::memcpy(d + nL.offTex[base + 2], lc, 8);
+            }
+        }
+    }
+    VGX_LOG_N(12, "lines: %s widened to quads: %u segment(s), size %u/6 px, tex offset code %u, mask %03X\n", pts ? "points" : (kind == 0xA8u ? "GX_LINES" : "GX_LINESTRIP"), nSeg, w6, code, r.mask);
+    return 1;
+}
+
 bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t foldedFrom) {
     VtxLayout L = LayoutOf(layoutMask);
     g_buf.vtx.resize(g_pendingVtxStart + static_cast<size_t>(count) * L.stride);
     auto drop = [&] { g_buf.vtx.resize(g_pendingVtxStart); };
     if (count == 0) return true;
 
-    const uint8_t prim = PrimKind(gxPrim);
-    const uint32_t idxCount = PrimIndexCount(gxPrim, count);
+    uint8_t prim = PrimKind(gxPrim);
+    uint32_t idxCount = PrimIndexCount(gxPrim, count);
     if (idxCount == 0) { drop(); return true; }
 
     uint32_t vcdMtxMask = 0;
@@ -2768,7 +2864,9 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
         for (int i = 0; i <= 8; ++i)
             if (g.vcd[i]) vcdMtxMask |= 1u << i;
     }
-    ResolveState(vcdMtxMask, count);
+    // (GXV_FIX_LINES: a line or point is widened by the vertex shader, which transforms its vertices: not on the CPU)
+    const bool lpWant = prim != PRIM_TRIANGLES && LinesFix();
+    ResolveState(vcdMtxMask, lpWant ? 0xFFFFFFFFu : count);
     if (foldedFrom != 0xFFFFFFFFu && !cur.fold) {
         // (laid out for folding, and it does not fold: undo the reservation, the caller decodes again)
         RestoreBvSnapshot();
@@ -2777,6 +2875,27 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     }
     if (cur.cullAll && prim == PRIM_TRIANGLES) { drop(); return true; }
     if (ChaOn()) CharaNote(g_buf.vtx.data() + g_pendingVtxStart, count, L.stride, L.mask); // (GXV_CHARAA: model-space vertices still)
+    RenderState lpRs;
+    split::DrawStateRef lpState{};
+    bool lpDraw = false;
+    if (lpWant) {
+        LpResult lp;
+        const int e = ExpandLinePoints(gxPrim, layoutMask, count, lp);
+        if (e == 2) return true; // (the arena refused the vertices; nothing is pending)
+        if (e == 1) {
+            // (quads: GX does not cull lines, so no face is culled)
+            lpRs = cur.rs;
+            lpRs.cull = CULL_NONE;
+            lpState = split::DrawStateRef{lp.vsId, cur.useFs, cur.texMask, cur.stateSerial, &lpRs, cur.tex};
+            lpDraw = true;
+            layoutMask = lp.mask;
+            count = lp.count;
+            L = LayoutOf(layoutMask);
+            gxPrim = 0x80;
+            prim = PRIM_TRIANGLES;
+            idxCount = PrimIndexCount(gxPrim, count);
+        }
+    }
     // (front-end split: the finishing thread transforms the vertices, once they are where they stay, below)
     const bool split = split::g_on;
     if (cur.soft && !split) SoftTransform(g_buf.vtx.data() + g_pendingVtxStart, count, L);
@@ -2831,14 +2950,14 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     j.vtxStart = static_cast<uint32_t>(g_pendingVtxStart);
     j.stride = L.stride;
     j.exX = ext.x; j.exY = ext.y; j.exW = ext.w; j.exH = ext.h;
-    if (prim == PRIM_TRIANGLES) {
+    if (prim == PRIM_TRIANGLES && !lpDraw) {
         // (a CPU-transformed draw too: its block is the identity, which is a palette slot like any other matrix)
         j.vsTwin = RigidTwin(); // (GXV_RIGIDMERGE; 0xFFFF: off or not a rigid key)
         const uintptr_t vp = reinterpret_cast<uintptr_t>(g_buf.vtx.data() + g_pendingVtxStart);
         j.vtxPtrLo = static_cast<uint32_t>(vp);
         j.vtxPtrHi = static_cast<uint32_t>(static_cast<uint64_t>(vp) >> 32);
     }
-    FinishOrSend(j);
+    FinishOrSend(j, lpDraw ? &lpState : nullptr);
     ++g_frameDraws;
     {
         stats::Frame& fr = stats::Cur();

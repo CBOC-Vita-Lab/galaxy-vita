@@ -101,5 +101,28 @@ inline float LodBiasOf(uint32_t mode0, uint32_t mode1) {
 inline unsigned TexMode0Reg(unsigned m) { return m < 4 ? 0x80 + m : 0xA0 + (m - 4); }
 inline unsigned TexMode1Reg(unsigned m) { return TexMode0Reg(m) + 4; }
 
+// ------------------------------------------------------------------ GX lines and points (BP 0x22 SU_LPSIZE, BP 0x30 + 2n SU_SSIZEn)
+// GXV_FIX_LINES: GX draws a line as a parallelogram widened along the minor axis of its screen-space direction (an x-major line vertically,
+// a y-major one horizontally, a tie x-major) by width/6 EFB pixels in total, and a point as an axis-aligned square of size/6 pixels. vitaGL
+// ignores glLineWidth for custom shaders and the generated vertex shader writes no point size, so the front end widens them into quads.
+// The first free run of `need` consecutive texture-coordinate slots (bit n of `used` = slot n is read by the layout or by a texgen) for the
+// expanded vertices' extra attributes, or -1.
+inline int LinePointFreeSlots(unsigned used, int need) {
+    for (int b = 0; b + need <= 8; ++b) {
+        const unsigned m = ((1u << need) - 1u) << b;
+        if (!(used & m)) return b;
+    }
+    return -1;
+}
+// SU_LPSIZE fields. size: line (bits 0..7) or point (bits 8..15) size in 1/6 pixel, 0 = nothing to expand; offset code: GX_TO_* (3 bits at
+// 16 for lines, 19 for points), 6 and 7 act as 5 (Dolphin's table {0, 1/16, 1/8, 1/4, 1/2, 1, 1, 1} of the texture coordinate offset).
+inline unsigned LinePointSize6(unsigned lpsize, bool point) { return point ? (lpsize >> 8) & 0xFF : lpsize & 0xFF; }
+inline unsigned LinePointTexCode(unsigned lpsize, bool point) {
+    const unsigned c = (lpsize >> (point ? 19 : 16)) & 7u;
+    return c > 5 ? 5 : c;
+}
+// SU_SSIZEn: GXEnableTexOffsets(coord, line, point) bits 18 and 19.
+inline bool LinePointTexEnabled(unsigned suSsize, bool point) { return ((suSsize >> (point ? 19 : 18)) & 1u) != 0; }
+
 } // namespace fixes
 } // namespace vgx

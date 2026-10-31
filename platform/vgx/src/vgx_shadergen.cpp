@@ -590,6 +590,12 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     for (int t = 0; t < 8; ++t)
         if (texSrcMask & (1u << t)) o("attribute vec2 a_tex%d;\n", t);
     if (needTmi) o("attribute vec4 a_tmi0;\nattribute vec4 a_tmi1;\n");
+    // GXV_FIX_LINES (VsKey::lpMode): the corner of the quad a line or point is widened into, and for a line the other end point.
+    // The slots are ones no texgen of this key reads (the front end picks them).
+    const int lpMode = (k.lpMode() == 1 || k.lpMode() == 2) && k.lpBase() + (k.lpMode() == 1 ? 3 : 1) <= 8 ? k.lpMode() : 0;
+    const int lpB = k.lpBase();
+    if (lpMode == 1) o("attribute vec2 a_tex%d;\nattribute vec2 a_tex%d;\nattribute vec2 a_tex%d;\n", lpB, lpB + 1, lpB + 2);
+    else if (lpMode == 2) o("attribute vec2 a_tex%d;\n", lpB);
     o("uniform mat4 u_proj;\n");
     const bool shortPal = k.perVtxPos == 2 || k.perVtxPos == 3;
     const int palK = PalRowsOfKey(k.perVtxPos); // rows of the short palette's position half (its normal half starts there)
@@ -618,6 +624,35 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
     }
     if (needNrm) o("  float nl = length(n);\n  if (nl > 0.0) n = n / nl;\n");
     o("  gl_Position = u_proj * vec4(eye, 1.0);\n");
+    if (lpMode == 1) {
+        // GX widens a line along the minor axis of its screen-space direction (x-major lines vertically, y-major horizontally; a tie is
+        // x-major), by lc = +-width / viewport size in NDC on each side. The offset is applied in clip space (times w), so it is exact under
+        // any transform. An end point behind the near plane is moved onto it along the line first: the two triangles of a quad with a
+        // corner behind the eye (w < 0) do not tile the ribbon any more. (Colours and texture coordinates keep the end point's own values there.) The direction comes from the two end points' NDC positions.
+        o("  vec4 p2 = vec4(a_tex%d.x, a_tex%d.y, a_tex%d.x, 1.0);\n", lpB, lpB, lpB + 1);
+        o("  vec2 lc = a_tex%d;\n", lpB + 2);
+        if (k.perVtxPos) {
+            char w2[24];
+            std::snprintf(w2, sizeof w2, "a_tex%d.y", lpB + 1);
+            RowIndex(o, "  ", "pj", w2);
+            if (shortPal) o("  if (pj > %d) pj = %d;\n", palK - 3, palK - 3);
+            else o("  if (pj > 61) pj = 61;\n");
+            o("  vec3 eye2 = vec3(dot(u_pal[pj], p2), dot(u_pal[pj + 1], p2), dot(u_pal[pj + 2], p2));\n");
+        } else {
+            o("  vec3 eye2 = vec3(dot(u_mv[0], p2), dot(u_mv[1], p2), dot(u_mv[2], p2));\n");
+        }
+        o("  vec4 c1 = u_proj * vec4(eye2, 1.0);\n  vec4 q0 = gl_Position;\n  vec4 q1 = c1;\n");
+        o("  float d0 = q0.z + q0.w;\n  float d1 = q1.z + q1.w;\n");
+        o("  if (d0 < 0.0 && d1 >= 0.0) q0 = gl_Position + (c1 - gl_Position) * (d0 / (d0 - d1));\n");
+        o("  if (d1 < 0.0 && d0 >= 0.0) q1 = c1 + (gl_Position - c1) * (d1 / (d1 - d0));\n");
+        o("  vec2 dn = vec2(0.0);\n  if (q0.w > 0.0 && q1.w > 0.0) dn = abs(q1.xy / q1.w - q0.xy / q0.w);\n");
+        o("  float tall = (dn.y * abs(lc.x) > dn.x * abs(lc.y)) ? 1.0 : 0.0;\n");
+        o("  gl_Position = q0;\n");
+        o("  gl_Position.xy += vec2(lc.x * tall, lc.y * (1.0 - tall)) * q0.w;\n");
+    } else if (lpMode == 2) {
+        // A point is an axis-aligned square of side size / 6 pixels around its centre; lc is the corner's offset.
+        o("  vec2 lc = a_tex%d;\n  gl_Position.xy += lc * gl_Position.w;\n", lpB);
+    }
     if (k.fogVtx & 1) o("  v_fog = gl_Position.%c;\n", (k.fogVtx & 2) ? 'z' : 'w');
 
     // Lighting channels.
@@ -732,6 +767,17 @@ void GenerateVertexShader(const VsKey& k, ShaderSource& src) {
             o("    vec4 q = vec4(tc, 1.0);\n    tc = vec3(dot(u_ptm[%d], q), dot(u_ptm[%d], q), dot(u_ptm[%d], q));\n", i * 3, i * 3 + 1, i * 3 + 2);
         }
         o("    v_tex%d = tc;\n  }\n", i);
+    }
+    // GXV_FIX_LINES: GXEnableTexOffsets. A line's far side (the +side of lc) is moved by the GX_TO_* amount in s; a point's right corners
+    // in s and its bottom corners in t. (Dolphin VideoCommon does the same, on the NDC offset's sign.)
+    if (lpMode && k.lpAmount() >= 1 && k.lpAmount() <= 5 && k.lpTexMask()) {
+        static const char* const kAmt[6] = {"0.0", "0.0625", "0.125", "0.25", "0.5", "1.0"};
+        const char* a = kAmt[k.lpAmount()];
+        for (int i = 0; i < k.numTexGens; ++i) {
+            if (!(k.lpTexMask() & (1u << i))) continue;
+            o("  if (lc.x > 0.0) v_tex%d.x += %s;\n", i, a);
+            if (lpMode == 2) o("  if (lc.y > 0.0) v_tex%d.y += %s;\n", i, a);
+        }
     }
     o("}\n");
     src.text = std::move(o.s);
