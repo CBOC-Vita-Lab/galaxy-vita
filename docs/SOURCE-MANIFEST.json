@@ -14272,7 +14272,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/GameScene.cpp",
-      "sha256": "a007dbe617d859d39bb5755db8727c64676babe4dfb13a70efac4f04b5de9a5a"
+      "sha256": "7d7f6a533abf21e7a799030342c66b63753f59988d0195841162a356de153b76"
     },
     {
       "path": "decomp/src/Game/Scene/GameSceneFunction.cpp",
@@ -18548,7 +18548,7 @@
     },
     {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "e4fe795b56f4268e17e04391ee5d68029c52505fa13c392d2f2bf6ca1a7d502a"
+      "sha256": "f1be2f3250e27f117502c2af1cb4d99f3651d79631763b265542d1410f502d42"
     },
     {
       "path": "platform/include/port/pointer_aim.h",
@@ -18792,7 +18792,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "afeeb1d5d5fe55d480761931b8278307dabd7b0822ca30d97da49d0c527c769c"
+      "sha256": "971c2807aa78b44c34da5a385e6f2e262756678029445bfd0a7c9513238204f8"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
@@ -18968,7 +18968,7 @@
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "e14dd4b68dd99d648804201e419458e04242be99a30b2ad327cae49564198e6e"
+      "sha256": "60173c404a694e265b6e7e5a367ff5a0407dc4e09c4c972036081bc5823f5ec8"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18984,7 +18984,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "fff40d0439830b76a34a432b78e5dc4b3dd17dd32a5ecb049b2b7bc80ba8d1cf"
+      "sha256": "51fbf0e40fa0085f032a9016f7f5ee75eb15846f98629bb54b7416defa9da7ab"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18996,7 +18996,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "de9928be078b28dabfb613ba6d53666ce81bae3cea2e11843d8f9be6567bbf29"
+      "sha256": "111eee7a1725669b334879e2258669a09bb35bf74595f84dd5907452220f8c8d"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19059,16 +19059,20 @@
       "sha256": "b56f65cb9a37fb472577b388c835206afe94c95995b49130ef608bbc52acb569"
     },
     {
+      "path": "platform/vgx/src/vgx_arena.h",
+      "sha256": "ccf2251a1a58dd01ffa21b5ee39ba829e08687591237e929fa989c4acdade7f6"
+    },
+    {
       "path": "platform/vgx/src/vgx_autoq.cpp",
-      "sha256": "1a756ea9bb88916c89b3e3638bcf4f7ba6c86e4a40dc892dad4d06cb39ce6eb5"
+      "sha256": "926cd1a8e863f28665c4c19f7461da66bd54d471ab09b8a2b06f405224fc099f"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.h",
-      "sha256": "402b6e69668a34bff69af5d28aac66e87a2774ed49451baebbb6ab5dbb1f430f"
+      "sha256": "bc7c4ceba5f5a5525fec4f314ea8d2a5914900225ea390ddf8c83a82ae427c91"
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
-      "sha256": "101e3752af1731ee87ff33d36291b9687376211bf93a254dc8771922e6fa3018"
+      "sha256": "5a5df33739d3659d1d63e89d14f6b9f82868babd0ae628b219e977e504e283b9"
     },
     {
       "path": "platform/vgx/src/vgx_backend_null.cpp",
@@ -19112,11 +19116,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_draw.cpp",
-      "sha256": "9dde30750608003520064acad7340e15cbabae394bc365565a892f52c9363c16"
+      "sha256": "ba11b16b6aff315addc0c9f49d01c85655fc07466fa91c0bfd00467b4902049f"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.cpp",
-      "sha256": "90c106f463e8989dc404f47bfce5a85ceb56fac7a1e2ecffa03ef971e4d2ae23"
+      "sha256": "6128bf4a4c5846b9d1d8fe97004381d68a8fe98942bddafa539a64383f941037"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.h",
@@ -19512,7 +19516,7 @@
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "497189fde9f070549fdfa261907fe02b55c4e9839953e5e389dda07ee0ead5a8"
+      "sha256": "222637aa6b2e297a90f38058dba81c8551c2a7ab22f93a1ba1d7859d034b4d0c"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19528,7 +19532,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "a8f45e586cad2de00efabc6884a1f94026e9e0763e925f0b27607cfe5fc17492"
+      "sha256": "3fcda3f0f25b31a3f7005c8809d16956c341a5c1d361a47c8bb8f9d478646b00"
     },
     {
       "path": "tests/player_settings_pad.cpp",
@@ -19536,11 +19540,11 @@
     },
     {
       "path": "tests/player_settings_store.cpp",
-      "sha256": "4f917f43a52db345cc4a5055514a1f78df5c4f51f344c63b2af2fcf872b08a4a"
+      "sha256": "772d3430c0b0263f1fc969588fa86bf2b2eeea865a64a59f91449f66dc2ad798"
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "739f6aeae3a43af7d893b970bef15dcc93d239d7a2d80b6ad52d1b3bbc834788"
+      "sha256": "6723b14893c0856df4705301cc68b020c0dfe9113a56f19807c6d208ec5f3e00"
     },
     {
       "path": "tests/pointer_aim.cpp",
@@ -19719,12 +19723,20 @@
       "sha256": "aa3c3920375d45c91e3ea13e80994865a4269012af78ea89aa30cef83f97a9b7"
     },
     {
+      "path": "tests/vgx_arena.cpp",
+      "sha256": "dd3161e391e3de81365def760a85706293937f88e90c6deb3d598fdb4e99caf8"
+    },
+    {
+      "path": "tests/vgx_autoq_60.cpp",
+      "sha256": "831b5aa4db40696e1b608eb08a13f7d8c903d9ebfc44add9806849a50512d326"
+    },
+    {
       "path": "tests/vgx_autoq_aniso.cpp",
       "sha256": "e9fee6d4745d865de97f9f4c8213e9bd64c635dfb24b041b6608c4d77cbf8d5b"
     },
     {
       "path": "tests/vgx_autoq_clock.cpp",
-      "sha256": "9c352124a1ac0391631daf80badfc74b9d7c7f8b50cc4fab162a7ae4e0b9e029"
+      "sha256": "faec1b5c14d3f2d47ed914f494d9c7bcf4afb29fadbf61eb235131c3223f8531"
     },
     {
       "path": "tests/vgx_autoq_fxstep.cpp",
@@ -19744,7 +19756,7 @@
     },
     {
       "path": "tests/vgx_autoq_test.cpp",
-      "sha256": "f728ad30ef124545973351b3a92dae3476339e8b5c5765f5be54f33f8ac2f880"
+      "sha256": "fa80e3934c2c61094f7b57eb097b6ad2ab28f5948408abcfe81aabf6f18874b1"
     },
     {
       "path": "tests/vgx_backend_clock.cpp",
@@ -20700,7 +20712,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "a62a371ffbdde4685ee8c8af28d6bedab41802b1d88a626eefb9c95f1477e3e3"
+      "sha256": "757882ca4d59d2d29191f78cdad6927926f4b80770db9d9cc3b6e9b54bab0d13"
     },
     {
       "path": "tools/push_data.py",
@@ -20991,8 +21003,16 @@
       "sha256": "7102e4ecdef6b33c600dc4d5e257aeb59feb44815d27a5dd159c27f849c1c59e"
     },
     {
+      "path": "tools/test_vgx_arena.sh",
+      "sha256": "1017c0f2dfe869718d0de820ff9fd1112fe77934c44ade5be0646a1df1195175"
+    },
+    {
       "path": "tools/test_vgx_autoq.sh",
-      "sha256": "f5acd767f87dfc013c2d363c8a21d3edb4c55093ae701430f3096c8381588960"
+      "sha256": "68923581eeada2e3d3a7e7e941decc58cbb25300a31203fe0d7775f47f50734d"
+    },
+    {
+      "path": "tools/test_vgx_autoq_60.sh",
+      "sha256": "902d02ca8de45774bb874fbcbcc61199858a4ea7f4b964e2b7bcd2884afcdc94"
     },
     {
       "path": "tools/test_vgx_autoq_aniso.sh",
@@ -21000,7 +21020,7 @@
     },
     {
       "path": "tools/test_vgx_autoq_clock.sh",
-      "sha256": "a967a2c5dc856c449a0161e050f0c7f04e2211810c32ee2451cb563167707566"
+      "sha256": "1b4bb60e3e0337ce089b0b83e1e26b60914c475533c2a679ec35c0fd7aa0b16a"
     },
     {
       "path": "tools/test_vgx_autoq_fxstep.sh",
