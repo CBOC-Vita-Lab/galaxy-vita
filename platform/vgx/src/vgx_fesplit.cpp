@@ -13,6 +13,7 @@
 //   finishing: its copy of what the blocks are built from, its draw records, index and uniform arenas, and the bytes of the
 //              vertices it was told to transform (the player does not touch them again in this frame).
 // At the frame's end the player waits until the finishing thread has done everything, then takes its arenas.
+#include "vgx_arena.h"
 #include "vgx_fesplit.h"
 #include "vgx_fixes.h"
 
@@ -473,6 +474,7 @@ bool DiagnosticsInTheWay() {
 
 void Start() {
     F = new Finisher();
+    arena::ReserveSplit(F->draws, F->idx, F->uni, arena::Get()); // (they are swapped into the frame buffers: vgx_arena.h)
     if (Verify()) V = new Shadow();
     g_firstChunk = g_wr = TakeChunk();
     g_wrPos = 0;

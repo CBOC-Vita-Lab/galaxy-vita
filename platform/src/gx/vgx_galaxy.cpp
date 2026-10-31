@@ -23,6 +23,7 @@
 #include "port/qemu_hooks.h"
 #include "port/vclock.h"
 #include "port/settings_lifecycle.h"
+#include "vgx_arena.h"
 #include "vgx_fesplit.h"
 #include "vgx_guestmem.h"
 #include "vgx_hdtex.h"
@@ -689,7 +690,15 @@ bool EnsureThread(bool wait = true) {
     std::unique_lock<std::mutex> lk(sMtx);
     if (!sThreadMade) {
         sThreadMade = true;
-        for (unsigned i = 0; i < sMaxInFlight + 1; ++i) sFree.push_back(new vgx::CmdBuf());
+        // The frame buffers' arenas at their floors now, while the C heap is still in one piece (vgx_arena.h): they then need not
+        // move again in play. The front end's own buffer circulates with them (FrameSink swaps it for a free one), and the
+        // front-end split's arenas are reserved when it starts.
+        const vgx::arena::Floors& floors = vgx::arena::Get();
+        for (unsigned i = 0; i < sMaxInFlight + 1; ++i) {
+            sFree.push_back(new vgx::CmdBuf());
+            vgx::arena::Reserve(*sFree.back(), floors);
+        }
+        vgx::arena::Reserve(vgx::Pending(), floors);
         // 4 MiB of stack: on the console the system's shader compiler runs on this thread.
         pthread_attr_t attr;
         pthread_attr_init(&attr);

@@ -1,5 +1,6 @@
 // Front end: turns the register state into self-contained draw records.
 #include "vgx_state.h"
+#include "vgx_arena.h"
 #include "vgx_fesplit.h"
 #include "vgx_fixes.h"
 #include "vgx_recipe_seed.h"
@@ -1810,9 +1811,13 @@ static struct BvSnapshot {
 } g_bvSnap;
 
 // Grows the arena. (Front-end split: the finishing thread transforms vertices in the arena in place, so
-// its memory may only move while that thread has nothing left to do.)
+// its memory may only move while that thread has nothing left to do.) Past its floor it grows in steps of
+// at most 2 MiB, not by doubling (vgx_arena.h: one request of twice the arena is what a cut-up heap cannot meet).
 static inline void ArenaGrow(size_t n) {
-    if (split::g_on && n > g_buf.vtx.capacity()) split::BeforeArenaGrow(g_buf.vtx, n);
+    if (n > g_buf.vtx.capacity()) {
+        if (split::g_on) split::BeforeArenaGrow(g_buf.vtx, n);
+        arena::VtxMakeRoom(g_buf.vtx, n, arena::Get());
+    }
     g_buf.vtx.resize(n);
 }
 
