@@ -1465,10 +1465,16 @@ bool StartGl(char* error, size_t errorSize) {
     if (paramKib) vglSetParamBufferSize(static_cast<uint32_t>(paramKib) * 1024u);
     if (vdmKib) vglSetVDMBufferSize(static_cast<uint32_t>(vdmKib) * 1024u);
     // A vitaGL built with HAVE_SCRATCH_MEMORY puts GL_DYNAMIC_DRAW and GL_STREAM_DRAW buffers in the
-    // per-frame circular pool by default. The static geometry is given the DYNAMIC hint (see below) and
+    // per-picture circular pool by default. The static geometry is given the DYNAMIC hint (see below) and
     // must outlive the frame, so only the stream buffers (the frame's vertex chunks and indices) may be
     // scratch. Without that build option the call does nothing.
-    vglSetupScratchMemory(GL_FALSE, GL_TRUE);
+    // GXV_VITA_SCRATCH=1 (default 0): the stream buffers come from that pool. Each is given its data again in every back-end
+    // frame before its draws, and the pool of a picture is written again only after the display queue has released the
+    // picture three swaps before (tools/vitagl/README.md); the gain is two heap allocations and two collector frees per frame.
+    long scratchStream = 0;
+    EnvLong("GXV_VITA_SCRATCH", scratchStream, 0, 1);
+    vglSetupScratchMemory(GL_FALSE, scratchStream ? GL_TRUE : GL_FALSE);
+    port_log("[vgx-vita] stream buffers: %s", scratchStream ? "in vitaGL's per-picture pool (library built with HAVE_SCRATCH_MEMORY only)" : "ordinary allocations");
     // (vitaGL's own default is three display buffers; GXV_VITA_TRIPLE=0 leaves that alone, it does not make two)
     port_log("[vgx-vita] sceGxm buffers: %s, parameter buffer %ld KiB, VDM ring %ld KiB (0 = vitaGL's default)",
              tripleBuffering ? "triple buffering asked for" : "vitaGL's default display buffers", paramKib, vdmKib);
