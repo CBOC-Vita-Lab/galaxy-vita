@@ -310,6 +310,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     setenv("GXV_HDTEX_EYES", "1", 0);
     // GX lines and points at their GX width and size (spin sparkles, rain lines, depth-of-field strips), drawn as triangles.
     setenv("GXV_FIX_LINES", "1", 0);
+    // Linear fog per vertex (ortho exact; perspective within 1/255 of the per-pixel curve in the host test): the per-pixel fog
+    // the Strikers GameCube port measured at about 8 ms a frame becomes one multiply-add per pixel.
+    setenv("GXV_FOGVTX", "2", 0);
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
     setenv("GXV_PAD_DEFAULTS", "1", 0);
