@@ -55,14 +55,14 @@ int main() {
     // Picture and speed choices (Display page). Each maps to a start-up switch; the game's own defaults set nothing; env.txt wins and a
     // value that disagrees with the menu is reported as a developer override.
     {
-        const char* all[]={"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_AUTOQ_FXSTEP","GXV_CHARAA_AUTO","GXV_DOF","GXV_CORE3_IO","GXV_AUTOQ","GXV_FPS_LIMIT","GXV_REDUCED_MOTION"};
+        const char* all[]={"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_AUTOQ_FXSTEP","GXV_CHARAA_AUTO","GXV_DOF","GXV_CORE3_IO","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_AUTOQ","GXV_FPS_LIMIT","GXV_REDUCED_MOTION"};
         auto clear=[&]{for(auto k:all)unsetenv(k);};
         auto startup=[&]{setenv("GXV_AUTOQ_FXSTEP","2",1);setenv("GXV_CHARAA_AUTO","2",1);setenv("GXV_CORE3_IO","1",1);};  // what vita/vgx-game/entry.cpp sets before Settings runs
         auto env=[&](const char* k)->std::string{const char* v=getenv(k);return v?v:"<unset>";};
         auto base=DefaultConfig(port::controls::GetControlApi());
         // Best picture (the defaults): nothing is set and nothing is an override.
         clear();startup();assert(ApplyStartup(base,true).empty());
-        for(auto k:{"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_DOF"})assert(!getenv(k));
+        for(auto k:{"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_DOF","GXV_TILT_GAIN","GXV_TILT_STICK"})assert(!getenv(k));
         assert(env("GXV_AUTOQ_FXSTEP")=="2"&&env("GXV_CHARAA_AUTO")=="2"&&env("GXV_CORE3_IO")=="1");
         // Each choice on its own.
         struct One {const char* what;void (*edit)(Config&);const char* key;const char* value;};
@@ -75,7 +75,11 @@ int main() {
             {"dof off",[](Config& c){c.depthOfField=false;},"GXV_DOF","0"},
             {"core off",[](Config& c){c.coreHelp=false;},"GXV_CORE3_IO","0"},
             {"effects full",[](Config& c){c.effects=EffectsQuality::Full;},"GXV_AUTOQ_FXSTEP","0"},
-            {"mario off",[](Config& c){c.prioritizeMario=false;},"GXV_CHARAA_AUTO","0"}};
+            {"mario off",[](Config& c){c.prioritizeMario=false;},"GXV_CHARAA_AUTO","0"},
+            {"tilt 50",[](Config& c){c.tiltPercent=50;},"GXV_TILT_GAIN","50"},{"tilt 75",[](Config& c){c.tiltPercent=75;},"GXV_TILT_GAIN","75"},
+            {"tilt 125",[](Config& c){c.tiltPercent=125;},"GXV_TILT_GAIN","125"},{"tilt 150",[](Config& c){c.tiltPercent=150;},"GXV_TILT_GAIN","150"},
+            {"tilt 175",[](Config& c){c.tiltPercent=175;},"GXV_TILT_GAIN","175"},{"tilt 200",[](Config& c){c.tiltPercent=200;},"GXV_TILT_GAIN","200"},
+            {"tilt stick",[](Config& c){c.tiltStick=true;},"GXV_TILT_STICK","1"}};
         for(const auto& one:ones) {
             clear();startup();auto c=base;one.edit(c);
             assert(ApplyStartup(c,true).empty());assert(env(one.key)==one.value);
@@ -99,7 +103,10 @@ int main() {
             {"GXV_DOF","1",[](Config&){},false},{"GXV_DOF","0",[](Config&){},true},{"GXV_DOF","0",[](Config& c){c.depthOfField=false;},false},
             {"GXV_AUTOQ_FXSTEP","1",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.effects=EffectsQuality::Full;},false},{"GXV_AUTOQ_FXSTEP","1",[](Config& c){c.effects=EffectsQuality::Full;},true},
             {"GXV_CHARAA_AUTO","0",[](Config&){},true},{"GXV_CHARAA_AUTO","1",[](Config&){},true},{"GXV_CHARAA_AUTO","0",[](Config& c){c.prioritizeMario=false;},false},
-            {"GXV_CORE3_IO","0",[](Config&){},true},{"GXV_CORE3_IO","0",[](Config& c){c.coreHelp=false;},false}};
+            {"GXV_CORE3_IO","0",[](Config&){},true},{"GXV_CORE3_IO","0",[](Config& c){c.coreHelp=false;},false},
+            {"GXV_TILT_GAIN","100",[](Config&){},false},{"GXV_TILT_GAIN","150",[](Config& c){c.tiltPercent=150;},false},
+            {"GXV_TILT_GAIN","150",[](Config&){},true},{"GXV_TILT_GAIN","100",[](Config& c){c.tiltPercent=50;},true},{"GXV_TILT_GAIN","75",[](Config& c){c.tiltPercent=75;},false},
+            {"GXV_TILT_STICK","1",[](Config& c){c.tiltStick=true;},false},{"GXV_TILT_STICK","1",[](Config&){},true},{"GXV_TILT_STICK","0",[](Config& c){c.tiltStick=true;},true},{"GXV_TILT_STICK","0",[](Config&){},false}};
         for(const auto& e:envs) {
             clear();startup();setenv(e.key,e.value,1);auto c=base;e.edit(c);
             const auto o=ApplyStartup(c,true);
@@ -110,6 +117,10 @@ int main() {
         clear();startup();
         // The earlier choices still work with the new ones set.
         setenv("GXV_AUTOQ","1",1);assert(ApplyStartup(base,true).size()==1);
+        // The tilt choices: the default sets nothing, and the label of a developer override names what env.txt did.
+        {clear();startup();auto c=base;c.tiltPercent=200;c.tiltStick=true;setenv("GXV_TILT_GAIN","50",1);setenv("GXV_TILT_STICK","0",1);
+         const auto o=ApplyStartup(c,true);assert(o.size()==2&&o[0].key=="GXV_TILT_GAIN"&&o[0].effectiveLabel=="Tilt sensitivity 50%"&&o[1].key=="GXV_TILT_STICK"&&o[1].effectiveLabel=="Tilt from the motion sensor");
+         assert(env("GXV_TILT_GAIN")=="50"&&env("GXV_TILT_STICK")=="0");}
         clear();unsetenv("GXV_AUTOQ_FXSTEP");unsetenv("GXV_CHARAA_AUTO");unsetenv("GXV_CORE3_IO");
     }
     std::cout<<"launch: exact dispatch, Play precedence, regional catalogs, gates and overrides passed\n";

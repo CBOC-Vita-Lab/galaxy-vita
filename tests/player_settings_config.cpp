@@ -20,7 +20,7 @@ int main() {
     }
     // Display page choices: the defaults are today's best picture; the preset is read from the covered rows, never stored.
     assert(c.aboveNative&&c.prioritizeMario&&c.antiAliasing==settings::AntiAliasing::Auto&&c.sharpness==settings::Sharpness::Auto&&c.hdTextures&&
-           c.effects==settings::EffectsQuality::Adaptive&&c.depthOfField&&c.coreHelp);
+           c.effects==settings::EffectsQuality::Adaptive&&c.depthOfField&&c.coreHelp&&c.tiltPercent==100&&!c.tiltStick);   // tilt: the game's own steering, from the sensor
     assert(settings::PresetOf(c)==settings::Preset::BestPicture);
     {
         const settings::Preset presets[]={settings::Preset::BestPicture,settings::Preset::Balanced,settings::Preset::Performance};

@@ -47,21 +47,21 @@ int main() {
     // reject bad values, and the file written fresh ends with a required key so a cut-short write is still seen as incomplete.
     {
         auto picked=settings::DefaultConfig(api);picked.aboveNative=false;picked.prioritizeMario=false;picked.antiAliasing=settings::AntiAliasing::Off;picked.sharpness=settings::Sharpness::Strong;
-        picked.hdTextures=false;picked.effects=settings::EffectsQuality::Full;picked.depthOfField=false;picked.coreHelp=false;
+        picked.hdTextures=false;picked.effects=settings::EffectsQuality::Full;picked.depthOfField=false;picked.coreHelp=false;picked.tiltPercent=150;picked.tiltStick=true;
         std::string text;assert(settings::SerializeDocument({settings::DefaultConfig(api),"schema=1\n",true},picked,api,text).status==settings::StoreStatus::Ok);
-        for(const char* key:{"above_native=0","mario_first=0","anti_aliasing=off","picture_sharpness=strong","hd_textures=0","effects_quality=full","depth_of_field=0","core_plan=off"})assert(text.find(key)!=std::string::npos);
+        for(const char* key:{"above_native=0","mario_first=0","anti_aliasing=off","picture_sharpness=strong","hd_textures=0","effects_quality=full","depth_of_field=0","core_plan=off","motion_gain=150","motion_source=stick"})assert(text.find(key)!=std::string::npos);
         settings::Document back;assert(settings::ParseDocument(text,api,back).status==settings::StoreStatus::Ok&&settings::Equal(back.config,picked)&&settings::PresetOf(back.config)==settings::Preset::Custom);
         // A file from before these keys: strip them, the defaults come back and unknown lines survive a save.
         std::string legacy="# kept\nfuture=1\n";
         {size_t at=0;while(at<text.size()){auto end=text.find('\n',at)+1;const auto line=text.substr(at,end-at);
-            bool drop=false;for(const char* key:{"above_native=","mario_first=","anti_aliasing=","picture_sharpness=","hd_textures=","effects_quality=","depth_of_field=","core_plan="})drop|=line.rfind(key,0)==0;
+            bool drop=false;for(const char* key:{"above_native=","mario_first=","anti_aliasing=","picture_sharpness=","hd_textures=","effects_quality=","depth_of_field=","core_plan=","motion_gain=","motion_source="})drop|=line.rfind(key,0)==0;
             if(!drop)legacy+=line;at=end;}}
         settings::Document old;assert(settings::ParseDocument(legacy,api,old).status==settings::StoreStatus::Ok);
-        assert(old.config.aboveNative&&old.config.prioritizeMario&&old.config.hdTextures&&old.config.depthOfField&&old.config.coreHelp&&old.config.antiAliasing==settings::AntiAliasing::Auto&&old.config.sharpness==settings::Sharpness::Auto&&old.config.effects==settings::EffectsQuality::Adaptive);
+        assert(old.config.aboveNative&&old.config.prioritizeMario&&old.config.hdTextures&&old.config.depthOfField&&old.config.coreHelp&&old.config.tiltPercent==100&&!old.config.tiltStick&&old.config.antiAliasing==settings::AntiAliasing::Auto&&old.config.sharpness==settings::Sharpness::Auto&&old.config.effects==settings::EffectsQuality::Adaptive);
         auto newer=old.config;newer.hdTextures=false;std::string saved;assert(settings::SerializeDocument(old,newer,api,saved).status==settings::StoreStatus::Ok);
         assert(saved.find("# kept\nfuture=1\n")==0&&saved.find("hd_textures=0")!=std::string::npos);
         // Bad values.
-        for(const char* bad:{"above_native=2","mario_first=yes","anti_aliasing=on","picture_sharpness=high","hd_textures=","effects_quality=half","depth_of_field=x","core_plan=on","above_native=1\nabove_native=1"}) {
+        for(const char* bad:{"above_native=2","mario_first=yes","anti_aliasing=on","picture_sharpness=high","hd_textures=","effects_quality=half","depth_of_field=x","core_plan=on","motion_gain=110","motion_gain=25","motion_gain=225","motion_gain=","motion_gain=1e2","motion_gain=-100","motion_source=tilt","motion_source=","above_native=1\nabove_native=1"}) {
             std::string broken=text;const std::string b=bad;const auto k=b.substr(0,b.find('='));
             const auto at=broken.find("\n"+k+"=")+1;const auto end=broken.find('\n',at)+1;
             broken.replace(at,end-at,b+"\n");   // the bad line in place of the good one (the duplicate case brings its own second line)

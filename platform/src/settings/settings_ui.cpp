@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include "port/tilt_gain.h"
 
 namespace port::settings {
 namespace {
@@ -13,8 +14,10 @@ controls::ControllerCaps EditCaps(const UiState& s) {
     return caps;
 }
 // Controls page: the profile row, one row per action, then the mouse-style aiming option; Display page: kDisplayRows settings.
-unsigned Commands(const UiState& s) {return s.page==Page::Display?kDisplayRows:static_cast<unsigned>(s.session->controls->actionCount)+2;}
-bool AimRow(const UiState& s) {return s.page==Page::Controls&&s.row==s.session->controls->actionCount+1;}
+unsigned Commands(const UiState& s) {return s.page==Page::Display?kDisplayRows:static_cast<unsigned>(s.session->controls->actionCount)+1+kControlExtras;}
+// A row after the actions: pointer aiming, Tilt with, Tilt sensitivity.
+bool ExtraRow(const UiState& s) {return s.page==Page::Controls&&s.row>s.session->controls->actionCount&&s.row<=s.session->controls->actionCount+kControlExtras;}
+unsigned ExtraAt(const UiState& s) {return s.row-static_cast<unsigned>(s.session->controls->actionCount)-1;}
 void ModalOpen(UiState& s,Modal modal) {s.modal=modal;s.modalChoice=0;s.captureArmed=false;s.candidate=0;s.previousMenu=0;s.armed=false;s.repeatKey=0;}
 void Finish(UiState& s) {s.result={Safe(*s.session),false};s.done=true;}
 void Cancel(UiState& s) {if(Dirty(s))ModalOpen(s,Modal::Discard);else Finish(s);}
@@ -62,7 +65,22 @@ void Capture(UiState& s,const UiInput& input) {
 void Change(UiState& s,int direction) {
     if(s.page==Page::Controls) {
         if(s.row==0) {s.working.profile=s.working.profile==controls::ProfileId::Handheld?controls::ProfileId::PlayStation:controls::ProfileId::Handheld;s.working.profileChosen=true;s.bindingSlot=0;s.armed=false;}
-        else if(AimRow(s))s.working.mouseAim=!s.working.mouseAim;
+        else if(ExtraRow(s)) {
+            switch(ExtraAt(s)) {
+                case ExtraAim: s.working.mouseAim=!s.working.mouseAim;break;
+                case ExtraTiltWith:
+                    // Only the console's own motion sensor is a choice; without one tilt is always the left stick and nothing is saved.
+                    if(!HasMotionSensor(s))s.message="This console has no motion sensor, so tilt uses the left stick";
+                    else s.working.tiltStick=!s.working.tiltStick;
+                    break;
+                default: {
+                    // Steps of 25 from 50 to 200, stopping at both ends.
+                    const int next=s.working.tiltPercent+direction*tilt::kStepPercent;
+                    if(next>=tilt::kMinPercent&&next<=tilt::kMaxPercent)s.working.tiltPercent=next;
+                    break;
+                }
+            }
+        }
         else if(s.row<=s.session->controls->actionCount) {
             const auto& action=s.session->controls->actions[s.row-1];if(action.maxBindings>1)s.bindingSlot=1-s.bindingSlot;
         }
@@ -104,6 +122,7 @@ void Change(UiState& s,int direction) {
     }
 }
 }
+bool HasMotionSensor(const UiState& s) {return s.controller.motion;}
 unsigned RowCount(const UiState& s) {return Commands(s)+3;}
 unsigned SettingRows(const UiState& s) {return Commands(s);}
 bool Dirty(const UiState& s) {return !Equal(s.working,s.session->document.config);}
@@ -171,7 +190,7 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
     if(event&(PreviousPage|NextPage)) {s.page=s.page==Page::Display?Page::Controls:Page::Display;s.row=0;s.bindingSlot=0;s.changedAt=now;return;}
     if(event&Reset&&s.page==Page::Controls) {
         if(!s.session->features.remap)s.message="Remapping unavailable in this build";
-        else if(AimRow(s)) return;
+        else if(ExtraRow(s)) {if(ExtraAt(s)==ExtraTiltGain)s.working.tiltPercent=tilt::kDefaultPercent;} // Tilt sensitivity back to 100%
         else if(s.row>0&&s.row<=s.session->controls->actionCount) {s.action=s.session->controls->actions[s.row-1].id;s.picker=0;ModalOpen(s,Modal::ButtonPicker);}
         else ModalOpen(s,Modal::ResetProfile);
         return;
@@ -188,7 +207,7 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
         if(s.row==commands)Save(s,s.session->mode==OpenMode::Running?ExitIntent::Return:ExitIntent::Play);
         else if(s.row==commands+1) {if(s.session->mode==OpenMode::Running)ModalOpen(s,Modal::Restart);else Save(s,ExitIntent::Exit);}
         else if(s.row==commands+2)Cancel(s);
-        else if(s.page==Page::Display||s.row==0||AimRow(s))Change(s,1);
+        else if(s.page==Page::Display||s.row==0||ExtraRow(s))Change(s,1);
         else if(s.session->features.remap) {
             s.action=s.session->controls->actions[s.row-1].id;s.message.clear();
             const auto chord=controls::Start|controls::Select;
@@ -308,10 +327,26 @@ void ControlsRowView(const UiState& s,unsigned row,RowView& v) {
         v.help1="Handheld uses the Vita's own buttons; PlayStation suits a DS3 or DS4 on a PS TV.";
         v.help2="Each profile keeps its own list. Left or Right switches the profile.";return;
     }
-    if(row==api.actionCount+1) {
+    if(row==api.actionCount+1+ExtraAim) {
         v.label="Mouse-style aiming";Put(v.value,OnOff(s.working.mouseAim));
         v.help1="Right stick moves the Star Pointer by speed, like a mouse, with acceleration.";
         v.help2="Off: the 1.0 feel, where the stick position sets the pointer's speed in a straight line.";return;
+    }
+    if(row==api.actionCount+1+ExtraTiltWith) {
+        v.label="Tilt with";
+        if(!HasMotionSensor(s)) {
+            Put(v.value,"Left stick");
+            v.help1="Star Ball and ray surfing steer by tilt. This console has no motion sensor, so the left stick tilts them.";
+            v.help2="Nothing to choose here; Tilt sensitivity below still applies.";return;
+        }
+        Put(v.value,s.working.tiltStick?"Left stick":"Motion sensor");
+        v.help1="What steers Star Ball and ray surfing: tip the console (Motion sensor) or push the left stick.";
+        v.help2="Select sets level again with the sensor. The stick suits a propped-up console. Applies from the next launch.";return;
+    }
+    if(row==api.actionCount+1+ExtraTiltGain) {
+        v.label="Tilt sensitivity";std::snprintf(v.value,sizeof v.value,"%d%%%s",s.working.tiltPercent,s.working.tiltPercent==tilt::kDefaultPercent?"  (as game)":"");
+        v.help1="How far a lean steers Star Ball and ray surfing: 50% takes a bigger tip, 200% a smaller one, in steps of 25.";
+        v.help2="100% is the game's own feel (Triangle sets it). The sensor and the stick both follow it. Applies from the next launch.";return;
     }
     if(row>api.actionCount)return;
     const auto& action=api.actions[row-1];v.label=action.label;v.help1=action.label;

@@ -293,9 +293,11 @@ void Legend(Raster& r,const UiState& state,const SettingsSession& session) {
         l.text("L / R: page");l.gap();
         if(!session.overrides.empty()) {char label[40];std::snprintf(label,sizeof label,"overrides (%u)",static_cast<unsigned>(session.overrides.size()));l.icon(Icon::Triangle);l.text(label);l.gap();}
     } else {
-        l.text("Left/Right: slot");l.gap();
-        l.icon(Icon::Cross);l.text("rebind");l.gap();
-        if(session.features.remap) {l.icon(Icon::Triangle);l.text(state.row>0&&state.row<=session.controls->actionCount?"button list":"reset profile");l.gap();}
+        const bool extra=state.row>session.controls->actionCount&&state.row<=session.controls->actionCount+kControlExtras;
+        l.text(extra?"Left/Right: change":"Left/Right: slot");l.gap();
+        if(!extra) {l.icon(Icon::Cross);l.text("rebind");l.gap();}
+        if(extra) {if(state.row==session.controls->actionCount+1+ExtraTiltGain) {l.icon(Icon::Triangle);l.text("100%");l.gap();}}
+        else if(session.features.remap) {l.icon(Icon::Triangle);l.text(state.row>0&&state.row<=session.controls->actionCount?"button list":"reset profile");l.gap();}
         l.text("L / R: page");l.gap();
     }
     l.icon(Icon::Circle);l.text("back");
@@ -348,7 +350,7 @@ void ControlsPage(Raster& r,const UiState& state,const SettingsSession& session,
     else r.text(174,kProfileY,name,gold,150,true);
     const char* detected=!state.controller.connected?"Controller disconnected":state.detectedProfile!=profile?"Other controller connected":state.detectedProfile==controls::ProfileId::Handheld?"Connected: Handheld":"Connected: PlayStation";
     r.text(340,kProfileY,detected,state.controller.connected?muted:red,236,true);
-    const unsigned items=static_cast<unsigned>(api.actionCount)+1;
+    const unsigned items=static_cast<unsigned>(api.actionCount)+kControlExtras;
     const unsigned focus=state.row>0&&state.row<=items?state.row-1:0;
     const unsigned firstItem=FirstRow(items,kActionRows,focus);
     for(unsigned slot=0;slot<kActionRows&&firstItem+slot<items;++slot) {
@@ -356,7 +358,7 @@ void ControlsPage(Raster& r,const UiState& state,const SettingsSession& session,
         if(at)Focus(r,44,y-2,540,elapsed,reduced,kActionPitch-1);
         RowView view;ControlsRowView(state,i+1,view);
         r.text(60,y,view.label,at?white:muted,250,true);
-        if(i==api.actionCount) {r.text(330,y,view.value,gold,240,true);continue;}
+        if(i>=api.actionCount) {r.text(330,y,view.value,gold,240,true);continue;}
         const auto* binding=Binding(state,api.actions[i].id);if(!binding)continue;
         char value[96];const bool slotFocus=state.bindingSlot&&at;
         if(api.actions[i].maxBindings>1)std::snprintf(value,sizeof value,"%s%s%s%s",Label(session,profile,binding->buttons[0]),slotFocus?"  [":"  + ",Label(session,profile,binding->buttons[1]),slotFocus?"]":"");
@@ -400,7 +402,7 @@ void ControlsPage(Raster& r,const UiState& state,const SettingsSession& session,
     std::snprintf(line,sizeof line,"Wall jump: %s at a wall, then again",jump);r.text(col2,kMoveY+kMovePitch,line,muted,420,true);
     std::snprintf(line,sizeof line,"Spin: %s, on the ground or in the air",spin);r.text(60,kMoveY+2*kMovePitch,line,muted,420,true);
     r.text(col2,kMoveY+2*kMovePitch,"Left stick moves, right stick points",muted,420,true);
-    RowView view;if(state.row<=api.actionCount+1)ControlsRowView(state,state.row,view);
+    RowView view;if(state.row<=api.actionCount+kControlExtras)ControlsRowView(state,state.row,view);
     else {const char* label;CommandView(state,state.row-SettingRows(state),label,view.help1,view.help2);}
     Help(r,state,view.help1,view.help2);
 }

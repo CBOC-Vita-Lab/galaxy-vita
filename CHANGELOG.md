@@ -17,6 +17,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 
 ### Settings
 - **A fuller Settings menu.** The Display page now has a **Preset** (Best picture, Balanced, Performance; any covered row you change reads Custom), **Dynamic resolution**, **Sharper when possible**, **Prioritize Mario**, **Anti-aliasing**, **Sharpness** (Auto, Off, Strong), **HD textures** (it says when the pack is not installed), **Effects quality**, **Depth of field**, **Core plan**, Reduced motion and Game language, each with a two-line explanation at the bottom and a button legend. The Controls page shows a table of what every button does in the current layout, and the moves that use them. The heading is drawn in the game's own menu font, over the title picture.
+- **Tilt, your way.** Settings > Controls has **Tilt sensitivity** (50% to 200%, 100% is the game's own feel) and **Tilt with** (Motion sensor or Left stick; a console without a motion sensor always uses the stick) for Star Ball and ray surfing, applied from the next launch.
 
 ### Better picture
 - **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).

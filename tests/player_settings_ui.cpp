@@ -101,15 +101,34 @@ int main() {
     // The mouse-style aiming option is the last row of the controls list, saved with the other choices; the profile row marks the profile as chosen.
     {
         auto aimSession=Session();UiState a;Begin(a,aimSession);Arm(a);Tap(a,NextPage);assert(a.page==Page::Controls&&!a.working.mouseAim&&!a.working.profileChosen);
-        const unsigned aimRow=static_cast<unsigned>(aimSession.controls->actionCount)+1;assert(RowCount(a)==aimRow+4);
-        Tap(a,Up);Tap(a,Up);Tap(a,Up);Tap(a,Up);assert(a.row==aimRow);                 // Cancel, Apply, Save, then the option (wrapping from row 0)
+        const unsigned aimRow=static_cast<unsigned>(aimSession.controls->actionCount)+1;assert(RowCount(a)==aimRow+kControlExtras-1+4);
+        for(int i=0;i<6;++i)Tap(a,Up);assert(a.row==aimRow);                 // Cancel, Apply, Save, Tilt sensitivity, Tilt with, then the option (wrapping from row 0)
         Tap(a,Right);assert(a.working.mouseAim&&Dirty(a));Tap(a,Left);assert(!a.working.mouseAim&&!Dirty(a));Tap(a,Accept);assert(a.working.mouseAim&&a.modal==Modal::None);
         Tap(a,Reset);assert(a.modal==Modal::None&&a.working.mouseAim);                 // Square has nothing to reset here
-        Tap(a,Down);assert(a.row==aimRow+1);Tap(a,Accept);assert(a.saveRequested&&a.working.mouseAim);
+        Tap(a,Down);assert(a.row==aimRow+1&&a.row==aimRow+ExtraTiltWith);
+        // Tilt with: Motion sensor (default) or Left stick, on a console that has the sensor; Reset has nothing to do here.
+        assert(!a.working.tiltStick&&a.working.tiltPercent==100);
+        Tap(a,Right);assert(a.working.tiltStick&&Dirty(a));Tap(a,Left);assert(!a.working.tiltStick);Tap(a,Accept);assert(a.working.tiltStick);Tap(a,Reset);assert(a.modal==Modal::None&&a.working.tiltStick);Tap(a,Accept);assert(!a.working.tiltStick);
+        // Tilt sensitivity: 50..200 in steps of 25, stopping at both ends (no wrap); Square puts it back to 100.
+        Tap(a,Down);assert(a.row==aimRow+ExtraTiltGain);
+        Tap(a,Right);assert(a.working.tiltPercent==125);Tap(a,Right);Tap(a,Right);Tap(a,Right);assert(a.working.tiltPercent==200);Tap(a,Right);assert(a.working.tiltPercent==200);
+        Tap(a,Reset);assert(a.working.tiltPercent==100&&a.modal==Modal::None);
+        Tap(a,Left);Tap(a,Left);assert(a.working.tiltPercent==50);Tap(a,Left);assert(a.working.tiltPercent==50&&Dirty(a));Tap(a,Accept);assert(a.working.tiltPercent==75);
+        Tap(a,Reset);assert(a.working.tiltPercent==100&&a.working.mouseAim);
+        Tap(a,Down);assert(a.row==aimRow+kControlExtras);Tap(a,Accept);assert(a.saveRequested&&a.working.mouseAim);
+        // A console without a motion sensor (a PS TV): Tilt with reads Left stick and cannot be changed; sensitivity still can; a saved Left stick is left as saved.
+        {
+            auto noSensor=aimSession;noSensor.controller.motion=false;noSensor.document.config.tiltStick=true;noSensor.active=noSensor.document.config;
+            UiState n;Begin(n,noSensor);Arm(n);Tap(n,NextPage);n.row=aimRow+ExtraTiltWith;
+            RowView rv;ControlsRowView(n,n.row,rv);assert(std::string(rv.value)=="Left stick"&&std::string(rv.help1).find("no motion sensor")!=std::string::npos);
+            Tap(n,Right);assert(n.working.tiltStick&&!Dirty(n)&&n.message.find("no motion sensor")!=std::string::npos);
+            auto sensor=aimSession;UiState y;Begin(y,sensor);y.page=Page::Controls;y.row=aimRow+ExtraTiltWith;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="Motion sensor");y.working.tiltStick=true;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="Left stick"&&std::string(rv.help1).find("no motion sensor")==std::string::npos);
+            y.row=aimRow+ExtraTiltGain;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="100%  (as game)");y.working.tiltPercent=150;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="150%");
+        }
         Begin(a,aimSession);Arm(a);Tap(a,NextPage);a.row=0;Tap(a,Right);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::PlayStation);
         Tap(a,Left);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::Handheld&&Dirty(a));
         // It draws, as a row of the list, on both profiles, and the actions above it are still reachable.
-        UiState d;for(unsigned profile=0;profile<2;++profile)for(unsigned row:{aimRow-1,aimRow,aimRow+1,aimRow+3}) {
+        UiState d;for(unsigned profile=0;profile<2;++profile)for(unsigned row:{aimRow-1,aimRow,aimRow+1,aimRow+2,aimRow+3,aimRow+5}) {
             Begin(d,aimSession);d.page=Page::Controls;d.working.profile=static_cast<controls::ProfileId>(profile);d.row=row;d.working.mouseAim=row&1;
             DrawAudit audit;DrawChecked(d,aimSession,surface,0,audit);assert(audit.minX>=32&&audit.maxX<=928&&audit.maxY<=512);
         }
@@ -234,7 +253,7 @@ int main() {
         for(unsigned row=0;row<kDisplayRows;++row) {RowView rv;DisplayRowView(v,row,rv);assert(rv.label[0]&&rv.value[0]&&rv.help1[0]);}
         RowView hd;DisplayRowView(v,RowHdTextures,hd);assert(std::string(hd.value)=="On");vs.hdtexPack=false;DisplayRowView(v,RowHdTextures,hd);assert(std::string(hd.value).find("not installed")!=std::string::npos&&std::string(hd.help2).find("not in")!=std::string::npos);vs.hdtexPack=true;
         RowView preset;DisplayRowView(v,RowPreset,preset);assert(std::string(preset.value)=="Best picture");v.working.sharpness=Sharpness::Strong;DisplayRowView(v,RowPreset,preset);assert(std::string(preset.value)=="Custom");
-        for(unsigned row=0;row<=vs.controls->actionCount+1;++row) {RowView rv;ControlsRowView(v,row,rv);assert(rv.label[0]&&rv.help1[0]&&rv.help2[0]&&(rv.value[0]||(row>0&&row<=vs.controls->actionCount)));}   // (an action's buttons are drawn from its binding)
+        for(unsigned row=0;row<=vs.controls->actionCount+kControlExtras;++row) {RowView rv;ControlsRowView(v,row,rv);assert(rv.label[0]&&rv.help1[0]&&rv.help2[0]&&(rv.value[0]||(row>0&&row<=vs.controls->actionCount)));}   // (an action's buttons are drawn from its binding)
         std::vector<uint32_t> frame(960*544);
         for(auto page:{Page::Display,Page::Controls})for(unsigned profile=0;profile<2;++profile)for(unsigned row=0;row<RowCount(v);++row) {
             Begin(v,vs);v.page=page;v.row=row;v.working.profile=static_cast<controls::ProfileId>(profile);

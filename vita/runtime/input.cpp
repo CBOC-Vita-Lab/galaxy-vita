@@ -1,5 +1,6 @@
 #include "input.h"
 #include "port/pointer_aim.h"
+#include "port/tilt_gain.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -27,6 +28,9 @@ SceTouchPanelInfo panel, rearPanel;
 //                           PETARI_RSTICK=camera keeps the stick the camera there too.
 //   GXV_MOUSE_AIM=1         (Settings > Controls > Mouse-style aiming) the stick moves the pointer like a mouse: speed on a curve
 //                           with acceleration while held (platform/include/port/pointer_aim.h); default off = the 1.0 linear speed
+//   GXV_TILT_GAIN=50..200   (Settings > Controls > Tilt sensitivity) percent of the lean that steers Star Ball and ray surfing, in steps
+//                           of 25; 100 (default) is the game's own steering, untouched (platform/include/port/tilt_gain.h)
+//   GXV_TILT_STICK=1        (Settings > Controls > Tilt with) the left stick tilts those levels even where the motion sensor exists
 //   PETARI_TOUCH_A=0        a touch only moves the pointer (default: a short tap also presses A
 //                           where it lands, a finger held still holds A, a drag does neither)
 //   GXV_VITA_WIDE=0         (renderer) the picture unstretched between side bars; the pointer follows
@@ -265,6 +269,7 @@ void motion(PortPadState* pad) {
     pad->downX = dot(gravity, right);
     pad->downY = -dot(gravity, neutral);
     pad->downZ = dot(gravity, forward);
+    port::tilt::Scale(pad->downX, pad->downY, pad->downZ, port::tilt::Percent());
 }
 }
 
@@ -588,12 +593,14 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         float shake = (control.timeStamp / 16000) & 1 ? 2.5f : -2.5f;
         pad->accX = pad->accY = shake;
     }
-    if (!remap || sampled.caps.motion) motion(pad);
-    else if (sampled.caps.tiltFallback && port_input_tilt_active()) {
+    // Tilt from the motion sensor, or (no sensor, or "Tilt with: Left stick") from the left stick.
+    if (!remap || (sampled.caps.motion && !port::tilt::UseStick())) motion(pad);
+    else if ((sampled.caps.tiltFallback || sampled.caps.motion) && port_input_tilt_active()) {
         // Same gravity interface as motion; WPAD retains the level's neutral pitch.
         const float x = pad->stickX * 0.65f, z = pad->stickY * 0.65f;
         pad->tilted = 1; pad->downX = x; pad->downZ = z;
         pad->downY = -sqrtf(fmaxf(0, 1.0f - x*x - z*z));
+        port::tilt::Scale(pad->downX, pad->downY, pad->downZ, port::tilt::Percent());
         pad->stickX = pad->stickY = 0;
     }
 }

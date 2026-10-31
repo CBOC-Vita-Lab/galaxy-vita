@@ -29,3 +29,12 @@ GXV_PAD_DEFAULTS=1 "$out/test" padhandheld
 "$out/test" padlegacy
 GXV_MOUSE_AIM=1 "$out/test" mouse
 GXV_MOUSE_AIM=1 GXV_PAD_DEFAULTS=1 "$out/test" mousepad
+# Tilt sensitivity (GXV_TILT_GAIN) and Tilt with (GXV_TILT_STICK): the sensor path, the left stick on the handheld, and a pad without a sensor
+"$out/test" tilt 100 sensor
+for p in 50 75 125 150 175 200; do
+  GXV_TILT_GAIN=$p "$out/test" tilt $p sensor
+  GXV_TILT_GAIN=$p GXV_TILT_STICK=1 "$out/test" tilt $p stick
+  GXV_TILT_GAIN=$p GXV_PAD_DEFAULTS=1 "$out/test" tiltpad $p
+done
+GXV_TILT_STICK=1 "$out/test" tilt 100 stick
+GXV_PAD_DEFAULTS=1 "$out/test" tiltpad 100

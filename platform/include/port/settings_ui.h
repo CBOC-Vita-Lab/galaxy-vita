@@ -76,7 +76,11 @@ constexpr unsigned kDisplayRows=13;
 enum DisplayRow : unsigned { RowPreset, RowRate, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowSharpness, RowHdTextures, RowEffects, RowDepthOfField, RowCorePlan, RowMotion, RowLanguage };
 struct RowView { const char* label=""; char value[72]={}; const char* help1=""; const char* help2=""; };
 void DisplayRowView(const UiState&, unsigned row, RowView&);
-// Controls page rows: row 0 the profile, then one per action, then the pointer-aiming option.
+// Controls page rows: row 0 the profile, then one per action, then kControlExtras options: pointer aiming, Tilt with, Tilt sensitivity.
+constexpr unsigned kControlExtras=3;
+enum ControlExtra : unsigned { ExtraAim, ExtraTiltWith, ExtraTiltGain };
+// Whether this console has the motion sensor the Tilt with row chooses between (a PS TV does not: tilt is always the left stick).
+bool HasMotionSensor(const UiState&);
 void ControlsRowView(const UiState&, unsigned row, RowView&);
 // Settings rows of the current page; the command rows (save, restart or exit, cancel) follow them.
 unsigned SettingRows(const UiState&);

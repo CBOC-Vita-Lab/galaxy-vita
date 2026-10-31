@@ -62,7 +62,7 @@ static void assertSame(const PortPadState& a, const PortPadState& b) {
     assert(a.pointerX == b.pointerX && a.pointerY == b.pointerY && a.pointerDist == b.pointerDist);
 }
 int main(int argc, char** argv) {
-    assert(argc == 2);
+    assert(argc >= 2);
     const bool off = std::strcmp(argv[1], "off") == 0;
     const bool defaults = std::strcmp(argv[1], "default") == 0;
     setenv("GXV_REMAP", off ? "0" : "1", 1);
@@ -156,6 +156,52 @@ int main(int argc, char** argv) {
         // Not aiming (the handheld without Circle): the stick is still the camera, not the pointer.
         if (!pad) { reset(); raw.rx = 255; auto p = poll(); assert((p.buttons & 0x0002) && !p.pointerValid); }
         std::puts("PASS: mouse-style aiming in the input path (30 and 60 reads a second, dead zone, clamp)");
+        return 0;
+    }
+    if (!std::strcmp(argv[1], "tilt") || !std::strcmp(argv[1], "tiltpad")) {
+        // Tilt levels: tilt <percent> <sensor|stick> on the handheld, tiltpad <percent> on a PS TV pad (no motion sensor, so the stick). The
+        // process was started with GXV_TILT_GAIN / GXV_TILT_STICK to match. 100 % sensor must be what the sensor path always gave.
+        assert(argc >= 3);
+        const int percent = std::atoi(argv[2]);
+        const bool stick = argc >= 4 && !std::strcmp(argv[3], "stick"), pad = !std::strcmp(argv[1], "tiltpad");
+        const bool fromStick = stick || pad;
+        const auto profile = pad ? ProfileId::PlayStation : ProfileId::Handheld;
+        auto map = GetControlApi().defaults(profile);
+        std::string error;
+        assert(SetActiveMapping(map, profile, NominalCaps(profile), error));
+        if (pad) type = SCE_CTRL_TYPE_DS4;
+        assert(port_vita_input_init()); poll();
+        const float deg = 3.14159265f / 180.0f;
+        auto leanOf = [](const PortPadState& q) { return std::atan2(std::sqrt(q.downX * q.downX + q.downZ * q.downZ), -q.downY) / (3.14159265f / 180.0f); };
+        auto unit = [](const PortPadState& q) { return std::fabs(q.downX * q.downX + q.downY * q.downY + q.downZ * q.downZ - 1) < 2e-6f; };
+        // Not steering by tilt: the stick is not a tilt (the sensor path reports its sample all the time; wpad.cpp only uses it while a level asks).
+        tilt = 0; neutral(); raw.lx = 255; raw.ly = 128; if (fromStick) assert(!poll().tilted);
+        tilt = 1; neutral(); auto p = poll();
+        if (fromStick) {
+            assert(p.tilted && p.downX == 0 && p.downZ == 0 && p.downY == -1 && p.stickX == 0 && p.stickY == 0);   // stick centred: level
+            // Half stick to the right: asin(0.325) = 18.97 degrees, scaled by the percentage up to the 85 degree stop.
+            raw.lx = 128 + 64; p = poll();
+            const float sx = (raw.lx - 127.5f) / 127.5f, half = (sx - 0.14f) / 0.86f, base = std::asin(0.65f * half) / deg;
+            assert(p.tilted && p.stickX == 0 && p.stickY == 0 && p.downX > 0 && std::fabs(p.downZ) < 0.01f && unit(p));   // (the stick centre is 127.5: one count of y is under the dead zone alone, not beside a half stick)
+            assert(std::fabs(leanOf(p) - std::fmin(base * percent / 100.0f, 85.0f)) < 0.5f);
+            raw.lx = 255; raw.ly = 0; p = poll();   // the corner: finite and unit length at every percentage
+            assert(p.tilted && p.downX > 0 && p.downZ > 0 && unit(p) && std::isfinite(p.downY));
+            // Full stick: 40.5 degrees times the percentage, to the stop.
+            neutral(); raw.lx = 255; p = poll();
+            assert(std::fabs(leanOf(p) - std::fmin(std::asin(0.65f) / deg * percent / 100.0f, 85.0f)) < 0.05f);
+        } else {
+            // The motion sensor: the first sample while steering is level, then a lean of 20 degrees to the right is scaled.
+            motionState.acceleration.x = 0; motionState.acceleration.y = -1; motionState.acceleration.z = 0;
+            p = poll(); assert(p.tilted && std::fabs(p.downX) < 1e-6f && p.downY == -1 && std::fabs(p.downZ) < 1e-6f);
+            motionState.acceleration.x = std::sin(20 * deg); motionState.acceleration.y = -std::cos(20 * deg);
+            p = poll();
+            assert(p.tilted && unit(p) && std::fabs(std::fabs(leanOf(p)) - std::fmin(20.0f * percent / 100.0f, 85.0f)) < 0.05f);
+            if (percent == 100) assert(std::fabs(p.downX - std::sin(20 * deg)) < 1e-5f && std::fabs(p.downY + std::cos(20 * deg)) < 1e-5f);
+            motionState.acceleration.x = std::sin(70 * deg); motionState.acceleration.y = -std::cos(70 * deg);
+            p = poll(); assert(unit(p) && std::fabs(leanOf(p) - std::fmin(70.0f * percent / 100.0f, 85.0f)) < 0.05f);
+            motionState.acceleration.x = 0; motionState.acceleration.y = -1;
+        }
+        std::printf("PASS: tilt (%s, %d%%) in the input path\n", pad ? "pad stick" : stick ? "left stick on the handheld" : "motion sensor", percent);
         return 0;
     }
     if (std::strcmp(argv[1], "calibration") == 0) {

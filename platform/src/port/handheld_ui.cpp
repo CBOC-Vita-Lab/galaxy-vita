@@ -25,6 +25,7 @@
 #include "port/heap_routing.h"
 #include "port/port.h"
 #include "port/control_bindings.h"
+#include "port/tilt_gain.h"
 
 #include "handheld_art.inc"
 
@@ -51,6 +52,8 @@ const unsigned char* ButtonGlyph(Action action) {
 }
 bool HasTouch() { return !port::controls::RemapEnabled() || port::controls::ActiveCapabilities().frontTouch; }
 bool HasMotion() { return !port::controls::RemapEnabled() || port::controls::ActiveCapabilities().motion; }
+// The tilt levels (Star Ball, ray surfing) are steered with the left stick: no motion sensor, or Settings > Controls > Tilt with: Left stick.
+bool TiltByStick() { return !HasMotion() || (port::controls::RemapEnabled() && port::tilt::UseStick()); }
 const unsigned char* ResolveGlyph(int glyph, const unsigned char* original) {
     if (!port::controls::RemapEnabled()) return original;
     switch (glyph) {
@@ -285,7 +288,7 @@ bool ApplyRules(std::vector<Tok>& t) {
                 }
                 changed = true;
             }
-        } else if (!HasMotion() && Is(t, i, "hold")) {
+        } else if (TiltByStick() && Is(t, i, "hold")) {
             const int j = Next(t,i), k = (Is(t,j,"your") || Is(t,j,"the")) ? Next(t,j) : j;
             const int posture = Next(t,k);
             if (IsPic(t,k,kPicRemote) && (Is(t,posture,"upright") || Is(t,posture,"level"))) {
@@ -293,7 +296,7 @@ bool ApplyRules(std::vector<Tok>& t) {
                 t.erase(t.begin()+i+1,t.begin()+posture+1);
                 changed = true;
             }
-        } else if (!HasMotion() && (Is(t, i, "tilt") || Is(t, i, "twist") || Is(t, i, "lean") ||
+        } else if (TiltByStick() && (Is(t, i, "tilt") || Is(t, i, "twist") || Is(t, i, "lean") ||
                    Is(t, i, "tilting") || Is(t, i, "twisting"))) {
             const int j = Next(t, i);
             const int k = (Is(t, j, "your") || Is(t, j, "the")) ? Next(t, j) : j;
@@ -338,7 +341,7 @@ void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8
     // the three "how to hold the controller" animations: a drawing of the handheld instead
     if (patch.animation) {
         if (port::controls::RemapEnabled() &&
-            ((!HasMotion() && !patch.animation->pose.square) ||
+            ((TiltByStick() && !patch.animation->pose.square) ||
              (patch.animation->pose.square && (!HasMotion() || strcmp(port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Spin)->id, "square"))))) {
             BlitGlyph(rgba, width, height, patch.animation->pose.square ? ButtonGlyph(Action::Spin) : kGlyphStick);
             return;

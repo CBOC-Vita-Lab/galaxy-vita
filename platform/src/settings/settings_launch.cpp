@@ -1,6 +1,7 @@
 #include "port/settings_launch.h"
 #include "port/port.h"
 #include "port/reduced_motion.h"
+#include "port/tilt_gain.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -22,9 +23,16 @@ const char* WantFxStep(const Config& c) {return c.prioritizeMario&&c.effects==Ef
 const char* WantCharaAuto(const Config& c) {return c.prioritizeMario?nullptr:"0";}
 const char* WantDof(const Config& c) {return c.depthOfField?nullptr:"0";}
 const char* WantCore(const Config& c) {return c.coreHelp?nullptr:"0";}
+// Tilt (Star Ball, ray surfing): the percentage as text ("100", the game's own, sets nothing) and the left stick as the source.
+const char* WantTiltGain(const Config& c) {
+    static constexpr const char* text[]={"50","75",nullptr,"125","150","175","200"};
+    return tilt::ValidPercent(c.tiltPercent)?text[(c.tiltPercent-tilt::kMinPercent)/tilt::kStepPercent]:nullptr;
+}
+const char* WantTiltStick(const Config& c) {return c.tiltStick?"1":nullptr;}
 constexpr Choice kChoices[]={
     {"GXV_AUTOQ_MAX","8",nullptr,WantMax},{"GXV_AUTOQ_MSAA","1",nullptr,WantMsaa},{"GXV_SHARPEN","auto",nullptr,WantSharpen},{"GXV_HDTEX","1",nullptr,WantHd},
-    {"GXV_AUTOQ_FXSTEP","2","2",WantFxStep},{"GXV_CHARAA_AUTO","2","2",WantCharaAuto},{"GXV_DOF","1",nullptr,WantDof},{"GXV_CORE3_IO","1","1",WantCore}};
+    {"GXV_AUTOQ_FXSTEP","2","2",WantFxStep},{"GXV_CHARAA_AUTO","2","2",WantCharaAuto},{"GXV_DOF","1",nullptr,WantDof},{"GXV_CORE3_IO","1","1",WantCore},
+    {"GXV_TILT_GAIN","100",nullptr,WantTiltGain},{"GXV_TILT_STICK","0",nullptr,WantTiltStick}};
 bool SameValue(const char* a,const char* b) {
     if(std::strcmp(a,b)==0)return true;
     char* ea=nullptr;char* eb=nullptr;const long x=std::strtol(a,&ea,0),y=std::strtol(b,&eb,0);
@@ -39,6 +47,8 @@ std::string ChoiceLabel(const char* key,const char* raw) {
     if(!std::strcmp(key,"GXV_AUTOQ_FXSTEP"))return "Load steps "+r;
     if(!std::strcmp(key,"GXV_CHARAA_AUTO"))return r=="0"?"Mario edge smoothing off":"Mario edge smoothing "+r;
     if(!std::strcmp(key,"GXV_DOF"))return r=="0"?"Depth of field off":"Depth of field "+r;
+    if(!std::strcmp(key,"GXV_TILT_GAIN"))return "Tilt sensitivity "+r+"%";
+    if(!std::strcmp(key,"GXV_TILT_STICK"))return r=="0"?"Tilt from the motion sensor":"Tilt from the left stick";
     return r=="0"?"System core help off":"System core help "+r;
 }
 bool Tokens(const char* p,size_t length,std::vector<std::string>& out) {
