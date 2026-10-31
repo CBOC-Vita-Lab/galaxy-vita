@@ -1,4 +1,5 @@
 // Exercise the real patch matcher and pixels; generated artwork remains local.
+#include <cstring>
 #include "../platform/src/port/handheld_ui.cpp"
 #include <array>
 #include <cstdio>

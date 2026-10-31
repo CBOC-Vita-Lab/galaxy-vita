@@ -13,6 +13,7 @@
 //    becomes "touch the screen", and the title screen's "press both (A) and (B)" becomes "Press START or
 //    touch the screen" (English texts; the other languages keep their wording and get the pictures). The game's text is patched when it is looked up, into a copy.
 // The controls these describe are in vita/runtime/input.cpp.
+#include <algorithm>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,6 +206,53 @@ void Drop(std::vector<Tok>& t, int i) {
     else if (i > 0 && t[u - 1].kind == Tok::Sep && t[u - 1].text[0] == ' ') t.erase(t.begin() + i - 1);
 }
 
+// The message boxes break a line that is too wide wherever it reaches the edge, even inside a word ("left st / ick"), and the
+// game's own line breaks were placed for its own wording. When a rule made a line longer than the message's longest original
+// line, the lines are wrapped again at spaces to that width (character counts: a picture counts as two, a tag as nothing).
+// A blank line (two breaks) and a tag of group 1 (the message's own page and timing controls) stay where they are.
+int TokWidth(const Tok& k) { return k.kind == Tok::Pic ? 2 : k.kind == Tok::Tag ? 0 : static_cast<int>(k.text.size()); }
+bool HardTag(const Tok& k) { return k.kind == Tok::Tag && k.text.size() >= 2 && ((k.text[1] >> 8) & 0xFF) == 1; }
+bool IsBreak(const Tok& k) { return k.kind == Tok::Sep && k.text[0] == '\n'; }
+int LongestLine(const std::vector<Tok>& t) {
+    int w = 0, m = 0;
+    for (const Tok& k : t) {
+        if (IsBreak(k) || HardTag(k)) { m = std::max(m, w); w = 0; }
+        else w += TokWidth(k);
+    }
+    return std::max(m, w);
+}
+void Reflow(std::vector<Tok>& t, int width) {
+    if (width <= 0 || LongestLine(t) <= width) return;
+    const size_t n = t.size();
+    // a single break between words becomes a space for the new wrap; blank lines and hard tags are kept
+    for (size_t i = 0; i < n; ++i) {
+        if (!IsBreak(t[i])) continue;
+        const bool blank = (i > 0 && IsBreak(t[i - 1])) || (i + 1 < n && IsBreak(t[i + 1]));
+        if (!blank) t[i].text = u" ";
+    }
+    int line = 0;
+    long lastSpace = -1;
+    int sinceSpace = 0;
+    for (size_t i = 0; i < n; ++i) {
+        Tok& k = t[i];
+        if (IsBreak(k) || HardTag(k)) { line = 0; lastSpace = -1; sinceSpace = 0; continue; }
+        if (k.kind == Tok::Sep && k.text[0] == ' ') {
+            lastSpace = static_cast<long>(i);
+            sinceSpace = 0;
+            line += 1;
+            continue;
+        }
+        const int w = TokWidth(k);
+        line += w;
+        sinceSpace += w;
+        if (line > width && lastSpace >= 0) {
+            t[static_cast<size_t>(lastSpace)].text = u"\n";
+            line = sinceSpace;
+            lastSpace = -1;
+        }
+    }
+}
+
 bool ApplyRules(std::vector<Tok>& t) {
     bool changed = false;
     for (int i = 0; i < static_cast<int>(t.size()); ++i) {
@@ -386,7 +434,10 @@ const void* port_handheld_message(const void* original) {
     if (p.hash != h) {
         p.hash = h;
         std::vector<Tok> t = Tokenize(s);
+        // (at least 40: the dialogue box holds about 41 characters; a short message's own width is no limit)
+        const int width = std::max(LongestLine(t), 40);
         p.changed = ApplyRules(t);
+        if (p.changed) Reflow(t, width);
         p.text.clear();
         if (p.changed) {
             for (const Tok& k : t)

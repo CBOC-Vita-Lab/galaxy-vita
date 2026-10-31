@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstring>
 #include "../platform/src/port/handheld_ui.cpp"
 #include "port/control_bindings.h"
 #include <cassert>
@@ -52,6 +54,26 @@ int main(int argc, char** argv) {
     assert(point.find(remap ? u"right stick" : u"Touch the screen") != std::u16string::npos);
     const auto tilt = message(u"Tilt your " + remote + u".");
     if (remap) assert(tilt.find(u"left stick") != std::u16string::npos && tilt.find(u"Tilt") == std::u16string::npos);
+    // Rolling Green's hint: the longer wording must not make a line wider than the message's widest original line
+    // (the box would break it inside a word: "left st / ick"), and the wrap happens at spaces.
+    const auto hint = message(u"From that basic position, tilt " + remote + u" to\nmove the ball in that direction. Then\njust press " + a + u" to jump!");
+    if (remap) {
+        size_t widest = 0, at = 0;
+        while (at <= hint.size()) {
+            size_t end = hint.find(u'\n', at);
+            if (end == std::u16string::npos) end = hint.size();
+            size_t w = 0;
+            for (size_t i = at; i < end; ++i) {
+                if (hint[i] == 0x1a) { const unsigned units = (hint[i + 1] & 0xFF) >= 4 ? (hint[i + 1] & 0xFF) / 2 : 2; w += ((hint[i + 1] >> 8) & 0xFF) == 3 ? 2 : 0; i += units - 1; }
+                else ++w;
+            }
+            widest = std::max(widest, w);
+            at = end + 1;
+        }
+        assert(hint.find(u"left stick") != std::u16string::npos);
+        assert(widest <= 40);  // the dialogue box holds about 41 characters
+        assert(hint.find(u"st\nick") == std::u16string::npos);
+    }
     const auto hold = message(u"Hold your " + remote + u" upright.");
     if (remap) assert(hold == u"Keep the left stick centred.");
     // Non-English words stay in their regional source; only their pictures change.
