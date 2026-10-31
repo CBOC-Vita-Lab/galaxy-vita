@@ -18792,7 +18792,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "ae1201be09ea57efc71f7023814a5ab11d2eb2e5ad68c8fbd50f511fd803b845"
+      "sha256": "e18892e2f154120f534bc98ef75e304f58725985a8e25e69fed28e343b083924"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
@@ -18884,7 +18884,7 @@
     },
     {
       "path": "platform/src/os/os_thread.cpp",
-      "sha256": "4ab491ff59a4299f3d6b820f859c0a10215c0b17f942819eef6b7e0874ea8d7e"
+      "sha256": "f96b47efcfb0348d393d90c922e9015f1b411725e65e125ae49636fa6e0dc5be"
     },
     {
       "path": "platform/src/port/boot.cpp",
