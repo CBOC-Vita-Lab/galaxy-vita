@@ -30,6 +30,7 @@
 #include "Game/System/GameSequenceFunction.hpp"
 #include "Game/Camera/CameraDirector.hpp"
 #ifdef TARGET_PC
+extern "C" void port_log_summary(const char* fmt, ...);
 extern "C" int port_turn_skipped(void);  // (platform/src/port/perf.cpp)
 #include "Game/Camera/CameraHolder.hpp"
 #include "Game/Camera/CameraManEvent.hpp"
@@ -249,6 +250,7 @@ void GameScene::update() {
                     sGameplayFrames = 0;
                     sAllFrames = 0;
                     OSReport("port: jumping to %s scenario %d\n", name, (int)scenario);
+                    port_log_summary("tour: jumping to %s scenario %d (%d of the list)", name, (int)scenario, sIndex);
                     MR::requestChangeStageInGameMoving(name, scenario);
                 }
             }
