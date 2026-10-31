@@ -5,16 +5,11 @@
 - The game executable, built from this repository.
 - The compiled-shader seed: the port's own generated shaders, compiled for the
   vitaGL in use. No game data.
-- The app icon and LiveArea pictures in `vita/vgx-game/sce_sys/` (icon0,
-  pic0, bg, startup and the Settings tile): made by
-  `tools/handheld/make_livearea_title.py` from the title-screen picture below
-  (its two text lines removed, the logo on its own sky), at the owner's
-  request, so the bubble, LiveArea, loading screen and Settings menu all carry
-  the game's own title screen. The earlier generated starfield pictures can
-  still be made with `tools/handheld/make_livearea.py`.
-- New builds include the preserved title-screen loading background described
-  below. It is not original port artwork; the icon and LiveArea pictures are
-  derived from it.
+- The app icon and LiveArea pictures in `vita/vgx-game/sce_sys/` (icon0, pic0,
+  bg, startup and the Settings tile): original drawings (a starfield, a
+  five-pointed star and plain text) made by `tools/handheld/make_livearea.py`.
+  **No game artwork is in the package**: no title-screen picture, no logo, no
+  capture. The game makes its own pictures from your copy, see below.
 - License texts for the port and the libraries it uses.
 
 [RELEASE.json](RELEASE.json) records the package and executable hashes.
@@ -33,30 +28,55 @@ texture pack made from it, saves, firmware and the Vita's shader compiler module
 (`libshacccg.suprx`). Supply your own. The code licenses grant no rights to the
 original game's assets.
 
-## Preserved Loading Background
+## Pictures Made From Your Own Copy
 
-`vita/vgx-game/sce_sys/loading-title.rgba` is the selected Galaxy title-screen
-background, retained unchanged as the explicitly requested exception to the
-source tree's general exclusion of game captures. It is 960x544, 8-bit RGBA,
-2,088,960 bytes, with SHA-256:
+The package carries no Nintendo artwork. Until the game has run once, the loading
+screen is a dark starfield of our own drawing with the progress bar, the Settings
+menu has its plain gradient background, and the home-screen bubble and LiveArea
+show the neutral package pictures.
 
-`14529d51dc9e3c4831a20f389b90c162f93ddeafc7567b206fe3b976dd679906`
+The first time the real title screen has been shown completely (the logo fully
+in, about two seconds after the loading screen has gone and the picture has
+stopped changing), the game copies the 960x544 picture on the screen, once, to
+`ux0:data/smg/art/title.rgba` on your own card. A low-priority background thread
+does this, never the game's or the renderer's. Nothing is uploaded and nothing
+leaves the console. From that one capture the same thread makes:
 
-These bytes match the preserved title-loader resource and historical installed
-file backups. This is dated local provenance, not a current device readback.
-The existing loading renderer replaces the start prompt with its progress bar
-and status text; the logo, copyright notice and pixels outside that loading
-band are unchanged. The source asset is not a newly generated imitation.
+- **the loading-screen picture**, used from the next start on (the progress bar
+  and text replace the "Press START" line, as before);
+- **the Settings menu backdrop** (darkened and halved in memory while the menu is
+  open);
+- **the bubble and LiveArea pictures**: the capture with its two text lines taken
+  out, as `pic0.png` (960x544) and `livearea/contents/bg.png` (840x500), and the
+  logo on its sky as `livearea/contents/startup.png` (280x158) and `icon0.png`
+  (128x128), written as 8-bit palette PNGs to
+  `ux0:app/<title id>/sce_sys/` and, for `icon0.png` and `pic0.png`, to the
+  console's own copy in `ur0:appmeta/<title id>/`. The title id is read from the
+  running application (`SMGV00001` if that fails). The LiveArea "Settings" tile
+  stays the package's own neutral picture.
 
-The Settings menu reads the same file as its darkened background, averaged down to half size in memory for the
-life of the menu; a missing or invalid file leaves the plain background. Nothing is copied or stored elsewhere.
+The console's home screen keeps its own cache of the bubble pictures. The new
+bubble shows once the home screen has read them again, which is after a restart
+of the console (or any time it refreshes the application's files); the LiveArea
+page (its background and start picture) is read when the page is opened. Nothing
+is needed from the player.
 
-The title artwork and its Nintendo notice remain third-party material, not
-covered by the port's code licenses. Including this particular image does not
-grant rights to other game assets or make the underlying artwork original to
-this project. No other game data, fonts, music, textures or captures are added.
+The capture is made once. It is made again when you delete
+`ux0:data/smg/art/title.rgba`, or set `GXV_TITLEART=2` in `ux0:data/smg/env.txt`
+(a new capture at every start); `GXV_TITLEART=0` turns the whole thing off. If a
+package update puts the neutral pictures back, the game notices at the next start
+and makes the bubble pictures again from the saved capture, without capturing. A
+console that does not let the game write to the application folder or to
+`ur0:appmeta` simply keeps the neutral bubble pictures; the loading screen and the
+Settings backdrop do not depend on it. Every failure is silent apart from one line
+in `log.txt`.
 
-The native packaging recipe checks this asset's exact size and hash and fails
-instead of silently dropping it. Runtime fallback for a missing/unreadable
-installed image remains unchanged. The frozen 1.0 VPK predates this source
-change; no executable, release manifest or package hash has been regenerated.
+`tools/handheld/make_livearea_title.py` is the host-side reference of this
+algorithm (the same steps with OpenCV and Pillow, for comparison and for
+previews); the code that runs on the console is
+`platform/include/port/title_art.h`, `title_art_png.h` and
+`vita/vgx-game/title_art_runtime.cpp`, tested by `tools/test_title_art.sh`.
+
+The pictures made on your console come from your copy of the game and remain
+Nintendo's artwork; they stay on your card and are not part of this project or its
+package, and the code licenses grant no rights to them.

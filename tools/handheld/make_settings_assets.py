@@ -244,7 +244,7 @@ def main():
         real.extend('    '+','.join('{%d,0x%08xu}' % tuple(run) for run in runs[i:i+8])+',' for i in range(0, len(runs), 8))
         real.append('};')
         (ROOT/f'platform/src/settings/settings_{filename}.inc').write_text('\n'.join(real)+'\n')
-    # (the LiveArea Settings tile, settings.png, is made by make_livearea_title.py from the title screen since 1.2)
+    # (the LiveArea Settings tile, settings.png, is drawn with the other package pictures by make_livearea.py; no game artwork)
 
 
 if __name__ == '__main__':

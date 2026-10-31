@@ -18,7 +18,7 @@ case "${1:-all}" in
   preview)
     "$CXX" "${flags[@]}" "${core[@]}" platform/src/settings/settings_font.cpp platform/src/settings/settings_ui.cpp platform/src/settings/settings_draw.cpp tools/preview_player_settings.cpp -o local/settings-tests/preview
     output=${PREVIEW_OUT:-local/settings-preview}
-    mkdir -p "$output"
+    mkdir -p "$output"  # (SETTINGS_BACKDROP_CAPTURE=<a title capture> adds the real-backdrop frames; the package carries none)
     args=("$output")
     if [[ -n ${SETTINGS_FONT_ARCHIVE:-} ]]; then args+=("$SETTINGS_FONT_ARCHIVE"); fi
     local/settings-tests/preview "${args[@]}"

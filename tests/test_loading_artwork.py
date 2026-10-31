@@ -1,66 +1,50 @@
-"""Preserve the selected loading picture and execute its CMake packaging guard."""
-import hashlib
+"""The public package carries no game artwork: no title picture in the tree, none in the VPK recipe, no packaging guard for one,
+and the loading screen and Settings read the player's own capture from ux0:data/smg/art (made by the game, port/title_art.h)."""
 from pathlib import Path
-import shutil
-import subprocess
-import tempfile
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSET = ROOT / "vita/vgx-game/sce_sys/loading-title.rgba"
-MODULE = ROOT / "vita/vgx-game/loading_artwork.cmake"
-SIZE = 960 * 544 * 4
-DIGEST = "14529d51dc9e3c4831a20f389b90c162f93ddeafc7567b206fe3b976dd679906"
 
 
 class LoadingArtworkTests(unittest.TestCase):
-    def test_preserved_title_pixels(self):
-        self.assertTrue(ASSET.is_file(), "The selected loading picture must be in the source tree")
-        data = ASSET.read_bytes()
-        self.assertEqual(len(data), SIZE)
-        self.assertEqual(hashlib.sha256(data).hexdigest(), DIGEST)
+    def test_no_title_picture_in_the_tree(self):
+        self.assertFalse((ROOT / "vita/vgx-game/sce_sys/loading-title.rgba").exists())
+        self.assertFalse((ROOT / "vita/vgx-game/loading_artwork.cmake").exists())
+        self.assertEqual([p for p in (ROOT / "vita/vgx-game/sce_sys").rglob("*.rgba")], [])
 
-    def test_build_uses_checked_artwork(self):
+    def test_vpk_recipe_lists_only_neutral_pictures(self):
         source = (ROOT / "vita/vgx-game/CMakeLists.txt").read_text()
-        self.assertIn('include("${CMAKE_CURRENT_LIST_DIR}/loading_artwork.cmake")', source)
-        self.assertIn("${smg_loading_picture}", source)
+        self.assertNotIn("loading-title", source)
+        self.assertNotIn("loading_artwork", source)
+        self.assertNotIn("smg_loading_picture", source)
+        listed = set(re.findall(r'FILE "\$\{sys\}/([^"]+)"', source))
+        self.assertEqual(listed, {"icon0.png", "pic0.png", "livearea/contents/bg.png", "livearea/contents/startup.png",
+                                  "livearea/contents/settings.png", "livearea/contents/template.xml"})
+        self.assertIn("title_art_runtime.cpp", source)
 
-    def configure(self, data):
-        with tempfile.TemporaryDirectory(prefix="galaxy-loading-") as temp:
-            root = Path(temp)
-            if data is not None:
-                (root / "loading-title.rgba").write_bytes(data)
-            script = root / "check.cmake"
-            record = root / "record.txt"
-            script.write_text('include("${MODULE}")\nfile(WRITE "${RECORD}" "${smg_loading_picture}")\n')
-            result = subprocess.run([shutil.which("cmake"), f"-DMODULE={MODULE}",
-                                     f"-Dsys={root}", f"-DRECORD={record}", "-P", str(script)],
-                                    capture_output=True, text=True, timeout=15)
-            output = record.read_text() if record.exists() else None
-            return result, output, str(root / "loading-title.rgba")
+    def test_both_readers_use_the_players_capture_path(self):
+        loading = (ROOT / "platform/vgx/vita/loading_screen.h").read_text()
+        backdrop = (ROOT / "platform/include/port/settings_backdrop.h").read_text()
+        art = (ROOT / "platform/include/port/title_art.h").read_text()
+        for text in (loading, backdrop, art):
+            self.assertIn('"ux0:data/smg/art/title.rgba"', text)
+            self.assertNotIn("loading-title.rgba", text)
 
-    @unittest.skipUnless(shutil.which("cmake"), "CMake is required for the packaging integration cases")
-    def test_cmake_records_exact_asset_destination(self):
-        self.assertTrue(ASSET.is_file(), "The selected loading picture is missing")
-        result, output, source = self.configure(ASSET.read_bytes())
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, f"FILE;{source};sce_sys/loading-title.rgba")
-
-    @unittest.skipUnless(shutil.which("cmake"), "CMake is required for the packaging integration cases")
-    def test_cmake_rejects_missing_or_wrong_size(self):
-        for data in (None, b"", bytes(SIZE - 1), bytes(SIZE + 1)):
-            with self.subTest(size=None if data is None else len(data)):
-                result, output, _ = self.configure(data)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn("Loading artwork", result.stderr)
-                self.assertIsNone(output)
-
-    @unittest.skipUnless(shutil.which("cmake"), "CMake is required for the packaging integration cases")
-    def test_cmake_rejects_wrong_picture_with_correct_size(self):
-        result, output, _ = self.configure(bytes(SIZE))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Loading artwork SHA-256", result.stderr)
-        self.assertIsNone(output)
+    def test_nothing_else_refers_to_the_old_picture(self):
+        skip = {"SHA256SUMS", "docs/SOURCE-MANIFEST.json", "docs/SOURCE.md", "CHANGELOG.md", "tests/test_loading_artwork.py", "tests/settings_runtime.cpp",
+                "tests/loading_artwork.cpp", "tests/test_title_art.py"}
+        for path in list(ROOT.glob("platform/**/*")) + list(ROOT.glob("vita/**/*")) + list(ROOT.glob("tools/*.sh")) + list(ROOT.glob("docs/*.md")):
+            if not path.is_file() or str(path.relative_to(ROOT)) in skip or path.suffix in {".png", ".rgba", ".inc", ".a", ".o"}:
+                continue
+            try:
+                text = path.read_text()
+            except UnicodeDecodeError:
+                continue
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                if "docs/ASSETS.md" == str(path.relative_to(ROOT)) or path.name == "make_livearea_title.py":
+                    continue
+                self.assertNotIn("loading-title.rgba", text)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
-// The title artwork stays on screen during startup; only the existing progress display replaces
-// its start prompt. Pixels are R, G, B, A bytes for both the direct display and GL upload.
+// The loading screen: the player's own title-screen capture (ux0:data/smg/art/title.rgba, made by the game from its own running
+// copy, see port/title_art.h) with the progress display where its start prompt was; until that capture exists (the first start,
+// or a package that carries no game artwork) a dark starfield of our own drawing. Pixels are R, G, B, A bytes for both the direct
+// display and GL upload.
 #pragma once
 
 #include <math.h>
@@ -51,7 +53,7 @@ inline void Blend(uint32_t* pixel, int r, int g, int b, int alpha) {
 
 inline uint32_t* g_bg = nullptr;
 constexpr size_t kBackgroundBytes = static_cast<size_t>(W) * H * 4;
-constexpr const char* kBackgroundPath = "app0:/sce_sys/loading-title.rgba";
+constexpr const char* kBackgroundPath = "ux0:data/smg/art/title.rgba";
 
 inline bool ReadBackground() {
     FILE* file = fopen(kBackgroundPath, "rb");
@@ -63,11 +65,46 @@ inline bool ReadBackground() {
     return valid;
 }
 
+// The picture used when there is no capture: a deep-blue gradient with a soft glow and a deterministic scatter of stars. No star
+// falls in the band the progress bar, its caption and its footer use (x 176..783, y 384..483), so the text reads on a plain ground.
+inline void FillNeutralBackground(uint32_t* bg) {
+    for (int y = 0; y < H; ++y) {
+        const int base_r = 3 + 6 * y / H, base_g = 8 + 15 * y / H, base_b = 24 + 30 * y / H;
+        for (int x = 0; x < W; ++x) {
+            const float dx = (x - 480) / 440.0f, dy = (y - 210) / 300.0f;
+            const float d = dx * dx + dy * dy;
+            const int glow = d < 1.0f ? static_cast<int>(26.0f * (1.0f - d) * (1.0f - d)) : 0;
+            bg[y * W + x] = Pack(base_r + glow / 3, base_g + glow / 2, base_b + glow);
+        }
+    }
+    uint32_t s = 0x2545F491u;
+    auto next = [&s]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; };
+    for (int i = 0; i < 520; ++i) {
+        const int x = static_cast<int>(next() % W), y = static_cast<int>(next() % H);
+        const int v = 110 + static_cast<int>(next() % 146);
+        const unsigned kind = next() % 100;
+        const int size = kind < 8 ? 2 : 1;
+        if (x >= 176 - 4 && x < 784 + 4 && y >= 384 - 4 && y < 484 + 4) continue;
+        if (x + size > W - 4 || y + size > H - 4 || x < 4 || y < 4) continue;
+        for (int j = 0; j < size; ++j)
+            for (int k = 0; k < size; ++k) bg[(y + j) * W + x + k] = Pack(v, v, v > 235 ? 255 : v + 20);
+        if (kind >= 97) {  // a few brighter ones get a small cross
+            for (int a = 1; a <= 3; ++a) {
+                const int fade = v * (4 - a) / 5;
+                bg[y * W + x - a] = Pack(fade, fade, fade + 15 > 255 ? 255 : fade + 15);
+                bg[y * W + x + a] = Pack(fade, fade, fade + 15 > 255 ? 255 : fade + 15);
+                bg[(y - a) * W + x] = Pack(fade, fade, fade + 15 > 255 ? 255 : fade + 15);
+                bg[(y + a) * W + x] = Pack(fade, fade, fade + 15 > 255 ? 255 : fade + 15);
+            }
+        }
+    }
+}
+
 inline void BuildBackground() {
     g_bg = static_cast<uint32_t*>(malloc(kBackgroundBytes));
     if (!g_bg) return;
     if (!ReadBackground()) {
-        for (int i = 0; i < W * H; ++i) g_bg[i] = Pack(1, 28, 48);
+        FillNeutralBackground(g_bg);
         return;
     }
     // Replace only the captured start prompt with nearby clean starfield, leaving the logo and

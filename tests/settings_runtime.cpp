@@ -26,7 +26,9 @@ void operator delete(void* data,std::size_t) noexcept {std::free(data);}
 void operator delete[](void* data,std::size_t) noexcept {std::free(data);}
 
 namespace fixture {
-const std::string backdropPath="app0:/sce_sys/loading-title.rgba";
+// The contract: the player's own capture, made by the game (port/title_art.h); nothing is read from the package.
+const std::string backdropPath="ux0:data/smg/art/title.rgba";
+const std::string legacyBackdropPath="app0:/sce_sys/loading-title.rgba";
 bool backdropExpected=false, exerciseBackdropFailures=false;
 size_t maxBackdropRead=0, backdropReads=0;
 // A deterministic 960x544 RGBA8 picture whose 2x2 averages are easy to recompute.
@@ -241,19 +243,21 @@ int main(int argc,char** argv) {
     fixture::parameter="psla:-settings";
     if(mode.rfind("backdrop-",0)==0 || mode.rfind("running-backdrop",0)==0) {
         const bool wrongSize=mode=="backdrop-oversized" || mode=="backdrop-short";
-        if(mode!="backdrop-missing") {
+        assert(fixture::backdropPath==port::settings::kBackdropPath);
+        if(mode=="backdrop-legacy-path") fixture::files[fixture::legacyBackdropPath]=fixture::BackdropFile();  // the old packaged picture is never read
+        if(mode!="backdrop-missing" && mode!="backdrop-legacy-path") {
             auto file=fixture::BackdropFile();
             if(mode=="backdrop-oversized")file.push_back(0);
             if(mode=="backdrop-short")file.resize(file.size()-4);
             fixture::files[fixture::backdropPath]=file;
         }
-        fixture::directories["app0:/sce_sys"]={"loading-title.rgba"};
+        fixture::directories["ux0:data/smg/art"]={"title.rgba"};
         fixture::shortReads=mode=="backdrop-short-read";
         fixture::prematureEof=mode=="backdrop-eof";
         fixture::failRead=mode=="backdrop-read-error";
         fixture::failClose=mode=="backdrop-close-error";
         fixture::exerciseBackdropFailures=mode=="backdrop-alloc" || mode=="running-backdrop-alloc";
-        fixture::backdropExpected=!wrongSize && mode!="backdrop-missing" && mode!="backdrop-eof" && mode!="backdrop-read-error" && mode!="backdrop-close-error";
+        fixture::backdropExpected=!wrongSize && mode!="backdrop-missing" && mode!="backdrop-legacy-path" && mode!="backdrop-eof" && mode!="backdrop-read-error" && mode!="backdrop-close-error";
     }
     if(mode=="running-font-oom") {
         fixture::directories["ux0:data/smg/game/files"]={"LayoutData"};
@@ -304,7 +308,7 @@ int main(int argc,char** argv) {
         assert(port_settings_startup(0,nullptr));assert(fixture::menus==1 && fixture::frees==1);
         assert(fixture::fontOpens==fixture::fontCloses && fixture::fileHandles.empty());
         // Wrong-size and missing files are rejected from the file size alone, without opening them.
-        if(mode=="backdrop-missing" || mode=="backdrop-oversized" || mode=="backdrop-short")assert(!fixture::fontOpens && !fixture::backdropReads);
+        if(mode=="backdrop-missing" || mode=="backdrop-legacy-path" || mode=="backdrop-oversized" || mode=="backdrop-short")assert(!fixture::fontOpens && !fixture::backdropReads);
         else assert(fixture::fontOpens==(fixture::exerciseBackdropFailures?2u:1u));  // the failure probe adds one successful load
     } else if(mode=="off") {
         assert(!port_settings_startup(0,nullptr));assert(!fixture::fileReads && !fixture::menus && !fixture::parameterReads);

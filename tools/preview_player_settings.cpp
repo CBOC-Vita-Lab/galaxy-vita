@@ -2,6 +2,7 @@
 #include "port/settings_ui.h"
 #include "../tests/settings_backdrop_check.h"
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -78,14 +79,15 @@ int main(int argc,char** argv) {
     };
     if(!scenes())return 1;
     std::cout<<"preview: 32 native-size PPM frames and safe text bounds generated\n";
-    // Backdrop frames: a synthetic picture, then the shipped title picture when it is present (read only, loaded through the
-    // same downsampler as the device). Each full scene set, with every text pixel's contrast against the picture checked.
+    // Backdrop frames: a synthetic picture, then a title capture when one is given as the third argument (read only, loaded
+    // through the same downsampler as the device; the package carries none, the game makes its own on the console). Each full scene set, with every text pixel's contrast against the picture checked.
     std::vector<uint32_t> synthetic(kBackdropPixels);
     for(unsigned y=0;y<kBackdropHeight;++y)for(unsigned x=0;x<kBackdropWidth;++x) {
         const unsigned v=((x/8+y/8)&1)?255:(x*255/kBackdropWidth);synthetic[y*kBackdropWidth+x]=0xff000000u|(v<<16)|((255-v)<<8)|(y*255/kBackdropHeight);
     }
     std::vector<uint32_t> real;
-    const std::string realPath=argc>3?argv[3]:"vita/vgx-game/sce_sys/loading-title.rgba";
+    const char* captureEnv=std::getenv("SETTINGS_BACKDROP_CAPTURE");  // or the third argument
+    const std::string realPath=argc>3?argv[3]:(captureEnv?captureEnv:"");
     {
         std::ifstream file(realPath,std::ios::binary);std::vector<uint8_t> bytes(kBackdropSourceBytes+1);
         if(file){file.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));

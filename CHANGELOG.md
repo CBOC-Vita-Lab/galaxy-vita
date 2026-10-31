@@ -12,6 +12,9 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 - **Movies on the Vita's video hardware.** The title video and cutscenes are decoded by the console's JPEG hardware, with the software decoder as a fallback.
 - **The newest vitaGL**, with its speed improvements.
 
+### Your own pictures
+- **No game artwork in the package.** The first time you reach the title screen, the game saves that picture on your card (`ux0:data/smg/art`) and makes the loading screen, the Settings background and the home-screen bubble and LiveArea pictures from it. Until then the loading screen is a plain starfield. The new bubble shows after the console's home screen refreshes (a restart). `GXV_TITLEART=0` turns it off.
+
 ### Better picture
 - **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
 - **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.

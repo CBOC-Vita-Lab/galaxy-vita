@@ -44,27 +44,42 @@ class PlayerSettingsAssets(unittest.TestCase):
         self.assertIn(0, controller[3::4])
 
 
-if __name__ == '__main__':
-    unittest.main()
 
+class PackagePictures(unittest.TestCase):
+    """The public package's bubble and LiveArea pictures are the neutral drawings of make_livearea.py (no game artwork); the
+    game replaces them on the console with ones made from the player's own title screen (tests/test_title_art.py)."""
+    SHIPPED = {'icon0.png': ('vita/vgx-game/sce_sys/icon0.png', (128, 128)), 'pic0.png': ('vita/vgx-game/sce_sys/pic0.png', (960, 544)),
+               'livearea/contents/bg.png': ('vita/vgx-game/sce_sys/livearea/contents/bg.png', (840, 500)),
+               'livearea/contents/startup.png': ('vita/vgx-game/sce_sys/livearea/contents/startup.png', (280, 158)),
+               'livearea/contents/settings.png': ('vita/vgx-game/sce_sys/livearea/contents/settings.png', (280, 64))}
 
-class TitleLiveArea(unittest.TestCase):
-    def test_title_pictures_are_reproducible(self):
+    def test_pictures_are_8bit_palette_pngs_of_the_right_size(self):
+        for name, (relative, size) in self.SHIPPED.items():
+            png = (ROOT / relative).read_bytes()
+            with self.subTest(name=name):
+                self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
+                self.assertEqual(struct.unpack('>II', png[16:24]), size)
+                self.assertEqual(png[24:26], b'\x08\x03', '8-bit palette PNG')
+
+    def test_neutral_pictures_are_reproducible_and_carry_no_version(self):
         try:
-            import cv2, numpy  # noqa: F401
             from PIL import ImageFont
             ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
         except Exception as error:
             self.skipTest(f'generator dependencies missing: {error}')
         import subprocess, sys
+        source = (ROOT / 'tools/handheld/make_livearea.py').read_text()
+        self.assertNotIn('version', source.lower().replace('versions', ''))
         with tempfile.TemporaryDirectory() as temporary:
-            subprocess.run([sys.executable, '-I', str(ROOT / 'tools/handheld/make_livearea_title.py'),
-                            str(ROOT / 'vita/vgx-game/sce_sys/loading-title.rgba'), temporary], check=True, capture_output=True)
-            out = pathlib.Path(temporary)
-            for name, relative in [('icon0.png', 'vita/vgx-game/sce_sys/icon0.png'), ('pic0.png', 'vita/vgx-game/sce_sys/pic0.png'),
-                                   ('bg.png', 'vita/vgx-game/sce_sys/livearea/contents/bg.png'),
-                                   ('startup.png', 'vita/vgx-game/sce_sys/livearea/contents/startup.png'),
-                                   ('settings.png', 'vita/vgx-game/sce_sys/livearea/contents/settings.png')]:
-                self.assertEqual((out / name).read_bytes(), (ROOT / relative).read_bytes(), name)
-                png = (ROOT / relative).read_bytes()
-                self.assertEqual(png[24:26], b'\x08\x03', f'{name}: 8-bit palette PNG')
+            subprocess.run([sys.executable, '-I', str(ROOT / 'tools/handheld/make_livearea.py'), temporary], check=True, capture_output=True)
+            for name, (relative, _) in self.SHIPPED.items():
+                self.assertEqual((pathlib.Path(temporary) / name).read_bytes(), (ROOT / relative).read_bytes(), name)
+
+    def test_reference_script_still_documents_the_device_algorithm(self):
+        text = (ROOT / 'tools/handheld/make_livearea_title.py').read_text()
+        self.assertIn('title_art.h', text)
+        self.assertIn('reference', text.lower())
+
+
+if __name__ == '__main__':
+    unittest.main()

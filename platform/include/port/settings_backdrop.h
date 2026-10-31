@@ -1,5 +1,5 @@
 #pragma once
-// Optional Settings backdrop: the shipped title-screen picture, stored at half size.
+// Optional Settings backdrop: the player's own title-screen capture (made by the game on a first run, see port/title_art.h), stored at half size.
 #include <cstddef>
 #include <cstdint>
 
@@ -9,7 +9,7 @@ constexpr unsigned kBackdropWidth = kBackdropSourceWidth / 2, kBackdropHeight = 
 constexpr unsigned kBackdropChunkRows = 32;  // source rows read per file request
 constexpr size_t kBackdropSourceBytes = size_t(kBackdropSourceWidth) * kBackdropSourceHeight * 4;
 constexpr size_t kBackdropPixels = size_t(kBackdropWidth) * kBackdropHeight;
-constexpr const char* kBackdropPath = "app0:/sce_sys/loading-title.rgba";
+constexpr const char* kBackdropPath = "ux0:data/smg/art/title.rgba";
 
 // Averages each 2x2 block of `rows` source rows (an even count starting at the even row `first`) of
 // 960-wide RGBA8 into the 480x272 buffer `out`. The result is opaque ABGR (the menu's pixel order).

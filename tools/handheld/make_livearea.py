@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Draws the Vita package's bubble pictures (original artwork: a starfield, a star, plain text) into
-vita/vgx-game/sce_sys/: icon0.png 128x128, pic0.png 960x544, livearea/contents/bg.png 840x500 and
-startup.png 280x158, all as 8-bit palette PNGs (the console's installer refuses anything else).
-  python3 tools/handheld/make_livearea.py        (needs Pillow and the DejaVu fonts)"""
-import math, os, random
+"""Draws the Vita package's bubble pictures (original artwork: a starfield, a star, plain text; no game artwork) into
+vita/vgx-game/sce_sys/ (or the folder given as the first argument): icon0.png 128x128, pic0.png 960x544,
+livearea/contents/bg.png 840x500, startup.png 280x158 and settings.png 280x64, all as 8-bit palette PNGs (the console's
+installer refuses anything else). These are what the public package ships. On a player's console the game replaces the
+bubble, LiveArea background and start pictures with ones made from the player's own title screen (docs/ASSETS.md);
+tools/handheld/make_livearea_title.py is the host-side reference of that.
+  python3 tools/handheld/make_livearea.py [out-dir]        (needs Pillow and the DejaVu fonts)"""
+import math, os, random, sys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'vita', 'vgx-game', 'sce_sys')
+OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'vita', 'vgx-game', 'sce_sys')
 BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 REG = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 
@@ -85,7 +88,7 @@ def main():
     f = ImageFont.truetype(BOLD, 44)
     text(im, (260, 90), 'Super Mario Galaxy', f)
     f2 = ImageFont.truetype(REG, 22)
-    for i, line in enumerate(['Native port for PlayStation Vita, version 1.0.',
+    for i, line in enumerate(['Native port for PlayStation Vita.',
                               'Touch, rear touch aiming and tilt controls.',
                               'Needs your own copy of the game.']):
         text(im, (262, 160 + i * 32), line, f2, fill=(215, 225, 255))
@@ -96,5 +99,13 @@ def main():
     f = ImageFont.truetype(BOLD, 30)
     text(im, (112, 60), 'Start', f)
     save(im, 'livearea/contents/startup.png')
+    # the "Settings" tile of the LiveArea
+    im = sky(280, 64, 5)
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(BOLD, 30)
+    w = d.textlength('Settings', font=f)
+    d.text(((280 - w) / 2, 13), 'Settings', font=f, fill=(255, 255, 255), stroke_width=2, stroke_fill=(8, 30, 60))
+    d.rounded_rectangle((1, 1, 278, 62), radius=10, outline=(255, 214, 64), width=2)
+    save(im, 'livearea/contents/settings.png')
 
 main()

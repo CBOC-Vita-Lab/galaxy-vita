@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""The Vita package's bubble and LiveArea pictures, made from the game's own title screen (sce_sys/loading-title.rgba,
-the approved title picture in docs/ASSETS.md): pic0.png 960x544 and livearea bg.png 840x500 (the title with its two text lines
-removed), startup.png 280x158 and icon0.png 128x128 (the title logo on its sky), settings.png 280x64 (the Settings tile).
-All 8-bit palette PNGs (the console installer refuses others). Deterministic.
-  python3 -I tools/handheld/make_livearea_title.py vita/vgx-game/sce_sys/loading-title.rgba <out-dir>
-Needs Pillow, NumPy, OpenCV and the DejaVu fonts. The older generated starfield pictures: make_livearea.py."""
+"""HOST REFERENCE of what the game does on the console with the player's own title screen (platform/include/port/title_art.h,
+platform/include/port/title_art_png.h and vita/vgx-game/title_art_runtime.cpp). The public package carries no game artwork: the
+first time the real title screen has been fully shown, the game saves the presented frame as ux0:data/smg/art/title.rgba
+(960x544 RGBA) and makes pic0.png 960x544 and livearea bg.png 840x500 (the title with its two text lines removed), startup.png
+280x158 and icon0.png 128x128 (the title logo on its sky) from it. This script does the same on a PC from such a capture, with
+OpenCV's inpainting where the console uses a plain neighbour fill (the pixels of the text lines, grown by 4, are filled from the
+sky around them, working inwards, then smoothed and given back the sky's own stars) and Pillow's quantizer and resampler where
+the console has its own median cut, Floyd-Steinberg dithering and Lanczos filter; tests/test_title_art.py compares the two by
+mean colour error. It also draws a Settings tile (settings.png 280x64, which the console build does not touch).
+All outputs are 8-bit palette PNGs (the console's tools refuse others). Deterministic.
+  python3 -I tools/handheld/make_livearea_title.py <capture.rgba> <out-dir>
+Needs Pillow, NumPy, OpenCV and the DejaVu fonts. The neutral pictures the package ships: make_livearea.py."""
 import sys, numpy as np
 from PIL import Image, ImageFilter, ImageDraw, ImageFont
 src, outdir = sys.argv[1], sys.argv[2]

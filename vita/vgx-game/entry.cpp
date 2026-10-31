@@ -32,6 +32,7 @@
 
 #include "../runtime/input.h"
 #include "settings_runtime.h"
+#include "title_art_runtime.h"
 #include "port/game_progress.h"
 #include "port/input_script.h"
 #include "port/port.h"
@@ -423,6 +424,7 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     port_vita_thread_class(1);
     port_boot(SMG_DATA "/game", SMG_DATA "/saves");
     port_vgx_vita_log_memory("after port_boot");
+    port_title_art_start();  // GXV_TITLEART: the player's own pictures, made from the title screen once it has been shown (title_art_runtime.cpp)
     int64_t previous = port_host_time_ns();
     const int64_t start = previous;
     int64_t lastReport = previous;
