@@ -96,25 +96,25 @@ static void Logic() {
         Check(t.Poll(3.9, true) == CaptureTrigger::kSample, "and the first sample comes 1.5 s later");
     }
     {
-        CaptureTrigger t;  // frames that fail their checks: three tries, then it is over for this start
+        CaptureTrigger t;  // frames that fail their checks: 40 tries (the title camera moves), then it is over for this start
         double now = 0;
         t.Poll(now, true);
         int tries = 0;
-        for (int i = 0; i < 400 && !t.Done(); ++i) {
+        for (int i = 0; i < 1200 && !t.Done(); ++i) {
             now = i * 0.1;
             const auto act = t.Poll(now, true);
             if (act == CaptureTrigger::kSample) t.Sampled(now, 0.5);
             else if (act == CaptureTrigger::kCapture) { ++tries; t.Captured(false); }
         }
-        Check(tries == 3 && t.Done(), "three failed captures end the attempts");
+        Check(tries == 40 && t.Done(), "40 failed captures end the attempts");
     }
     {
-        CaptureTrigger t;  // never ready long enough: gives up after 45 s of being ready without a capture
+        CaptureTrigger t;  // never ready long enough: gives up after 120 s of being ready without a capture
         double now = 0;
         t.Poll(now, true);
         CaptureTrigger::Act last = CaptureTrigger::kWait;
-        for (int i = 0; i < 600 && last != CaptureTrigger::kGiveUp; ++i) { now = i * 0.1; last = t.Poll(now, true); if (last == CaptureTrigger::kSample) t.Sampled(now, -1); }
-        Check(last == CaptureTrigger::kGiveUp && now >= 44.9 && now <= 45.2, "gives up after 45 s when no pair of samples ever completes");
+        for (int i = 0; i < 1300 && last != CaptureTrigger::kGiveUp; ++i) { now = i * 0.1; last = t.Poll(now, true); if (last == CaptureTrigger::kSample) t.Sampled(now, -1); }
+        Check(last == CaptureTrigger::kGiveUp && now >= 119.9 && now <= 120.2, "gives up after 120 s when no pair of samples ever completes");
     }
     // Samples.
     {
@@ -261,6 +261,12 @@ static void Synthetic(const std::string& dir) {
     Check(FindLogoBox(title.data(), 4, box) && box.left == logo.left && box.right == logo.right && box.top == logo.top && box.bottom == logo.bottom, "the logo box is found exactly");
     // Not titles.
     Check(!LooksLikeTitle(fixture::MakeTitle(false, true).data(), 4), "no logo: not a title");
+    {   // the title camera passes over the planet: a glowing cyan horizon fills the lower part of the frame
+        auto horizon = fixture::MakeTitle();
+        for (int y = 350; y < fixture::H; ++y)
+            for (int x = 0; x < fixture::W; ++x) { uint8_t* p = &horizon[(size_t(y) * fixture::W + x) * 4]; if (p[2] > p[0] + 35) { p[0] = 40; p[1] = 190; p[2] = 205; } }
+        Check(LooksLikeTitle(horizon.data(), 4), "a cyan planet horizon below the logo: still the title");
+    }
     { std::vector<uint8_t> black(kRgbaBytes, 0); Check(!LooksLikeTitle(black.data(), 4), "black frame: not a title"); }
     { std::vector<uint8_t> white(kRgbaBytes, 255); Check(!LooksLikeTitle(white.data(), 4), "white frame: not a title"); }
     Check(!LooksLikeTitle(fixture::MakeTitle(true, true, {20, 300, 50, 340}).data(), 4), "a logo off to the left: not a title");

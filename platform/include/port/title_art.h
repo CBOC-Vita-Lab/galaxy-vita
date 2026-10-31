@@ -82,8 +82,8 @@ struct TriggerParams {
     double pairGap = 0.5;      // the two samples of the stability test
     double maxDiff = 2.5;      // mean absolute difference (0..255) of the two samples that still counts as the same picture
     double forceAfter = 10.0;  // a title that never settles (a moving background) is taken anyway after this long
-    double giveUp = 45.0;      // no capture this session after this long
-    int maxTries = 3;          // captures that failed their checks
+    double giveUp = 120.0;     // no capture this session after this long
+    int maxTries = 40;         // captures that failed their checks (the title camera moves: a comet or nebula can cross the frame for a while)
 };
 // The decision of the capture worker, fed with the clock and whether the title is up with the loading screen gone.
 class CaptureTrigger {
@@ -117,7 +117,8 @@ private:
 };
 
 // ------------------------------------------------------------------------------------------------ the picture
-inline bool IsSky(const uint8_t* p) { return p[2] > p[0] + 35 && p[2] > p[1] + 10; }
+// Blue or cyan (the title camera also passes over the planet's glowing cyan horizon); not green, grey or white.
+inline bool IsSky(const uint8_t* p) { return p[2] > p[0] + 35 && p[2] + 25 > p[1]; }
 
 struct LogoBox {
     int left = 0, right = 0, top = 0, bottom = 0;  // inclusive

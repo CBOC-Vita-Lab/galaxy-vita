@@ -38,7 +38,7 @@ for y, x, k in zip(ys[pick], xs[pick], rng.integers(0, max(1, len(stars)), pick.
 clean = Image.fromarray(out.clip(0, 255).astype(np.uint8))
 # logo box: bright, saturated pixels in rows 40..350
 b = np.asarray(clean).astype(int); Rc, Gc, Bc = b[..., 0], b[..., 1], b[..., 2]
-let = ~((Bc > Rc + 35) & (Bc > Gc + 10))   # the logo: everything that is not the blue sky
+let = ~((Bc > Rc + 35) & (Bc + 25 > Gc))   # the logo: everything that is not the blue (or cyan horizon) sky
 cols = np.where(let[20:380].sum(0) > 25)[0]; rows = np.where(let[:, cols.min():cols.max() + 1].sum(1) > 25)[0]
 rows = rows[rows < 390]
 L, R, T, B = cols.min(), cols.max(), rows.min(), rows.max()
