@@ -304,6 +304,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Square/R spin as a 20-read swing pulse that waits out the game's 10-update A/B cooldown: a spin right after a jump comes at
     // once instead of 0.33 s late (from the swing's echo), and no phantom spin follows the spin interval (GAL-030).
     setenv("GXV_SHAKE_PULSE", "1", 0);
+    // The HD pack's eye textures are used again: the white / stuck-closed eyes 1.0 players saw with them came from the clamped final
+    // alpha, which GXV_TEVWRAP=2 now wraps as the Wii does (checked frame by frame in the Gateway wake-up close-up). GXV_HDTEX_EYES=0
+    // keeps the game's own eye images.
+    setenv("GXV_HDTEX_EYES", "1", 0);
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
     setenv("GXV_PAD_DEFAULTS", "1", 0);
