@@ -126,6 +126,13 @@
 // (a long wait for a quiet moment used up most of the block). A scene remembers, with its rung, the rung below which a step
 // bought nothing; the next visit takes no step below it for maxBlockSec (a stage whose GPU time does not scale with the
 // picture does not try the useless drop again on every visit; after that it may try once more, in case it was the moment).
+// The floor first (the console, rc2, Beach Bowl: with that rule alone the stage stayed at 640x456 and showed 26 a second; each
+// smaller size saves only 4-6 % of its GPU time there, and the old slide to 544x388 / 480x340 showed 31): while the floor is
+// missed (the GPU-limited stretch before the step came slower than the target, or its GPU time alone was over the budget) a
+// step is kept when it saved missGainFrac (3 %) of the GPU time, and the next one may follow; the stricter rule above applies
+// to a step taken while the floor was met, which could only add pictures above the target. A step undone while the floor was
+// missed is remembered with the scene only when it saved nothing (under nothingFrac, 1 %), so a saving hidden by one noisy check does not hold
+// the scene above the size its floor needs on later visits. The same in both targets, each against its own budget.
 //
 // Performance mode (GXV_AUTOQ_TARGET=60, Config::targetFps 60; the default stays 30, Quality mode: never below 30, then the
 // sharpest picture): as close to 60 pictures a second as the GPU allows. Everything of target mode above, against a budget of
@@ -260,6 +267,8 @@ struct Config {
     // Target mode: a step below today's size is kept only when the GPU's busy time fell by this share of the saving the sizes
     // predict (and by betterFrac at least); a step that bought nothing waits at most noGainUndoSec for a quiet moment to be undone.
     double gainShare = 0.5;
+    double missGainFrac = 0.03;  // ... but while the floor is missed (pictures slower than the target), any saving of this much is kept
+    double nothingFrac = 0.01;   // ... and a step undone then is remembered with the scene only when it saved less than this (nothing)
     double noGainUndoSec = 5.0;
     double belowCheckSec = 4.0;  // ... judged over this long (checkSec in the other modes): the GPU time of a water stage wanders
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
@@ -398,6 +407,7 @@ private:
     // holds (seconds the condition has lasted)
     double overT_ = 0, boundT_ = 0, roomT_ = 0;
     double boundSpan_ = 0;
+    double boundIntervalSum_ = 0;    // target mode: the frame intervals of the GPU-limited stretch (us), to tell a missed floor
     unsigned boundFrames_ = 0;
     uint64_t settleUntil_ = 0;
     unsigned sinceChange_ = 1u << 30; // frames since the last change (minChangeFrames)
@@ -429,6 +439,7 @@ private:
     bool pendingBelow_ = false;      // calm: a step below today is due (the GPU is the limit at today's size)
     uint64_t belowAt_ = 0;
     double belowBefore_ = 0;
+    bool belowMissing_ = false, checkMissing_ = false; // target mode: the floor was missed before the step below today
     uint64_t roomAt_ = 0;            // when that window ended (0: no room seen since the last change or overload)
     uint32_t scene_ = 0;             // the key of the scene being played
     struct SceneRung { uint32_t key; int8_t rung; uint8_t fx; int8_t floor; };

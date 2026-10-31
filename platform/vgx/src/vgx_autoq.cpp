@@ -202,6 +202,7 @@ void Controller::ResetHolds() {
     overT_ = boundT_ = roomT_ = 0;
     overFrames_ = 0;
     boundSpan_ = 0;
+    boundIntervalSum_ = 0;
     boundFrames_ = 0;
     fxRoomT_ = 0;
     anisoRoomT_ = 0;
@@ -607,6 +608,7 @@ bool Controller::Add(const FrameTimes& f) {
             checking_ = true;
             checkFrom_ = from;
             checkBefore_ = belowBefore_;
+            checkMissing_ = belowMissing_;
             checkSpan_ = 0;
             checkT_ = 0;
             checkFrames_ = 0;
@@ -761,15 +763,21 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
             checking_ = false;
             const double after = checkSpan_ / 1000.0 / checkFrames_;
             double need = cfg_.betterFrac;
+            // (target mode: while the floor was missed, any real saving of GPU time is kept, missGainFrac (3 %): in Beach Bowl each
+            // size saves only 4-6 %, and together those steps are what holds 30 (the console, rc2: kept at 640x456 by the stricter
+            // rule it showed 26 a second, with them 31). Once the floor is met, a step that only adds pictures above the target
+            // must buy half of the saving the sizes predict.)
             if (target && rung_ < checkFrom_)
-                need = std::max(need, cfg_.gainShare * (1.0 - Cost(rung_) / Cost(checkFrom_)));
+                need = checkMissing_ ? cfg_.missGainFrac : std::max(need, cfg_.gainShare * (1.0 - Cost(rung_) / Cost(checkFrom_)));
             // (undone only when the frames stayed about as long: when they got much longer the scene got heavier during
             // the check, which says nothing against the smaller picture; the Strikers port, cc302e6)
             if (after > checkBefore_ * (1.0 - need) && after < checkBefore_ * 1.15) {
                 belowBlockLen_ = belowBlockLen_ > 0 ? std::min(belowBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
                 belowBlockedUntil_ = now + static_cast<uint64_t>(belowBlockLen_ * 1e6);
                 lastBlockAt_ = now;
-                if (target) sceneFloor_ = std::max(sceneFloor_, checkFrom_); // (the scene remembers it with its rung)
+                // (the scene remembers it with its rung; a step undone while the floor was missed only when it saved nothing at all:
+                // a saving lost in the noise of one check must not keep the scene above a size its floor needs on every visit)
+                if (target && (!checkMissing_ || after > checkBefore_ * (1.0 - cfg_.nothingFrac))) sceneFloor_ = std::max(sceneFloor_, checkFrom_);
                 if (cfg_.calm) {
                     pendingUndo_ = checkFrom_; // (calm: back at the next quiet moment; target mode: within noGainUndoSec)
                     undoDueAt_ = now + static_cast<uint64_t>(cfg_.noGainUndoSec * 1e6);
@@ -817,12 +825,14 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     if (bound) {
         boundT_ += dt;
         boundSpan_ += target ? measureMs * 1000.0 * frames_ : static_cast<double>(present_);
+        boundIntervalSum_ += static_cast<double>(present_);
         boundFrames_ += frames_;
         boundGpuSum_ += gpuMs * frames_;
         boundGpuFrames_ += frames_;
     } else {
         boundT_ = 0;
         boundSpan_ = 0;
+        boundIntervalSum_ = 0;
         boundFrames_ = 0;
         boundGpuSum_ = 0;
         boundGpuFrames_ = 0;
@@ -926,11 +936,16 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         // (target mode: the GPU's mean busy time over the GPU-limited stretch, what the step is judged on)
         const double before = target ? (boundGpuFrames_ ? boundGpuSum_ / boundGpuFrames_ : gpuMs)
                                      : (boundFrames_ ? boundSpan_ / 1000.0 / boundFrames_ : winIntervalMs_);
+        // (target mode: the floor is being missed: the pictures of the stretch came slower than the target, or the GPU alone
+        // needs more than the budget)
+        const double beforeInterval = boundFrames_ ? boundIntervalSum_ / 1000.0 / boundFrames_ : winIntervalMs_;
+        const bool missing = target && (before > cfg_.budgetMs || beforeInterval > cfg_.budgetMs * 1.03);
         if (cfg_.calm && (!target || boundT_ < 8.0)) {
             // (calm: a step below today only buys a little speed, so it waits for a quiet moment as a step up does)
             pendingBelow_ = true;
             belowAt_ = now;
             belowBefore_ = before;
+            belowMissing_ = missing;
             return false;
         }
         // Target mode prefers a quiet downstep too, but a persistent GPU miss
@@ -939,6 +954,7 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         checking_ = true;
         checkFrom_ = from;
         checkBefore_ = before;
+        checkMissing_ = missing;
         checkSpan_ = 0;
         checkT_ = 0;
         checkFrames_ = 0;

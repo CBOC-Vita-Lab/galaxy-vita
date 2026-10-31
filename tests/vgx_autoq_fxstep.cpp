@@ -17,9 +17,10 @@
 // 6. The floor census: pictures, late pictures and their time, causes, stalls and quiet moments, reset by TakeFloor.
 // 7. A scene remembers the step with its rung.
 // 8. A step below today's size is judged on the GPU's busy time against the saving the sizes predict: a scene whose GPU time
-//    hardly changes with the picture (Beach Bowl on the console) keeps today's size, the useless step undone and blocked even
+//    hardly changes with the picture (under 3 %) keeps today's size, the useless step undone and blocked even
 //    when the change's own freeze is a stall, never two steps down in a row, not retried on the next visit of the scene; a
-//    scene whose GPU time scales with the picture still steps down and keeps it.
+//    scene whose GPU time scales with the picture still steps down and keeps it, and so does one where each size saves only
+//    4-6 % while 30 is missed (Beach Bowl as rc2 measured it): the floor first.
 #include "../platform/vgx/src/vgx_autoq.h"
 
 #include <algorithm>
@@ -631,24 +632,50 @@ int main(int argc, char** argv) {
         Check(h.ctl.Current() == kEmergency && !noGain, "... a much heavier one reaches 480x340, each step kept");
     }
     {
-        // A step that buys a little (5-7 %: more than betterFrac, much less than half of the predicted 14 %) is not kept either.
-        Load little;
-        little.fixedGpuMs = 30;
-        little.pixGpuMs = 14; // 44 ms at 640x456, 42 ms at 592x422 (-4.6 %)
-        little.fxGain = little.bgGain = 1.0;
-        Sim s(Target(true), 93, 0.02);
-        s.Run(little, 60);
-        if (verbose) s.Print("a step that buys a little");
-        const int down = s.Index('R', 0, 1);
-        Check(down >= 0 && down + 1 < static_cast<int>(s.ev.size()) && s.ev[down + 1].why == Why::NoGain && s.ev[down + 1].to == kToday,
-              "a step that saves much less than half of the predicted GPU time is undone");
-    }
-    {
-        // The scene remembers it: Beach Bowl (key 333), another stage, Beach Bowl again: no useless step on the second visit.
+        // Beach Bowl as the console's rc2 build showed it: each smaller size saves 5-6 % of the GPU time (24 + 13 x Cost ms: 37 at
+        // 640x456, 35.1 at 592x422, 33.4 at 544x388, 31.3 at 480x340), 640x456 misses 30. The floor comes first: every such step
+        // is kept, down to the size that meets 30.
         Load beach;
         beach.gameMs = 14;
-        beach.fixedGpuMs = 34;
-        beach.pixGpuMs = 4;
+        beach.fixedGpuMs = 24;
+        beach.pixGpuMs = 13;
+        beach.fxGain = beach.bgGain = 1.0;
+        Sim s(Target(true), 93, 0.05);
+        s.freezeUs = 260000;
+        s.Run(beach, 120);
+        if (verbose) s.Print("Beach Bowl, 4-6 % saved by each size, 640x456 misses 30");
+        bool noGain = false;
+        for (const Event& e : s.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
+        const unsigned late = s.lateFrames;
+        s.lateFrames = 0;
+        s.Run(beach, 30);
+        char line[200];
+        std::snprintf(line, sizeof line, "small savings while 30 is missed: each step kept, down to 480x340 (rung %d), %u late pictures in the last 30 s",
+                      s.ctl.Current(), s.lateFrames);
+        Check(s.ctl.Current() == kEmergency && !noGain, line);
+        Check(s.lateFrames <= 30 && late > 0, "... where the floor is met");
+        // the same scene in Performance mode (60), against its own budget: the floor is missed all the way, every step kept
+        Config p = Target(true);
+        p.targetFps = 60;
+        p.budgetMs = 1000.0 / 60.0;
+        Load lighter = beach;
+        lighter.gameMs = 6;       // (one turn's CPU at 60: game 3 ms, renderer 3 ms)
+        lighter.fixedGpuMs = 12.5;
+        lighter.pixGpuMs = 6.5;   // 19 ms at 640x456, 16.2 at 480x340
+        Sim q(p, 94, 0.05);
+        q.Run(lighter, 120);
+        noGain = false;
+        for (const Event& e : q.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
+        if (verbose) q.Print("the same in Performance mode");
+        Check(q.ctl.Current() == kEmergency && !noGain, "... and in Performance mode (60) against 16.7 ms");
+    }
+    {
+        // The scene remembers it: a stage whose GPU time does not change with the picture at all (key 333), another stage, the
+        // first again: no useless step on the second visit.
+        Load beach;
+        beach.gameMs = 14;
+        beach.fixedGpuMs = 37.5;
+        beach.pixGpuMs = 0.5;
         beach.fxGain = beach.bgGain = 1.0;
         Load light;
         light.pixGpuMs = 5;
