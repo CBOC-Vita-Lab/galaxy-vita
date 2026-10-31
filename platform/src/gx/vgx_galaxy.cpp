@@ -80,6 +80,7 @@ void SubmitToBackend(CmdBuf&) {}
 
 extern "C" void port_input_latency_frame_done(unsigned long long shown); // input/wpad.cpp
 extern "C" void port_host_heap_summary(void) __attribute__((weak));  // os/os_thread.cpp (absent in some host tests)
+extern "C" void port_vgx_census_log(const char* when);  // (below)
 
 namespace {
 
@@ -244,7 +245,7 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             longest = 0;
             CharaPerfLine();
             static unsigned windows = 0;
-            if (++windows % 6 == 0 && port_host_heap_summary) port_host_heap_summary();  // (every 30 s: the C heap's use, so a slow growth shows before it runs out)
+            if (++windows % 6 == 0 && port_host_heap_summary) { port_host_heap_summary(); port_vgx_census_log("every 30 s"); }  // (every 30 s: the C heap's use, so a slow growth shows before it runs out)
         }
         sPerf = w;
         return;
@@ -1146,7 +1147,7 @@ extern "C" void port_vgx_census_log(const char* when) {
     }
     const size_t pending = vgx::Pending().HostBytes();
     other = ring - vtx;
-    port_log("vgx host memory %s: frame buffers %u KiB in %u (vertex arenas %u KiB, the rest %u KiB), the front end's own frame %u KiB, display-list cache %u KiB "
+    port_log_summary("vgx host memory %s: frame buffers %u KiB in %u (vertex arenas %u KiB, the rest %u KiB), the front end's own frame %u KiB, display-list cache %u KiB "
              "(+ %u KiB static in the back end), the game's `new` %u KiB",
              when, static_cast<unsigned>(ring / 1024), bufs, static_cast<unsigned>(vtx / 1024), static_cast<unsigned>(other / 1024),
              static_cast<unsigned>(pending / 1024), static_cast<unsigned>(vgx::DlCacheLiveBytes() / 1024),
