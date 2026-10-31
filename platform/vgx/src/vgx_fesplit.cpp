@@ -34,6 +34,7 @@ namespace vgx {
 namespace split {
 
 bool g_on = false;
+static std::vector<uint8_t> g_joinOut; // the join log of the frame FinishFrame finished (GXV_RIGIDMERGE_DLLEARN)
 
 namespace {
 
@@ -145,12 +146,14 @@ struct Finisher {
     uint32_t lastRecSerial = 0, records = 0;
     RigidRun rig;                  // GXV_RIGIDMERGE
     std::vector<uint32_t> results; // per job: the record it made, or ~0 (merged)
+    std::vector<uint8_t> joinLog;  // GXV_RIGIDMERGE_DLLEARN: per job, whether it joined the previous record
     uint32_t rowMismatches = 0;    // (GXV_SPLIT=2) the matrix rows the player computed differ from the builder's
     void ResetFrame() {
         uni.clear();
         draws.clear();
         idx.clear();
         results.clear();
+        joinLog.clear();
         for (int b = 0; b < UB_COUNT; ++b) { blockOff[b] = kNoBlock; blockLen[b] = 0; }
         lastDraw = -1;
         records = 0;
@@ -172,6 +175,7 @@ struct Shadow {
     RigidRun rig;
     std::vector<VtxWrite> vtxLog; // the palette indices the single-thread code would have written into vertices (GXV_RIGIDMERGE)
     std::vector<uint32_t> results;
+    std::vector<uint8_t> joinLog; // GXV_RIGIDMERGE_DLLEARN
     size_t scan = 0; // commands of the frame's list copied into `cmds` so far
     struct Xf { size_t off; uint32_t bytes; size_t at; uint32_t stride; };
     std::vector<Xf> xf;          // transformed vertex ranges, and where the expected bytes are in xfData
@@ -185,6 +189,7 @@ struct Shadow {
         idx.clear();
         cmds.clear();
         results.clear();
+        joinLog.clear();
         xf.clear();
         xfData.clear();
         for (int b = 0; b < UB_COUNT; ++b) { blockOff[b] = kNoBlock; blockLen[b] = 0; }
@@ -364,7 +369,8 @@ void Run(uint32_t type, const uint32_t* p) {
     case OP_JOB: {
         DrawJob j;
         CopyWords(&j, p, kJobWords);
-        FinishCtx c{&F->draws, &F->idx, nullptr, F->blockOff, &F->lastDraw, &F->lastRecSerial, &F->records, false, &F->uni, &F->rig, nullptr};
+        FinishCtx c{&F->draws, &F->idx, nullptr, F->blockOff, &F->lastDraw, &F->lastRecSerial, &F->records, false, &F->uni, &F->rig, nullptr,
+                    RigidMergeLearnMax() ? &F->joinLog : nullptr};
         const DrawStateRef st{F->vsId, F->useFs, F->texMask, F->serial, &F->rs, F->tex};
         F->results.push_back(j.kind == JOB_STATIC ? FinishStatic(c, j, st) : FinishDraw(c, j, st));
         break;
@@ -525,6 +531,10 @@ void Compare(CmdBuf& buf) {
                 break;
             }
     }
+    if (F->joinLog != v.joinLog) {
+        ++v.badResults;
+        if (bad++ == 0) std::snprintf(what, sizeof what, "join logs differ (%" VGX_PRIZU " / %" VGX_PRIZU " jobs)", F->joinLog.size(), v.joinLog.size());
+    }
     if (buf.cmds.size() != v.cmds.size() || !std::equal(buf.cmds.begin(), buf.cmds.end(), v.cmds.begin(), [](const Cmd& a, const Cmd& b) { return a.type == b.type && a.arg == b.arg; })) {
         ++v.badCmds;
         if (bad++ == 0) std::snprintf(what, sizeof what, "command lists differ (%" VGX_PRIZU " / %" VGX_PRIZU " commands)", buf.cmds.size(), v.cmds.size());
@@ -597,6 +607,7 @@ void Compare(CmdBuf& buf) {
 void SetThreadInit(void (*fn)(int core)) { g_threadInit = fn; }
 
 uint32_t StolenOps() { return g_stolen.load(std::memory_order_relaxed); }
+const std::vector<uint8_t>& FinishedJoinLog() { return g_joinOut; }
 void Counters(int64_t& finisherCpuUs, int64_t& playerWaitNs, uint32_t& frames) {
     finisherCpuUs = g_bCpuUs.load(std::memory_order_relaxed);
     playerWaitNs = g_waitNs.load(std::memory_order_relaxed);
@@ -745,7 +756,8 @@ uint32_t Job(const DrawJob& j, const DrawStateRef& st) {
     if (Verify()) {
         ShadowSync(Pending().cmds);
         V->scan = Pending().cmds.size() + 1; // (the placeholder the caller pushes next)
-        FinishCtx c{&V->draws, &V->idx, &V->cmds, V->blockOff, &V->lastDraw, &V->lastRecSerial, &V->records, false, &V->uni, &V->rig, &V->vtxLog};
+        FinishCtx c{&V->draws, &V->idx, &V->cmds, V->blockOff, &V->lastDraw, &V->lastRecSerial, &V->records, false, &V->uni, &V->rig, &V->vtxLog,
+                    RigidMergeLearnMax() ? &V->joinLog : nullptr};
         V->results.push_back(j.kind == JOB_STATIC ? FinishStatic(c, j, st) : FinishDraw(c, j, st));
     }
     SendState(st);
@@ -794,6 +806,7 @@ void FinishFrame(CmdBuf& buf) {
     std::swap(buf.draws, F->draws);
     std::swap(buf.idx, F->idx);
     std::swap(buf.uni, F->uni);
+    g_joinOut.swap(F->joinLog);
     stats::Cur().drawCalls += F->records;
     F->ResetFrame();
     g_busy.store(false, std::memory_order_release);

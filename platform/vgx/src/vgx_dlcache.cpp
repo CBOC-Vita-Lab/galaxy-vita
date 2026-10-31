@@ -19,6 +19,9 @@
 //   GXV_DLCACHE=verify  hash on every call and report an entry whose
 //                           bytes changed without a write notification
 //   GXV_DLCACHE_BOUNDS_GUARD=1  do not cache decodes with unreadable indexed elements (default off)
+//   GXV_RIGIDMERGE_DLMAX=<n>    (with GXV_RIGIDMERGE) lists of up to n vertices without matrix indices stay in the arena, to join palette runs
+//   GXV_RIGIDMERGE_DLMAX=learn  (or GXV_RIGIDMERGE_DLLEARN=1) the same for lists of up to GXV_RIGIDMERGE_DLLEARN_MAX vertices (default 512), but a list
+//                               is copied only where that joins a run: see "learned copies" below
 // Counters: per frame in the CSV (dlHit, dlBuild, dlRehash, dlBypass), totals in vgx_stats.txt.
 #include "vgx_guestmem.h"
 #include "vgx_state.h"
@@ -83,6 +86,11 @@ struct Entry {
     uint32_t bufId = 0;            // static buffer in the back end (0: vertices are copied into the frame arena per use)
     uint32_t bufBytes = 0;
     bool promotable = false;       // the list as a whole is too large for the CPU-transform-and-merge path
+    bool rigidCopy = false;        // GXV_RIGIDMERGE_DLMAX keeps it in the arena (counted as a copy for a palette run)
+    // ---- learned copies (GXV_RIGIDMERGE_DLLEARN, see below)
+    bool copyable = false;         // the decoded vertices are kept after the promotion, so that a use can copy them into the arena
+    uint32_t keptBytes = 0;
+    uint32_t serial = 0;           // (staggers the probes; names the entry in the table of uses)
     // ---- policy
     uint64_t lastUse = 0;
     uint8_t fails = 0;             // consecutive content changes
@@ -223,6 +231,50 @@ struct Counters {
     uint64_t hitVerts = 0, builtVerts = 0, liveBytes = 0, staticBytes = 0, promoted = 0, staticBufs = 0;
 } g_ctr;
 
+// ---- learned copies (GXV_RIGIDMERGE_DLLEARN)
+// Consecutive rigid draws that differ only in their matrix become one GL draw (vgx_draw.cpp, RigidJoin), but only draws whose vertices are in the frame's
+// arena can: a cached list that became a static buffer cannot join. GXV_RIGIDMERGE_DLMAX=<n> keeps every list of up to n vertices in the arena (a copy of
+// its vertices at each use), which costs a copy where no join follows. Here a list of at most N vertices is a static buffer as always, but its decoded
+// vertices are kept as well, and a use copies them into the arena only when uses of the same list, after the same kind of draw (UseKey: the shaders and
+// state of the draw before it, which learned list that was, and which registers were written since), joined a run on average often enough to pay for
+// the copy (the join rate times GXV_RIGIDMERGE_DLLEARN_GAIN >= the bytes of the copy). How that is known:
+//   - a use that was copied: the record stage says whether its first draw joined the record before it, and whether the next job joined it (the join log of
+//     the frame, FinishCtx::joinLog, read at the frame's end: the same in every GXV_SPLIT mode);
+//   - a use that stayed static: the record stage tests whether the draw would have joined, had it been a copy (FinishStatic: the same tests as RigidJoin,
+//     with the previous draw counted as a copy too when its list can be copied); so a join that is there to find is found without trying.
+// A copy that joined nothing puts that use of the list out of copying for 64 frames (twice as long each time, up to 512), and a list not
+// marked is copied once in 64 frames anyway (staggered by list), in case the test missed something. (The answers are kept in a table of 8192 uses.)
+uint32_t g_learnMax = 0;
+uint64_t g_joinGain = 0;      // bytes of copying that one saved draw is worth (a GL draw ~20 us, a copy ~1 GB/s)
+bool g_learnInit = false;
+uint64_t g_keptBytes = 0, g_keptBudget = 0;
+uint32_t g_entrySerial = 0;
+struct LearnCounters {
+    uint64_t copies = 0, copyBytes = 0, copyJoined = 0, copyWasted = 0, staticUses = 0, staticCouldJoin = 0, keptLists = 0;
+} g_lc;
+// What is known of the uses of the learned lists: by list (Entry::serial) and what came before the use (UseKey): how often the use joined a run (a running mean,
+// 0..255), and, after a copy that bought nothing, the frame before which the use is not copied again (retryAt) and how many times in a row that happened.
+// A table with room for a few thousand uses, two slots to a bucket; a use that finds its bucket taken takes a slot of it: what is lost is learned again.
+struct CtxSlot { uint32_t tag = 0, retryAt = 0; uint8_t rate = 0, failLevel = 0; bool used = false; };
+constexpr uint32_t kCtxSlots = 8192;
+std::vector<CtxSlot> g_ctx;
+CtxSlot* CtxFind(uint32_t serial, uint32_t key, bool create) {
+    if (g_ctx.empty()) return nullptr;
+    uint64_t h = (static_cast<uint64_t>(serial) << 32 | key) * 0x9E3779B97F4A7C15ull;
+    h ^= h >> 29;
+    const uint32_t tag = static_cast<uint32_t>(h >> 32) | 1u;
+    CtxSlot* b = &g_ctx[(static_cast<uint32_t>(h) & (kCtxSlots - 1)) & ~1u];
+    for (int k = 0; k < 2; ++k)
+        if (b[k].used && b[k].tag == tag) return &b[k];
+    if (!create) return nullptr;
+    CtxSlot* v = !b[0].used ? &b[0] : (!b[1].used ? &b[1] : (b[0].rate <= b[1].rate ? &b[0] : &b[1]));
+    *v = CtxSlot();
+    v->tag = tag;
+    return v;
+}
+struct Use { Entry* e; uint32_t j0, j1, key; uint8_t kind; }; // kind: 0 a copy before the promotion (the first use), 1 a static buffer, 2 a deliberate copy of a static buffer
+std::vector<Use> g_uses; // this frame's uses of lists that can be copied
+
 // Static buffer ids: small, reused, owner known (for GXV_HASH=2).
 std::vector<uint32_t> g_freeIds;
 std::vector<Entry*> g_bufOwner(1, nullptr);
@@ -254,7 +306,14 @@ void Promote(Entry& e) {
     if (abs) {
         bool ok = e.totalVerts <= 0x10000;
         for (const Seg& sg : e.segs) ok = ok && sg.stride == stride;
-        if (!ok) { e.promotable = false; return; }
+        if (!ok) {
+            e.promotable = false;
+            g_keptBytes -= e.keptBytes; // (never a static buffer: nothing to learn)
+            if (e.copyable) --g_lc.keptLists;
+            e.keptBytes = 0;
+            e.copyable = false;
+            return;
+        }
     }
     BufUpload up;
     up.bufId = e.bufId = AllocBufId(&e);
@@ -292,6 +351,9 @@ void Promote(Entry& e) {
         up.vtx = e.verts;
         e.idx = up.idx;
         g_ctr.liveBytes += e.verts.capacity();
+    } else if (e.copyable) {
+        up.vtx = e.verts; // (GXV_RIGIDMERGE_DLLEARN: the entry keeps its vertices too, for the copies into the arena)
+        g_ctr.liveBytes += e.verts.capacity();
     } else {
         up.vtx = std::move(e.verts);
         e.verts = std::vector<uint8_t>();
@@ -316,6 +378,13 @@ void Init() {
     // Default off: reject cached decodes with incompletely readable indexed data.
     g_boundsGuard = EnvInt("GXV_DLCACHE_BOUNDS_GUARD", 0) != 0;
     g_keepCopy = diag::Int("GXV_HASH", 0) == 2;
+    // GXV_RIGIDMERGE_DLLEARN_MB (read once, default 6): the most the kept copies of the learned lists may take (megabytes).
+    g_learnMax = g_static ? RigidMergeLearnMax() : 0u;
+    g_keptBudget = static_cast<uint64_t>(EnvInt("GXV_RIGIDMERGE_DLLEARN_MB", 6)) << 20;
+    // GXV_RIGIDMERGE_DLLEARN_GAIN (read once, default 20000): a list is copied while (how often its uses joined) x this is at least the bytes the copy moves:
+    // the bytes one saved GL draw pays for (about 20 us of the console's CPU against a copy at about 1 GB/s). A very large value: any list that joins is copied.
+    g_joinGain = static_cast<uint64_t>(EnvInt("GXV_RIGIDMERGE_DLLEARN_GAIN", 20000));
+    if (g_learnMax) g_ctx.assign(kCtxSlots, CtxSlot());
 }
 
 // Walks a list that consists of draw commands (and padding) only. Fills
@@ -324,6 +393,12 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     const uint8_t* const list = p;
     const uint8_t* const end = p + nbytes;
     ReleaseBuffer(e);
+    g_keptBytes -= e.keptBytes;
+    if (e.copyable) --g_lc.keptLists;
+    e.keptBytes = 0;
+    e.copyable = false;
+    e.rigidCopy = false;
+    e.serial = ++g_entrySerial; // (a rebuilt list is a new one to the table of uses)
     e.segs.clear();
     e.verts.clear();
     e.idx.clear();
@@ -412,7 +487,16 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     // anything larger becomes a static buffer the second time it is drawn unchanged.
     if (e.totalVerts <= SoftXformLimit()) e.promotable = false;
     // (GXV_RIGIDMERGE_DLMAX: a rigid list may stay in the arena, to join a palette run with the draws around it)
+    if (!g.vcd[0] && e.totalVerts > SoftXformLimit() && e.totalVerts <= RigidMergeListMax()) e.rigidCopy = true;
     if (!g.vcd[0] && e.totalVerts <= RigidMergeListMax()) e.promotable = false;
+    // (GXV_RIGIDMERGE_DLLEARN: a list that will be a static buffer keeps its vertices as well, within a budget)
+    if (g_learnMax && !g.vcd[0] && e.promotable && e.totalVerts > SoftXformLimit() && e.totalVerts <= g_learnMax && !e.segs.empty() &&
+        g_keptBytes + vertexBytes <= g_keptBudget) {
+        e.copyable = true;
+        e.keptBytes = static_cast<uint32_t>(vertexBytes);
+        g_keptBytes += vertexBytes;
+        ++g_lc.keptLists;
+    }
     return !e.segs.empty();
 }
 
@@ -448,12 +532,40 @@ bool SameState(const Entry& e) {
     return true;
 }
 
-void Emit(const Entry& e, uint32_t nbytes) {
+// What a use of a learned list is looked up by: the shaders and the render state of the draw before it (DlLastJobKey) and, when that draw was the previous learned
+// list's, which list: so that a list at the head of a run and the same list in the middle of one (after itself) are two uses.
+uint32_t g_prevSerial = 0, g_prevEndJob = ~0u;
+inline uint32_t UseKey(const Entry&) {
+    // (and which registers the state is built from were written since the last draw: a list that starts with another material than the draw before it
+    // cannot join it, one that starts with the same can)
+    const uint32_t dirty = (g.bpKeyDirty ? 1u : 0u) | (g.bpRsDirty ? 2u : 0u) | (g.xfKeyDirty ? 4u : 0u) | (g.xfRegDirty ? 8u : 0u) | (g.texDirty ? 16u : 0u);
+    return DlLastJobKey() * 0x9E3779B1u + (g_prevEndJob == DlJobSeq() ? g_prevSerial * 0x85EBCA6Bu : 0u) + dirty * 0x27D4EB2Fu;
+}
+
+// Whether this use of a learned list copies its vertices into the arena: where the list, after a draw of this shader key, joined a run at its last use
+// (the test of the static uses counts), unless its last copy joined nothing and is still being waited out; and once in 64 frames, staggered by list.
+bool WantCopy(const Entry& e) {
+    if (e.verts.empty()) return false;
+    const uint32_t frame = static_cast<uint32_t>(CurrentFrame());
+    const uint32_t key = UseKey(e);
+    const bool probe = ((frame + e.serial) & 63u) == 0;
+    if (const CtxSlot* c = CtxFind(e.serial, key, false)) {
+        if (static_cast<int32_t>(frame - c->retryAt) < 0) return false;
+        return probe || static_cast<uint64_t>(c->rate) * g_joinGain >= static_cast<uint64_t>(e.keptBytes) * 255u;
+    }
+    return probe;
+}
+
+void Emit(Entry& e, uint32_t nbytes) {
     stats::Frame& fr = stats::Cur();
     ++fr.streams;
     fr.streamBytes += nbytes;
-    if (e.bufId) {
+    const bool learn = e.copyable && g_learnMax != 0;
+    const bool copy = !e.bufId || (learn && WantCopy(e));
+    const uint32_t j0 = DlJobSeq(), key = learn ? UseKey(e) : 0u;
+    if (!copy) {
         const bool abs = AbsoluteIndices();
+        if (learn) SetPendingStaticCopyable(true); // (the record stage tests whether a copy would have joined)
         for (const Run& r : e.runs) {
             SetPendingPosMtxMax(r.posMtxMax);
             if (!e.rowBoxes.empty()) SetPendingBounds(e.rowBoxes.data(), static_cast<uint32_t>(e.rowBoxes.size()));
@@ -462,20 +574,36 @@ void Emit(const Entry& e, uint32_t nbytes) {
             fr.primsDL += r.prims;
             fr.vertsDL += r.vtxCount;
         }
-        return;
+        if (learn) SetPendingStaticCopyable(false);
+    } else {
+        uint64_t bytes = 0;
+        for (const Seg& s : e.segs) {
+            uint8_t* out = BeginVertices(s.layoutMask, s.count);
+            if (!out) continue; // (BeginVertices' guard refused the arena: this segment is not drawn)
+            std::memcpy(out, e.verts.data() + s.offset, static_cast<size_t>(s.count) * s.stride);
+            bytes += static_cast<uint64_t>(s.count) * s.stride;
+            SetPendingPosMtxMax(s.posMtxMax);
+            EmitDraw(s.prim, s.layoutMask, s.count); // (GXV_CHARAA: bounds from the vertices themselves, few by construction)
+            ++fr.primsDL;
+            fr.vertsDL += s.count;
+        }
+        if (learn || e.rigidCopy) {
+            ++g_lc.copies;
+            g_lc.copyBytes += bytes;
+        }
     }
-    for (const Seg& s : e.segs) {
-        uint8_t* out = BeginVertices(s.layoutMask, s.count);
-        if (!out) continue; // (BeginVertices' guard refused the arena: this segment is not drawn)
-        std::memcpy(out, e.verts.data() + s.offset, static_cast<size_t>(s.count) * s.stride);
-        SetPendingPosMtxMax(s.posMtxMax);
-        EmitDraw(s.prim, s.layoutMask, s.count); // (GXV_CHARAA: bounds from the vertices themselves, few by construction)
-        ++fr.primsDL;
-        fr.vertsDL += s.count;
+    if (learn) {
+        g_prevSerial = e.serial;
+        g_prevEndJob = DlJobSeq();
     }
+    if (learn && DlJobSeq() != j0) g_uses.push_back(Use{&e, j0, DlJobSeq(), key, static_cast<uint8_t>(!e.bufId ? 0 : (copy ? 2 : 1))});
 }
 
 void Free(Entry* e) {
+    for (Use& u : g_uses)
+        if (u.e == e) u.e = nullptr;
+    g_keptBytes -= e->keptBytes;
+    if (e->copyable) --g_lc.keptLists;
     ReleaseBuffer(*e);
     g_ctr.liveBytes -= e->verts.capacity();
     delete e;
@@ -521,8 +649,57 @@ void Unlink(ListInfo& li, Entry* e) {
 
 } // namespace
 
+// The end of a frame: what the uses of the learned lists came to (see "learned copies" above). `log` has a byte per job of the frame.
+void DlLearnFrameEnd(const std::vector<uint8_t>& log, uint64_t frame) {
+    for (const Use& u : g_uses) {
+        Entry* e = u.e;
+        if (!e || u.j0 >= log.size()) continue;
+        const bool joined = log[u.j0] != 0 || (u.j1 < log.size() && log[u.j1] != 0);
+        CtxSlot* c = CtxFind(e->serial, u.key, true);
+        if (!c) continue;
+        const uint32_t now = static_cast<uint32_t>(frame);
+        const bool blocked = c->used && static_cast<int32_t>(now - c->retryAt) < 0;
+        if (!c->used) {
+            c->used = true;
+            c->rate = joined ? 255 : 0;
+        } else if (u.kind == 2 || !blocked) {
+            c->rate = static_cast<uint8_t>((c->rate * 3u + (joined ? 255u : 0u)) / 4u);
+        }
+        if (u.kind == 2) {
+            if (joined) {
+                ++g_lc.copyJoined;
+                c->failLevel = 0;
+            } else {
+                ++g_lc.copyWasted;
+                // (a copy that bought nothing and is not paying for itself: not again for a while)
+                if (static_cast<uint64_t>(c->rate) * g_joinGain < static_cast<uint64_t>(e->keptBytes) * 255u || c->rate < 128) {
+                    c->retryAt = static_cast<uint32_t>(now + (64u << c->failLevel));
+                    if (c->failLevel < 3) ++c->failLevel;
+                }
+            }
+        } else if (u.kind == 1) {
+            ++g_lc.staticUses;
+            if (joined) ++g_lc.staticCouldJoin;
+        }
+    }
+    g_uses.clear();
+    g_prevSerial = 0;
+    g_prevEndJob = ~0u;
+}
+
+void DlLearnCounters(uint64_t out[8]) {
+    out[0] = g_lc.copies;
+    out[1] = g_lc.copyBytes;
+    out[2] = g_lc.copyJoined;
+    out[3] = g_lc.copyWasted;
+    out[4] = g_lc.staticUses;
+    out[5] = g_lc.staticCouldJoin;
+    out[6] = g_keptBytes;
+    out[7] = g_lc.keptLists;
+}
+
 bool StaticBufferData(uint32_t bufId, const uint8_t*& vtx, const uint16_t*& idx) {
-    if (bufId >= g_bufOwner.size() || !g_bufOwner[bufId] || g_bufOwner[bufId]->verts.empty()) return false;
+    if (bufId >= g_bufOwner.size() || !g_bufOwner[bufId] || g_bufOwner[bufId]->verts.empty() || g_bufOwner[bufId]->idx.empty()) return false; // (no copy: or only the learned lists' vertices)
     vtx = g_bufOwner[bufId]->verts.data();
     idx = g_bufOwner[bufId]->idx.data();
     return true;
@@ -541,6 +718,13 @@ void DlCacheReport(FILE* f) {
                  (unsigned long long)g_ctr.bypassed, (unsigned long long)g_ctr.uncacheable, (unsigned long long)g_ctr.evicted,
                  (unsigned long long)g_ctr.staleNoNotify, g_ctr.liveBytes / 1048576.0, (unsigned long long)g_ctr.promoted,
                  (unsigned long long)g_ctr.staticBufs, g_ctr.staticBytes / 1048576.0);
+    if (g_learnMax)
+        std::fprintf(f,
+                     "learned copies (up to %u vertices): %llu copies (%.1f MB), %llu joined, %llu did not; %llu static uses, %llu of them could have joined; "
+                     "%.1f MB of vertices kept for %llu lists\n",
+                     g_learnMax, (unsigned long long)g_lc.copies, g_lc.copyBytes / 1048576.0, (unsigned long long)g_lc.copyJoined,
+                     (unsigned long long)g_lc.copyWasted, (unsigned long long)g_lc.staticUses, (unsigned long long)g_lc.staticCouldJoin,
+                     g_keptBytes / 1048576.0, (unsigned long long)g_lc.keptLists);
 }
 
 static uint32_t TinyListBytes() {

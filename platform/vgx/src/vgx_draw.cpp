@@ -2559,9 +2559,10 @@ uint16_t RigidTwin() {
 }
 // Whether the draw `j` (state st) can join the record `p` (the last one, index `last`), and if it can, does it. The tests are those of an
 // ordinary merge except the vertex shader and the matrix block; `common` is the rest of them.
-template <class Common>
+// dry: only whether it would (GXV_RIGIDMERGE_DLLEARN: a static job, asked as if its list were a copy in the arena; nothing is changed).
+template <bool dry, class Common>
 bool RigidJoin(split::FinishCtx& c, DrawRec& p, int last, const split::DrawJob& j, const split::DrawStateRef& st, Common common) {
-    if (!c.uni || !c.rig || j.vsTwin == 0xFFFF || j.kind != split::JOB_DYNAMIC) return false;
+    if (!c.uni || !c.rig || j.vsTwin == 0xFFFF || (!dry && j.kind != split::JOB_DYNAMIC)) return false;
     const long mode = RigidMode();
     if (!mode) return false;
     const bool conv = c.rig->rec == last;
@@ -2576,6 +2577,13 @@ bool RigidJoin(split::FinishCtx& c, DrawRec& p, int last, const split::DrawJob& 
     if (xo + 24 > uni.size() || (!conv && static_cast<size_t>(p.ublock[UB_MV]) + 24 > uni.size())) return false;
     const uint32_t K = mode == 1 ? 30u : 12u, maxSlots = kRigidMaxSlotsOf[mode];
     if (!common()) return false;
+    if (dry) {
+        if (!conv) return maxSlots >= 2;
+        const float* const pl = uni.data() + c.rig->pal;
+        const uint32_t nw = c.rig->slots - 1;
+        const float* const xx = uni.data() + xo;
+        return c.rig->slots < maxSlots || (std::memcmp(pl + nw * 12, xx, 12 * sizeof(float)) == 0 && std::memcmp(pl + K * 4 + nw * 12, xx + 12, 12 * sizeof(float)) == 0);
+    }
     // ---- it joins
     uint32_t slot;
     if (!conv) {
@@ -2626,6 +2634,21 @@ uint32_t RigidMergeListMax() {
     static const uint32_t n = RigidMode() ? static_cast<uint32_t>(EnvInt("GXV_RIGIDMERGE_DLMAX", 0)) : 0u;
     return n;
 }
+// GXV_RIGIDMERGE_DLMAX=learn, or GXV_RIGIDMERGE_DLLEARN=1 (read once, default off, only with GXV_RIGIDMERGE on): the cached lists of more than GXV_SOFTXFORM
+// and up to N vertices (GXV_RIGIDMERGE_DLLEARN_MAX, default 512; GXV_RIGIDMERGE_DLLEARN=<n> with n >= 16 sets it too) are copied into the arena only where
+// that has bought a palette run (vgx_dlcache.cpp). 0: off.
+uint32_t RigidMergeLearnMax() {
+    static const uint32_t n = [] () -> uint32_t {
+        if (!RigidMode()) return 0u;
+        const char* dm = std::getenv("GXV_RIGIDMERGE_DLMAX");
+        const long on = EnvInt("GXV_RIGIDMERGE_DLLEARN", 0);
+        if (!(dm && std::strcmp(dm, "learn") == 0) && on == 0) return 0u;
+        long cap = on >= 16 ? on : EnvInt("GXV_RIGIDMERGE_DLLEARN_MAX", 512);
+        if (cap > 0xFFFF) cap = 0xFFFF;
+        return cap > static_cast<long>(SoftXformLimit()) ? static_cast<uint32_t>(cap) : 0u;
+    }();
+    return n;
+}
 
 // The record part of a draw: merged into the previous record when nothing but the geometry differs, else a new
 // record; then the indices. (The front-end split runs this on its finishing thread: vgx_fesplit.h.)
@@ -2665,7 +2688,7 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
             rec = &p;
             *c.lastRecSerial = st.serial;
             if (!abs) base = p.vtxCount;
-        } else if (j.vsTwin != 0xFFFF && RigidJoin(c, p, last, j, st, [&] {
+        } else if (j.vsTwin != 0xFFFF && RigidJoin<false>(c, p, last, j, st, [&] {
                        return p.vbuf == 0 && p.prim == j.prim && p.layoutMask == j.layoutMask && p.fsId == st.useFs && p.vtxCount + j.count <= 0xFFFF &&
                               contiguous && p.idxOffset + p.idxCount == idx.size() && (sameSerial || sameState());
                    })) {
@@ -2675,6 +2698,8 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
             if (!abs) base = p.vtxCount;
         }
     }
+    if (c.joinLog) c.joinLog->push_back(rec ? 1 : 0); // (GXV_RIGIDMERGE_DLLEARN)
+    if (c.rig) c.rig->prevOk = j.vsTwin != 0xFFFF;
     if (!rec) {
         rec = NewDrawRec(c, j.prim, j.layoutMask, st);
         made = static_cast<uint32_t>(draws.size() - 1);
@@ -2704,6 +2729,25 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
 }
 
 uint32_t split::FinishStatic(FinishCtx& c, const DrawJob& j, const DrawStateRef& st) {
+    if (c.joinLog) {
+        // GXV_RIGIDMERGE_DLLEARN: would the draw join the previous record if its list were copied into the arena (and the previous draw's too, if it is
+        // a static one)? The tests are FinishDraw's, but for the vertices' places.
+        bool would = false;
+        const int last = *c.lastDraw;
+        const bool prevIsDraw = c.cmds ? (!c.cmds->empty() && c.cmds->back().type == CMD_DRAW) : j.prevIsDraw != 0;
+        std::vector<DrawRec>& draws = *c.draws;
+        if (j.copyable && j.vsTwin != 0xFFFF && c.rig && c.rig->prevOk && last >= 0 && last == static_cast<int>(draws.size()) - 1 && prevIsDraw) {
+            DrawRec& p = draws[last];
+            static const int mergeMode = static_cast<int>(EnvInt("GXV_MERGEFAST", 1));
+            const bool sameSerial = mergeMode != 0 && *c.lastRecSerial == st.serial;
+            would = RigidJoin<true>(c, p, last, j, st, [&] {
+                return p.prim == j.prim && p.layoutMask == j.layoutMask && p.fsId == st.useFs && p.vtxCount + j.count <= 0xFFFF &&
+                       (sameSerial || (p.texMask == st.texMask && SameStruct(p.rs, *st.rs) && SameWords(p.tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4))));
+            });
+        }
+        c.joinLog->push_back(would ? 1 : 0);
+        if (c.rig) c.rig->prevOk = j.copyable && j.vsTwin != 0xFFFF;
+    }
     DrawRec* rec = NewDrawRec(c, j.prim, j.layoutMask, st);
     rec->vbuf = j.vbuf;
     rec->vtxOffset = j.vtxOffset;
@@ -2714,14 +2758,34 @@ uint32_t split::FinishStatic(FinishCtx& c, const DrawJob& j, const DrawStateRef&
     return static_cast<uint32_t>(c.draws->size() - 1);
 }
 
+static std::vector<uint8_t> g_joinLogMain; // GXV_RIGIDMERGE_DLLEARN: the single-thread path's join log of the frame
+static uint32_t g_jobSeq = 0, g_lastJobKey = 0; // jobs of this frame so far; the shader and state key of the last one (GXV_RIGIDMERGE_DLLEARN)
+static uint32_t g_hashedSerial = ~0u, g_stateHash = 0;
+uint32_t DlJobSeq() { return g_jobSeq; }
+uint32_t DlLastJobKey() { return g_lastJobKey; }
+static bool g_pendingCopyable = false;
+void SetPendingStaticCopyable(bool on) { g_pendingCopyable = on; }
 static inline split::FinishCtx MainFinishCtx() {
-    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true, &g_buf.uni, &g_rig, nullptr};
+    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true, &g_buf.uni, &g_rig, nullptr,
+                              RigidMergeLearnMax() ? &g_joinLogMain : nullptr};
 }
 static inline split::DrawStateRef CurStateRef() { return split::DrawStateRef{cur.vsId, cur.useFs, cur.texMask, cur.stateSerial, &cur.rs, cur.tex}; }
 // The record part of a draw: here, or (front-end split) a placeholder command and a job for the finishing thread.
 static inline void FinishOrSend(const split::DrawJob& j, const split::DrawStateRef* over = nullptr) {
     const split::DrawStateRef st = over ? *over : CurStateRef();
-    if (j.vsTwin != 0xFFFF) {
+    ++g_jobSeq;
+    if (RigidMergeLearnMax()) {
+        // (GXV_RIGIDMERGE_DLLEARN: what a learned list's use is told apart by: the shaders and the render state, textures and texture mask of the draw before it.
+        // The state's serial says when to hash it again.)
+        if (st.serial != g_hashedSerial || over) {
+            g_hashedSerial = over ? ~0u : st.serial;
+            uint64_t h = XXH3_64bits(st.rs, sizeof(RenderState));
+            h = XXH3_64bits_withSeed(st.tex, sizeof cur.tex, h);
+            g_stateHash = static_cast<uint32_t>(h ^ (h >> 32)) + st.texMask;
+        }
+        g_lastJobKey = (g_stateHash * 0x9E3779B1u) ^ ((static_cast<uint32_t>(st.vsId) << 16) | st.useFs);
+    }
+    if (j.vsTwin != 0xFFFF && j.kind == split::JOB_DYNAMIC) {
         // (GXV_RIGIDMERGE: the palette twin of the key may be what a record is drawn with: its variant goes on the warm-up list too)
         static struct { uint32_t ids = ~0u, layout = 0, serial = 0; } lastTwin;
         const uint32_t ids = (static_cast<uint32_t>(j.vsTwin) << 16) | st.useFs;
@@ -2999,6 +3063,7 @@ void EmitStaticDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_
     j.vtxOffset = vtxByteOffset;
     j.vtxFirst = vtxFirst;
     j.idxOffset = idxOffset;
+    if (g_pendingCopyable && prim == PRIM_TRIANGLES) { j.copyable = 1; j.vsTwin = RigidTwin(); } // (GXV_RIGIDMERGE_DLLEARN)
     FinishOrSend(j);
     ++g_frameDraws;
     {
@@ -3031,6 +3096,7 @@ void EmitStaticRun(uint8_t prim, uint32_t layoutMask, uint32_t vtxCount, uint32_
     j.vtxOffset = vtxByteOffset;
     j.vtxFirst = vtxFirst;
     j.idxOffset = idxOffset;
+    if (g_pendingCopyable && prim == PRIM_TRIANGLES) { j.copyable = 1; j.vsTwin = RigidTwin(); } // (GXV_RIGIDMERGE_DLLEARN)
     FinishOrSend(j);
     g_frameDraws += prims;
     {
@@ -4677,6 +4743,14 @@ void FrontPresent(bool direct, void (*onDecoded)()) {
     // (front-end split: the finishing thread's records, indices and uniforms join the frame here; a no-op when the
     // host did it at the display copy already)
     if (split::g_on) split::FinishFrame(g_buf);
+    if (RigidMergeLearnMax()) {
+        // (GXV_RIGIDMERGE_DLLEARN: what the frame's cached lists did, for the next frame's copies)
+        DlLearnFrameEnd(split::g_on ? split::FinishedJoinLog() : g_joinLogMain, g_frame);
+        g_joinLogMain.clear();
+    }
+    g_jobSeq = 0;
+    g_lastJobKey = 0;
+    g_hashedSerial = ~0u;
     g_buf.cmds.push_back(Cmd{CMD_PRESENT, 0});
     g_buf.frame = g_frame;
     g_buf.crowdActive = StaticCrowdEnabled();

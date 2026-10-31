@@ -287,6 +287,15 @@ uint32_t LastDecodedPosMtxMax(); // of the last DecodeVertices call
 // Number of indices a GX primitive of `count` vertices turns into; writes them (relative to `base`) when out != null.
 uint32_t PrimIndices(uint8_t gxPrim, uint32_t count, uint32_t base, uint16_t* out);
 uint32_t RigidMergeListMax(); // GXV_RIGIDMERGE_DLMAX: a rigid cached list of at most this many vertices stays in the frame's arena (0: none)
+uint32_t RigidMergeLearnMax(); // GXV_RIGIDMERGE_DLLEARN: a rigid cached list of at most this many vertices is copied into the arena where that joined a run (0: off)
+// GXV_RIGIDMERGE_DLLEARN (vgx_dlcache.cpp, vgx_draw.cpp): jobs (draws handed to the record stage) this frame, and the shader key of the last one; the next
+// static draw is one whose list can also be copied into the arena; at the frame's end, the join log of the jobs (FinishCtx::joinLog) is handed to the cache.
+uint32_t DlJobSeq();
+uint32_t DlLastJobKey();
+void SetPendingStaticCopyable(bool on);
+void DlLearnFrameEnd(const std::vector<uint8_t>& joinLog, uint64_t frame);
+// copies made, bytes copied, copies that joined, copies that did not, static uses, static uses that could have joined, bytes of vertices kept, lists kept
+void DlLearnCounters(uint64_t out[8]);
 uint32_t SoftXformLimit(); // primitives up to this many vertices may be transformed on the CPU (and merged)
 // GXV_HASH=2 needs the bytes of a static buffer to hash what a draw refers to (vgx_dlcache.cpp).
 bool StaticBufferData(uint32_t bufId, const uint8_t*& vtx, const uint16_t*& idx);

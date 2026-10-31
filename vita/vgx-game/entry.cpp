@@ -344,7 +344,7 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     setenv("GXV_SLIP", "1", 0);
     setenv("GXV_SLIP_MAX", "20", 0);
     // Consecutive rigid draws that differ only in their matrix drawn as one, through the 10-matrix palette (GXV_RIGIDMERGE=1;
-    // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs) stays a test switch.
+    // 2 = the 4-matrix palette). GXV_RIGIDMERGE_DLMAX (small cached lists joining runs; =learn copies only where it joins) stays a test switch.
     setenv("GXV_RIGIDMERGE", "1", 0);
     // Frame pipeline (1.2): the game thread alone on core 0 (every other thread on cores 1-2); under a frame cap the queue depth
     // follows the back end's own CPU time, not its wall time (which includes the display wait and kept the queue at one frame,

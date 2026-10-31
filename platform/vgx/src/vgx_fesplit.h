@@ -65,7 +65,8 @@ struct DrawJob {
     uint8_t kind = JOB_DYNAMIC;
     uint8_t gxPrim = 0, prim = 0, cover = 0;
     uint8_t prevIsDraw = 0; // (split) the command before this draw's placeholder is a draw's
-    uint8_t pad[3] = {};
+    uint8_t copyable = 0;   // static, GXV_RIGIDMERGE_DLLEARN: the list's vertices are also kept on the CPU (a copy in the arena could join a palette run)
+    uint8_t pad[2] = {};
     uint32_t layoutMask = 0, count = 0, idxCount = 0;
     // dynamic: where the vertices are (absolute indices: chunk and first vertex; else the byte offset) and their stride
     uint32_t chunk = 0, first = 0, vtxStart = 0, stride = 0;
@@ -82,6 +83,7 @@ struct DrawJob {
 struct RigidRun {
     int rec = -1;
     uint32_t slots = 0, pal = 0;
+    bool prevOk = false; // (GXV_RIGIDMERGE_DLLEARN) the last job was a rigid draw, or a static one whose list can be copied into the arena
 };
 // (GXV_SPLIT=2) a palette slot written into the w of `count` vertices at arena offset `off`: recorded instead of written.
 struct VtxWrite {
@@ -103,6 +105,9 @@ struct FinishCtx {
     UniArena* uni = nullptr;            // (GXV_RIGIDMERGE) the uniform arena the palette blocks are made in
     RigidRun* rig = nullptr;
     std::vector<VtxWrite>* vtxLog = nullptr; // non-null: the palette indices are logged, not written (the shadow of GXV_SPLIT=2)
+    // non-null (GXV_RIGIDMERGE_DLLEARN): one byte per job, in the order of the jobs: 1 = the draw joined the previous record (a static draw: it
+    // would have, had its list been copied into the arena), else 0. FinishDraw / FinishStatic append it.
+    std::vector<uint8_t>* joinLog = nullptr;
 };
 // Merges the primitive into the previous record or makes a new one. Returns the new record's index, or ~0u (merged).
 uint32_t FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& st);
@@ -135,6 +140,8 @@ void SetThreadInit(void (*fn)(int core));
 void Counters(int64_t& finisherCpuUs, int64_t& playerWaitNs, uint32_t& frames);
 // (any thread) Operations the player ran itself at frame ends because the finishing thread was behind (since the start).
 uint32_t StolenOps();
+// (player, GXV_RIGIDMERGE_DLLEARN) the join log of the frame FinishFrame finished (see FinishCtx::joinLog).
+const std::vector<uint8_t>& FinishedJoinLog();
 
 } // namespace split
 } // namespace vgx

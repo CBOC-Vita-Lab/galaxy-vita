@@ -206,6 +206,13 @@ int main(int argc, char** argv) {
         const char* rm = std::getenv("GXV_RIGIDMERGE");
         const char* dm = std::getenv("GXV_RIGIDMERGE_DLMAX");
         const bool rigidInArena = rigid && rm && dm && (std::atoi(rm) == 1 || std::atoi(rm) == 2) && std::atol(dm) >= 256; // (a 255 limit keeps the 256-vertex list static)
+        // (GXV_RIGIDMERGE_DLMAX=learn: the list is a static buffer as usual; with nothing around it to join, it is copied into the arena only by the probe, once in 64 frames
+        // and less often as the probes find nothing)
+        const bool learned = rigid && rm && dm && (std::atoi(rm) == 1 || std::atoi(rm) == 2) && !std::strcmp(dm, "learn");
+        if (learned) {
+            Require(staticPictures <= pictures - 1 && staticPictures + pictures / 64 + 3 >= pictures - 1, "a learned list with nothing to join is a static buffer, but for the probes");
+            return 0;
+        }
         const unsigned expected = (mode == "change-each" || mode == "small-list" || mode == "static-disabled" || rigidInArena) ? 0 :
                                   pictures - (mode == "age-out" || mode == "change-once" ? 3 : 1);
         Require(staticPictures == expected, "static-buffer reuse contract");

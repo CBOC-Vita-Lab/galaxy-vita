@@ -348,6 +348,20 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
                      (unsigned long long)(c[1] - last[1]));
         std::memcpy(last, c, sizeof c);
     }
+    {
+        // GXV_RIGIDMERGE_DLMAX / GXV_RIGIDMERGE_DLLEARN: cached lists copied into the arena to join palette runs (printed when there were any, or learning is on)
+        static uint64_t last[8] = {};
+        uint64_t c[8];
+        vgx::DlLearnCounters(c);
+        if (c[0] != last[0] || c[4] != last[4]) {
+            const double n = gf ? gf : 1;
+            port_log("perf: list copies: %.1f/frame (%.0f KiB/frame), %.1f of them joined a run; static lists %.1f/frame, %.1f of them could have joined; "
+                     "%.2f MiB of vertices kept for %llu lists",
+                     (c[0] - last[0]) / n, (c[1] - last[1]) / 1024.0 / n, (c[2] - last[2]) / n, (c[4] - last[4]) / n, (c[5] - last[5]) / n, c[6] / 1048576.0,
+                     (unsigned long long)c[7]);
+        }
+        std::memcpy(last, c, sizeof c);
+    }
     sPerf = w;
 }
 

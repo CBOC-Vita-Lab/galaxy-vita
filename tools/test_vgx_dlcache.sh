@@ -40,5 +40,18 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
       GXV_ABSIDX=$indices GXV_RIGIDMERGE=0 GXV_RIGIDMERGE_DLMAX=1000 timeout 10s /tmp/vgx_dlcache rigid-list
       cases=$((cases + 1))
     done
+    # GXV_RIGIDMERGE_DLMAX=learn: the same list is a static buffer (copied into the arena only where it joined a run, here by the probes only); the cache contracts hold
+    for indices in 0 1; do
+      for rm in 1 2; do
+        for hash in 0 2; do
+          for cap in 255 256 512; do
+            GXV_ABSIDX=$indices GXV_HASH=$hash GXV_RIGIDMERGE=$rm GXV_RIGIDMERGE_DLMAX=learn GXV_RIGIDMERGE_DLLEARN_MAX=$cap timeout 10s /tmp/vgx_dlcache rigid-list
+            cases=$((cases + 1))
+          done
+        done
+      done
+      GXV_ABSIDX=$indices GXV_RIGIDMERGE=1 GXV_RIGIDMERGE_DLLEARN=1 timeout 10s /tmp/vgx_dlcache clean
+      cases=$((cases + 1))
+    done
     printf "PASS: %s production display-list cache scenarios (synthetic geometry, not Vita FPS)\n" "$cases"
   '
