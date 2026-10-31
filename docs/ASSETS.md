@@ -48,6 +48,9 @@ The existing loading renderer replaces the start prompt with its progress bar
 and status text; the logo, copyright notice and pixels outside that loading
 band are unchanged. The source asset is not a newly generated imitation.
 
+The Settings menu reads the same file as its darkened background, averaged down to half size in memory for the
+life of the menu; a missing or invalid file leaves the plain background. Nothing is copied or stored elsewhere.
+
 The title artwork and its Nintendo notice remain third-party material, not
 covered by the port's code licenses. Including this particular image does not
 grant rights to other game assets or make the underlying artwork original to

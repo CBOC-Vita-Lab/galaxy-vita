@@ -22,7 +22,8 @@ case "${1:-all}" in
     args=("$output")
     if [[ -n ${SETTINGS_FONT_ARCHIVE:-} ]]; then args+=("$SETTINGS_FONT_ARCHIVE"); fi
     local/settings-tests/preview "${args[@]}"
-    python3 tools/handheld/settings_preview_png.py "$output" ;;
+    python3 tools/handheld/settings_preview_png.py "$output"
+    for sub in "$output"/backdrop-*; do [[ -d $sub ]] && python3 tools/handheld/settings_preview_png.py "$sub"; done; true ;;
   all) bash "$0" config; bash "$0" store; bash "$0" pad; bash "$0" launch; bash "$0" font; bash "$0" ui; bash "$0" preview ;;
   *) echo 'usage: test_player_settings.sh [config|store|pad|launch|font|ui|preview|all]' >&2; exit 2 ;;
 esac

@@ -1,3 +1,4 @@
+#include "port/settings_backdrop.h"
 #include "port/settings_ui.h"
 #include <algorithm>
 #include <cmath>
@@ -190,10 +191,25 @@ void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
         r.text(497,359,positive,state.modalChoice?white:muted,250);
     }
 }
+// Draws the optional backdrop (nearest-neighbour scaled to the screen, dimmed per row). False when there is none.
+bool DrawBackdrop(Raster& r,const SettingsSession& session) {
+    const uint32_t* source=session.backdrop;const unsigned w=session.backdropW,h=session.backdropH;
+    if(!source||w<2||h<2||w>960||h>544)return false;
+    uint16_t column[960];for(unsigned x=0;x<960;++x)column[x]=static_cast<uint16_t>(x*w/960);
+    for(unsigned y=0;y<544;++y) {
+        const uint32_t* row=source+static_cast<size_t>(y*h/544)*w;const unsigned dim=BackdropDim(y);
+        uint32_t* to=r.s.pixels+static_cast<size_t>(y)*r.s.stride;
+        for(unsigned x=0;x<960;++x) {
+            const uint32_t p=row[column[x]];
+            to[x]=0xff000000u|((((p&0xff00ffu)*dim)>>8)&0xff00ffu)|((((p&0xff00u)*dim)>>8)&0xff00u);
+        }
+    }
+    return true;
+}
 void Render(const UiState& state,const SettingsSession& session,Surface surface,uint64_t now,DrawAudit* audit) {
     if(!surface.pixels||surface.width!=960||surface.height!=544||surface.stride<960||!session.controls)return;
     Raster r{surface,audit,session.fonts};
-    for(unsigned y=0;y<544;++y)r.rect(0,static_cast<int>(y),960,1,RGB(9+y/90,18+y/65,25+y/30));
+    if(!DrawBackdrop(r,session))for(unsigned y=0;y<544;++y)r.rect(0,static_cast<int>(y),960,1,RGB(9+y/90,18+y/65,25+y/30));
     for(unsigned i=0;i<68;++i) {
         int x=33+static_cast<int>((i*137+41)%894),y=33+static_cast<int>((i*79+19)%478);
         unsigned alpha=state.working.reducedMotion?145:95+static_cast<unsigned>((i*19+now/20000)%110);

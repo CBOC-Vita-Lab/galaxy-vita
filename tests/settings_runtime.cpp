@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstring>
 #include <map>
+#include <new>
 #include <thread>
 #include <psp2/ctrl.h>
 #include <psp2/io/dirent.h>
@@ -10,7 +11,40 @@
 #include "settings_font_allocation_fixture.h"
 #include "../vita/vgx-game/settings_runtime.cpp"
 
+static bool forbidNew=false;
+// The fake SDK file calls below use containers; only the code under test is held to the no-fatal-new rule.
+struct AllowNew {bool old=forbidNew;AllowNew(){forbidNew=false;}~AllowNew(){forbidNew=old;}};
+void* operator new(std::size_t bytes) {
+    if(forbidNew){std::fputs("FAIL: optional backdrop loader reached fatal operator new\n",stderr);std::abort();}
+    if(void* result=std::malloc(bytes?bytes:1))return result;
+    std::abort();
+}
+void* operator new[](std::size_t bytes) {return ::operator new(bytes);}
+void operator delete(void* data) noexcept {std::free(data);}
+void operator delete[](void* data) noexcept {std::free(data);}
+void operator delete(void* data,std::size_t) noexcept {std::free(data);}
+void operator delete[](void* data,std::size_t) noexcept {std::free(data);}
+
 namespace fixture {
+const std::string backdropPath="app0:/sce_sys/loading-title.rgba";
+bool backdropExpected=false, exerciseBackdropFailures=false;
+size_t maxBackdropRead=0, backdropReads=0;
+// A deterministic 960x544 RGBA8 picture whose 2x2 averages are easy to recompute.
+std::vector<uint8_t> BackdropFile() {
+    std::vector<uint8_t> data(960*544*4);
+    for(unsigned y=0;y<544;++y)for(unsigned x=0;x<960;++x) {
+        uint8_t* p=&data[(y*960+x)*4];p[0]=uint8_t(x*7+y);p[1]=uint8_t(y*3+x/5);p[2]=uint8_t((x^y)*5);p[3]=uint8_t(x&1?0:77);
+    }
+    return data;
+}
+uint32_t BackdropExpected(const std::vector<uint8_t>& d,unsigned x,unsigned y) {
+    uint32_t out=0xff000000u;
+    for(unsigned c=0;c<3;++c) {
+        unsigned sum=2;for(unsigned dy=0;dy<2;++dy)for(unsigned dx=0;dx<2;++dx)sum+=d[((y*2+dy)*960+x*2+dx)*4+c];
+        out|=uint32_t(sum>>2)<<(8*c);
+    }
+    return out;
+}
 std::string parameter;
 unsigned parameterReads=0, fileReads=0, discProbes=0, opens=0, frees=0, menus=0, restarts=0;
 unsigned guestRearms=0, hostRearms=0, restoreAttempts=0, resumed=0;
@@ -73,19 +107,20 @@ extern "C" SceUInt64 sceKernelGetProcessTimeWide() {
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 extern "C" int sceKernelDelayThread(SceUInt us) {std::this_thread::sleep_for(std::chrono::microseconds(us));return 0;}
-extern "C" int sceIoGetstat(const char* path,SceIoStat* info) {
+extern "C" int sceIoGetstat(const char* path,SceIoStat* info) {AllowNew allow;
     ++fixture::fileReads;*info={};
     if(fixture::files.count(path)){info->st_mode=SCE_S_IFREG;info->st_size=fixture::files[path].size();return 0;}
     if(fixture::directories.count(path)){info->st_mode=SCE_S_IFDIR;return 0;}
     return static_cast<int>(0x80010002u);
 }
-extern "C" SceUID sceIoOpen(const char* path,int flags,SceMode) {
+extern "C" SceUID sceIoOpen(const char* path,int flags,SceMode) {AllowNew allow;
     assert(flags==SCE_O_RDONLY);
     if(!fixture::files.count(path))return static_cast<int>(0x80010002u);
     const int handle=100+fixture::fontOpens++;fixture::fileHandles[handle]={path,0};return handle;
 }
-extern "C" int sceIoRead(SceUID handle,void* out,SceSize size) {
+extern "C" int sceIoRead(SceUID handle,void* out,SceSize size) {AllowNew allow;
     auto& [path,offset]=fixture::fileHandles.at(handle);const auto& data=fixture::files.at(path);
+    if(path==fixture::backdropPath){fixture::maxBackdropRead=std::max<size_t>(fixture::maxBackdropRead,size);++fixture::backdropReads;}
     if(fixture::failRead)return -1;
     const size_t length=fixture::prematureEof?data.size()/2:data.size();
     const size_t count=std::min<size_t>(std::min<size_t>(size,length-offset),fixture::shortReads?17:size);
@@ -93,7 +128,7 @@ extern "C" int sceIoRead(SceUID handle,void* out,SceSize size) {
 }
 extern "C" int sceIoWrite(SceUID,const void*,SceSize) {assert(false);return -1;}
 extern "C" int sceIoSyncByFd(SceUID,int) {assert(false);return -1;}
-extern "C" int sceIoClose(SceUID handle) {assert(fixture::fileHandles.erase(handle)==1);++fixture::fontCloses;return fixture::failClose?-1:0;}
+extern "C" int sceIoClose(SceUID handle) {AllowNew allow;assert(fixture::fileHandles.erase(handle)==1);++fixture::fontCloses;return fixture::failClose?-1:0;}
 extern "C" SceUID sceIoDopen(const char* path) {
     if(!fixture::directories.count(path))return -1;
     const int handle=200+fixture::directoryHandles.size();fixture::directoryHandles[handle]={path,0};return handle;
@@ -145,6 +180,40 @@ RunResult Run(SettingsSession& session) {
     assert(session.active.fpsLimit==0);
     assert(session.detectedProfile==(fixture::playStation?port::controls::ProfileId::PlayStation:port::controls::ProfileId::Handheld));
     assert(bool(session.fonts.menu)==fixture::fontExpected && bool(session.fonts.message)==fixture::fontExpected);
+    // The title backdrop is all-or-nothing and never reports a problem to the user.
+    assert((session.backdrop!=nullptr)==fixture::backdropExpected);
+    if(session.backdrop) {
+        assert(session.backdropW==480 && session.backdropH==272);
+        const auto file=fixture::BackdropFile();
+        for(unsigned y:{0u,1u,17u,150u,207u,208u,224u,225u,271u})for(unsigned x:{0u,1u,111u,112u,200u,367u,368u,479u}) {
+            const bool patched=y>=208&&y<225&&x>=112&&x<368;
+            const unsigned sy=patched?y-29:y;
+            assert(session.backdrop[y*480+x]==fixture::BackdropExpected(file,x,sy));
+        }
+        assert(fixture::maxBackdropRead<=32*960*4 && fixture::backdropReads>=17);
+    }
+    assert(session.statusMessage.find("ackdrop")==std::string::npos && session.statusMessage.find("title")==std::string::npos);
+    if(fixture::exerciseBackdropFailures) {
+        const auto file=fixture::BackdropFile();
+        for(unsigned failure=0;failure<=2;++failure) {
+            FontAllocationProbe probe;probe.failAt=failure;
+            const unsigned opened=fixture::fontOpens,closed=fixture::fontCloses;
+            forbidNew=true;
+            {
+                const auto loaded=LoadBackdrop(probe.allocator());
+                assert(loaded.size()==(failure?0u:kBackdropPixels));
+                if(!failure){assert(probe.calls==2 && probe.peak==32*960*4+kBackdropPixels*4 && loaded[0]==fixture::BackdropExpected(file,0,0));}
+            }
+            forbidNew=false;
+            assert(!probe.live && probe.calls==(failure?failure:2u));
+            // Neither allocation failing may leave a file open; a failed allocation never starts the read.
+            assert(fixture::fontOpens-opened==(failure?0u:1u) && fixture::fontCloses-closed==(failure?0u:1u));
+            if(session.mode==OpenMode::Running) {
+                assert(fixture::renderer && fixture::audio && fixture::paused && fixture::clock && fixture::interrupts==0);
+                assert(sInputHold.Requested() && port_settings_active() && !fixture::guestRearms && !fixture::hostRearms);
+            }
+        }
+    }
     if(session.mode==OpenMode::Running)assert(fixture::renderer && fixture::audio && fixture::paused && fixture::interrupts==0);
     if(fixture::exerciseFontFailures) {
         for(unsigned failure=1;failure<=7;++failure) {
@@ -170,6 +239,22 @@ int main(int argc,char** argv) {
     const std::string mode=argv[1];
     setenv("GXV_SETTINGS",mode=="off"?"0":"1",1);
     fixture::parameter="psla:-settings";
+    if(mode.rfind("backdrop-",0)==0 || mode.rfind("running-backdrop",0)==0) {
+        const bool wrongSize=mode=="backdrop-oversized" || mode=="backdrop-short";
+        if(mode!="backdrop-missing") {
+            auto file=fixture::BackdropFile();
+            if(mode=="backdrop-oversized")file.push_back(0);
+            if(mode=="backdrop-short")file.resize(file.size()-4);
+            fixture::files[fixture::backdropPath]=file;
+        }
+        fixture::directories["app0:/sce_sys"]={"loading-title.rgba"};
+        fixture::shortReads=mode=="backdrop-short-read";
+        fixture::prematureEof=mode=="backdrop-eof";
+        fixture::failRead=mode=="backdrop-read-error";
+        fixture::failClose=mode=="backdrop-close-error";
+        fixture::exerciseBackdropFailures=mode=="backdrop-alloc" || mode=="running-backdrop-alloc";
+        fixture::backdropExpected=!wrongSize && mode!="backdrop-missing" && mode!="backdrop-eof" && mode!="backdrop-read-error" && mode!="backdrop-close-error";
+    }
     if(mode=="running-font-oom") {
         fixture::directories["ux0:data/smg/game/files"]={"LayoutData"};
         fixture::directories["ux0:data/smg/game/files/LayoutData"]={"Font.arc"};
@@ -215,6 +300,12 @@ int main(int argc,char** argv) {
         assert(fixture::fontOpens==fixture::fontCloses && fixture::fileHandles.empty() && fixture::directoryHandles.empty());
         if(mode=="font-missing" || mode=="font-ambiguous" || mode=="font-oversized" || mode=="font-bounded" || mode=="font-bucket-limit" || fixture::failDirectoryRead || fixture::failDirectoryClose)assert(!fixture::fontOpens);
         if(mode=="font-bounded")assert(fixture::dirReads==4096);
+    } else if(mode.rfind("backdrop-",0)==0) {
+        assert(port_settings_startup(0,nullptr));assert(fixture::menus==1 && fixture::frees==1);
+        assert(fixture::fontOpens==fixture::fontCloses && fixture::fileHandles.empty());
+        // Wrong-size and missing files are rejected from the file size alone, without opening them.
+        if(mode=="backdrop-missing" || mode=="backdrop-oversized" || mode=="backdrop-short")assert(!fixture::fontOpens && !fixture::backdropReads);
+        else assert(fixture::fontOpens==(fixture::exerciseBackdropFailures?2u:1u));  // the failure probe adds one successful load
     } else if(mode=="off") {
         assert(!port_settings_startup(0,nullptr));assert(!fixture::fileReads && !fixture::menus && !fixture::parameterReads);
     } else if(mode=="allocation-failure") {

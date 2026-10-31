@@ -1,4 +1,8 @@
+#include "port/settings_backdrop.h"
 #include "port/settings_ui.h"
+#include "../tests/settings_backdrop_check.h"
+#include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -15,50 +19,90 @@ int main(int argc,char** argv) {
         session.fonts=installedFonts.view();
     }
     std::vector<uint32_t> pixels(960*544);std::ofstream report(directory+"/bounds.txt");
+    // Where frames go: the plain frames in `directory`, backdrop frames in a subdirectory of their own, with their own report.
+    std::string outDir=directory;std::ofstream* out=&report;bool legible=true;double worstContrast=1e9;
     auto render=[&](const char* name,UiState state,uint64_t time=150000) {
         DrawAudit audit;DrawChecked(state,session,{pixels.data(),960,544,960},time,audit);
         if(audit.minX<32||audit.minY<32||audit.maxX>928||audit.maxY>512)return false;
-        std::ofstream file(directory+"/"+name+".ppm",std::ios::binary);file<<"P6\n960 544\n255\n";
+        // With a backdrop, every opaque glyph pixel must keep contrast >= 4.5 against the picture behind it.
+        if(session.backdrop&&state.modal==Modal::None) {
+            const auto check=backdrop_check::CheckText(pixels,session.backdrop,session.backdropW,session.backdropH,4.5);
+            worstContrast=std::min(worstContrast,check.worst);if(check.failures||check.textPixels<1000)legible=false;
+        }
+        std::ofstream file(outDir+"/"+name+".ppm",std::ios::binary);file<<"P6\n960 544\n255\n";
         for(auto pixel:pixels) {const char rgb[]={static_cast<char>(pixel&255),static_cast<char>((pixel>>8)&255),static_cast<char>((pixel>>16)&255)};file.write(rgb,3);}
-        report<<name<<": "<<audit.textRuns<<" text runs; bounds "<<audit.minX<<","<<audit.minY<<" to "<<audit.maxX<<","<<audit.maxY<<"; "<<audit.truncatedRuns<<" truncated\n";
+        *out<<name<<": "<<audit.textRuns<<" text runs; bounds "<<audit.minX<<","<<audit.minY<<" to "<<audit.maxX<<","<<audit.maxY<<"; "<<audit.truncatedRuns<<" truncated\n";
         return file.good();
     };
+    auto scenes=[&]()->bool {
+    session.mode=OpenMode::ColdStart;session.document=Document{};session.document.config=DefaultConfig(*session.controls);session.active=session.document.config;
+    session.features={true,true};session.overrides.clear();session.languages.names={"English","French","German","Spanish","Italian"};
     UiState state;Begin(state,session);
-    if(!render("display-cold",state))return 1;
+    if(!render("display-cold",state))return false;
     state.working.fpsLimit=30;state.working.autoQuality=AutoQuality::Enabled;state.working.language="French";state.row=2;
-    if(!render("display-edited",state))return 1;
+    if(!render("display-edited",state))return false;
     // The Reduced motion row focused, off and on: its one-line note must stay inside the safe text bounds and not be truncated.
-    state.row=3;if(!render("display-reduced-motion-row",state))return 1;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return 1;state.working.reducedMotion=false;state.row=2;
+    state.row=3;if(!render("display-reduced-motion-row",state))return false;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return false;state.working.reducedMotion=false;state.row=2;
     session.mode=OpenMode::Running;Begin(state,session);state.modal=Modal::Restart;
-    if(!render("restart-cancel",state))return 1;state.modalChoice=1;if(!render("restart-confirm",state))return 1;
-    state.modal=Modal::Discard;if(!render("discard",state))return 1;
+    if(!render("restart-cancel",state))return false;state.modalChoice=1;if(!render("restart-confirm",state))return false;
+    state.modal=Modal::Discard;if(!render("discard",state))return false;
     state.modal=Modal::None;state.page=Page::Controls;state.row=3;state.bindingSlot=1;
-    if(!render("controls-handheld",state))return 1;
-    state.working.profile=port::controls::ProfileId::PlayStation;if(!render("controls-playstation",state))return 1;
-    state.bindingSlot=0;state.row=4;if(!render("controls-playstation-shoulder-left",state))return 1;
-    state.row=6;if(!render("controls-playstation-start",state))return 1;
-    state.row=7;if(!render("controls-playstation-select",state))return 1;
-    state.row=11;if(!render("controls-scrolled",state))return 1;
+    if(!render("controls-handheld",state))return false;
+    state.working.profile=port::controls::ProfileId::PlayStation;if(!render("controls-playstation",state))return false;
+    state.bindingSlot=0;state.row=4;if(!render("controls-playstation-shoulder-left",state))return false;
+    state.row=6;if(!render("controls-playstation-start",state))return false;
+    state.row=7;if(!render("controls-playstation-select",state))return false;
+    state.row=11;if(!render("controls-scrolled",state))return false;
     {std::string conflict;auto caps=port::controls::NominalCaps(port::controls::ProfileId::PlayStation);
-     if(session.controls->bind(state.working.profiles[1],"star_bits",0,"r2",true,caps,conflict)!=port::controls::BindResult::Applied)return 1;
-     state.row=2;if(!render("controls-playstation-r2",state))return 1;
-     state.row=12;if(!render("controls-aim-row",state))return 1;state.working.mouseAim=true;if(!render("controls-aim-row-on",state))return 1;state.working.mouseAim=false;}
-    state.modal=Modal::Capture;state.action="jump";if(!render("capture",state))return 1;
-    state.candidate=port::controls::Circle;if(!render("capture-release",state))return 1;
-    state.modal=Modal::ButtonPicker;state.picker=6;if(!render("button-picker",state))return 1;
-    state.modal=Modal::Conflict;state.candidateButton="circle";state.conflictAction="star_bits";state.modalChoice=0;if(!render("conflict-cancel",state))return 1;
-    state.modalChoice=1;if(!render("conflict-swap",state))return 1;
-    state.modal=Modal::ResetProfile;if(!render("reset-profile",state))return 1;
-    state.modal=Modal::None;state.page=Page::Display;state.row=4;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return 1;
-    session.document.editable=false;Begin(state,session);if(!render("newer-readonly",state))return 1;
-    session.document.editable=true;session.document.config.language="Unavailable language";Begin(state,session);state.row=2;if(!render("language-unavailable",state))return 1;
-    session.document.config.language="";session.languages.names.clear();Begin(state,session);state.row=2;if(!render("game-data-unavailable",state))return 1;
+     if(session.controls->bind(state.working.profiles[1],"star_bits",0,"r2",true,caps,conflict)!=port::controls::BindResult::Applied)return false;
+     state.row=2;if(!render("controls-playstation-r2",state))return false;
+     state.row=12;if(!render("controls-aim-row",state))return false;state.working.mouseAim=true;if(!render("controls-aim-row-on",state))return false;state.working.mouseAim=false;}
+    state.modal=Modal::Capture;state.action="jump";if(!render("capture",state))return false;
+    state.candidate=port::controls::Circle;if(!render("capture-release",state))return false;
+    state.modal=Modal::ButtonPicker;state.picker=6;if(!render("button-picker",state))return false;
+    state.modal=Modal::Conflict;state.candidateButton="circle";state.conflictAction="star_bits";state.modalChoice=0;if(!render("conflict-cancel",state))return false;
+    state.modalChoice=1;if(!render("conflict-swap",state))return false;
+    state.modal=Modal::ResetProfile;if(!render("reset-profile",state))return false;
+    state.modal=Modal::None;state.page=Page::Display;state.row=4;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return false;
+    session.document.editable=false;Begin(state,session);if(!render("newer-readonly",state))return false;
+    session.document.editable=true;session.document.config.language="Unavailable language";Begin(state,session);state.row=2;if(!render("language-unavailable",state))return false;
+    session.document.config.language="";session.languages.names.clear();Begin(state,session);state.row=2;if(!render("game-data-unavailable",state))return false;
     session.languages.names={"English","French","German","Spanish","Italian"};
     session.overrides={{"GXV_FPS_LIMIT","invalid","Existing picture-rate path"},{"GXV_AUTOQ","1","1"},{"GXV_AUTOQ_LEVEL","2","2"},{"GXV_AUTOQ_CYCLE","1","1"},{"PETARI_LANGUAGE","japanese","japanese"},{"GXV_REMAP","0","Remapping disabled"}};
-    state.modal=Modal::Overrides;if(!render("developer-overrides",state))return 1;
-    session.document.config.language="";session.overrides.clear();session.features={false,false};session.document.config.fpsLimit=30;Begin(state,session);if(!render("capability-disabled",state))return 1;
+    state.modal=Modal::Overrides;if(!render("developer-overrides",state))return false;
+    session.document.config.language="";session.overrides.clear();session.features={false,false};session.document.config.fpsLimit=30;Begin(state,session);if(!render("capability-disabled",state))return false;
     session.features={true,true};session.document.config.fpsLimit=0;Begin(state,session);state.changedAt=1000000;
-    if(!render("animation-0",state,1000000)||!render("animation-75",state,1075000)||!render("animation-150",state,1150000))return 1;
-    state.working.reducedMotion=true;if(!render("reduced-motion",state,10000000))return 1;
+    if(!render("animation-0",state,1000000)||!render("animation-75",state,1075000)||!render("animation-150",state,1150000))return false;
+    state.working.reducedMotion=true;if(!render("reduced-motion",state,10000000))return false;
+    return true;
+    };
+    if(!scenes())return 1;
     std::cout<<"preview: 32 native-size PPM frames and safe text bounds generated\n";
+    // Backdrop frames: a synthetic picture, then the shipped title picture when it is present (read only, loaded through the
+    // same downsampler as the device). Each full scene set, with every text pixel's contrast against the picture checked.
+    std::vector<uint32_t> synthetic(kBackdropPixels);
+    for(unsigned y=0;y<kBackdropHeight;++y)for(unsigned x=0;x<kBackdropWidth;++x) {
+        const unsigned v=((x/8+y/8)&1)?255:(x*255/kBackdropWidth);synthetic[y*kBackdropWidth+x]=0xff000000u|(v<<16)|((255-v)<<8)|(y*255/kBackdropHeight);
+    }
+    std::vector<uint32_t> real;
+    const std::string realPath=argc>3?argv[3]:"vita/vgx-game/sce_sys/loading-title.rgba";
+    {
+        std::ifstream file(realPath,std::ios::binary);std::vector<uint8_t> bytes(kBackdropSourceBytes+1);
+        if(file){file.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+            if(static_cast<size_t>(file.gcount())==kBackdropSourceBytes) {
+                real.assign(kBackdropPixels,0);
+                for(unsigned row=0;row<kBackdropSourceHeight;row+=kBackdropChunkRows)DownsampleBackdropRows(bytes.data()+size_t(row)*kBackdropSourceWidth*4,row,kBackdropChunkRows,real.data());
+                CleanBackdropPrompt(real.data());
+            }}
+    }
+    const struct {const char* name;std::vector<uint32_t>* pixels;} sets[]={{"backdrop-synthetic",&synthetic},{"backdrop-real",&real}};
+    for(const auto& set:sets) {
+        if(set.pixels->empty()){std::cout<<"preview: "<<set.name<<" skipped (no picture at "<<realPath<<")\n";continue;}
+        outDir=directory+"/"+set.name;std::filesystem::create_directories(outDir);
+        std::ofstream backdropReport(outDir+"/bounds.txt");out=&backdropReport;
+        session.backdrop=set.pixels->data();session.backdropW=kBackdropWidth;session.backdropH=kBackdropHeight;legible=true;worstContrast=1e9;
+        if(!scenes()||!legible){std::cerr<<"preview: "<<set.name<<" frames failed bounds or text contrast\n";return 1;}
+        char line[160];std::snprintf(line,sizeof line,"preview: %s frames generated; worst text contrast %.2f:1 (minimum 4.5)\n",set.name,worstContrast);std::cout<<line;
+    }
+    session.backdrop=nullptr;
 }

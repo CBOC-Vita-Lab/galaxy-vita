@@ -5,6 +5,7 @@
 #include "port/port.h"
 #include "port/settings_lifecycle.h"
 #include "port/settings_launch.h"
+#include "port/settings_backdrop.h"
 #include "vgx_common.h"
 
 #include <psp2/appmgr.h>
@@ -179,6 +180,34 @@ FontBundle LoadMenuFonts(const FontAllocator& allocator = {}) {
     return fonts;
 }
 
+// The title-screen picture for the menu backdrop, read in bounded chunks and averaged 2x2 into one 480x272 buffer.
+// Any problem (no file, wrong size, short or failed read, no memory) gives an empty buffer: the menu keeps its plain
+// background and shows no error. Allocation is non-throwing like the fonts', never the fatal operator new path.
+FontBuffer<uint32_t> LoadBackdrop(const FontAllocator& allocator = {}) {
+    FontBuffer<uint32_t> backdrop;
+    FileInfo info{};
+    if (Stat(nullptr, kBackdropPath, info) < 0 || !info.regular || info.size != kBackdropSourceBytes) return backdrop;
+    FontBuffer<uint8_t> chunk;
+    constexpr size_t chunkBytes = size_t(kBackdropChunkRows) * kBackdropSourceWidth * 4;
+    if (!chunk.Allocate(chunkBytes, allocator) || !backdrop.Allocate(kBackdropPixels, allocator)) return {};
+    const int64_t handle = OpenRead(nullptr, kBackdropPath);
+    if (handle < 0) return {};
+    bool valid = true;
+    for (unsigned row = 0; valid && row < kBackdropSourceHeight; row += kBackdropChunkRows) {
+        size_t offset = 0;
+        while (offset < chunkBytes) {
+            const int64_t count = Read(nullptr, handle, chunk.begin() + offset, chunkBytes - offset);
+            if (count <= 0 || static_cast<uint64_t>(count) > chunkBytes - offset) { valid = false; break; }
+            offset += static_cast<size_t>(count);
+        }
+        if (valid) DownsampleBackdropRows(chunk.begin(), row, kBackdropChunkRows, backdrop.begin());
+    }
+    const int closed = Close(nullptr, handle);
+    if (!valid || closed < 0) return {};
+    CleanBackdropPrompt(backdrop.begin());
+    return backdrop;
+}
+
 struct Screen {
     SceUID memory = -1;
     void* base = nullptr;
@@ -277,6 +306,9 @@ RunResult Menu(Screen& screen, OpenMode mode) {
     session.detectedProfile = initial.detectedProfile;
     const auto fonts = LoadMenuFonts();
     session.fonts = fonts.view();
+    // Freed when the menu closes (end of this function), in both LiveArea and in-game modes.
+    const auto backdrop = LoadBackdrop();
+    if (backdrop.size() == kBackdropPixels) { session.backdrop = backdrop.begin(); session.backdropW = kBackdropWidth; session.backdropH = kBackdropHeight; }
     if (mode == OpenMode::Running && port::controls::RemapEnabled() && !port_vita_input_mapping_available())
         session.overrides.push_back({"Controller", "", "Active mapping needs a different controller"});
     sStatus.clear();

@@ -36,6 +36,10 @@ struct SettingsSession {
     std::string statusMessage;
     FontSet fonts;
     controls::ProfileId detectedProfile=controls::ProfileId::Handheld;
+    // Optional backdrop picture (opaque ABGR pixels, backdropW x backdropH, at most 960x544), drawn scaled to the screen
+    // and darkened. Null: the plain gradient. The caller owns the pixels for the life of the session.
+    const uint32_t* backdrop=nullptr;
+    unsigned backdropW=0, backdropH=0;
 };
 enum class Page : uint8_t { Display, Controls };
 enum class Modal : uint8_t { None, Discard, Restart, Capture, Conflict, ButtonPicker, ResetProfile, Overrides };

@@ -1,6 +1,7 @@
 #include "port/settings_ui.h"
 #include "player_settings_files.h"
 #include "player_settings_font_fixture.h"
+#include "settings_backdrop_check.h"
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -98,6 +99,49 @@ int main() {
             // and nowhere else on the picture: the other shoulder's box is absent
             const unsigned otherX=static_cast<unsigned>(c.cx==837?686:837)-12;assert(surface.pixels[y*surface.stride+otherX]!=kCyan);
         }
+    }
+    // Optional backdrop: null / unusable keeps the exact old gradient; a picture is drawn scaled, dimmed and legible.
+    {
+        auto bdSession=Session();UiState b;Begin(b,bdSession);std::vector<uint32_t> plain(960*544),other(plain.size());
+        Draw(b,bdSession,{plain.data(),960,544,960},0);
+        for(unsigned y=0;y<32;++y)for(unsigned x=0;x<32;++x)assert(plain[y*960+x]==backdrop_check::RGB(9+y/90,18+y/65,25+y/30));  // the gradient, unchanged
+        std::vector<uint32_t> tiny(4,0xffffffffu),huge(961*10,0xffffffffu);
+        const struct {const uint32_t* pixels;unsigned w,h;} unusable[]={{nullptr,480,272},{tiny.data(),0,272},{tiny.data(),480,0},{tiny.data(),1,2},{tiny.data(),2,1},{huge.data(),961,10},{huge.data(),10,545}};
+        for(const auto& u:unusable) {bdSession.backdrop=u.pixels;bdSession.backdropW=u.w;bdSession.backdropH=u.h;Draw(b,bdSession,{other.data(),960,544,960},0);assert(other==plain);}
+        // Pictures: the worst case (all white), a pattern at the stored size, odd sizes, and full size.
+        auto picture=[](unsigned w,unsigned h,unsigned kind) {
+            std::vector<uint32_t> v(static_cast<size_t>(w)*h);
+            for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x) {
+                const unsigned r=kind==0?255:(x*255/w),g=kind==0?255:(y*255/h),c=kind==0?255:((x/3+y/3)&1?255:40);
+                v[static_cast<size_t>(y)*w+x]=0xff000000u|(c<<16)|(g<<8)|r;
+            }
+            return v;
+        };
+        const struct {unsigned w,h,kind;} sizes[]={{480,272,0},{480,272,1},{480,272,2},{2,2,1},{7,5,2},{960,544,1},{960,544,0},{481,273,2}};
+        for(const auto& sz:sizes)for(bool fonts:{false,true})for(auto page:{Page::Display,Page::Controls})for(auto modal:{Modal::None,Modal::Capture,Modal::Overrides})for(unsigned profile=0;profile<2;++profile) {
+            const auto pic=picture(sz.w,sz.h,sz.kind);
+            bdSession=Session();bdSession.fonts=fonts?synthetic.view():FontSet{};bdSession.backdrop=pic.data();bdSession.backdropW=sz.w;bdSession.backdropH=sz.h;
+            bdSession.overrides={{"GXV_FPS_LIMIT","no","Existing picture-rate path"}};
+            Begin(b,bdSession);b.page=page;b.modal=modal;b.working.profile=static_cast<controls::ProfileId>(profile);b.row=page==Page::Controls?3:1;b.action="jump";b.message="Settings replacement rename failed.";
+            std::vector<uint32_t> frame(976*544+2,0x12345678);Surface framed{frame.data()+1,960,544,976};
+            DrawAudit bdAudit;DrawChecked(b,bdSession,framed,0,bdAudit);
+            assert(frame.front()==0x12345678&&frame.back()==0x12345678&&bdAudit.minX>=32&&bdAudit.minY>=32&&bdAudit.maxX<=928&&bdAudit.maxY<=512);
+            for(unsigned y=0;y<544;++y)for(unsigned x=960;x<976;++x)assert(frame[1+y*976+x]==0x12345678);
+            std::vector<uint32_t> tight(960*544);for(unsigned y=0;y<544;++y)std::copy_n(frame.begin()+1+y*976,960,tight.begin()+y*960);
+            // The picture shows where the menu draws nothing (the 32 px margin; modals dim the whole screen) at exactly the scaled, dimmed value.
+            if(modal==Modal::None)for(unsigned y:{0u,1u,100u,271u,272u,400u,543u})for(unsigned x:{0u,5u,31u})assert(tight[y*960+x]==backdrop_check::Expected(pic.data(),sz.w,sz.h,x,y));
+            if(modal==Modal::None&&sz.w>=7) {
+                const auto result=backdrop_check::CheckText(tight,pic.data(),sz.w,sz.h,4.5);
+                assert(result.textPixels>1000&&!result.failures);
+            }
+        }
+        // Reduced motion freezes the dots over a backdrop too; otherwise they still twinkle.
+        const auto pic=picture(480,272,1);bdSession=Session();bdSession.backdrop=pic.data();bdSession.backdropW=480;bdSession.backdropH=272;Begin(b,bdSession);
+        b.working.reducedMotion=true;Draw(b,bdSession,{plain.data(),960,544,960},0);Draw(b,bdSession,{other.data(),960,544,960},999999);assert(plain==other);
+        b.working.reducedMotion=false;Draw(b,bdSession,{plain.data(),960,544,960},0);Draw(b,bdSession,{other.data(),960,544,960},999999);
+        size_t moved=0;for(size_t i=0;i<plain.size();++i)moved+=plain[i]!=other[i];assert(moved>0&&moved<10000);
+        // The brightness curve stays inside the dim range and never brightens the picture.
+        for(unsigned y=0;y<544;++y)assert(port::settings::BackdropDim(y)>=48&&port::settings::BackdropDim(y)<=96);
     }
     for(bool fonts:{false,true})for(auto page:{Page::Display,Page::Controls})for(auto modal:{Modal::None,Modal::Discard,Modal::Restart,Modal::Capture,Modal::Conflict,Modal::ButtonPicker,Modal::ResetProfile,Modal::Overrides})for(unsigned profile=0;profile<2;++profile) {
         session.fonts=fonts?synthetic.view():FontSet{};
