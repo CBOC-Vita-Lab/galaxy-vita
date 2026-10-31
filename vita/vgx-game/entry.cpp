@@ -329,7 +329,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // half size, then cheaper background textures (never Mario, characters, key items or the HUD), and only then a smaller
     // picture; while the picture is upscaled Mario and Luigi get their own edge smoothing.
     setenv("GXV_AUTOQ_FXSTEP", "2", 0);
-    setenv("GXV_CHARAA_AUTO", "1", 0);
+    setenv("GXV_CHARAA_AUTO", "2", 0);  // Mario/Luigi edge smoothing whenever the picture is upscaled and not multisampled
+    // Anisotropic filtering as the top quality step (first given up under load); the HD pack's textures trilinear.
+    setenv("GXV_AUTOQ_ANISO", "1", 0);
+    setenv("GXV_HDTEX_TRILINEAR", "1", 0);
     // TEV inputs A, B, C read the low 8 bits of a colour register, as on the Wii (the Lumas were white without it).
     setenv("GXV_FIX_TEVIN", "1", 0);
     // Lost quality comes back sooner: a step up after 10 s of room in a row (not 20); a failed step still blocks itself.
