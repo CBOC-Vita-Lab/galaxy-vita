@@ -22,6 +22,7 @@
 //   GXV_VITA_CDRAM_RESERVE_MIB=<n> video memory left to sceGxm itself (default 18)
 //   GXV_VITA_PATCHER_MIB=<n>      shader-patcher pool (default 8: 8 MiB host, 4 + 4 MiB code)
 //   GXV_VITA_FBO_SCENES=<1..8>    scenes per frame of a framebuffer object (default 8)
+//   GXV_VITA_RTMEM_LOG=1          log what sceGxm asks for one render target's driver memory at 1 and at 8 scenes per frame (default 0)
 //   GXV_VITA_DISPLAY=WxH          display mode (default 960x544; 720x408, 640x368, 480x272)
 //   GXV_VITA_WIDE=0|1             1 (default): the game's 16:9 picture over the whole 960x544 screen
 //   GXV_VITA_PRIME=0              leave out the scissored clear that Vita3K's OpenGL renderer needs
@@ -1528,6 +1529,31 @@ bool StartGl(char* error, size_t errorSize) {
         return false;
     }
     LogMemory("after vitaGL");
+    // GXV_VITA_RTMEM_LOG=1 (default 0, log only): the driver memory sceGxm asks for one render target of a few sizes at 1 and at
+    // 8 scenes per frame (a pure query; vitaGL passes driverMemBlock -1, so sceGxm allocates it itself, outside vitaGL's pools).
+    // The difference times the number of render targets (display + EFB + pooled objects) is what GXV_VITA_FBO_SCENES=8 costs.
+    {
+        long rtMemLog = 0;
+        EnvLong("GXV_VITA_RTMEM_LOG", rtMemLog, 0, 1);
+        if (rtMemLog) {
+            static const int kSizes[][2] = {{kScreenW, kScreenH}, {640, 456}, {320, 228}, {160, 160}};
+            for (const auto& sz : kSizes) {
+                SceGxmRenderTargetParams rtp;
+                std::memset(&rtp, 0, sizeof(rtp));
+                rtp.width = static_cast<uint16_t>(sz[0]);
+                rtp.height = static_cast<uint16_t>(sz[1]);
+                rtp.multisampleMode = msaaMode;
+                rtp.driverMemBlock = -1;
+                unsigned one = 0, eight = 0;
+                rtp.scenesPerFrame = 1;
+                const int r1 = sceGxmGetRenderTargetMemSize(&rtp, &one);
+                rtp.scenesPerFrame = 8;
+                const int r8 = sceGxmGetRenderTargetMemSize(&rtp, &eight);
+                port_log("[vgx-vita] render target %dx%d driver memory: %u bytes at 1 scene per frame (0x%X), %u bytes at 8 (0x%X)", sz[0], sz[1], one,
+                         static_cast<unsigned>(r1), eight, static_cast<unsigned>(r8));
+            }
+        }
+    }
     if (&vgl_shader_cache_path != nullptr && vgl_shader_cache_path[0]) {
         const char* tail = std::strrchr(vgl_shader_cache_path, '/');
         if (!tail || std::strcmp(tail + 1, kVglCacheVersionDir) != 0)
