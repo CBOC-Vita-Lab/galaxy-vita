@@ -164,6 +164,8 @@ const char* WhyText(Why w) {
     case Why::FxOn: return "the GPU is the limit at today's size: a cheaper picture before a smaller one";
     case Why::FxOff: return "room again: back at full quality";
     case Why::FxNoGain: return "the step bought no speed";
+    case Why::AnisoOn: return "room at the top rung: anisotropic filtering on";
+    case Why::AnisoOff: return "the GPU is the limit: anisotropic filtering goes first";
     default: return "-";
     }
 }
@@ -175,8 +177,8 @@ Controller::Controller(const Config& c) : cfg_(c) {
     if (cfg_.windowFrames < 2) cfg_.windowFrames = 2;
     rung_ = cfg_.startRung;
     last_.from = last_.to = rung_;
-    if (cfg_.targetFps != 30) cfg_.fxStep = cfg_.bgStep = false; // (the steps belong to the whole-picture target)
-    lastFx_.from = lastFx_.to = rung_;
+    if (cfg_.targetFps != 30) cfg_.fxStep = cfg_.bgStep = cfg_.aniso = false; // (the steps belong to the whole-picture target)
+    lastFx_.from = lastFx_.to = lastAniso_.from = lastAniso_.to = rung_;
 }
 
 void Controller::ResetWindow() {
@@ -194,6 +196,7 @@ void Controller::ResetHolds() {
     boundSpan_ = 0;
     boundFrames_ = 0;
     fxRoomT_ = 0;
+    anisoRoomT_ = 0;
     boundGpuSum_ = 0;
     boundGpuFrames_ = 0;
 }
@@ -217,6 +220,13 @@ void Controller::SetRung(int to, Why why, uint64_t now) {
     roomAt_ = 0;
     pendingBelow_ = false;
     if (why == Why::NewScene) pendingUndo_ = -1;
+    if (aniso_ && to != cfg_.maxRung) {
+        // (it belongs to the top rung: any other has it off)
+        aniso_ = false;
+        ++anisoChanges_;
+        anisoAt_ = now;
+        lastAniso_ = Change{last_.from, to, why, winLoad_, winCpu_, winIntervalMs_, now};
+    }
     if (steps_ && to > FxRung() && why != Why::NewScene) {
         // (the steps belong to today's rung and below: a rung above has them off)
         steps_ = 0;
@@ -266,9 +276,35 @@ void Controller::SetSceneSteps(unsigned to, uint64_t now) {
     stepGain_[0] = stepGain_[1] = 0;
 }
 
+// Anisotropic filtering on or off at the top rung. Nothing is made again for it (no render target), so the windows restart but
+// no settling is needed beyond the first quarter second; the next change is at least 3 s away.
+void Controller::SetAniso(bool to, Why why, uint64_t now) {
+    if (aniso_ == to) return;
+    lastAniso_ = Change{rung_, rung_, why, winLoad_, winCpu_, winIntervalMs_, now};
+    aniso_ = to;
+    ++anisoChanges_;
+    anisoAt_ = now;
+    sinceChange_ = 0;
+    settleUntil_ = now + static_cast<uint64_t>(cfg_.settleSec * 1e6);
+    ResetWindow();
+    ResetHolds();
+}
+
+// A new scene starts with it as the scene last had it (applied with the rung, in the load).
+void Controller::SetSceneAniso(bool to, uint64_t now) {
+    if (aniso_ == to) return;
+    lastAniso_ = Change{rung_, rung_, Why::NewScene, winLoad_, winCpu_, winIntervalMs_, now};
+    aniso_ = to;
+    ++anisoChanges_;
+    ResetWindow();
+    ResetHolds();
+}
+
 void Controller::ForgetFxBlocks() {
     onBlockedUntil_[0] = onBlockedUntil_[1] = fxOffBlockedUntil_ = 0;
     onBlockLen_[0] = onBlockLen_[1] = fxOffBlockLen_ = 0;
+    anisoBlockedUntil_ = 0;
+    anisoBlockLen_ = 0;
 }
 
 void Controller::Remember(uint32_t key, int rung, unsigned fx) {
@@ -333,6 +369,7 @@ void Controller::Limit(int highest, uint64_t now) {
     checking_ = false;
     rung_ = highest;
     last_.to = rung_;
+    if (aniso_ && rung_ != cfg_.maxRung) { aniso_ = false; ++anisoChanges_; anisoAt_ = now; }
     sinceChange_ = 0;
     ResetWindow();
     ResetHolds();
@@ -374,7 +411,7 @@ bool Controller::Add(const FrameTimes& f) {
         // (GXV_AUTOQ_RECOVER: the blocks that ran out long ago do not count towards the next one's length)
         for (double& len : blockLen_) len = 0;
         belowBlockLen_ = 0;
-        onBlockLen_[0] = onBlockLen_[1] = fxOffBlockLen_ = 0;
+        onBlockLen_[0] = onBlockLen_[1] = fxOffBlockLen_ = anisoBlockLen_ = 0;
         lastBlockAt_ = 0;
     }
     const uint64_t interval = f.presentUs > prevPresent_ ? f.presentUs - prevPresent_ : 0;
@@ -382,7 +419,7 @@ bool Controller::Add(const FrameTimes& f) {
     if (sinceChange_ < (1u << 30)) ++sinceChange_;
     const bool mayChange = sinceChange_ >= static_cast<unsigned>(cfg_.minChangeFrames) &&
         (cfg_.targetFps != 30 || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u) &&
-        (!fxEver_ || f.presentUs >= lastFxAt_ + 3000000u);
+        (!fxEver_ || f.presentUs >= lastFxAt_ + 3000000u) && (anisoAt_ == 0 || f.presentUs >= anisoAt_ + 3000000u);
     const uint32_t gameRun = f.gameRunUs - prevGameRun_, gameTurns = f.gameTurns - prevGameTurns_;
     const bool gameKnown = f.gameKnown && prevGameKnown_ && f.gameFaults == prevGameFaults_;
     if (cfg_.targetFps == 30) {
@@ -448,7 +485,7 @@ bool Controller::Add(const FrameTimes& f) {
             // rung (or the start rung), applied now, while the load hides it. The same scene after a long gap (a
             // shader compile, the console suspended) keeps its rung and its blocks.
             const uint32_t from = scene_, to = f.scene;
-            Remember(from, rung_, steps_);
+            Remember(from, rung_, Mem());
             scene_ = to;
             if (to != 0 && to == from) return false;
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
@@ -459,14 +496,17 @@ bool Controller::Add(const FrameTimes& f) {
             int want = Recall(to, &wantFx);
             if (want == kNoRung) want = cfg_.startRung;
             want = std::clamp(want, cfg_.minRung, cfg_.maxRung);
+            const bool wantAniso = cfg_.aniso && (wantFx & 4u) != 0 && want == cfg_.maxRung;
             wantFx &= StepMask();
             if (want > FxRung()) wantFx = 0;
             if (want != rung_) {
                 SetSceneSteps(wantFx, f.presentUs);
+                SetSceneAniso(wantAniso, f.presentUs);
                 SetRung(want, Why::NewScene, f.presentUs);
                 return true;
             }
             SetSceneSteps(wantFx, f.presentUs);
+            SetSceneAniso(wantAniso, f.presentUs);
             return false;
         }
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0) {
@@ -477,6 +517,7 @@ bool Controller::Add(const FrameTimes& f) {
             belowBlockLen_ = 0;
             ForgetFxBlocks();
             SetSceneSteps(0, f.presentUs);
+            SetSceneAniso(false, f.presentUs);
             if (rung_ != cfg_.startRung) {
                 SetRung(cfg_.startRung, Why::NewScene, f.presentUs);
                 return true;
@@ -488,13 +529,15 @@ bool Controller::Add(const FrameTimes& f) {
         // The scene's key came after the load's gap (the game names the stage a few frames into it): the rung of the
         // scene left goes under the old key, and a remembered rung of the new one is taken while the scene is still
         // fading in (within 60 frames of the return to the start rung).
-        Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_, steps_);
+        Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_,
+                 last_.why == Why::NewScene && sinceChange_ <= 60 ? steps_ : Mem());
         scene_ = f.scene;
         unsigned wantFx = 0;
         const int want = Recall(f.scene, &wantFx);
         if (last_.why == Why::NewScene && sinceChange_ <= 60 && want != kNoRung && want != rung_) {
             const int to = std::clamp(want, cfg_.minRung, cfg_.maxRung);
             SetSceneSteps(to <= FxRung() ? (wantFx & StepMask()) : 0u, f.presentUs);
+            SetSceneAniso(cfg_.aniso && (wantFx & 4u) != 0 && to == cfg_.maxRung, f.presentUs);
             SetRung(to, Why::NewScene, f.presentUs);
             return true;
         }
@@ -737,6 +780,15 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     } else {
         fxRoomT_ = 0.0;
     }
+    if (cfg_.aniso && target && !aniso_ && rung_ == cfg_.maxRung && !steps_ && !checking_ && pendingUndo_ < 0 && !trial_) {
+        // Room for anisotropic filtering at the top rung: the GPU's busy time as it would be with it (the assumed ratio), the other
+        // stages, and the cadence, within the margin a step up keeps.
+        const bool anisoRoom = wholeKnown && hintKnown_ && winIntervalMs_ <= cfg_.budgetMs * 1.03 &&
+            std::max({gameMs, backendMs, gpuMs * cfg_.anisoRatio}) <= cfg_.upTarget * cfg_.budgetMs;
+        anisoRoomT_ = anisoRoom ? anisoRoomT_ + dt : 0.0;
+    } else {
+        anisoRoomT_ = 0.0;
+    }
 
     if (cfg_.calm) {
         // (calm: room long enough is kept for the next quiet moment; a window without it, or an overload, forgets it)
@@ -753,7 +805,22 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         if (!bound) pendingBelow_ = false;
     }
     if (!mayChange) return false; // (too soon after the last change: the holds go on counting)
-    if (fxActive && rung_ == FxRung() && !checking_ && pendingUndo_ < 0 && !trial_) {
+    if (cfg_.aniso && target && rung_ == cfg_.maxRung) {
+        if (aniso_) {
+            if (overT_ >= cfg_.downHoldSec) {
+                // The GPU is the limit: what means least to a player goes first, before any rung or step.
+                anisoBlockLen_ = anisoBlockLen_ > 0 ? std::min(anisoBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
+                anisoBlockedUntil_ = now + static_cast<uint64_t>(anisoBlockLen_ * 1e6);
+                lastBlockAt_ = now;
+                SetAniso(false, Why::AnisoOff, now);
+                return false;
+            }
+        } else if (anisoRoomT_ >= cfg_.anisoHoldSec && now >= anisoBlockedUntil_) {
+            SetAniso(true, Why::AnisoOn, now);
+            return false;
+        }
+    }
+    if (fxActive && rung_ == FxRung() && !checking_ && pendingUndo_ < 0 && !trial_ && !aniso_) {
         const unsigned next = NextStep(now);
         if (next && boundT_ >= cfg_.fxHoldSec) {
             // GPU-limited at today's rung: the thing that means least to a player first.

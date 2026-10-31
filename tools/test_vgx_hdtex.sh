@@ -15,7 +15,7 @@ ${CXX:-g++} -std=c++20 -O1 -g -fsanitize=address,undefined -DVGX_NO_NEON -I"$roo
   "$root/platform/vgx/src/vgx_shadergen.cpp" "$root/platform/vgx/src/vgx_texcache.cpp" "$root/platform/vgx/src/vgx_texdecode.cpp" \
   "$root/platform/vgx/src/vgx_stats.cpp" "$root/platform/vgx/src/vgx_backend_null.cpp" -o "$out/vgx_hdtex" -lpthread
 export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1
-for mode in replace clamp budget dryrun copy changed; do
+for mode in replace clamp budget dryrun copy changed trilinear; do
   "$out/vgx_hdtex" "$out/test.pack" "$mode"
 done
 # eye textures (name contains "eye") keep the game's own image unless GXV_HDTEX_EYES=1

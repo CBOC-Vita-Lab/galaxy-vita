@@ -21,7 +21,11 @@ namespace vgx::hdtex {
 //                          (default 8: the 4.5 MiB pack is preloaded; 0: read each texture from
 //                          the card when it is first uploaded)
 //   GXV_HDTEX_TRILINEAR=1  sample replaced textures with GL_LINEAR_MIPMAP_LINEAR (default 0:
-//                          GL_LINEAR_MIPMAP_NEAREST, the cost of the original bilinear fetch)
+//                          GL_LINEAR_MIPMAP_NEAREST, the cost of the original bilinear fetch). Only the filter of the replaced
+//                          textures changes (the textures of Mario, the main characters and the key items; a nearest-filtered
+//                          original stays nearest): two bilinear fetches instead of one for those pixels, and no step where
+//                          the level in use changes. Also the textures anisotropic filtering applies to (GXV_AUTOQ_ANISO:
+//                          vitaGL's switch acts on trilinear textures only).
 //   GXV_HDTEX_LOG=<n>      log the first n replacements by name (default 48)
 void Install(void (*log)(const char* fmt, ...));
 

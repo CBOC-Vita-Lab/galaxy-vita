@@ -402,6 +402,16 @@ int QualityTopRung();
 // (tests) Floor protection by degrees (vgx_autoq.h) set by hand for the next frame: effects and blur passes at half size, the
 // cheaper background. The controller stops being the one to set them only if it is off (tests run without one).
 void DebugSetQualitySteps(bool fxHalf, bool cheapBackground);
+// Anisotropic filtering as the top step of the quality ladder (vgx_autoq.h, GXV_AUTOQ_ANISO). The host that has vitaGL's anisotropic
+// switch (a build with ANISO_SWITCH: vglSetAnisotropicFilter) hands it over before the first frame; the back end calls it on its own
+// thread between frames with the minification filter value to use for trilinear textures (2 or 3), or 0 for none, and sets every
+// trilinear texture's minification filter again when it is next bound (the switch acts when a filter is set, not at a draw).
+// Without a hook GXV_AUTOQ_ANISO is ignored.
+using AnisoHook = void (*)(unsigned filter);
+void SetAnisotropicHook(AnisoHook hook);
+bool AnisotropicOn(); // in force for the frame being drawn
+// (tests) Anisotropic filtering set by hand for the next frame (filter 2 or 3): as the controller's, through the same hook.
+void DebugSetAnisotropic(bool on, unsigned filter = 2);
 // The rung of the quality ladder now.
 int QualityRung();
 void QualityRungSize(int& w, int& h, int& samples); // the internal picture now (render target size, EFB samples)

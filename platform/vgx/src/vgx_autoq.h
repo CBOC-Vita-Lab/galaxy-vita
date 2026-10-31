@@ -126,6 +126,7 @@
 // Alongside (not a controller step): GXV_CHARAA_AUTO=1 draws the characters' edge smoothing (GXV_CHARAA's filter) for Mario's and
 // Luigi's own textures only, and only while the picture is below 640x456 (rungs 1, 0, emergency): the player stays crisp when the
 // rest of the picture softens, at the cost of the filter only where the picture is already cheaper (vgx_backend_gl.cpp PresentCharaAA).
+// GXV_CHARAA_AUTO=2 draws it at every rung whose picture is shown larger than it was drawn (all but 960x544) and is not multisampled.
 // Each step is judged like a step below today: after checkSec the GPU's mean busy time must be betterFrac shorter, else it is
 // switched off again (the next step is tried at once; this one is not tried again for blockSec, doubling), so a step that buys
 // nothing in a scene costs two seconds, not a lasting loss.
@@ -137,6 +138,19 @@
 // (20 s), doubling. Changes are at least 3 s apart, as for rungs. A CPU-limited stretch never starts a step (the GPU must be
 // the largest of the three stages by 5 % and near the budget: the rules for the emergency rung). A scene remembers the steps
 // with its rung.
+//
+// Anisotropic filtering as the top of the ladder (Config::aniso, GXV_AUTOQ_ANISO, target mode, default off): the picture extra above the
+// last rung. It is on only at the highest rung the platform allows (Config::maxRung: 960x544 with 4x multisampling where the EFB can
+// have it, else the highest size), so the order of giving up is
+//   1. anisotropic filtering (Controller::AnisoOn(): the back end sets vitaGL's anisotropic filter for trilinear textures),
+//   2. the multisampled rungs, then the sizes above the game's own, ... (the ladder and steps above, as before).
+// and the way back is the reverse: it comes on last, only at the top rung, after anisoHoldSec (8 s) of predicted room in a row (the
+// GPU's busy time times anisoRatio, 1.15 until measured on a console, and the other stages, within upTarget of the budget; the cadence
+// must hold). Under load it goes first: the GPU is the limit (the same test as for any step down) for downHoldSec (1.5 s) takes
+// it off, before the rung is touched, and switching it on is blocked for blockSec (60 s, doubling to maxBlockSec) like a rung that
+// overloaded. It costs no frozen picture (no new render targets), so it needs no quiet moment; changes are at least 3 s apart.
+// Any change of rung, or a step below the top, has it off; a scene remembers it with its rung. Nothing else of the controller moves
+// for it: with the option off every decision is the one made without it.
 //
 // Floor census (Controller::TakeFloor, target mode): for the basic log's "floor:" line, the pictures of a window, those later
 // than the budget (+3 %), the time they took, and for each late picture which stage was the largest.
@@ -206,6 +220,11 @@ struct Config {
     double bgRatio = 1.1;
     double fxOffBlockSec = 20.0; // after a switch on within fxRepeatSec of a switch off, no switching off for this long (doubling)
     double fxRepeatSec = 60.0;
+    // GXV_AUTOQ_ANISO (target mode only; default off, and then every decision is the one made without it): anisotropic filtering above the
+    // top rung (see above).
+    bool aniso = false;
+    double anisoHoldSec = 8.0;   // predicted room in a row (at the top rung) before it goes on
+    double anisoRatio = 1.15;    // GPU time with it / without it, assumed (not measured on a console yet)
     // A late picture (interval over budgetMs + 3 %) is blamed on a stage when that stage's work is at least this share of the budget
     double causeShare = 0.85;
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
@@ -250,7 +269,7 @@ struct FrameTimes {
     uint32_t scene = 0;        // calm mode: the scene's key (0 = unknown)
 };
 
-enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain };
+enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain, AnisoOn, AnisoOff };
 const char* WhyText(Why w);
 
 struct Change {
@@ -306,6 +325,11 @@ public:
     unsigned FxChanges() const { return fxChanges_; }
     // The floor census since the last call (target mode): returns it and starts a new window.
     FloorWindow TakeFloor();
+    // Anisotropic filtering (Config::aniso): whether the back end should have it on now (only at the top rung), the last change of it,
+    // and how often it changed.
+    bool AnisoOn() const { return aniso_; }
+    const Change& LastAnisoChange() const { return lastAniso_; }
+    unsigned AnisoChanges() const { return anisoChanges_; }
     unsigned Changes() const { return changes_; }
     const Config& Cfg() const { return cfg_; }
     // When the block on `rung` ends (microseconds on the frames' clock; 0: not blocked): diagnostics and tests.
@@ -378,6 +402,9 @@ private:
     bool StepsEnabled() const { return cfg_.fxStep || cfg_.bgStep; }
     unsigned StepMask() const { return (cfg_.fxStep ? 1u : 0u) | (cfg_.bgStep ? 2u : 0u); }
     void ForgetFxBlocks();
+    void SetAniso(bool to, Why why, uint64_t now);
+    void SetSceneAniso(bool to, uint64_t now);
+    unsigned Mem() const { return steps_ | (aniso_ ? 4u : 0u); } // what a scene remembers beside its rung (bit 2: anisotropic filtering)
     int FxRung() const { return cfg_.minRung > kToday ? cfg_.minRung : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
     void FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
                     uint64_t gpu, uint64_t game, uint64_t backend);
@@ -401,6 +428,14 @@ private:
     uint64_t onBlockedUntil_[2] = {0, 0}, fxOffBlockedUntil_ = 0, lastFxOffAt_ = 0;
     double onBlockLen_[2] = {0, 0}, fxOffBlockLen_ = 0;
     FloorWindow floor_;
+    // anisotropic filtering at the top rung (Config::aniso)
+    bool aniso_ = false;
+    Change lastAniso_;
+    unsigned anisoChanges_ = 0;
+    uint64_t anisoAt_ = 0;                  // when it last changed (0: never): changes are spaced from here
+    uint64_t anisoBlockedUntil_ = 0;
+    double anisoBlockLen_ = 0;
+    double anisoRoomT_ = 0;                 // seconds of predicted room in a row for it
 };
 
 // The log of automatic quality: the Vita's port_log (the console's log file; the back end's stderr goes nowhere there),

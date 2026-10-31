@@ -1517,7 +1517,8 @@ bool StartGl(char* error, size_t errorSize) {
     if (fellBack) port_log("[vgx-vita] vitaGL could not set %dx%d and fell back to a smaller display mode", kScreenW, kScreenH);
     // GXV_ANISO=0|2|3 (default 0, off): the Strikers port's experimental anisotropic switch, in a vitaGL built with ANISO_SWITCH
     // (tools/vitagl/build-gpu-timers.sh): trilinear textures get minification filter 2 or 3, believed to be the hardware's
-    // anisotropic modes. Untested on a console (also in Strikers): not part of the automatic quality.
+    // anisotropic modes. Untested on a console (also in Strikers). For good from start-up; the automatic quality's own top step is
+    // GXV_AUTOQ_ANISO (below, it switches the same filter at run time).
     {
         long aniso = 0;
         EnvLong("GXV_ANISO", aniso, 0, 3);
@@ -1529,6 +1530,8 @@ bool StartGl(char* error, size_t errorSize) {
                 port_log("[vgx-vita] GXV_ANISO=%ld ignored: this vitaGL has no anisotropic switch", aniso);
             }
         }
+        // The automatic quality's top step (GXV_AUTOQ_ANISO, vgx_autoq.h) calls the same switch at run time, through the back end's hook.
+        if (vglSetAnisotropicFilter) vgx::backend::SetAnisotropicHook(&vglSetAnisotropicFilter);
     }
     if (vglMemTotal(VGL_MEM_VRAM) == 0 && vglMemTotal(VGL_MEM_RAM) == 0) {
         std::snprintf(error, errorSize, "vitaGL started without any memory pool (vglInit gave none).\nRestart the Vita. If this repeats, send log.txt (the [vitaGL] lines).");

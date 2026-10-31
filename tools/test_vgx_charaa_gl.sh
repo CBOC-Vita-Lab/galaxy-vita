@@ -16,3 +16,5 @@ nice -n 10 "${CXX:-g++}" -std=gnu++20 -O1 -g -w -I"$src" -I"$root/platform/vgx/t
 GXV_CAP_PRESENT=960x544 GXV_CAP_AB=1 GXV_CHARAA=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_charaa_gl_test" "$out"
 # GXV_CHARAA_AUTO=1 with GXV_CHARAA unset: the same rectangle, drawn only below the EFB's own size (the gate; see the test's header)
 GXV_CAP_PRESENT=960x544 GXV_CAP_AB=1 GXV_CHARAA_AUTO=1 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_charaa_gl_test" "$out"
+# GXV_CHARAA_AUTO=2: drawn whenever the picture is upscaled and the EFB is not multisampled, also at the EFB's own size (see the test's header)
+GXV_CAP_PRESENT=960x544 GXV_CAP_AB=1 GXV_CHARAA_AUTO=2 LIBGL_ALWAYS_SOFTWARE=1 GXV_LOG=0 "$out/vgx_charaa_gl_test" "$out"

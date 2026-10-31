@@ -2134,10 +2134,12 @@ static bool SmallDrawBounds(uint8_t gxPrim, const uint8_t* v, uint32_t count, ui
 // 43.3 off, the front end ("player") 0.66 ms a frame dearer (the Observatory is front-end-bound and has up to 190 character
 // draws a frame, the Lumas). The gain on the picture is modest. GXV_CHARAA=1 turns it on.
 constexpr int kCharaDefault = 0;
-//   GXV_CHARAA_AUTO=1      (default 0; with GXV_CHARAA off) the same machinery for the player's own draws only (the textures of the
-//                          pack's list from the archives of Mario and Luigi: IsPlayerTexture), and the back end draws the filter
+//   GXV_CHARAA_AUTO=1|2    (default 0; with GXV_CHARAA off) the same machinery for the player's own draws only (the textures of the
+//                          pack's list from the archives of Mario and Luigi: IsPlayerTexture). =1: the back end draws the filter
 //                          only while the picture is upscaled from a render size below the EFB's (backend::PresentCharaAA): Mario
-//                          stays crisp exactly when the rest of the picture softens. The Observatory's 190 Luma draws are not
+//                          stays crisp exactly when the rest of the picture softens. =2: whenever the picture is shown larger than it
+//                          was drawn and the EFB is not multisampled, so at 640x456 too (the 960x544 screen shows it upscaled; the
+//                          area cap GXV_CHARAA_AREA applies as ever). The Observatory's 190 Luma draws are not
 //                          noted, so the 0.66 ms measured for all characters is not paid. HUD markers are written, as for GXV_CHARAA=1.
 int CharaAAMode() {
     static const int m = [] {

@@ -16,7 +16,8 @@ that exact library.
    own unsubmitted partial allocations and never publishes an incomplete surface). Host tests:
    `tools/test_vitagl_scene_fail.sh --vitagl-source <patched tree>`.
 3. **[gpu_timers.py](gpu_timers.py)**: `GPU_TIMERS`, the per-scene GPU time the automatic picture
-   quality reads, and `ANISO_SWITCH` (off unless the game asks for it).
+   quality reads, and `ANISO_SWITCH` (off unless the game asks for it; it acts when a texture's filters are set, in
+   `vglSetTexMipFilter`, and may be changed while the game runs: `GXV_AUTOQ_ANISO`).
 4. **[fbo_msaa.py](fbo_msaa.py)**: `FBO_MSAA`, multisampling per framebuffer object, for the automatic
    anti-aliasing.
 5. **[build-vitagl.sh](build-vitagl.sh)** with the options `DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL

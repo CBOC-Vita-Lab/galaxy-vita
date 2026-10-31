@@ -29,7 +29,10 @@ for the watcher. The host configures this before starting the watcher through vg
 Also (only with -DANISO_SWITCH), the Strikers port's experimental anisotropic switch, OFF unless asked for:
   vglSetAnisotropicFilter(f)   f = 2 or 3: a trilinear texture (minification LINEAR with the mip filter on) gets this minification
       filter instead (the filter values vitasdk names MIPMAP_LINEAR / MIPMAP_POINT, believed to be the hardware's anisotropic modes;
-      untested on a console, also in Strikers); 0: off (the default). Call before textures are made.
+      untested on a console, also in Strikers); 0: off (the default). The filter is written when a texture's filters are set
+      (glTexParameteri of the minification filter, texture creation, a sampler change at a draw), not at every draw: a texture
+      takes a change of this value the next time its minification filter is set (the back end sets it again for that, vgx_backend_gl.cpp,
+      GXV_AUTOQ_ANISO). It may therefore be called while the game runs, from the thread that makes the GL calls.
 """
 import sys
 
@@ -268,9 +271,17 @@ extern uint32_t vgl_aniso_min; // rt_gpu.c vglSetAnisotropicFilter
 #endif
 static inline __attribute__((always_inline)) void vglSetTexMinFilter(SceGxmTexture *texture, SceGxmTextureFilter minFilter) {
 	SceGxmTextureInternal *tex = (SceGxmTextureInternal *)texture;
+"""),
+    # The substitution is made here, not in the minification setter: every caller sets the minification filter first and the mip
+    # filter right after it (textures.c, ffp.c, custom_shaders.c), so only here are both the new minification filter and the new
+    # mip filter known. A filter that is trilinear after the call (linear, mip filter on) becomes the anisotropic value; any other
+    # call leaves the plain value the minification setter wrote. It therefore holds each time the filters are set again, which is
+    # how the game switches it while running.
+    ("""	tex->control_words[0] = mipFilter & 0x200 | tex->control_words[0] & 0xFFFFFDFF;
+""", """	tex->control_words[0] = mipFilter & 0x200 | tex->control_words[0] & 0xFFFFFDFF;
 #ifdef ANISO_SWITCH
-	if (vgl_aniso_min && minFilter == SCE_GXM_TEXTURE_FILTER_LINEAR && (tex->control_words[0] & 0x200))
-		minFilter = (SceGxmTextureFilter)vgl_aniso_min;
+	if (vgl_aniso_min && (mipFilter & 0x200) && ((tex->control_words[0] & 0xC00) >> 10) == SCE_GXM_TEXTURE_FILTER_LINEAR)
+		tex->control_words[0] = (tex->control_words[0] & 0xFFFFF3FF) | ((vgl_aniso_min << 10) & 0xC00);
 #endif
 """),
 ])

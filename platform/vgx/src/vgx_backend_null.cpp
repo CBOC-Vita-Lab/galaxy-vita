@@ -73,6 +73,9 @@ int PresentCharaAA(unsigned, int, int, int, int, int, int, int, int, float, bool
 void CharaAACounters(uint64_t& a, uint64_t& b, uint64_t& c, uint64_t& d) { a = b = c = d = 0; }
 void QualityRungSize(int& w, int& h, int& samples) { w = h = 0; samples = 1; }
 void DebugSetQualitySteps(bool, bool) {}
+void SetAnisotropicHook(AnisoHook) {}
+void DebugSetAnisotropic(bool, unsigned) {}
+bool AnisotropicOn() { return false; }
 unsigned DebugLastFrameScenes() { return 0; }
 void SetProgressDisplay(unsigned, int, int, ProgressShowHook) {}
 bool SetPicture(const uint32_t*, int, int) { return false; }

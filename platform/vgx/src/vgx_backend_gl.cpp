@@ -236,6 +236,7 @@ struct Tex {
     bool renderTarget = false;
     uint16_t ew = 0, eh = 0; // a render target: its size in EFB pixels (w x h is that at the render scale); 0: unknown
     bool efbBuf = false; // GXV_EFBSWAP: `id` is a colour buffer the EFB had (it goes back to the EFB's spares, it is not deleted)
+    uint32_t anisoGen = 0; // g_anisoGen when a trilinear minification filter was last set (GXV_AUTOQ_ANISO: set again after a change)
 };
 
 int g_fixedW = 0, g_fixedH = 0; // 0 = follow the EFB size
@@ -377,6 +378,15 @@ float g_passScale = 1.0f;       // GXV_PASSHALF: the open pass is drawn at this 
 bool g_stepFxWanted = false, g_stepBgWanted = false;
 bool g_stepFx = false, g_stepBg = false;
 float g_passScaleNext = 1.0f;   // ... for the pass BeginPass begins next (set by its caller, used once)
+// Anisotropic filtering at the top rung (vgx_autoq.h, GXV_AUTOQ_ANISO): vitaGL's anisotropic switch (a vitaGL built with ANISO_SWITCH;
+// the host hands its function over, SetAnisotropicHook) makes a trilinear texture's minification filter the anisotropic value when
+// that filter is SET (glTexParameteri), not at every draw. So a change is made in two parts: the switch is called between frames, and
+// g_anisoGen counts the changes; BindTexture sets the minification filter again, once, on the first bind after a change, of every
+// texture that is trilinear. Never changed (g_anisoGen 0), no call is made that was not made before.
+AnisoHook g_anisoHook = nullptr;
+bool g_anisoWanted = false, g_aniso = false; // wanted (the controller, or a test: DebugSetAnisotropic) / latched at the start of a frame
+unsigned g_anisoFilter = 2;                  // the value handed to the switch when on (GXV_AUTOQ_ANISO=1|2: 2, =3: 3)
+uint32_t g_anisoGen = 0;
 
 // ------------------------------------------------------------ cached GL state
 // Nothing below calls GL unless the value changes. Invalidate() after
@@ -1434,11 +1444,17 @@ void BindTexture(int unit, const TexBind& b, bool cheap = false) {
         if (minF == FILT_LIN_MIP_LIN) minF = FILT_LIN_MIP_NEAR;
         else if (minF == FILT_NEAR_MIP_LIN) minF = FILT_NEAR_MIP_NEAR;
     }
-    if (t.wrapS == b.wrapS && t.wrapT == b.wrapT && t.minF == minF && t.magF == b.magFilter) return;
+    const bool anisoStale = minF == FILT_LIN_MIP_LIN && t.anisoGen != g_anisoGen; // (trilinear: the switch applies to it)
+    if (t.wrapS == b.wrapS && t.wrapT == b.wrapT && t.minF == minF && t.magF == b.magFilter && !anisoStale) return;
     if (S.unit != unit) { G(glActiveTexture(GL_TEXTURE0 + unit)); S.unit = unit; }
     if (t.wrapS != b.wrapS) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, static_cast<GLint>(kWrap[b.wrapS % 3]))); t.wrapS = b.wrapS; ++C.texParams; }
     if (t.wrapT != b.wrapT) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, static_cast<GLint>(kWrap[b.wrapT % 3]))); t.wrapT = b.wrapT; ++C.texParams; }
-    if (t.minF != minF) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(kMin[minF % 6]))); t.minF = minF; ++C.texParams; }
+    if (t.minF != minF || anisoStale) {
+        G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(kMin[minF % 6])));
+        t.minF = minF;
+        if (minF == FILT_LIN_MIP_LIN) t.anisoGen = g_anisoGen;
+        ++C.texParams;
+    }
     if (t.magF != b.magFilter) {
         G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, b.magFilter == FILT_NEAR ? GL_NEAREST : GL_LINEAR));
         t.magF = b.magFilter;
@@ -3775,6 +3791,19 @@ void AutoQualityInit() {
         cfg.fxStep = !fxStatic;
         cfg.bgStep = steps >= 2;
     }
+    // GXV_AUTOQ_ANISO=0|1|2|3 (default 0; target 30 only): anisotropic filtering as the top of the ladder (vgx_autoq.h): on when the GPU
+    // has room at the highest rung, the first thing given up under load (before the multisampled rungs), on again last. 1 or 2: the
+    // switch's filter value 2; 3: its value 3 (which of the two vitaGL's GXM minification filters is the anisotropic one is
+    // to be seen on a console). Needs a vitaGL built with ANISO_SWITCH (the host hands the switch over, SetAnisotropicHook), and is
+    // moot when the start-up GXV_ANISO already has it on for good.
+    if (const long an = target30 ? EnvInt("GXV_AUTOQ_ANISO", 0) : 0; an > 0) {
+        if (EnvInt("GXV_ANISO", 0) >= 2) autoq::Log("[autoq] GXV_AUTOQ_ANISO ignored: GXV_ANISO already has anisotropic filtering on for good");
+        else if (!g_anisoHook) autoq::Log("[autoq] GXV_AUTOQ_ANISO ignored: this vitaGL has no anisotropic switch");
+        else {
+            cfg.aniso = true;
+            g_anisoFilter = an >= 3 ? 3u : 2u;
+        }
+    }
     if (!autoq::clock::Start()) {
         autoq::Log("[autoq] off: no GPU clock here, the EFB's own size");
         return;
@@ -3785,6 +3814,12 @@ void AutoQualityInit() {
     if (c.fxStep || c.bgStep)
         autoq::Log("[autoq] GXV_AUTOQ_FXSTEP: at 640x456, a GPU-limited miss first takes %s%s%s before any smaller picture (each step kept only if it shortens the GPU's busy time; the way back is the reverse)",
                    c.fxStep ? "half-size effects and blur" : "", c.fxStep && c.bgStep ? ", then " : "", c.bgStep ? "cheaper background textures" : "");
+    if (c.aniso) {
+        char top[32];
+        RungText(c.maxRung, top, sizeof top);
+        autoq::Log("[autoq] GXV_AUTOQ_ANISO: anisotropic filtering (filter %u) at rung %d (%s) after %.0f s of room, the first thing given up under load, on again last",
+                   g_anisoFilter, c.maxRung, top, c.anisoHoldSec);
+    }
     if (target30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
     char lo[32], hi[32], st[32];
     RungText(c.minRung, lo, sizeof lo);
@@ -3796,6 +3831,15 @@ void AutoQualityInit() {
     if (c.recover) autoq::Log("[autoq] GXV_AUTOQ_RECOVER: a step up in play after %.0f s of room in a row, a single frame ends that stretch only when it missed the budget, blocks' doubling forgotten after %.0f s", c.recoverHoldSec, c.blockForgetSec);
     if (c.calm && (!port_screen_quiet || !port_scene_key))
         autoq::Log("[autoq] calm mode without %s%s from the game", port_screen_quiet ? "" : "quiet moments ", port_scene_key ? "" : "stage keys");
+}
+
+// Anisotropic filtering (g_anisoWanted) takes effect at the start of a frame: the switch is called on this thread, between
+// frames, and the textures are set again as they are bound (BindTexture). No change, nothing happens.
+void AnisoLatch() {
+    if (g_aniso == g_anisoWanted) return;
+    g_aniso = g_anisoWanted;
+    ++g_anisoGen;
+    if (g_anisoHook) g_anisoHook(g_aniso ? g_anisoFilter : 0u);
 }
 
 // The start of every frame (Execute): the GPU's finished frames go to the controller, and a new rung is applied now,
@@ -3844,9 +3888,13 @@ void FloorReport() {
     const autoq::FloorWindow w = g_autoq->TakeFloor();
     char rungText[32];
     RungText(g_rung, rungText, sizeof rungText);
-    char steps[96] = "";
+    char steps[128] = "";
     if (g_autoq->Cfg().fxStep || g_autoq->Cfg().bgStep)
         std::snprintf(steps, sizeof steps, "; half-size effects %s, cheaper background %s", g_autoq->FxStepOn() ? "on" : "off", g_autoq->BgStepOn() ? "on" : "off");
+    if (g_autoq->Cfg().aniso) {
+        const size_t used = std::strlen(steps);
+        std::snprintf(steps + used, sizeof steps - used, "; anisotropic filtering %s", g_autoq->AnisoOn() ? "on" : "off");
+    }
     char extra[96] = "";
     if (w.stalls || w.quiet)
         std::snprintf(extra, sizeof extra, "; not counted: %u stalls (%.2f s), %u pause/fade pictures", w.stalls, static_cast<double>(w.stallUs) / 1e6, w.quiet);
@@ -3864,9 +3912,11 @@ void FloorReport() {
 void AutoQualityFrame() {
     g_stepFx = g_stepFxWanted; // (the steps latch here: a frame is wholly one state)
     g_stepBg = g_stepBgWanted;
+    AnisoLatch();
     if (g_autoq && g_autoq->Cfg().fxStep) WarmFxPrograms();
     AutoQualityStatus();
     if (g_forceRung != autoq::kNoRung) {
+        if (g_autoq && g_autoq->Cfg().aniso) g_anisoWanted = false; // (the controller that owned the switch is stopped: back to the plain picture)
         g_autoq.reset();
         g_cycleSec = 0;
         if (!ApplyRung(g_forceRung, "ForceQualityRung")) autoq::Log("[autoq] ForceQualityRung(%d) refused: no memory", g_forceRung);
@@ -3897,6 +3947,13 @@ void AutoQualityFrame() {
         if (g_autoq->Add(f)) want = g_autoq->Current();
     }
     if (g_autoq->Cfg().targetFps == 30) FloorReport();
+    if (g_autoq->Cfg().aniso && g_autoq->AnisoOn() != g_anisoWanted) {
+        const autoq::Change& ac = g_autoq->LastAnisoChange();
+        g_anisoWanted = g_autoq->AnisoOn();
+        AnisoLatch(); // (now: the frame about to be drawn is wholly the new state)
+        autoq::Log("[autoq] anisotropic filtering now %s at rung %d (%s): %s (GPU %.0f %% of the budget, %.1f ms a picture)", g_aniso ? "on" : "off", g_rung,
+                   RungSizeText(g_rung), autoq::WhyText(ac.why), ac.load * 100.0, ac.intervalMs);
+    }
     if (g_autoq->FxStepOn() != g_stepFxWanted || g_autoq->BgStepOn() != g_stepBgWanted) {
         const autoq::Change& fc = g_autoq->LastFxChange();
         g_stepFxWanted = g_autoq->FxStepOn();
@@ -3962,6 +4019,12 @@ void AutoQualitySwapped() {
     if (g_autoq) autoq::clock::FramePresented();
 }
 
+void SetAnisotropicHook(AnisoHook hook) { g_anisoHook = hook; }
+void DebugSetAnisotropic(bool on, unsigned filter) {
+    g_anisoWanted = on;
+    g_anisoFilter = filter == 3 ? 3u : 2u;
+}
+bool AnisotropicOn() { return g_aniso; }
 void DebugSetQualitySteps(bool fxHalf, bool cheapBackground) {
     g_stepFxWanted = fxHalf;
     g_stepBgWanted = cheapBackground;
@@ -4301,11 +4364,19 @@ int PresentCharaAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int
     const CopyDispCmd* d = g_charaDisp;
     if (!d || (d->charaN == 0 && !g_charaFull) || w <= 0 || h <= 0 || dw <= 0 || dh <= 0) return 0;
     if (g_efbSamples > 1) { ++g_charaStats.msaaSkips; return 0; } // (rungs 7-8: the whole picture is multisampled)
-    // GXV_CHARAA_AUTO=1 (with GXV_CHARAA off; the front end then notes the player's own draws only: Mario and Luigi): the edge filter
-    // runs only while the picture is upscaled from a render size below the EFB's (rungs 1, 0 and the emergency rung), so the player
-    // stays crisp exactly when the rest of the picture softens. At the EFB's own size and above, nothing is drawn.
-    static const bool charaAuto = EnvInt("GXV_CHARAA", 0) == 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0;
-    if (charaAuto && g_rtW >= g_efbW && g_rtH >= g_efbH) return 0;
+    // GXV_CHARAA_AUTO=1|2 (with GXV_CHARAA off; the front end then notes the player's own draws only: Mario and Luigi). =1: the edge
+    // filter runs only while the picture is upscaled from a render size below the EFB's (rungs 1, 0 and the emergency rung), so the
+    // player stays crisp exactly when the rest of the picture softens; at the EFB's own size and above, nothing is drawn. =2: it runs
+    // whenever the picture is shown larger than it was drawn (the render rectangle smaller than the screen's, so at 640x456 and up to
+    // the sizes before 960x544 as well) and the EFB is not multisampled (the check above): the 640x456 picture is upscaled to the
+    // screen, and its stair steps are visible at the player.
+    static const long autoMode = [] {
+        if (EnvInt("GXV_CHARAA", 0) != 0) return 0L;
+        const long v = EnvInt("GXV_CHARAA_AUTO", 0);
+        return v == 0 ? 0L : (v >= 2 ? 2L : 1L);
+    }();
+    if (autoMode == 1 && g_rtW >= g_efbW && g_rtH >= g_efbH) return 0;
+    if (autoMode == 2 && w >= dw && h >= dh) return 0; // (shown 1:1 or smaller: no upscale steps to smooth)
     // GXV_CHARAA_KERNEL=fxaa|sub (default fxaa): the edge filter (EnsureCharaProgram)
     static const int kernelEnv = [] { const char* e = std::getenv("GXV_CHARAA_KERNEL"); return e && std::strcmp(e, "sub") == 0 ? 1 : 0; }();
     const int kernel = g_charaKernel >= 0 ? g_charaKernel : kernelEnv;
