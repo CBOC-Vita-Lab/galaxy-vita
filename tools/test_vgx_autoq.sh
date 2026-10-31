@@ -14,3 +14,4 @@ UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test"
 env -u GXV_AUTOQ_TARGET UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock
 GXV_AUTOQ_TARGET=15 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock
 GXV_AUTOQ_TARGET=30 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock
+GXV_AUTOQ_TARGET=60 UBSAN_OPTIONS=halt_on_error=1 "$out/vgx_autoq_test" game-clock

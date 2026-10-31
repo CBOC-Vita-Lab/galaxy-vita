@@ -105,8 +105,11 @@ int main(int argc, char** argv) {
     using namespace vgx::autoq;
     Require(argc == 3, "supply scenario and expected target mode");
     const std::string mode = argv[1];
-    target30 = std::string(argv[2]) == "30";
-    Require(Target30Enabled() == target30, "only the opt-in target enables new behavior");
+    // (target30: a whole-picture target is on, 30 or 60: the clock's rules are the same for both)
+    const int targetFps = std::atoi(argv[2]);
+    target30 = targetFps == 30 || targetFps == 60;
+    Require(TargetEnabled() == target30 && TargetFps() == targetFps && Target30Enabled() == (targetFps == 30),
+            "only the opt-in target enables new behavior");
     Require(clock::Start(), "real adapter chooses the supplied GPU timers");
     if (mode == "timer-guard") {
         const bool guarded = std::getenv("GXV_GPU_TIMER_GUARD") && std::atoi(std::getenv("GXV_GPU_TIMER_GUARD")) != 0;
@@ -134,7 +137,7 @@ int main(int argc, char** argv) {
             Require(f.gpuBusyUs == (known ? 5000u : 0u), "unknown work is not retained as a measured cheap frame");
         }
         setenv("GXV_AUTOQ_TARGET", target30 ? "0" : "30", 1);
-        Require(Target30Enabled() == target30, "target switch remains read once");
+        Require(TargetEnabled() == target30 && TargetFps() == targetFps, "target switch remains read once");
         divisor = 2;
         const auto f = Present(2, 4, 3, 5000);
         Require(f.busyKnown == !target30, "environment mutation cannot change coverage policy mid-run");
@@ -182,5 +185,5 @@ int main(int argc, char** argv) {
                         port_autoq_picture_work_us(), cpuReads, timerReads);
         }
     } else Require(false, "known scenario");
-    std::printf("PASS: autoq clock %s target=%d\n", mode.c_str(), target30 ? 30 : 0);
+    std::printf("PASS: autoq clock %s target=%d\n", mode.c_str(), targetFps);
 }

@@ -127,6 +127,22 @@
 // bought nothing; the next visit takes no step below it for maxBlockSec (a stage whose GPU time does not scale with the
 // picture does not try the useless drop again on every visit; after that it may try once more, in case it was the moment).
 //
+// Performance mode (GXV_AUTOQ_TARGET=60, Config::targetFps 60; the default stays 30, Quality mode: never below 30, then the
+// sharpest picture): as close to 60 pictures a second as the GPU allows. Everything of target mode above, against a budget of
+// 16.7 ms (a picture every retrace) instead of 33.3 ms, and with ONE game turn per picture instead of two in the whole-picture
+// work: max(one game turn's CPU, back-end CPU per picture, GPU busy/picture). So:
+//   - only a GPU-limited miss lowers anything (the GPU at 95 % of 16.7 ms and the largest stage by 5 %); a game-CPU-limited scene
+//     keeps its size, a smaller picture would buy it nothing;
+//   - the order of giving up is the same: anisotropic filtering (at the top rung only, so off in practice), the multisampled rungs
+//     and the sizes above the game's own (they come only with room at 16.7 ms, upTarget of it, which a Wii scene rarely leaves),
+//     half-size effects and the cheaper background (GXV_AUTOQ_FXSTEP), the sizes down to 544x388, and 480x340 last. The emergency
+//     rung is allowed: 60 is the point of the mode, and a step below today that buys no GPU time is undone as in target 30;
+//   - the way back is the same (room at 16.7 ms for recoverHoldSec with GXV_AUTOQ_RECOVER).
+// The pacing hint (port_autoq_picture_work_us) stays a 30 Hz feasibility cost in both targets (two turns): the 20/30 pacing of
+// GXV_PACE reads it against 30 Hz limits. The bounded slip (GXV_SLIP) is a 30-floor tool: it engages only when a pair of turns
+// does not fit two retraces (a game slower than 30 at full speed), where 60 is out of reach anyway, and it only paces turns, so
+// the two never pull the same lever.
+//
 // Floor protection by degrees (Config::fxStep / Config::bgStep, GXV_AUTOQ_FXSTEP=1|2, target mode, default off): the things
 // that mean least to a player go first, the picture size and the emergency rung last. The order of degrading is
 //   0. the multisampled rungs (7, 8), then the sizes above the game's own 640x456 (6..3): the ladder above, as before,
@@ -194,7 +210,7 @@ inline double Cost(int rung) {
 }
 
 struct Config {
-    int targetFps = 0;        // 30: whole-picture throughput target; 0: the old GPU-only controller
+    int targetFps = 0;        // 30 / 60: whole-picture throughput target (Quality / Performance mode); 0: the old GPU-only controller
     int minRung = 0, maxRung = kRungs - 1, startRung = kToday;
     double upTarget = 0.78;    // predicted load after a step up must stay at or below this
     double downAbove = 0.90;   // above today: step down when the load reaches this ...
@@ -425,6 +441,8 @@ private:
     void SetSteps(unsigned to, Why why, uint64_t now);
     void SetSceneSteps(unsigned to, uint64_t now);
     bool StepsEnabled() const { return cfg_.fxStep || cfg_.bgStep; }
+    bool Target() const { return cfg_.targetFps != 0; }                  // a whole-picture target (30 or 60)
+    unsigned PictureTurns() const { return cfg_.targetFps == 60 ? 1u : 2u; } // 60 Hz game turns per picture of the target
     unsigned StepMask() const { return (cfg_.fxStep ? 1u : 0u) | (cfg_.bgStep ? 2u : 0u); }
     void ForgetFxBlocks();
     void SetAniso(bool to, Why why, uint64_t now);
@@ -468,7 +486,9 @@ private:
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // The same, into the basic log (the Vita's port_log_summary, which every build writes; stderr elsewhere): the "floor:" line.
 void LogSummary(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-bool Target30Enabled(); // GXV_AUTOQ_TARGET, read once for both the controller and game CPU sampling
+int TargetFps();        // GXV_AUTOQ_TARGET (30 or 60; anything else 0), read once for both the controller and game CPU sampling
+bool TargetEnabled();   // a whole-picture target (30 or 60): game CPU sampling on, complete GPU timings required
+bool Target30Enabled(); // exactly the 30 target (Quality mode)
 
 // ---- the GPU clock (the Vita: a watcher thread that time-stamps the GPU's completion of every presented
 // frame through vitaGL's scene-end notification). Elsewhere it reports nothing and the controller never

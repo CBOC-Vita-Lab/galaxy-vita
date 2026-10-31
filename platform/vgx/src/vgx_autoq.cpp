@@ -41,11 +41,17 @@ constexpr uint32_t kVglRtGpuTimers = 0x8; // VGL_RT_GPU_TIMERS
 
 namespace vgx::autoq {
 
-bool Target30Enabled() {
-    // GXV_AUTOQ_TARGET=30 targets whole-picture throughput; 0 (default) keeps the old GPU-only policy and sampling off.
-    static const bool enabled = EnvInt("GXV_AUTOQ_TARGET", 0) == 30;
-    return enabled;
+int TargetFps() {
+    // GXV_AUTOQ_TARGET=30 (Quality mode) or 60 (Performance mode) targets whole-picture throughput; anything else (0, the default)
+    // keeps the old GPU-only policy and the game CPU sampling off.
+    static const int fps = [] {
+        const long v = EnvInt("GXV_AUTOQ_TARGET", 0);
+        return v == 30 || v == 60 ? static_cast<int>(v) : 0;
+    }();
+    return fps;
 }
+bool TargetEnabled() { return TargetFps() != 0; }
+bool Target30Enabled() { return TargetFps() == 30; }
 
 namespace {
 // One writer (the game thread), bounded snapshot retries on the renderer. Keep
@@ -57,12 +63,12 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free);
 }
 
 extern "C" void port_autoq_game_begin() {
-    if (!Target30Enabled()) return;
+    if (!TargetEnabled()) return;
     g_gameCpuStart = port_thread_cpu_us ? port_thread_cpu_us() : 0;
 }
 
 extern "C" void port_autoq_game_work_done() {
-    if (!Target30Enabled()) return;
+    if (!TargetEnabled()) return;
     const int64_t end = port_thread_cpu_us ? port_thread_cpu_us() : 0;
     const bool valid = g_gameCpuStart > 0 && end >= g_gameCpuStart;
     g_gameSeq.fetch_add(1, std::memory_order_acq_rel);
@@ -81,7 +87,7 @@ extern "C" void port_autoq_game_work_done() {
 }
 
 extern "C" int port_autoq_game_cpu_totals(uint32_t* cpu, uint32_t* turns, uint32_t* faults) {
-    if (!Target30Enabled()) return 0;
+    if (!TargetEnabled()) return 0;
     for (unsigned attempt = 0; attempt < 4; ++attempt) {
         const uint32_t seq = g_gameSeq.load(std::memory_order_acquire);
         if (seq & 1u) continue;
@@ -101,7 +107,7 @@ extern "C" int port_autoq_game_cpu_totals(uint32_t* cpu, uint32_t* turns, uint32
 // Optional pacing hint: the 30 Hz feasibility cost, not the cost of three turns
 // in a deliberately paced 20 Hz picture. Zero means this signal is unavailable.
 extern "C" uint64_t port_autoq_picture_work_us() {
-    if (!Target30Enabled()) return 0;
+    if (!TargetEnabled()) return 0;
     const uint32_t faults = g_gameFaults.load(std::memory_order_acquire);
     const uint32_t stamp = g_pictureFaults.load(std::memory_order_acquire);
     const uint32_t work = g_pictureWorkUs.load(std::memory_order_acquire);
@@ -171,13 +177,15 @@ const char* WhyText(Why w) {
 }
 
 Controller::Controller(const Config& c) : cfg_(c) {
-    cfg_.minRung = std::clamp(cfg_.minRung, cfg_.targetFps == 30 ? kEmergency : 0, kRungs - 1);
+    if (cfg_.targetFps != 30 && cfg_.targetFps != 60) cfg_.targetFps = 0;
+    if (cfg_.targetFps == 60) cfg_.budgetMs = std::min(cfg_.budgetMs, 1000.0 / 60.0); // (a picture every retrace: never the 30 budget)
+    cfg_.minRung = std::clamp(cfg_.minRung, Target() ? kEmergency : 0, kRungs - 1);
     cfg_.maxRung = std::clamp(cfg_.maxRung, std::max(0, cfg_.minRung), kRungs - 1);
     cfg_.startRung = std::clamp(cfg_.startRung, std::max(0, cfg_.minRung), cfg_.maxRung);
     if (cfg_.windowFrames < 2) cfg_.windowFrames = 2;
     rung_ = cfg_.startRung;
     last_.from = last_.to = rung_;
-    if (cfg_.targetFps != 30) cfg_.fxStep = cfg_.bgStep = cfg_.aniso = false; // (the steps belong to the whole-picture target)
+    if (!Target()) cfg_.fxStep = cfg_.bgStep = cfg_.aniso = false; // (the steps belong to the whole-picture target)
     lastFx_.from = lastFx_.to = lastAniso_.from = lastAniso_.to = rung_;
 }
 
@@ -221,7 +229,7 @@ void Controller::SetRung(int to, Why why, uint64_t now) {
     pendingBelow_ = false;
     if (why == Why::NewScene) pendingUndo_ = -1;
     // (target mode: a change to the rung an undo was waiting for, or above it, has done the undo's work)
-    if (cfg_.targetFps == 30 && pendingUndo_ >= 0 && to >= pendingUndo_) pendingUndo_ = -1;
+    if (Target() && pendingUndo_ >= 0 && to >= pendingUndo_) pendingUndo_ = -1;
     if (aniso_ && to != cfg_.maxRung) {
         // (it belongs to the top rung: any other has it off)
         aniso_ = false;
@@ -335,7 +343,7 @@ int Controller::Recall(uint32_t key, unsigned* fx, int* floor) const {
 void Controller::RecallFloor(uint32_t key, uint64_t now) {
     int floor = kNoRung;
     Recall(key, nullptr, &floor);
-    sceneFloor_ = cfg_.targetFps == 30 ? floor : kNoRung;
+    sceneFloor_ = Target() ? floor : kNoRung;
     sceneFloorUntil_ = sceneFloor_ != kNoRung ? now + static_cast<uint64_t>(cfg_.maxBlockSec * 1e6) : 0;
 }
 
@@ -348,7 +356,7 @@ void Controller::UndoBelow(uint64_t now) {
     pendingBelow_ = false;
     checking_ = false;
     SetRung(to, Why::NoGain, now);
-    if (cfg_.targetFps == 30) {
+    if (Target()) {
         belowBlockedUntil_ = now + static_cast<uint64_t>(belowBlockLen_ * 1e6);
         lastBlockAt_ = now;
     }
@@ -424,7 +432,7 @@ void Controller::Refused(int back, int failed, uint64_t now) {
 
 bool Controller::Add(const FrameTimes& f) {
     if (!havePrev_) {
-        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_release);
+        if (Target()) g_pictureWorkUs.store(0, std::memory_order_release);
         havePrev_ = true;
         prevDone_ = f.gpuDoneUs;
         prevPresent_ = f.presentUs;
@@ -446,11 +454,11 @@ bool Controller::Add(const FrameTimes& f) {
     const uint64_t prevDone = prevDone_, prevRun = prevRun_;
     if (sinceChange_ < (1u << 30)) ++sinceChange_;
     const bool mayChange = sinceChange_ >= static_cast<unsigned>(cfg_.minChangeFrames) &&
-        (cfg_.targetFps != 30 || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u) &&
+        (!Target() || changes_ == 0 || f.presentUs >= last_.atUs + 3000000u) &&
         (!fxEver_ || f.presentUs >= lastFxAt_ + 3000000u) && (anisoAt_ == 0 || f.presentUs >= anisoAt_ + 3000000u);
     const uint32_t gameRun = f.gameRunUs - prevGameRun_, gameTurns = f.gameTurns - prevGameTurns_;
     const bool gameKnown = f.gameKnown && prevGameKnown_ && f.gameFaults == prevGameFaults_;
-    if (cfg_.targetFps == 30) {
+    if (Target()) {
         bool currentRoom = false;
         const bool backendKnown = f.backendRunUs > 0 && prevRun > 0 && f.backendRunUs >= prevRun &&
             f.backendRunUs <= INT64_MAX && prevRun <= INT64_MAX;
@@ -462,7 +470,7 @@ bool Controller::Add(const FrameTimes& f) {
             const uint64_t fenceBusy = f.gpuDoneUs > from ? std::min(f.gpuDoneUs - from, doneSpan) : 0;
             const bool gameOk = gameKnown && gameTurns != 0;
             FloorCount(interval, f.quiet, gameOk && backendKnown && gpuKnown, gpuKnown, gameOk, backendKnown,
-                       f.timers ? f.gpuBusyUs : fenceBusy, gameOk ? uint64_t(gameRun) * 2 / gameTurns : 0,
+                       f.timers ? f.gpuBusyUs : fenceBusy, gameOk ? uint64_t(gameRun) * PictureTurns() / gameTurns : 0,
                        backendKnown ? f.backendRunUs - prevRun : 0);
         }
         if (!gameKnown || !gameTurns || !backendKnown || !gpuKnown) {
@@ -474,10 +482,12 @@ bool Controller::Add(const FrameTimes& f) {
             const uint64_t from = std::max(prevDone, f.startUs);
             const uint64_t fenceBusy = f.gpuDoneUs > from ? std::min(f.gpuDoneUs - from, doneSpan) : 0;
             const uint64_t gpu = f.timers ? f.gpuBusyUs : fenceBusy;
-            const uint64_t game = uint64_t(gameRun) * 2 / gameTurns;
+            // (the pacing hint is a 30 Hz feasibility cost in either target: two turns; the decisions take the target's own turns)
+            const uint64_t game2 = uint64_t(gameRun) * 2 / gameTurns;
+            const uint64_t game = uint64_t(gameRun) * PictureTurns() / gameTurns;
             const uint64_t backend = f.backendRunUs - prevRun;
             currentWorkUs_ = static_cast<uint32_t>(std::min<uint64_t>(1000000,
-                std::max({gpu, backend, game})));
+                std::max({gpu, backend, game2})));
             // A known slow current picture must invalidate old headroom even when a quiet return skips evaluation.
             const uint32_t published = g_pictureWorkUs.load(std::memory_order_relaxed);
             if (published && currentWorkUs_ > published) g_pictureWorkUs.store(currentWorkUs_, std::memory_order_release);
@@ -503,25 +513,25 @@ bool Controller::Add(const FrameTimes& f) {
     prevGameFaults_ = f.gameFaults;
     prevGameKnown_ = f.gameKnown;
     if (static_cast<double>(interval) > cfg_.gapResetMs * 1000.0) {
-        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_relaxed);
+        if (Target()) g_pictureWorkUs.store(0, std::memory_order_relaxed);
         // A load or a shader compile: what came before says nothing about what comes next.
         ResetWindow();
         ResetHolds();
         // (target mode: a check of a step below today goes on after a stall in the same scene. The change's own freeze, the new
         // render targets and the next slow frame, is often just over gapResetMs (0.26 s on the console), and a check dropped
         // there kept the smaller picture without a verdict: Beach Bowl went 640 -> 592 that way although the GPU time stayed.)
-        if (cfg_.targetFps != 30) checking_ = false;
+        if (!Target()) checking_ = false;
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0 && cfg_.calm) {
             // A load (calm mode): the rung of the scene left is remembered, the new scene starts at its own remembered
             // rung (or the start rung), applied now, while the load hides it. The same scene after a long gap (a
             // shader compile, the console suspended) keeps its rung and its blocks.
             const uint32_t from = scene_, to = f.scene;
             // (target mode: a scene left before an undo for no gain was made is remembered at the rung the undo goes back to)
-            Remember(from, cfg_.targetFps == 30 && pendingUndo_ >= 0 ? pendingUndo_ : rung_, Mem(), sceneFloor_);
+            Remember(from, Target() && pendingUndo_ >= 0 ? pendingUndo_ : rung_, Mem(), sceneFloor_);
             scene_ = to;
             if (to != 0 && to == from) return false;
             checking_ = false;
-            if (cfg_.targetFps == 30) pendingUndo_ = -1; // (an undo learnt in the scene left: the new scene starts at its own rung)
+            if (Target()) pendingUndo_ = -1; // (an undo learnt in the scene left: the new scene starts at its own rung)
             RecallFloor(to, f.presentUs);
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
@@ -548,7 +558,7 @@ bool Controller::Add(const FrameTimes& f) {
             // A new scene: nothing learnt about the old one holds, and its rung may be wrong for this one. Back to the
             // start rung (today's picture), from where the next windows decide again.
             checking_ = false;
-            if (cfg_.targetFps == 30) pendingUndo_ = -1;
+            if (Target()) pendingUndo_ = -1;
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
@@ -612,7 +622,7 @@ bool Controller::Add(const FrameTimes& f) {
         return false;
     }
     if (!f.timers && (f.gpuDoneUs == 0 || prevDone == 0)) return false;          // no GPU clock for this pair
-    if (cfg_.targetFps == 30 && f.paced && !f.timers) {
+    if (Target() && f.paced && !f.timers) {
         // The fence is sampled only after swap returns. A paced callback can
         // delay that observation beyond GPU completion: without exact timers,
         // keep the rung rather than mistake a deliberate wait for GPU work.
@@ -644,14 +654,14 @@ bool Controller::Add(const FrameTimes& f) {
     }
     present_ += interval;
     ++frames_;
-    if (cfg_.targetFps == 30) {
+    if (Target()) {
         if (gameKnown) { gameRun_ += gameRun; gameTurns_ += gameTurns; }
         else gameKnown_ = false;
     }
     // Fast path: above today, a few frames in a row near the GPU's limit step down now.
     const int floorUp = std::max(kToday, cfg_.minRung);
     if (frameLoad >= 0.0) overFrames_ = frameLoad >= cfg_.saturated ? overFrames_ + 1 : 0;
-    if (cfg_.targetFps != 30 && rung_ > floorUp && overFrames_ >= static_cast<unsigned>(cfg_.fastFrames) && mayChange) {
+    if (!Target() && rung_ > floorUp && overFrames_ >= static_cast<unsigned>(cfg_.fastFrames) && mayChange) {
         // One step (a short spike costs one rung); when the step before was one of these and did not help (the overload
         // lasts), as far down as this frame's load says. Changes are spaced (minChangeFrames), so one rung at a time would
         // take a second or more for each.
@@ -675,7 +685,7 @@ bool Controller::Add(const FrameTimes& f) {
 
 bool Controller::Evaluate(uint64_t now, bool mayChange) {
     if (present_ == 0 || busyN_ == 0) {
-        if (cfg_.targetFps == 30) g_pictureWorkUs.store(0, std::memory_order_release);
+        if (Target()) g_pictureWorkUs.store(0, std::memory_order_release);
         return false;
     }
     double load;
@@ -691,19 +701,21 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     winLoad_ = load;
     winCpu_ = cpu;
     winIntervalMs_ = static_cast<double>(present_) / 1000.0 / frames_;
-    const bool target = cfg_.targetFps == 30;
+    const bool target = Target();
     const double gpuMs = target ? static_cast<double>(busy_) / busyN_ / 1000.0 : 0.0;
     const double backendMs = target && runKnown_ ? static_cast<double>(run_) / frames_ / 1000.0 : -1.0;
-    // Two 60 Hz game turns are required per 30 Hz picture. Use CPU work, not
+    // Two 60 Hz game turns are required per 30 Hz picture, one per 60 Hz picture. Use CPU work, not
     // retrace/pacing waits, and a maximum: all three pipeline stages overlap.
-    const double gameMs = target && gameKnown_ && gameTurns_ ? static_cast<double>(gameRun_) * 2.0 / gameTurns_ / 1000.0 : -1.0;
+    const double gameMs = target && gameKnown_ && gameTurns_ ? static_cast<double>(gameRun_) * PictureTurns() / gameTurns_ / 1000.0 : -1.0;
+    // (the pacing hint below stays a 30 Hz cost, two turns, whatever the target: the 20/30 pacing reads it)
+    const double game2Ms = target && gameKnown_ && gameTurns_ ? static_cast<double>(gameRun_) * 2.0 / gameTurns_ / 1000.0 : -1.0;
     const bool wholeKnown = gameMs >= 0.0 && backendMs >= 0.0;
     winGameMs_ = gameMs;
     winBackendMs_ = backendMs;
     winWorkMs_ = std::max({gpuMs, gameMs, backendMs});
     if (target) {
         const uint32_t work = wholeKnown && hintKnown_ ? std::max(currentWorkUs_,
-            static_cast<uint32_t>(std::min(winWorkMs_ * 1000.0, 1000000.0))) : 0;
+            static_cast<uint32_t>(std::min(std::max({gpuMs, game2Ms, backendMs}) * 1000.0, 1000000.0))) : 0;
         // Invalidate before changing stamp. The getter brackets work with stamp/fault reads, so it cannot pair old work with a new fault generation.
         g_pictureWorkUs.store(0, std::memory_order_release);
         g_pictureFaults.store(prevGameFaults_, std::memory_order_release);
@@ -1077,7 +1089,7 @@ void FramePresented() {
             g_rtHead = n;
             // Target30 must not mistake dropped scene timings for GPU headroom.
             // Consume incomplete publications once, but leave their cost unknown.
-            if (!dropped && (!Target30Enabled() || (g.scenes != 0 && g.timed == g.scenes))) {
+            if (!dropped && (!TargetEnabled() || (g.scenes != 0 && g.timed == g.scenes))) {
                 e.known = true;
                 e.busy = g.busy_us;
             }

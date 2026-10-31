@@ -3732,7 +3732,7 @@ void AutoQualityInit() {
     const long onByDefault = 0; // (no GPU clock: the controller would never move)
 #endif
     g_autoqLog = EnvInt("GXV_AUTOQ_LOG", 0) != 0;
-    const bool target30 = autoq::Target30Enabled();
+    const int targetFps = autoq::TargetFps(); // 30: Quality mode, 60: Performance mode, 0: the GPU-only controller
     const char* noMsaa = "";
     g_msaaTop = MsaaProbe(noMsaa);
     if (g_msaaTop > 1) autoq::Log("[autoq] the EFB can be multisampled (up to %dx): rungs 7 and 8", g_msaaTop);
@@ -3764,9 +3764,9 @@ void AutoQualityInit() {
     const bool calm = EnvInt("GXV_AUTOQ_CALM", 1) != 0;
     autoq::Config cfg = calm ? autoq::Config() : autoq::Config::Legacy();
     if (const long b = EnvInt("GXV_AUTOQ_BUDGET_MS", 0); calm && b > 0) cfg.budgetMs = static_cast<double>(std::clamp<long>(b, 8, 100));
-    if (target30) {
-        cfg.targetFps = 30;
-        cfg.budgetMs = 1000.0 / 30.0;
+    if (targetFps) {
+        cfg.targetFps = targetFps;
+        cfg.budgetMs = 1000.0 / targetFps;
         cfg.minRung = autoq::kEmergency;
     }
     cfg.minRung = static_cast<int>(EnvInt("GXV_AUTOQ_MIN", cfg.minRung));
@@ -3785,21 +3785,21 @@ void AutoQualityInit() {
     cfg.longGapMs = static_cast<double>(EnvInt("GXV_AUTOQ_SCENE_MS", 1500));
     // GXV_AUTOQ_SPACING=<frames>: two changes at least this many frames apart (default 20; the Strikers port, 160c3f9)
     cfg.minChangeFrames = static_cast<int>(EnvInt("GXV_AUTOQ_SPACING", 20));
-    // GXV_AUTOQ_FXSTEP=0|1|2 (default 0; target 30 only): floor protection by degrees (vgx_autoq.h). 1: at 640x456, a GPU-limited miss
+    // GXV_AUTOQ_FXSTEP=0|1|2 (default 0; target 30 or 60 only): floor protection by degrees (vgx_autoq.h). 1: at 640x456, a GPU-limited miss
     // first halves the effects and blur passes (GXV_FXHALF / GXV_PASSHALF as a runtime state), before any smaller picture; 2: and
     // then makes the background's textures cheaper (the nearest mip level, not the blend of two, for draws that sample no character's
     // or key item's texture). Each step is kept only if it shortens the GPU's busy time; the way back is the reverse.
-    if (const long steps = target30 ? EnvInt("GXV_AUTOQ_FXSTEP", 0) : 0; steps >= 1) {
+    if (const long steps = targetFps ? EnvInt("GXV_AUTOQ_FXSTEP", 0) : 0; steps >= 1) {
         const bool fxStatic = EnvInt("GXV_FXHALF", 0) != 0 && EnvInt("GXV_PASSHALF", 0) != 0;
         cfg.fxStep = !fxStatic;
         cfg.bgStep = steps >= 2;
     }
-    // GXV_AUTOQ_ANISO=0|1|2|3 (default 0; target 30 only): anisotropic filtering as the top of the ladder (vgx_autoq.h): on when the GPU
+    // GXV_AUTOQ_ANISO=0|1|2|3 (default 0; target 30 or 60 only): anisotropic filtering as the top of the ladder (vgx_autoq.h): on when the GPU
     // has room at the highest rung, the first thing given up under load (before the multisampled rungs), on again last. 1 or 2: the
     // switch's filter value 2; 3: its value 3 (which of the two vitaGL's GXM minification filters is the anisotropic one is
     // to be seen on a console). Needs a vitaGL built with ANISO_SWITCH (the host hands the switch over, SetAnisotropicHook), and is
     // moot when the start-up GXV_ANISO already has it on for good.
-    if (const long an = target30 ? EnvInt("GXV_AUTOQ_ANISO", 0) : 0; an > 0) {
+    if (const long an = targetFps ? EnvInt("GXV_AUTOQ_ANISO", 0) : 0; an > 0) {
         if (EnvInt("GXV_ANISO", 0) >= 2) autoq::Log("[autoq] GXV_AUTOQ_ANISO ignored: GXV_ANISO already has anisotropic filtering on for good");
         else if (!g_anisoHook) autoq::Log("[autoq] GXV_AUTOQ_ANISO ignored: this vitaGL has no anisotropic switch");
         else {
@@ -3823,14 +3823,21 @@ void AutoQualityInit() {
         autoq::Log("[autoq] GXV_AUTOQ_ANISO: anisotropic filtering (filter %u) at rung %d (%s) after %.0f s of room, the first thing given up under load, on again last",
                    g_anisoFilter, c.maxRung, top, c.anisoHoldSec);
     }
-    if (target30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
+    if (targetFps == 30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
+    if (targetFps == 60)
+        autoq::Log("[autoq] target 60 (Performance mode): as close to 60 pictures a second as the GPU allows; whole-picture work (one game turn, renderer CPU, GPU busy; "
+                   "overlapping stages use max) against 16.7 ms; only a GPU-limited miss lowers quality (cheaper effects and background first, then sizes to 544x388, "
+                   "480x340 last); a game-CPU-limited scene keeps its size");
     char lo[32], hi[32], st[32];
     RungText(c.minRung, lo, sizeof lo);
     RungText(c.maxRung, hi, sizeof hi);
     RungText(g_rung, st, sizeof st);
+    char calmText[224] = "";
+    if (c.calm)
+        std::snprintf(calmText, sizeof calmText, "; calm mode: changes of size in quiet moments (pause menu, closed fades), in play only for an overload (or after 120 s of room), "
+                      "against a %.0f ms frame budget; each stage keeps its rung", c.budgetMs);
     autoq::Log("[autoq] on: rungs %d (%s) to %d (%s), starting at %d (%s); up when the predicted GPU load is <= %.0f %% for %.1f s%s", c.minRung, lo, c.maxRung, hi,
-               g_rung, st, c.upTarget * 100.0, c.upHoldSec,
-               c.calm ? "; calm mode: changes of size in quiet moments (pause menu, closed fades), in play only for an overload (or after 120 s of room), against a 33 ms frame budget; each stage keeps its rung" : "");
+               g_rung, st, c.upTarget * 100.0, c.upHoldSec, calmText);
     if (c.recover) autoq::Log("[autoq] GXV_AUTOQ_RECOVER: a step up in play after %.0f s of room in a row, a single frame ends that stretch only when it missed the budget, blocks' doubling forgotten after %.0f s", c.recoverHoldSec, c.blockForgetSec);
     if (c.calm && (!port_screen_quiet || !port_scene_key))
         autoq::Log("[autoq] calm mode without %s%s from the game", port_screen_quiet ? "" : "quiet moments ", port_scene_key ? "" : "stage keys");
@@ -3863,9 +3870,9 @@ void AutoQualityStatus() {
     else
         autoq::Log("[autoq] status: rung %d (%dx%d, %d samples, for EFB %dx%d), render targets %.1f MiB in %u pooled objects (no controller)", g_rung, g_rtW, g_rtH,
                    g_efbSamples, g_efbW, g_efbH, static_cast<double>(RenderTargetBytes()) / 1048576.0, static_cast<unsigned>(g_pool.size()));
-    if (g_autoq && g_autoq->Cfg().targetFps == 30)
-        autoq::Log("[autoq] target 30 work: game two turns %.1f ms, renderer CPU %.1f ms, GPU %.1f ms; overlapping maximum %.1f ms against %.3f ms",
-                   g_autoq->WindowGameMs(), g_autoq->WindowBackendMs(), g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs,
+    if (g_autoq && g_autoq->Cfg().targetFps != 0)
+        autoq::Log("[autoq] target %d work: game %s %.1f ms, renderer CPU %.1f ms, GPU %.1f ms; overlapping maximum %.1f ms against %.3f ms",
+                   g_autoq->Cfg().targetFps, g_autoq->Cfg().targetFps == 60 ? "one turn" : "two turns", g_autoq->WindowGameMs(), g_autoq->WindowBackendMs(), g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs,
                    g_autoq->WindowWorkMs(), g_autoq->Cfg().budgetMs);
     double freeMiB = 0;
     if (FreeVram(freeMiB))
@@ -3903,12 +3910,12 @@ void FloorReport() {
         std::snprintf(extra, sizeof extra, "; not counted: %u stalls (%.2f s), %u pause/fade pictures", w.stalls, static_cast<double>(w.stallUs) / 1e6, w.quiet);
     const double late = static_cast<double>(w.lateUs) / 1e6;
     if (w.late == 0) {
-        autoq::LogSummary("floor: %.1f s, %u pictures, none under 30; rung %d (%s)%s%s", window, w.pictures, g_rung, rungText, steps, extra);
+        autoq::LogSummary("floor: %.1f s, %u pictures, none under %d; rung %d (%s)%s%s", window, w.pictures, g_autoq->Cfg().targetFps, g_rung, rungText, steps, extra);
         return;
     }
-    autoq::LogSummary("floor: %.1f s, %u pictures, %u late (over %.1f ms) = %.2f s below 30, worst %.0f ms; late by GPU %u, game CPU %u, renderer CPU %u, "
+    autoq::LogSummary("floor: %.1f s, %u pictures, %u late (over %.1f ms) = %.2f s below %d, worst %.0f ms; late by GPU %u, game CPU %u, renderer CPU %u, "
                       "none of the three (front end, waits, pacing) %u, not measured %u; rung %d (%s)%s%s",
-                      window, w.pictures, w.late, g_autoq->Cfg().budgetMs * 1.03, late, static_cast<double>(w.worstUs) / 1000.0, w.gpu, w.game, w.renderer,
+                      window, w.pictures, w.late, g_autoq->Cfg().budgetMs * 1.03, late, g_autoq->Cfg().targetFps, static_cast<double>(w.worstUs) / 1000.0, w.gpu, w.game, w.renderer,
                       w.other, w.unknown, g_rung, rungText, steps, extra);
 }
 
@@ -3949,7 +3956,7 @@ void AutoQualityFrame() {
         f.scene = scene;
         if (g_autoq->Add(f)) want = g_autoq->Current();
     }
-    if (g_autoq->Cfg().targetFps == 30) FloorReport();
+    if (g_autoq->Cfg().targetFps != 0) FloorReport();
     if (g_autoq->Cfg().aniso && g_autoq->AnisoOn() != g_anisoWanted) {
         const autoq::Change& ac = g_autoq->LastAnisoChange();
         g_anisoWanted = g_autoq->AnisoOn();
@@ -4033,7 +4040,7 @@ void DebugSetQualitySteps(bool fxHalf, bool cheapBackground) {
     g_stepBgWanted = cheapBackground;
     if (fxHalf) WarmFxPrograms();
 }
-void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, autoq::Target30Enabled() ? autoq::kEmergency : 0, TopRung()); }
+void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, autoq::TargetEnabled() ? autoq::kEmergency : 0, TopRung()); }
 void DebugFailAllocation(int nth) { g_simFailAt = nth; g_simChecks = 0; }
 void DebugLastChange(unsigned& resampled, unsigned& plain) { resampled = g_lastResampled; plain = g_lastPlain; }
 int QualityRung() { return g_rung; }
