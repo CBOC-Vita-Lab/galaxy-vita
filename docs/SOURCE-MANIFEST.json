@@ -18792,7 +18792,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "e18892e2f154120f534bc98ef75e304f58725985a8e25e69fed28e343b083924"
+      "sha256": "afeeb1d5d5fe55d480761931b8278307dabd7b0822ca30d97da49d0c527c769c"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
