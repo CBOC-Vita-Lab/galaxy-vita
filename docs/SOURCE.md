@@ -14,7 +14,15 @@ Version 1.1 plus the changes below, built from this repository (the release comm
 - **Start-up:** bounded waits with a stall message, `GXV_BOOT_TITLE_FALLBACK=60`, named libshacccg and graphics-start errors.
 - Half precision in the fragment shaders proven to stay within one 8-bit level of the float result (`GXV_FS_HALF=1`; `2` is every shader through vitaGL patch 0012, `0` off).
 - Vertex fog on (`GXV_FOGVTX=2`). Test switches, off: `GXV_SANITIZE` (bit 16 counts a draw or copy that samples the target it writes; log only), `GXV_GLDEBUG` (GL debug output on the host), `GXV_SCENELOG_MIN`, `GXV_WAITLOG`, `GXV_RESUME_RESET`, `GXV_RIGIDMERGE_DLMAX`, `GXV_FXHALF`, `GXV_VITA_DISPLAY_SCENES` (default 1) / `FBO_SCENES` (default 8) / `TRIPLE` / `RTMEM_LOG`.
-- Compiled-shader seed: 1,417 programs under `c0477cd7` (1.0's 1,131 byte-identical, plus the shaders 1.2's fixes change, compiled in Vita3K with the console's compiler).
+- **Found on the console (31 Oct 2026):**
+  - Frame arenas reserved at their floors at start-up and grown in steps, never doubled (`platform/vgx/src/vgx_arena.h`, `GXV_ARENA_KIB`; host heap exhaustion after ~14 galaxies in one session).
+  - The C heap's use, its growth steps and the heap-exhausted FATAL line in the player log every 30 s.
+  - A step below 640x456 is judged on the GPU's busy time; while the 30 floor is missed any real saving (3 %) is kept, otherwise half the predicted saving; useless steps are undone and remembered per stage (`vgx_autoq`).
+  - The controller's 60 target (`GXV_AUTOQ_TARGET=60`) is in the code but not offered in Settings in 1.2.
+  - The packaged shader seed is read in place as a read-only second level behind the card's cache (no copy on the first start; `GXV_VITA_SEED=copy` restores the copy).
+  - Title capture accepts the title camera's cyan planet horizon; no picture work when the console refuses the app and appmeta folders (a retail Vita does).
+  - Hints whose Vita wording made a line too wide are wrapped again at spaces; env.txt lines up to 2 KiB.
+- Compiled-shader seed: 2,144 programs under `c0477cd7`, compiled on a PS Vita by a tour of all 45 galaxies with the 1.2 shader generator, plus the learned warm-up list.
 
 ## Version 1.1 (`galaxy-v1.1`)
 
