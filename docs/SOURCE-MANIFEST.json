@@ -6208,7 +6208,7 @@
     },
     {
       "path": "decomp/include/Game/Util/Color.hpp",
-      "sha256": "23662a908c4d6d36cb82dadda956421519f4305878ebce37ec98529b11b14604"
+      "sha256": "423216469cd5bc98e785a82402688996545bbc0f1168b8ab2cfa8f0da95ab66a"
     },
     {
       "path": "decomp/include/Game/Util/DemoUtil.hpp",
@@ -19080,7 +19080,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_draw.cpp",
-      "sha256": "1fe3a38949c1483a8192181e3459a6220b775df7523983a40b6fb6f056ed24bd"
+      "sha256": "cdb9c470d76ff5d4a5a996229dfc9e4d1cf55915a1855c9ea243d387b1404f8c"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.cpp",
@@ -19092,7 +19092,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_fixes.h",
-      "sha256": "30daf80f7cece2f4860f675670296794306eca0e4585cceb7be30a792105f1b5"
+      "sha256": "5e3c4f9d8cb3b219524bcb695faba5c82efb80744c86f6fe97bc1e4f659d59fa"
     },
     {
       "path": "platform/vgx/src/vgx_guestmem.cpp",
@@ -19132,11 +19132,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_shadergen.cpp",
-      "sha256": "7bb6e4b0bc17e79ba65026a3b2f55c156259e54d69f988c3a7cfadf3b5428214"
+      "sha256": "c9ac850bd7a6905c4ac7f89eeedff1b139b7e531dbb21bf8860362249b45a033"
     },
     {
       "path": "platform/vgx/src/vgx_shadergen.h",
-      "sha256": "323b3b65e27a0da6e936d3525ac1a3dbb60e34707ae40562db79941c21635cdc"
+      "sha256": "a57708b01b5060568ef392bb794edd764b0650c9061908af9e375b898d64a2f8"
     },
     {
       "path": "platform/vgx/src/vgx_state.cpp",
@@ -19277,6 +19277,10 @@
     {
       "path": "tests/boot_data_startup.cpp",
       "sha256": "ed8130d9a4108b45f3d77c64f26064a1ddfa1d237f0d1dee5f4dacacf7d7b2ad"
+    },
+    {
+      "path": "tests/color8_byte_order.cpp",
+      "sha256": "ca9bedbdfc0c4770a6222fbfc93761ce3c6c2aee19780734e3aec84de7d0f2b4"
     },
     {
       "path": "tests/control_bindings.cpp",
@@ -19851,6 +19855,10 @@
       "sha256": "6ecdbecffb1c1b91e4190caaca68426914bbb76c5e483db016a06007618acc26"
     },
     {
+      "path": "tests/vgx_lines_gl.cpp",
+      "sha256": "187c248c77e907121e8bb8fe65aecdb8e22f2eb4a2ba21eac340e9b09938cd74"
+    },
+    {
       "path": "tests/vgx_lodbias_gl.cpp",
       "sha256": "71cdea95afbce9b8dcdcde31a8dec1fa20ae791ba92cbbeeee1d40040a4b38a2"
     },
@@ -20201,6 +20209,10 @@
     {
       "path": "tools/check-files.py",
       "sha256": "ddf247b042a4c921381cd30d2e2d1f903f17645fb736fff143c97e051ecf8d78"
+    },
+    {
+      "path": "tools/check_color8_units.sh",
+      "sha256": "7e2f915eead9a1fdbb3581a7a90fc18365a10bf087a260a879371bf3aca7415f"
     },
     {
       "path": "tools/check_reduced_motion_units.sh",
@@ -20639,6 +20651,10 @@
       "sha256": "51bae070423de1daec436956e3ab4fbfdfeeb4dd775fc85d7ff93383e2810481"
     },
     {
+      "path": "tools/test_color8.sh",
+      "sha256": "c9229ef1e64fce4b9ee912d722dace7f3cfcdf3348684129bbaeb27b97e29715"
+    },
+    {
       "path": "tools/test_control_bindings.sh",
       "sha256": "c64751ee5e7ebc02d386ec6a964dbf56b351092a8734c707f7524ab7dd903a26"
     },
@@ -21001,6 +21017,10 @@
     {
       "path": "tools/test_vgx_linear_texture.sh",
       "sha256": "7e8f72385976330def37dcef58b289e7fa41b860fc58e667521f2903339650a8"
+    },
+    {
+      "path": "tools/test_vgx_lines_gl.sh",
+      "sha256": "2b2d9488970995e85a022ad25032336365856fdc547adb19608f5b65c35721b7"
     },
     {
       "path": "tools/test_vgx_lodbias_gl.sh",
@@ -21572,7 +21592,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "b0eed031f7ccb025073204fe7ab9a345d866e1cc44a1006ae5c207ddc2b3b4a2"
+      "sha256": "de80b270e9d17583ad154cea59c44a5dcca5fa903c01c433500bd21037536a84"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
