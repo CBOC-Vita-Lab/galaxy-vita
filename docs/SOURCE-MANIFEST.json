@@ -14260,7 +14260,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/GameScene.cpp",
-      "sha256": "b1418abe293997a1be59b809426ff10ebe4f50da955c4d54b205dec2a2a1413d"
+      "sha256": "a007dbe617d859d39bb5755db8727c64676babe4dfb13a70efac4f04b5de9a5a"
     },
     {
       "path": "decomp/src/Game/Scene/GameSceneFunction.cpp",
@@ -18836,7 +18836,7 @@
     },
     {
       "path": "platform/src/input/wpad.cpp",
-      "sha256": "f32d5794722744210cf0764546f03c3e6fc5bab10388510980c4cd629811e8c1"
+      "sha256": "a028c308523a4c451fa0fa59f20f9eaf50628ba07db9d92563c62b154205b001"
     },
     {
       "path": "platform/src/nand/nand.cpp",
@@ -19024,7 +19024,7 @@
     },
     {
       "path": "platform/vgx/host/vgx_host_egl.cpp",
-      "sha256": "703b6b031c1483cdce7c610761f1106ad32b9bee1a113a56b84f097d30661d86"
+      "sha256": "b56f65cb9a37fb472577b388c835206afe94c95995b49130ef608bbc52acb569"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.cpp",
@@ -19036,7 +19036,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
-      "sha256": "6a59c860df4e89368b508c28e2ec42de3074e5e1b6c39c0b105b386d605e11fd"
+      "sha256": "b1ff60a229b03fe091489edd175f654c29319129eab49133016b4c30e6bffbe7"
     },
     {
       "path": "platform/vgx/src/vgx_backend_null.cpp",
@@ -19128,7 +19128,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_sanitize.h",
-      "sha256": "0b3e94087bf9a4303eadab6f584a8320e181ddef652cbc1c0c72afd1039df1ff"
+      "sha256": "c219de159e10d7c0bafc31b2d6054f39835b3cb9cafc091c1ddf1fc096ce0d6b"
     },
     {
       "path": "platform/vgx/src/vgx_shadergen.cpp",
@@ -19563,8 +19563,16 @@
       "sha256": "4b565284b0c771fe41c389d9ac3aef5db628a78d573dbdeb1e7eb2b655e48786"
     },
     {
+      "path": "tests/spin_detect.cpp",
+      "sha256": "994aadcc33b77d01634c4758a7d8d43af46964e352accda8db725ee36e29edbf"
+    },
+    {
+      "path": "tests/spin_detect_stubs/Game/System/WPad.hpp",
+      "sha256": "ed137c5cd01a6f6a65f6cdfb9c4fe9064f3f53d7da6be81d57fd393f5da40797"
+    },
+    {
       "path": "tests/spin_paths.cpp",
-      "sha256": "abb60ce7ff947bfda604d7961e28307bebbd14250e9fafe8f6eecab6744a00f0"
+      "sha256": "47196d1d0fb2e60e63234ee33f0cf76e90eb9388a9133cb968ddbdb293d48bcb"
     },
     {
       "path": "tests/tap_clean.cpp",
@@ -19900,11 +19908,11 @@
     },
     {
       "path": "tests/vgx_sanitize.cpp",
-      "sha256": "ff4f7446c279d067d44068844cca422ccf0c388289e932bf1fe652b9807ca241"
+      "sha256": "9b33f66554df4bdd8947e2b004449cd25d0802b6460ff9afa869b107d89c5562"
     },
     {
       "path": "tests/vgx_sanitize_gl.cpp",
-      "sha256": "ac83912a5cd058f78f4e135011d91847ef1f879bfc05ed9c0951dc08aaadb897"
+      "sha256": "fdb6f9696fb8baf5a6bb13d1b5ba80f127ab4020b3d77b8f3fa687437cb0c59d"
     },
     {
       "path": "tests/vgx_shader_learning.cpp",
@@ -20823,8 +20831,12 @@
       "sha256": "803034a27564878c0ce0a53fb89dc6cebab56386ed63cd6be71dba5b0edaa766"
     },
     {
+      "path": "tools/test_spin_detect.sh",
+      "sha256": "8b1d09b6b4fc983d9b2c29959879aa6c20d6ce67cbbfb4419c84c2579a8c6ee1"
+    },
+    {
       "path": "tools/test_spin_paths.sh",
-      "sha256": "89aaef522765c2d7ede48103307afbfd07462aee23d149163e1362d97c37cc78"
+      "sha256": "ce4487bfae1773ff782a5b6c194622998652e828607fe5a3b1d20e387ac76ebb"
     },
     {
       "path": "tools/test_tap_clean.sh",
@@ -21044,7 +21056,7 @@
     },
     {
       "path": "tools/test_vgx_sanitize_gl.sh",
-      "sha256": "60673758216e04f0217f02fdaa4b737a6d0a3ce5ce29cfc5497d5224fd913d45"
+      "sha256": "745fa7ba2112918fdce3637d39b6f3e4142aeb05aa71503584daee741b2e3361"
     },
     {
       "path": "tools/test_vgx_shader_learning.sh",
@@ -21560,7 +21572,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "e60ce27a658771bb11f82e5ab832ed97fcd179a2301157f7c5ca58fb25fbd4d8"
+      "sha256": "b0eed031f7ccb025073204fe7ab9a345d866e1cc44a1006ae5c207ddc2b3b4a2"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
