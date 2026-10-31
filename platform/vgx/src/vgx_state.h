@@ -29,6 +29,8 @@ const GuestHooks& Hooks();
 bool FixLodBias();
 // GXV_FIX_TEVIN (default 0, read once): TEV inputs A, B and C read the low 8 bits of a register (FsKey::inWrap), see State::tevOor.
 bool FixTevIn();
+// FixTevIn(), or GXV_FS_HALF=1 / 3: State::tevOor is kept up to date (and is part of the key hash).
+bool TevOorTracked();
 bool StaticCrowdEnabled();
 void QueueCrowdSnapshot(const staticcrowd::Tag* tags, uint32_t count, bool valid);
 void ResetCrowdTags();
@@ -181,7 +183,7 @@ struct State {
     // TEV colour registers (bits 0..3: PREV, REG0, REG1, REG2) and konst colours (bits 4..7)
     // written since the last draw: the TEV block's values, apart from bpDirty.
     uint8_t tevColDirty = 0xFF;
-    // GXV_FIX_TEVIN: 1 while a TEV colour register (PREV, REG0..2, any component) is outside 0..255; part of the shader key hash (FsKey::inWrap).
+    // GXV_FIX_TEVIN (and GXV_FS_HALF=1 / 3: TevOorTracked): 1 while a TEV colour register (PREV, REG0..2, any component) is outside 0..255; part of the shader key hash (FsKey::inWrap).
     uint8_t tevOor = 0;
     bool layoutDirty = true;  // VCD / VAT
     uint32_t vcdGen = 0;      // counts the changes of the vertex descriptor (FoldGuess)

@@ -219,10 +219,12 @@ int main(int argc,char** argv) {
             for (unsigned i=0;i<1024;++i) { draw.tex[0].texId=1000+i; Execute(commands); }
             Require(!audit || (AuditLines()<200 && AuditHas("suppressed=")),"unique fallback floods are capped with a suppression summary");
             RequireGreenPixels();
-        } else if (mode == "fs-half" || mode == "fs-half-off") {
+        } else if (mode == "fs-half" || mode == "fs-half-off" || mode == "fs-half-eligible") {
             // GXV_FS_HALF: off (the default) the sources are the two parts they always were and vitaGL's precision mode is never touched;
-            // on, the fragment source has the marker part in front of its text and the low-precision mode is on around the link only.
-            if (mode == "fs-half") setenv("GXV_FS_HALF","1",1); else unsetenv("GXV_FS_HALF");
+            // 2 (every shader): the fragment source has the marker part in front of its text and the low-precision mode is on around the link only;
+            // 1 (eligible shaders only): the choice is in the shader text (half types), so the source is still the two parts, with no marker, and
+            // vitaGL's precision mode is never touched either.
+            if (mode == "fs-half") setenv("GXV_FS_HALF","2",1); else if (mode == "fs-half-eligible") setenv("GXV_FS_HALF","1",1); else unsetenv("GXV_FS_HALF");
             RegisterPair(); Require(GetProgram(3,4).ok,"program links with the switch");
             RenderRecovered();
             Require(vsParts == 2,"the vertex source is always the two parts");
@@ -230,7 +232,7 @@ int main(int argc,char** argv) {
                 Require(fsParts == 3 && fsMarker,"the fragment source carries the marker (its compiled-shader cache key differs)");
                 Require(lowAtLink && !lowOn && lowCalls == 2,"low precision is on during the link and off again after it");
             } else {
-                Require(fsParts == 2 && !fsMarker && lowCalls == 0 && !lowAtLink,"switch off: no marker, vitaGL's precision mode untouched");
+                Require(fsParts == 2 && !fsMarker && lowCalls == 0 && !lowAtLink,"switch off or 1: no marker, vitaGL's precision mode untouched");
             }
         } else if (mode == "audit-read-once") {
             RegisterPair(true); Require(!GetProgram(3,4).ok,"invalid source exercises first audit read");

@@ -552,6 +552,9 @@ void BuildFsKey(FsKey& k) {
     }
     if (FixLogicOp() && !blending && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3) k.logicSrc = fixes::LogicOpPlan(bits(cm0, 12, 4)).src;
     if (FixTevIn() && g.tevOor) k.inWrap = 1; // (GXV_FIX_TEVIN: a TEV register outside 0..255; State::tevOor)
+    // GXV_FS_HALF=1 / 3 without GXV_FIX_TEVIN: a register outside 0..255 only matters to a key the half precision analysis would take (it assumes
+    // registers in 0..1); that one is marked (bit 1: no wrap code, not half) so that it gets the float shader. Every other key is unchanged.
+    else if (g.tevOor && TevOorTracked() && FsHalfEligible(k)) k.inWrap = 2;
 }
 
 void BuildVsKey(VsKey& k, uint8_t numTexGens, uint8_t palCls, uint8_t fsFog) {

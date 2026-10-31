@@ -159,13 +159,19 @@ std::string Swizzle(uint8_t swap) {
 // UB_TEV as vec4 indices
 enum { V_REG = 0, V_KONST = 4, V_MISC = 8, V_FOG = 9, V_FOGCOL = 10, V_INDMTX = 11, V_INDSCALE = 17, V_TEXSIZE = 21, V_LODBIAS = 25 };
 
-const char* ColorArg(uint32_t a) {
+// (t3: the three-component type the shader declares its colours with, "vec3", or "hvec3" for a half precision shader)
+std::string ColorArg(uint32_t a, const char* t3) {
     static const char* const t[16] = {"prev.rgb", "prev.aaa", "c0.rgb", "c0.aaa", "c1.rgb", "c1.aaa", "c2.rgb", "c2.aaa",
-                                      "tex.rgb", "tex.aaa", "ras.rgb", "ras.aaa", "vec3(1.0)", "vec3(0.5)", "kc", "vec3(0.0)"};
-    return t[a & 15];
+                                      "tex.rgb", "tex.aaa", "ras.rgb", "ras.aaa", nullptr, nullptr, "kc", nullptr};
+    switch (a & 15) {
+    case 12: return std::string(t3) + "(1.0)";
+    case 13: return std::string(t3) + "(0.5)";
+    case 15: return std::string(t3) + "(0.0)";
+    default: return t[a & 15];
+    }
 }
-// The colour / alpha input with the low-8-bit wrap (FsKey::inWrap) on register reads (selectors 0..7 / 0..3).
-std::string WrapArg(const char* plain, bool reg, bool color) {
+// The colour / alpha input with the low-8-bit wrap (FsKey::inWrap bit 0) on register reads (selectors 0..7 / 0..3).
+std::string WrapArg(const std::string& plain, bool reg, bool color) {
     if (!reg) return plain;
     return std::string(color ? "vgx_w3(" : "vgx_w1(") + plain + ")";
 }
@@ -177,18 +183,18 @@ const char* RegName(uint32_t r) {
     static const char* const t[4] = {"prev", "c0", "c1", "c2"};
     return t[r & 3];
 }
-std::string KonstColor(uint8_t sel) {
+std::string KonstColor(uint8_t sel, const char* t3) {
     char b[64];
-    if (sel < 8) { std::snprintf(b, sizeof b, "vec3(%.3f)", (8 - sel) / 8.0); return b; }
-    if (sel < 12) return "vec3(0.0)";
+    if (sel < 8) { std::snprintf(b, sizeof b, "%s(%.3f)", t3, (8 - sel) / 8.0); return b; }
+    if (sel < 12) return std::string(t3) + "(0.0)";
     const int k = sel & 3;
     static const char* const comp[5] = {"rgb", "rrr", "ggg", "bbb", "aaa"};
     std::snprintf(b, sizeof b, "u_tev[%d].%s", V_KONST + k, comp[(sel - 12) >> 2]);
     return b;
 }
-std::string KonstAlpha(uint8_t sel) {
+std::string KonstAlpha(uint8_t sel, bool half) {
     char b[64];
-    if (sel < 8) { std::snprintf(b, sizeof b, "%.3f", (8 - sel) / 8.0); return b; }
+    if (sel < 8) { std::snprintf(b, sizeof b, half ? "hfloat(%.3f)" : "%.3f", (8 - sel) / 8.0); return b; }
     if (sel < 16) return "0.0";
     const int k = sel & 3;
     static const char* const comp[4] = {"r", "g", "b", "a"};
@@ -276,20 +282,238 @@ void UnitFinal(const FsKey& k, bool verify, bool& color, bool& alpha) {
     }
 }
 
-} // namespace
-
-void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
-    Out o;
-    // GXV_TEVWRAP=1 repairs out-of-range final TEV bytes before alpha testing.
-    // Read once: shader code and its source-hashed compiled cache stay stable per process.
-    // GXV_TEVWRAP=2 wraps only the final alpha (enough for the eye repair: its biased alpha decides the
-    // alpha test) and leaves RGB clamped as in 1.0, at a quarter of the extra per-pixel work.
+// The final-value wrap GXV_TEVWRAP asks for, for this key (GenerateFragmentShader and the half precision analysis both read it).
+// GXV_TEVWRAP=1 repairs out-of-range final TEV bytes before alpha testing.
+// Read once: shader code and its source-hashed compiled cache stay stable per process.
+// GXV_TEVWRAP=2 wraps only the final alpha (enough for the eye repair: its biased alpha decides the
+// alpha test) and leaves RGB clamped as in 1.0, at a quarter of the extra per-pixel work.
+// GXV_TEVWRAP_ELIDE is read once: 0/default keeps the original source; 1 elides only
+// proven unit-range copies; 2 independently verifies the proof with fallback.
+void FinalWrapPlan(const FsKey& k, bool& wrapColor, bool& wrapAlpha) {
     static const long wrapMode = EnvInt("GXV_TEVWRAP", 0);
     static const bool wrapFinal = wrapMode == 1 || wrapMode == 2;
     static const bool wrapRgb = wrapMode == 1;
-    // GXV_TEVWRAP_ELIDE is read once: 0/default keeps the original source; 1 elides only
-    // proven unit-range copies; 2 independently verifies the proof with fallback.
     static const long elide = EnvInt("GXV_TEVWRAP_ELIDE", 0);
+    bool unitColor = false, unitAlpha = false;
+    if (wrapFinal && (elide == 1 || elide == 2)) UnitFinal(k, elide == 2, unitColor, unitAlpha);
+    const FsKey::Stage& last = k.stage[k.numStages - 1];
+    wrapColor = wrapRgb && !bits(last.color, 19, 1) && !unitColor;
+    wrapAlpha = wrapFinal && !bits(last.alpha, 19, 1) && !unitAlpha;
+}
+
+// ---- GXV_FS_HALF: which fragment shaders may run in half precision --------------------------------------------------------------
+//
+// The half shader keeps texture coordinates (varyings v_texN, uvN, the projective divide), the alpha-test arithmetic and gl_FragColor in
+// float. Its TEV colour variables (registers, tex, ras, kc, ka, a b c d, the stage results, fin) and the u_tev uniform array are half
+// (10-bit mantissa, unit round-off u = 2^-11, |fl16(x) - x| <= u |x|); every arithmetic operation rounds its result to half. What the
+// analysis below does is a forward error analysis of exactly the operations GenerateFragmentShader emits, on the keys it accepts:
+//   * each value is an interval [lo, hi] with an absolute error bound e (the largest |half value - float value|);
+//   * inputs: texture samples, rasterised colours, TEV registers and konst colours are in 0..1 (the texture unit and the lighting
+//     are unit-range; the registers are, as long as the front end has not set FsKey::inWrap bit 1) and are rounded to half once (e = u);
+//     0, 0.5, 1 and n/8 are exact;
+//   * a + b, a - b, a * b round their result (e += u * max|result|); an operand that is exactly 0 (or, for a product, exactly 1) makes
+//     the operation exact; the scales 2, 4 and 0.5 are exact; clamp does not grow the error;
+//   * mix(a, b, c) is bounded as the worse of its two usual code forms a + c * (b - a) and a * (1 - c) + b * c;
+//   * the bound of the final value is e * 255 in 8-bit levels. The float shader's own value is taken as exact (its error is 2^-24).
+// If |x - y| <= 1 level, round(255 x) and round(255 y) differ by at most 1; so a bound of 1 level means "at most one level off in any
+// pixel". Whether the same level is hit depends on where the float value sits between two levels: see tests/vgx_fshalf_test.cpp for
+// how often that is.
+//
+// Keys the analysis does not take (the first one found is reported):
+//   indirect stages       texel-unit arithmetic, coordinates times 256 and wrapped, offsets from textures
+//   fog                   the factor c1 * w + c0 needs float parameters (large terms that cancel), and u_tev is one half array
+//   compare-mode stages   (a > b) and (a == b) with a 0.25 / 255 tolerance decide on differences far below half precision
+//   final wrap            vgx_wrap_final: byteValue = value * 255 up to 1023 has a spacing of 0.5 in half
+//   inWrap                a register outside 0..255 (range assumption of the analysis, and TEVIN wrap code)
+//   logicSrc              output inverted or whitened (not worth another operation to prove)
+// Not a reason: texture size or projective coordinates (float), alpha-test references (integers 0..255 are exact in half), a texture LOD
+// bias (a multiple of 1/32 in -4..4: exact), ztex (unused by the generator), dstAlpha (an exact 8-bit constant), regFromVtx.
+constexpr double kU16 = 1.0 / 2048.0;     // unit round-off of half
+constexpr double kTiny16 = 1.0 / 33554432.0; // 2^-25: largest rounding error of a half subnormal result
+
+struct Ab {
+    double lo, hi, e;
+    double mag() const { return std::max(std::fabs(lo), std::fabs(hi)); }
+    bool zero() const { return lo == 0.0 && hi == 0.0 && e == 0.0; }
+    bool one() const { return lo == 1.0 && hi == 1.0 && e == 0.0; }
+};
+Ab AbExact(double v) { return {v, v, 0.0}; }
+Ab AbIn(double lo, double hi) { // a float value rounded to half
+    Ab r{lo, hi, 0.0};
+    r.e = kU16 * r.mag() + kTiny16;
+    return r;
+}
+double AbRound(double lo, double hi) { return kU16 * std::max(std::fabs(lo), std::fabs(hi)) + kTiny16; }
+Ab AbAdd(const Ab& a, const Ab& b) {
+    if (a.zero()) return b;
+    if (b.zero()) return a;
+    Ab r{a.lo + b.lo, a.hi + b.hi, a.e + b.e};
+    r.e += AbRound(r.lo, r.hi);
+    return r;
+}
+Ab AbSub(const Ab& a, const Ab& b) {
+    if (b.zero()) return a;
+    if (a.zero()) return {-b.hi, -b.lo, b.e};
+    Ab r{a.lo - b.hi, a.hi - b.lo, a.e + b.e};
+    r.e += AbRound(r.lo, r.hi);
+    return r;
+}
+Ab AbMul(const Ab& a, const Ab& b) {
+    if (a.zero() || b.zero()) return AbExact(0.0);
+    if (a.one()) return b;
+    if (b.one()) return a;
+    const double p[4] = {a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi};
+    Ab r{std::min(std::min(p[0], p[1]), std::min(p[2], p[3])), std::max(std::max(p[0], p[1]), std::max(p[2], p[3])), 0.0};
+    r.e = a.mag() * b.e + b.mag() * a.e + a.e * b.e + AbRound(r.lo, r.hi);
+    return r;
+}
+Ab AbScale(const Ab& a, double f) { // by a power of two: exact
+    Ab r{std::min(a.lo * f, a.hi * f), std::max(a.lo * f, a.hi * f), a.e * std::fabs(f)};
+    return r;
+}
+Ab AbClamp(const Ab& a, double lo, double hi) {
+    auto C = [&](double v) { return std::min(std::max(v, lo), hi); };
+    Ab r{C(a.lo), C(a.hi), a.e};
+    r.e = std::min(r.e, C(a.hi + a.e) - C(a.lo - a.e)); // both values are inside the clamp range
+    return r;
+}
+// mix(a, b, c): the worse of  a + c * (b - a)  and  a * (1 - c) + b * c;  the range is that of a convex combination when c is in 0..1
+Ab AbMix(const Ab& a, const Ab& b, const Ab& c) {
+    const Ab m1 = AbAdd(a, AbMul(c, AbSub(b, a)));
+    const Ab m2 = AbAdd(AbMul(a, AbSub(AbExact(1.0), c)), AbMul(b, c));
+    Ab r = m1.e >= m2.e ? m1 : m2;
+    if (c.lo >= 0.0 && c.hi <= 1.0) {
+        r.lo = std::min(a.lo, b.lo);
+        r.hi = std::max(a.hi, b.hi);
+    }
+    return r;
+}
+
+struct HalfRegs { Ab rgb, a; };
+
+FsHalfReport AnalyseHalf(const FsKey& k) {
+    FsHalfReport rep;
+    auto No = [&](const char* why) { rep.why = why; return rep; };
+    if (k.numIndStages) return No("indirect stage");
+    if (k.fog) return No("fog");
+    if (k.inWrap) return No("TEV register outside 0..255");
+    if (k.logicSrc) return No("logic-op output");
+    bool wrapColor = false, wrapAlpha = false;
+    FinalWrapPlan(k, wrapColor, wrapAlpha);
+    if (wrapColor || wrapAlpha) return No("final value wrap");
+    for (int s = 0; s < k.numStages; ++s) {
+        if (k.stage[s].ind) return No("indirect stage");
+        if (bits(k.stage[s].color, 16, 2) == 3 || bits(k.stage[s].alpha, 16, 2) == 3) return No("compare-mode stage");
+    }
+    const Ab in01 = AbIn(0.0, 1.0);
+    const Ab one = AbExact(1.0), zero = AbExact(0.0);
+    HalfRegs reg[4];
+    reg[0] = {in01, in01};
+    reg[1] = {in01, in01};
+    reg[2] = {in01, in01};
+    reg[3] = {in01, in01};
+    HalfRegs tex{one, one}, ras{zero, zero};
+    Ab kc = one, ka = one;
+    for (int s = 0; s < k.numStages; ++s) {
+        const FsKey::Stage& st = k.stage[s];
+        if (st.texEnable) tex = {in01, in01};
+        else if (st.texOff) tex = {one, one};
+        if (st.rasChan < 2) ras = {in01, in01};
+        else ras = {zero, zero};
+        const uint32_t tc = st.color, ta = st.alpha;
+        bool kcUsed = false, kaUsed = false;
+        for (int i = 0; i < 4; ++i) {
+            if (bits(tc, i * 4, 4) == 14) kcUsed = true;
+            if (bits(ta, 4 + i * 3, 3) == 6) kaUsed = true;
+        }
+        if (kcUsed) {
+            const uint8_t sel = st.kcsel;
+            kc = sel < 8 ? AbExact((8 - sel) / 8.0) : sel < 12 ? zero : in01;
+        }
+        if (kaUsed) {
+            const uint8_t sel = st.kasel;
+            ka = sel < 8 ? AbExact((8 - sel) / 8.0) : sel < 16 ? zero : in01;
+        }
+        auto ColorArg = [&](uint32_t a) -> Ab {
+            switch (a & 15) {
+            case 0: return reg[0].rgb;  case 1: return reg[0].a;
+            case 2: return reg[1].rgb;  case 3: return reg[1].a;
+            case 4: return reg[2].rgb;  case 5: return reg[2].a;
+            case 6: return reg[3].rgb;  case 7: return reg[3].a;
+            case 8: return tex.rgb;     case 9: return tex.a;
+            case 10: return ras.rgb;    case 11: return ras.a;
+            case 12: return one;        case 13: return AbExact(0.5);
+            case 14: return kc;         default: return zero;
+            }
+        };
+        auto AlphaArg = [&](uint32_t a) -> Ab {
+            switch (a & 7) {
+            case 0: return reg[0].a; case 1: return reg[1].a; case 2: return reg[2].a; case 3: return reg[3].a;
+            case 4: return tex.a;    case 5: return ras.a;    case 6: return ka;        default: return zero;
+            }
+        };
+        auto Combine = [&](uint32_t reg32, const Ab& A, const Ab& B, const Ab& C, const Ab& D) {
+            const uint32_t bias = bits(reg32, 16, 2), op = bits(reg32, 18, 1), clampOn = bits(reg32, 19, 1), scale = bits(reg32, 20, 2);
+            Ab r = AbMix(A, B, C);
+            r = op ? AbSub(D, r) : AbAdd(D, r);
+            if (bias == 1) r = AbAdd(r, AbExact(0.5));
+            else if (bias == 2) r = AbSub(r, AbExact(0.5));
+            static const double kScale[4] = {1.0, 2.0, 4.0, 0.5};
+            r = AbScale(r, kScale[scale]);
+            // (the half text clamps to the half values of -4.0157 / 4.0118: 4.015625 / 4.01171875, a difference of 1e-4 at most)
+            if (clampOn) return AbClamp(r, 0.0, 1.0);
+            r = AbClamp(r, -4.0157, 4.0118);
+            r.e += 1e-4;
+            return r;
+        };
+        const Ab cr = Combine(tc, ColorArg(bits(tc, 12, 4)), ColorArg(bits(tc, 8, 4)), ColorArg(bits(tc, 4, 4)), ColorArg(bits(tc, 0, 4)));
+        const Ab ar = Combine(ta, AlphaArg(bits(ta, 13, 3)), AlphaArg(bits(ta, 10, 3)), AlphaArg(bits(ta, 7, 3)), AlphaArg(bits(ta, 4, 3)));
+        reg[bits(tc, 22, 2)].rgb = cr;
+        reg[bits(ta, 22, 2)].a = ar;
+    }
+    const FsKey::Stage& last = k.stage[k.numStages - 1];
+    const Ab fr = AbClamp(reg[bits(last.color, 22, 2)].rgb, 0.0, 1.0);
+    const Ab fa = AbClamp(reg[bits(last.alpha, 22, 2)].a, 0.0, 1.0);
+    rep.eligibleShape = true;
+    rep.colorLevels = fr.e * 255.0;
+    rep.alphaLevels = fa.e * 255.0;
+    rep.alphaTested = k.alphaTestOn && !(NoDiscard() && AlphaTestAlwaysPasses(k.alphaTest & 7, -1, (k.alphaTest >> 6) & 3, (k.alphaTest >> 3) & 7, -1));
+    if (k.dstAlpha) rep.alphaLevels = AbIn(0.0, 1.0).e * 255.0; // a constant 8-bit alpha, rounded to half once
+    return rep;
+}
+
+} // namespace
+
+long FsHalfMode() {
+    static const long m = [] {
+        const long v = EnvInt("GXV_FS_HALF", 0); // 0 off, 1 eligible shaders, 2 every shader (vitaGL patch 0012), 3 eligible, strict bound
+        return v >= 1 && v <= 3 ? v : 0L;
+    }();
+    return m;
+}
+FsHalfReport FsHalfAnalyse(const FsKey& key) { return AnalyseHalf(key); }
+bool FsHalfReport::Eligible(long mode) const {
+    if (!eligibleShape) return false;
+    const double limit = mode == 3 ? kHalfMaxLevelsStrict : kHalfMaxLevels;
+    return colorLevels <= limit && alphaLevels <= (alphaTested ? kHalfMaxLevelsAlphaTest : limit);
+}
+bool FsHalfEligible(const FsKey& key) {
+    const long m = FsHalfMode();
+    return (m == 1 || m == 3) && AnalyseHalf(key).Eligible(m);
+}
+
+namespace {
+void GenerateFragmentShaderAs(const FsKey& k, ShaderSource& src, bool hf);
+}
+void GenerateFragmentShader(const FsKey& k, ShaderSource& src) { GenerateFragmentShaderAs(k, src, FsHalfEligible(k)); }
+void GenerateFragmentShaderPrecision(const FsKey& k, ShaderSource& src, bool half) {
+    GenerateFragmentShaderAs(k, src, half && AnalyseHalf(k).eligibleShape);
+}
+
+namespace {
+void GenerateFragmentShaderAs(const FsKey& k, ShaderSource& src, bool hf) {
+    Out o;
+    // GXV_TEVWRAP / GXV_TEVWRAP_ELIDE: see FinalWrapPlan.
     // GXV_FIX_INDPREV (default 0 until seen on the console: it changes the text of add-previous keys, whose compiled shaders are then not in the shipped cache; 1 = the fix): an indirect stage that adds the previous stage's coordinate
     // (BP 0x10+n bit 20, GX_ITB addprev) adds it in texels, as GX does. The old text added the previous stage's
     // already-normalised coordinate to texel units, so the carried-over part was ~1/texture-size of what it should be.
@@ -298,11 +522,16 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     bool indPrev = false;
     for (int s = 0; indPrevOn && s < k.numStages; ++s)
         if (k.stage[s].ind && bits(k.stage[s].ind, 20, 1)) indPrev = true;
-    bool unitColor = false, unitAlpha = false;
-    if (wrapFinal && (elide == 1 || elide == 2)) UnitFinal(k, elide == 2, unitColor, unitAlpha);
+    // hf (GXV_FS_HALF=1 / 3, a key the analysis accepts): the shader is written with half precision colour variables (see FsHalfAnalyse).
+    // Every other key, and every key with the switch off or 2, is written exactly as before (hf false: the strings below are the old ones).
+    const char* const T1 = hf ? "hfloat" : "float";
+    const char* const T3 = hf ? "hvec3" : "vec3";
+    const char* const T4 = hf ? "hvec4" : "vec4";
+    // a float constant in a half expression: written as a half constant, so that no operation is promoted to float for its literal
+    auto L = [&](const char* lit) -> std::string { return hf ? std::string("hfloat(") + lit + ")" : std::string(lit); };
     const FsKey::Stage& last = k.stage[k.numStages - 1];
-    const bool wrapColor = wrapRgb && !bits(last.color, 19, 1) && !unitColor;
-    const bool wrapAlpha = wrapFinal && !bits(last.alpha, 19, 1) && !unitAlpha;
+    bool wrapColor = false, wrapAlpha = false;
+    FinalWrapPlan(k, wrapColor, wrapAlpha);
     uint8_t texMask = 0;
     bool usesCol[2] = {false, false};
     for (int s = 0; s < k.numStages; ++s) {
@@ -312,6 +541,12 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     for (int i = 0; i < k.numIndStages; ++i) texMask |= static_cast<uint8_t>(1u << k.ind[i].texMap);
 
     o("#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n");
+    if (hf) {
+        // The half types: Cg's own half under vitaGL (its GLSL preprocessor, which defines VITAGL, expands these before the translator
+        // sees the text, and the translator does not rewrite them), plain float types on a PC.
+        o("#ifdef VITAGL\n#define hfloat half\n#define hvec3 half3\n#define hvec4 half4\n#else\n"
+          "#define hfloat float\n#define hvec3 vec3\n#define hvec4 vec4\n#endif\n");
+    }
     if (wrapColor || wrapAlpha) {
         // Keep in-range fractions unchanged. This repairs final conversion only, not
         // the existing normalized-float approximation of intermediate GX arithmetic.
@@ -320,7 +555,7 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
           "  float byteValue = floor(value * 255.0 + 0.5);\n"
           "  return (byteValue - 256.0 * floor(byteValue / 256.0)) / 255.0;\n}\n");
     }
-    if (k.inWrap) {
+    if (k.inWrap & 1) {
         // (GXV_FIX_TEVIN) byte wrap of a register value, as GX's `& 255` on the inputs A, B, C; values in range are returned unchanged
         o("float vgx_w1(float value) {\n"
           "  if (value >= 0.0 && value <= 1.0) return value;\n"
@@ -330,14 +565,15 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     }
     for (int m = 0; m < 8; ++m)
         if (texMask & (1u << m)) o("uniform sampler2D u_tex%d;\n", m);
-    o("uniform vec4 u_tev[%d];\n", FsTevCount(k));
-    if (usesCol[0] || (k.regFromVtx & 1)) o("varying vec4 v_col0;\n");
-    if (usesCol[1] || (k.regFromVtx & 2)) o("varying vec4 v_col1;\n");
+    o("uniform %s u_tev[%d];\n", T4, FsTevCount(k));
+    if (usesCol[0] || (k.regFromVtx & 1)) o("varying %s v_col0;\n", T4);
+    if (usesCol[1] || (k.regFromVtx & 2)) o("varying %s v_col1;\n", T4);
     for (int i = 0; i < k.numTexGens; ++i) o("varying vec3 v_tex%d;\n", i);
     if (k.fog & kFogVtxBit) o("varying float v_fog;\n");
     o("void main() {\n");
-    o("  vec4 prev = u_tev[0], c0 = %s, c1 = %s, c2 = u_tev[3];\n", (k.regFromVtx & 1) ? "v_col0" : "u_tev[1]", (k.regFromVtx & 2) ? "v_col1" : "u_tev[2]");
-    o("  vec4 tex = vec4(1.0), ras = vec4(0.0);\n  vec3 kc = vec3(1.0);\n  float ka = 1.0;\n");
+    o("  %s prev = u_tev[0], c0 = %s, c1 = %s, c2 = u_tev[3];\n", T4, (k.regFromVtx & 1) ? "v_col0" : "u_tev[1]", (k.regFromVtx & 2) ? "v_col1" : "u_tev[2]");
+    if (hf) o("  hvec4 tex = hvec4(1.0), ras = hvec4(0.0);\n  hvec3 kc = hvec3(1.0);\n  hfloat ka = hfloat(1.0);\n");
+    else o("  vec4 tex = vec4(1.0), ras = vec4(0.0);\n  vec3 kc = vec3(1.0);\n  float ka = 1.0;\n");
     // Texture coordinates (normalised).
     for (int i = 0; i < k.numTexGens; ++i) {
         if (k.texProjMask & (1u << i)) o("  vec2 uv%d = v_tex%d.xy / (v_tex%d.z == 0.0 ? 1.0 : v_tex%d.z);\n", i, i, i, i);
@@ -393,39 +629,46 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
             }
             coord = "itc";
         }
-        if (st.texEnable && st.lodBias)
+        if (hf) {
+            // (the sample is a float vec4 from the translator's texture function; the coordinate stays float)
+            if (st.texEnable && st.lodBias)
+                o("  tex = hvec4(texture2D(u_tex%d, %s, float(u_tev[%d].%c)).%s);\n", st.texMap, coord.c_str(), V_LODBIAS + st.texMap / 4, "xyzw"[st.texMap & 3],
+                  Swizzle(st.texSwap).c_str());
+            else if (st.texEnable) o("  tex = hvec4(texture2D(u_tex%d, %s).%s);\n", st.texMap, coord.c_str(), Swizzle(st.texSwap).c_str());
+            else if (st.texOff) o("  tex = hvec4(1.0);\n");
+        } else if (st.texEnable && st.lodBias)
             o("  tex = texture2D(u_tex%d, %s, u_tev[%d].%c).%s;\n", st.texMap, coord.c_str(), V_LODBIAS + st.texMap / 4, "xyzw"[st.texMap & 3],
               Swizzle(st.texSwap).c_str());
         else if (st.texEnable) o("  tex = texture2D(u_tex%d, %s).%s;\n", st.texMap, coord.c_str(), Swizzle(st.texSwap).c_str());
         else if (st.texOff) o("  tex = vec4(1.0);\n");
         if (st.rasChan < 2) o("  ras = v_col%d.%s;\n", st.rasChan, Swizzle(st.rasSwap).c_str());
-        else o("  ras = vec4(0.0);\n");
+        else o("  ras = %s(0.0);\n", T4);
         const uint32_t tc = st.color, ta = st.alpha;
         bool kcUsed = false, kaUsed = false;
         for (int i = 0; i < 4; ++i) {
             if (bits(tc, i * 4, 4) == 14) kcUsed = true;
             if (bits(ta, 4 + i * 3, 3) == 6) kaUsed = true;
         }
-        if (kcUsed) o("  kc = %s;\n", KonstColor(st.kcsel).c_str());
-        if (kaUsed) o("  ka = %s;\n", KonstAlpha(st.kasel).c_str());
+        if (kcUsed) o("  kc = %s;\n", KonstColor(st.kcsel, T3).c_str());
+        if (kaUsed) o("  ka = %s;\n", KonstAlpha(st.kasel, hf).c_str());
         o("  {\n");
-        const bool w = k.inWrap != 0;
-        o("    vec3 a = %s, b = %s, c = %s, d = %s;\n", WrapArg(ColorArg(bits(tc, 12, 4)), w && bits(tc, 12, 4) < 8, true).c_str(),
-          WrapArg(ColorArg(bits(tc, 8, 4)), w && bits(tc, 8, 4) < 8, true).c_str(), WrapArg(ColorArg(bits(tc, 4, 4)), w && bits(tc, 4, 4) < 8, true).c_str(),
-          ColorArg(bits(tc, 0, 4)));
-        o("    float aa = %s, ab = %s, ac = %s, ad = %s;\n", WrapArg(AlphaArg(bits(ta, 13, 3)), w && bits(ta, 13, 3) < 4, false).c_str(),
+        const bool w = (k.inWrap & 1) != 0;
+        o("    %s a = %s, b = %s, c = %s, d = %s;\n", T3, WrapArg(ColorArg(bits(tc, 12, 4), T3), w && bits(tc, 12, 4) < 8, true).c_str(),
+          WrapArg(ColorArg(bits(tc, 8, 4), T3), w && bits(tc, 8, 4) < 8, true).c_str(), WrapArg(ColorArg(bits(tc, 4, 4), T3), w && bits(tc, 4, 4) < 8, true).c_str(),
+          ColorArg(bits(tc, 0, 4), T3).c_str());
+        o("    %s aa = %s, ab = %s, ac = %s, ad = %s;\n", T1, WrapArg(AlphaArg(bits(ta, 13, 3)), w && bits(ta, 13, 3) < 4, false).c_str(),
           WrapArg(AlphaArg(bits(ta, 10, 3)), w && bits(ta, 10, 3) < 4, false).c_str(), WrapArg(AlphaArg(bits(ta, 7, 3)), w && bits(ta, 7, 3) < 4, false).c_str(),
           AlphaArg(bits(ta, 4, 3)));
-        static const char* const kBias[3] = {"", " + 0.5", " - 0.5"};
-        static const char* const kScale[4] = {"", " * 2.0", " * 4.0", " * 0.5"};
+        const std::string kBias[3] = {"", " + " + L("0.5"), " - " + L("0.5")};
+        const std::string kScale[4] = {"", " * " + L("2.0"), " * " + L("4.0"), " * " + L("0.5")};
         auto Combine = [&](uint32_t reg, bool color) {
             const uint32_t bias = bits(reg, 16, 2), op = bits(reg, 18, 1), clampOn = bits(reg, 19, 1), scale = bits(reg, 20, 2);
             const char* res = color ? "rc" : "ra";
-            const char* type = color ? "vec3" : "float";
+            const char* type = color ? T3 : T1;
             const char* A = color ? "a" : "aa"; const char* B = color ? "b" : "ab";
             const char* C = color ? "c" : "ac"; const char* D = color ? "d" : "ad";
             if (bias != 3) {
-                o("    %s %s = (%s %s mix(%s, %s, %s)%s)%s;\n", type, res, D, op ? "-" : "+", A, B, C, kBias[bias], kScale[scale]);
+                o("    %s %s = (%s %s mix(%s, %s, %s)%s)%s;\n", type, res, D, op ? "-" : "+", A, B, C, kBias[bias].c_str(), kScale[scale].c_str());
             } else {
                 // Compare modes: d + ((a OP b) ? c : 0). scale selects the operand width.
                 const bool eq = op != 0;
@@ -459,8 +702,8 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
                 if (scale == 3 && color) o("    vec3 rc = d + c * %s;\n", buf);
                 else o("    %s %s = %s + (%s ? %s : %s(0.0));\n", type, res, D, buf, C, type);
             }
-            if (clampOn) o("    %s = clamp(%s, 0.0, 1.0);\n", res, res);
-            else o("    %s = clamp(%s, -4.0157, 4.0118);\n", res, res);
+            if (clampOn) o("    %s = clamp(%s, %s, %s);\n", res, res, L("0.0").c_str(), L("1.0").c_str());
+            else o("    %s = clamp(%s, %s, %s);\n", res, res, L("-4.0157").c_str(), L("4.0118").c_str());
         };
         Combine(tc, true);
         Combine(ta, false);
@@ -472,7 +715,7 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
         if (wrapAlpha) o("  fin.a = vgx_wrap_final(fin.a);\n");
         o("  fin = clamp(fin, 0.0, 1.0);\n");
     } else {
-        o("  vec4 fin = clamp(vec4(%s.rgb, %s.a), 0.0, 1.0);\n", RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)));
+        o("  %s fin = clamp(%s(%s.rgb, %s.a), %s, %s);\n", T4, T4, RegName(bits(last.color, 22, 2)), RegName(bits(last.alpha, 22, 2)), L("0.0").c_str(), L("1.0").c_str());
     }
     // GXV_NODISCARD: a test that cannot fail leaves no `discard` in the shader. (On the console's GPU any discard in a shader
     // turns off hidden-surface removal for the draws that use it; the front end already drops the combinations of ALWAYS and
@@ -480,12 +723,12 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     // can still carry them.)
     if (k.alphaTestOn && !(NoDiscard() && AlphaTestAlwaysPasses(k.alphaTest & 7, -1, (k.alphaTest >> 6) & 3, (k.alphaTest >> 3) & 7, -1))) {
         char b0[96], b1[96], r0[32], r1[32];
-        std::snprintf(r0, sizeof r0, "u_tev[%d].x", V_MISC);
-        std::snprintf(r1, sizeof r1, "u_tev[%d].y", V_MISC);
+        std::snprintf(r0, sizeof r0, hf ? "float(u_tev[%d].x)" : "u_tev[%d].x", V_MISC);
+        std::snprintf(r1, sizeof r1, hf ? "float(u_tev[%d].y)" : "u_tev[%d].y", V_MISC);
         const char* e0 = CompareExpr(k.alphaTest & 7, r0, b0, sizeof b0);
         const char* e1 = CompareExpr((k.alphaTest >> 3) & 7, r1, b1, sizeof b1);
         static const char* const kOp[4] = {"&&", "||", "!=", "=="};
-        o("  float ai = floor(fin.a * 255.0 + 0.5);\n");
+        o(hf ? "  float ai = floor(float(fin.a) * 255.0 + 0.5);\n" : "  float ai = floor(fin.a * 255.0 + 0.5);\n");
         o("  if (!(%s %s %s)) discard;\n", e0, kOp[(k.alphaTest >> 6) & 3], e1);
     }
     if (k.fog) {
@@ -516,6 +759,7 @@ void GenerateFragmentShader(const FsKey& k, ShaderSource& src) {
     src.numTexGens = k.numTexGens;
     src.nTev = static_cast<uint8_t>(FsTevCount(k));
 }
+} // namespace
 
 namespace {
 // The palette row a vertex names (a_pos.w, a_tmi*: whole numbers stored as floats) as an int.

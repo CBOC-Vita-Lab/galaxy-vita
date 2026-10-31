@@ -27,6 +27,8 @@ struct FsKey {
     // GX reads the TEV inputs A, B and C as the low 8 bits of the (11-bit signed) register value; vgx keeps registers as normalised floats and
     // would clamp an out-of-range one (a J3D material colour of 270 reads as 14). Set only under GXV_FIX_TEVIN, and only while a TEV
     // register is outside 0..255: register reads feeding A, B and C go through vgx_w3 / vgx_w1.
+    // Bit 0 (value 1) is that wrap. Bit 1 (value 2, set only under GXV_FS_HALF=1 or 3, which then also track the registers) is "a TEV register is
+    // outside 0..255" on its own: no wrap code, but the shader is not made half precision (FsHalfAnalyse assumes registers in 0..1).
     uint8_t inWrap = 0;
     struct Stage {
         uint32_t color = 0; // BP 0xC0+2n bits 0..23
@@ -109,6 +111,32 @@ bool FogVtxEligible(uint8_t fog);
 //          for its measured size).
 struct FogVtxCoef { float c1, c0; };
 FogVtxCoef FogVtxCoeffs(double a, double b, double c, double p4, double p5, double zn, double zf, bool ortho);
+// GXV_FS_HALF (read once, default 0): half precision (fp16) fragment shaders.
+//   0 off (every fragment shader float, as always)
+//   1 only the shaders FsHalfAnalyse proves to differ from the float shader by at most one 8-bit level in every colour channel
+//     (kHalfMaxLevels) and, with an alpha test, by well under one level in alpha (kHalfMaxLevelsAlphaTest): the shader text declares
+//     its colour variables as hvec3 / hvec4 / hfloat (half3 / half4 / half under vitaGL, plain floats on a PC); texture coordinates,
+//     the alpha-test arithmetic and gl_FragColor stay float. No vitaGL patch is needed for this mode.
+//   2 every fragment shader (vitaGL patch 0012: the translator #defines float -> half for the whole shader, texture coordinates too;
+//     the back end sets it around the link, the text of the shaders is unchanged). For A/B comparisons.
+//   3 like 1 with the stricter bound kHalfMaxLevelsStrict (colour within 0.5 of a level)
+long FsHalfMode();
+// What the analysis found for a key (all numbers are worst-case bounds, in 8-bit levels, of |half result - float result| before the final
+// 8-bit rounding; they are meaningful only when `eligibleShape` is true).
+struct FsHalfReport {
+    bool eligibleShape = false;   // no indirect stage, fog, compare-mode stage, wrapped final value, out-of-range register, logic-op output
+    const char* why = "";         // the first reason it is not (a string literal), "" if it is
+    double colorLevels = 0.0;     // bound for the colour channels of the final value
+    double alphaLevels = 0.0;     // bound for the alpha channel of the final value
+    bool alphaTested = false;     // the generated shader has a `discard`
+    bool Eligible(long mode) const;
+};
+constexpr double kHalfMaxLevels = 1.0, kHalfMaxLevelsStrict = 0.5, kHalfMaxLevelsAlphaTest = 0.15;
+FsHalfReport FsHalfAnalyse(const FsKey& key);
+// Whether GenerateFragmentShader makes this key half precision under the current GXV_FS_HALF (modes 1 and 3).
+bool FsHalfEligible(const FsKey& key);
+// The fragment shader of a key with the precision given (for tests; a key whose shape FsHalfAnalyse rejects is always written as float).
+void GenerateFragmentShaderPrecision(const FsKey& key, ShaderSource& out, bool half);
 // GXV_NODISCARD (read once, default 0): no `discard` in a fragment shader whose alpha test cannot fail.
 bool NoDiscard();
 // Whether alpha compare (comp0 ref0 op comp1 ref1; GX encodings, op 0 AND 1 OR 2 XOR 3 XNOR) is true for every 8-bit alpha. A

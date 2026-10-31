@@ -843,16 +843,19 @@ bool BadGlName(GLuint id) {
     return id == 0;
 }
 
-// GXV_FS_HALF (read once, default 0; Vita only, needs the vitaGL of patch 0012): the generated fragment shaders are translated with
-// half precision (vitaGL's float -> half header), the vertex shaders stay float. vitaGL translates both shaders of a program inside
+// GXV_FS_HALF=2 (read once through FsHalfMode, default 0; Vita only, needs the vitaGL of patch 0012): EVERY generated fragment shader is
+// translated with half precision (vitaGL's float -> half header, texture coordinates and uniforms included), the vertex shaders stay
+// float. This is the all-or-nothing form, kept for A/B comparisons. vitaGL translates both shaders of a program inside
 // glLinkProgram (its postponed mode), not at glCompileShader, so the low-precision mode is on around the link of a generated
 // program only, and only fragment shaders are affected. The translation is not part of vitaGL's compiled-shader cache key (that is a
 // hash of the GLSL text handed to glShaderSource), so a fragment shader compiled with the switch on gets a marker line in front of
 // its text: its cache entry is its own, and a cache made without the switch is not reused (nor the other way round).
+// GXV_FS_HALF=1 / 3 do not come here: they decide per shader in GenerateFragmentShader (the text itself declares half variables for
+// the shaders proven to differ by at most one 8-bit level), which needs no vitaGL support and no marker.
 bool FsHalf() {
     static const bool on = [] {
 #ifdef __VGX_VITA__
-        if (EnvInt("GXV_FS_HALF", 0) == 0) return false;
+        if (FsHalfMode() != 2) return false;
         if (!vglUseLowPrecisionFragmentOnly) { VGX_ERR("GXV_FS_HALF: this vitaGL has no vglUseLowPrecisionFragmentOnly (patch 0012); fragment shaders stay float\n"); return false; }
         return true;
 #else

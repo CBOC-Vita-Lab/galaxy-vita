@@ -22,6 +22,12 @@ bool FixTevIn() {
     static const bool on = EnvInt("GXV_FIX_TEVIN", 0) != 0;
     return on;
 }
+bool TevOorTracked() {
+    // GXV_FS_HALF=1 / 3 (vgx_shadergen.h FsHalfMode) also needs to know whether a TEV register is outside 0..255: its half precision analysis assumes
+    // registers in 0..1. (Read here, not through FsHalfMode, so that this file does not depend on the shader generator.)
+    static const bool on = FixTevIn() || [] { const long m = EnvInt("GXV_FS_HALF", 0); return m == 1 || m == 3; }();
+    return on;
+}
 void SetGuestHooks(const GuestHooks& h) { g_hooks = h; }
 const GuestHooks& Hooks() { return g_hooks; }
 
@@ -99,7 +105,7 @@ uint64_t KeyHashOf(const State& s) {
             if (IsLodReg(r)) h ^= KeyZ(r, s.bp[r]);
     for (uint32_t r = 0; r < 0x58; ++r)
         if (IsKeyXF(r)) h ^= KeyZ(0x100u + r, s.xfReg[r]);
-    if (FixTevIn()) h ^= KeyZ(0x158u, s.tevOor);
+    if (TevOorTracked()) h ^= KeyZ(0x158u, s.tevOor);
     return h;
 }
 
@@ -196,9 +202,9 @@ static void ShadowCheckLog(bool ok, const char* what, uint32_t reg, uint32_t v) 
         VGX_LOG_N(200, "regshadow: %llu repeated writes checked, %llu mismatching\n", static_cast<unsigned long long>(g_shadowChecked),
                   static_cast<unsigned long long>(g_shadowBad));
 }
-// GXV_FIX_TEVIN: after a TEV colour register changed, keep State::tevOor (and the key hash) in step; a change marks the shader keys dirty.
+// GXV_FIX_TEVIN (and GXV_FS_HALF=1 / 3): after a TEV colour register changed, keep State::tevOor (and the key hash) in step; a change marks the shader keys dirty.
 static inline void TevOorUpdate() {
-    if (!FixTevIn()) return;
+    if (!TevOorTracked()) return;
     uint8_t oor = 0;
     for (int i = 0; i < 4; ++i)
         for (int c = 0; c < 4; ++c)

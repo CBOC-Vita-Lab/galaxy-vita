@@ -120,6 +120,14 @@ not console timings.
   in-process verifier (`GXV_PASSVERIFY`) checks each change frame by frame.
 - Reduced-size additive effects (`GXV_FXHALF`) and half-size blur passes (`GXV_PASSHALF`) are in
   the source but **off** by default.
+- Half precision (fp16) fragment shaders (`GXV_FS_HALF`, **off** by default). `1`: only the shaders
+  `FsHalfAnalyse` proves to differ from the float shader by at most one 8-bit level (a forward error
+  analysis of the TEV stages: unit-range inputs, a half rounding after every operation; no indirect
+  stages, fog, compare-mode stages, wrapped final values or registers outside 0..255); their colour
+  variables and the `u_tev` array are `half`, texture coordinates and the alpha test stay float.
+  `3`: the same with a bound of half a level. `2`: every shader through vitaGL patch 0012 (A/B only).
+  Host test: `tools/test_vgx_fshalf.sh`. Turning it on changes the text of the eligible shaders, so the
+  shipped shader seed has to be regenerated.
 - **Video memory:** render targets are owned and bounded explicitly; idle pooled framebuffers are
   deleted after 60 presents (`GXV_POOL_IDLE`); textures are detached from pooled framebuffers
   before deletion (`GXV_DETACH_DELETE`), so vitaGL really frees them; no new EFB buffer or effect
