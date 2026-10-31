@@ -19060,11 +19060,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_autoq.cpp",
-      "sha256": "63abd4f530c993073a29df8d08615aac916f6245ba79a3db8ace0a40c35ff04e"
+      "sha256": "1a756ea9bb88916c89b3e3638bcf4f7ba6c86e4a40dc892dad4d06cb39ce6eb5"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.h",
-      "sha256": "a231f7668ae68ecdd49112719ff84554de63a21063681904f08ab964a3348285"
+      "sha256": "402b6e69668a34bff69af5d28aac66e87a2774ed49451baebbb6ab5dbb1f430f"
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
@@ -19720,7 +19720,7 @@
     },
     {
       "path": "tests/vgx_autoq_aniso.cpp",
-      "sha256": "2deb7c8f774dc900c1c5f68dc5b64cf930aceebbbfc30e2f871f4ecd0118f14c"
+      "sha256": "e9fee6d4745d865de97f9f4c8213e9bd64c635dfb24b041b6608c4d77cbf8d5b"
     },
     {
       "path": "tests/vgx_autoq_clock.cpp",
@@ -19728,7 +19728,7 @@
     },
     {
       "path": "tests/vgx_autoq_fxstep.cpp",
-      "sha256": "52ee4c265f5f71727c118f2503bffab9bba2021fd0aeb2510323fe995e1bf561"
+      "sha256": "0e543d1e29ae81e4c50d1cb5df855daa37c1c4e1aae8d11395ca3c650e340e0e"
     },
     {
       "path": "tests/vgx_autoq_gl_test.cpp",
@@ -19740,7 +19740,7 @@
     },
     {
       "path": "tests/vgx_autoq_recover.cpp",
-      "sha256": "13c1b5cdd0d5f8241b7809ee70c8419b31a96e0153851c8e08a52736a291959f"
+      "sha256": "a8fbad3601f7abf087bc8029c8e2a629744c79bb7552948adebde179a131ec8a"
     },
     {
       "path": "tests/vgx_autoq_test.cpp",
