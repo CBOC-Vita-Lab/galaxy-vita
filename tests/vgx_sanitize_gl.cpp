@@ -4,6 +4,7 @@
 //   nan-proj  a draw whose projection holds NaN
 //   viewport  a draw whose viewport has no area
 //   copy      an EFB copy of a rectangle with no area, after a good copy to the same texture
+//   feedback-copy  a copy out of a texture rectangle into that same texture (bit 4 counts it, nothing is skipped)
 #include "vgx_state.h"
 #include "vgx_sanitize.h"
 #include <GLES2/gl2.h>
@@ -133,6 +134,23 @@ int main(int argc, char** argv) {
         Check(Read(id, px), "read the texture");
         std::printf("texture centre %u %u %u (%zu bytes)\n", Centre(px)[0], Centre(px)[1], Centre(px)[2], px.size());
         if (acts) Check(px.size() == 64u * 64u * 4u && Centre(px)[1] == 255 && Centre(px)[0] == 0, "the good copy is still there");
+    } else if (scenario == "feedback-copy") {
+        const uint32_t id = CopyTo(destination, 64, 64); // green, into the texture
+        Flush();
+        CopyTexCmd self; // (an atlas-style copy whose source texture is its own destination: a copy quad that reads what it writes)
+        self.texId = id;
+        self.srcTex = id;
+        self.srcTexW = self.srcTexH = 64;
+        self.src = EfbRect{0, 0, 64, 64};
+        self.dstW = self.dstH = 64;
+        self.dstTexW = self.dstTexH = 64;
+        for (int i = 0; i < 4; ++i) self.mat[i][i] = 1.0f;
+        Pending().copyTex.push_back(self);
+        Pending().cmds.push_back(Cmd{CMD_COPY_TEX, static_cast<uint32_t>(Pending().copyTex.size() - 1)});
+        Flush();
+        Check(Read(id, px), "read the texture");
+        std::printf("texture centre %u %u %u (%zu bytes)\n", Centre(px)[0], Centre(px)[1], Centre(px)[2], px.size());
+        Check(Centre(px)[1] == 255 && Centre(px)[0] == 0, "the identity self copy leaves the green picture (nothing is skipped in any mode)");
     } else {
         Check(false, "unknown scenario");
     }
@@ -149,6 +167,10 @@ int main(int argc, char** argv) {
     } else if (scenario == "viewport") {
         Check(c.badViewport >= 1, "empty viewport counted");
         Check(c.skippedDraws == (acts ? 1u : 0u), acts ? "one draw skipped" : "log-only mode skips nothing");
+    } else if (scenario == "feedback-copy") {
+        std::printf("feedback draws %llu copies %llu\n", static_cast<unsigned long long>(c.feedbackDraws), static_cast<unsigned long long>(c.feedbackCopies));
+        Check(c.feedbackCopies == ((mode & sanitize::kFeedback) ? 1u : 0u), (mode & sanitize::kFeedback) ? "the self copy is counted once" : "no feedback counting without bit 4");
+        Check(c.feedbackDraws == 0 && c.skippedDraws == 0 && c.skippedCopies == 0, "nothing else counted, nothing skipped");
     } else if (scenario == "copy") {
         Check(c.badCopy == 1, "empty copy counted");
         Check(c.skippedCopies == (acts ? 1u : 0u), acts ? "the copy was reduced to its clear" : "log-only mode skips nothing");

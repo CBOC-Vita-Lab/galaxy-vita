@@ -332,12 +332,21 @@ void GameScene::update() {
         }
     }
     {
-        // Debug: PETARI_POSLOG=1 logs the player's position once a second.
-        static const bool posLog = getenv("PETARI_POSLOG") != nullptr;
+        // Debug: PETARI_POSLOG=1 logs the player's position once a second; =2 every frame, with the camera's position and whether the
+        // camera and the player are in water (the water-surface crossings).
+        static const char* posLogEnv = getenv("PETARI_POSLOG");
+        static const bool posLog = posLogEnv != nullptr;
+        static const s32 posEvery = posLogEnv != nullptr && atoi(posLogEnv) >= 2 ? 1 : 60;
         static s32 sPosFrames = 0;
-        if (posLog && MR::isExistMario() && isNerve(GET_NERVE(GameScene, GameSceneAction)) && ++sPosFrames % 60 == 0) {
+        if (posLog && MR::isExistMario() && isNerve(GET_NERVE(GameScene, GameSceneAction)) && ++sPosFrames % posEvery == 0) {
             const TVec3f* p = MR::getPlayerPos();
-            OSReport("port: player at %.1f %.1f %.1f%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "");
+            if (posEvery == 1) {
+                const TVec3f cam = MR::getCamPos();
+                OSReport("port: player at %.1f %.1f %.1f%s cam %.1f %.1f %.1f%s%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "", cam.x, cam.y, cam.z,
+                         MR::isCameraInWater() ? " (camera in water)" : "", MR::isPlayerSwimming() ? " (swimming)" : "");
+            } else {
+                OSReport("port: player at %.1f %.1f %.1f%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "");
+            }
         }
     }
     {

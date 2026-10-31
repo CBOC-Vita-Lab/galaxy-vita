@@ -11,6 +11,9 @@
 //   bit 2 (4)  log only: count and log, change nothing (for a desktop run that must stay bit-identical)
 //   bit 3 (8)  strict: a non-finite texture-matrix, palette or TEV block also skips the draw (otherwise those are
 //              only counted: unused rows of those blocks may hold anything)
+//   bit 4 (16) feedback: count and log (never skip) a draw that samples the texture it is drawing into (the colour or depth
+//              attachment of the bound target) and a copy quad whose source is its own destination. GL tolerates both; a
+//              PowerVR SGX tile renderer does not promise anything for them. The fix is GXV_FIX_FEEDBACK (a snapshot).
 #include "vgx_cmd.h"
 #include <cmath>
 #include <cstdint>
@@ -18,8 +21,8 @@
 
 namespace vgx::sanitize {
 
-enum : unsigned { kAct = 1, kVertexScan = 2, kLogOnly = 4, kStrict = 8 };
-constexpr unsigned kKnownBits = kAct | kVertexScan | kLogOnly | kStrict;
+enum : unsigned { kAct = 1, kVertexScan = 2, kLogOnly = 4, kStrict = 8, kFeedback = 16 };
+constexpr unsigned kKnownBits = kAct | kVertexScan | kLogOnly | kStrict | kFeedback;
 
 // A mode word from the environment text value: 0 for anything that is not a number or has bits outside kKnownBits.
 inline unsigned ParseMode(long v) { return (v > 0 && (v & ~static_cast<long>(kKnownBits)) == 0) ? static_cast<unsigned>(v) : 0u; }
@@ -36,6 +39,11 @@ inline uint32_t CountNonFinite(const float* p, size_t n) {
     uint32_t bad = 0;
     for (size_t i = 0; i < n; ++i) bad += !Finite(p[i]);
     return bad;
+}
+
+// A texture (GL name) that is sampled and is also the colour or depth attachment of the target being drawn into.
+inline bool SamplesOwnTarget(uint32_t sampled, uint32_t targetColor, uint32_t targetDepth) {
+    return sampled != 0 && (sampled == targetColor || sampled == targetDepth);
 }
 
 // The render state's viewport (floats, before the render scale): positive size, finite, not absurd.
@@ -73,6 +81,8 @@ struct VertexScan {
     uint32_t nonFinitePos = 0;
     uint32_t extremePos = 0;  // finite but beyond kExtremeCoord
     uint32_t nonFiniteAttr = 0;
+    uint32_t firstBadVertex = 0;  // the index of the first vertex with a non-finite attribute (valid when nonFiniteAttr != 0)
+    uint32_t badAttrMask = 0;     // bit 0: normal, bit 1+t: texture coordinate set t (every attribute found non-finite, all vertices)
 };
 // Looks at every vertex the draw's indices name: `vertices` is the draw's vertex chunk, `vtxOffset` the draw's base inside it.
 inline VertexScan ScanVertices(const DrawRec& d, const uint8_t* vertices, size_t vertexBytes, const uint16_t* indices, size_t indexTotal) {
@@ -91,17 +101,25 @@ inline VertexScan ScanVertices(const DrawRec& d, const uint8_t* vertices, size_t
         s.nonFinitePos += !finite;
         s.extremePos += extreme;
         bool attr = true;
+        uint32_t badNow = 0;
         if (d.layoutMask & VL_NRM) {
             float n[3];
             std::memcpy(n, vertices + start + L.offNrm, sizeof n);
-            for (float v : n) attr &= Finite(v);
+            bool ok = true;
+            for (float v : n) ok &= Finite(v);
+            if (!ok) badNow |= 1u;
+            attr &= ok;
         }
         for (unsigned t = 0; t < 8; ++t)
             if (d.layoutMask & (VL_TEX0 << t)) {
                 float uv[2];
                 std::memcpy(uv, vertices + start + L.offTex[t], sizeof uv);
-                attr &= Finite(uv[0]) && Finite(uv[1]);
+                const bool ok = Finite(uv[0]) && Finite(uv[1]);
+                if (!ok) badNow |= 2u << t;
+                attr &= ok;
             }
+        if (!attr && !s.nonFiniteAttr) s.firstBadVertex = index;
+        s.badAttrMask |= badNow;
         s.nonFiniteAttr += !attr;
     }
     return s;
@@ -112,9 +130,10 @@ struct Counts {
     uint64_t nonFiniteUniform[UB_COUNT] = {};
     uint64_t badIndexRange = 0, badVertexRefs = 0, outsideRefs = 0, nonFinitePos = 0, extremePos = 0, nonFiniteAttr = 0;
     uint64_t badViewport = 0, badDepthRange = 0, badCopy = 0, badUpload = 0;
+    uint64_t feedbackDraws = 0, feedbackCopies = 0; // (bit 4: counted, never skipped)
     uint64_t skippedDraws = 0, skippedCopies = 0, skippedUploads = 0;
     uint64_t Total() const {
-        uint64_t t = badIndexRange + badVertexRefs + outsideRefs + nonFinitePos + extremePos + nonFiniteAttr + badViewport + badDepthRange + badCopy + badUpload;
+        uint64_t t = badIndexRange + badVertexRefs + outsideRefs + nonFinitePos + extremePos + nonFiniteAttr + badViewport + badDepthRange + badCopy + badUpload + feedbackDraws + feedbackCopies;
         for (uint64_t u : nonFiniteUniform) t += u;
         return t;
     }

@@ -17,8 +17,12 @@ int main() {
     using namespace sanitize;
     // Mode parsing: unknown bits and non-numbers are off.
     Check(ParseMode(0) == 0 && ParseMode(1) == 1 && ParseMode(3) == 3 && ParseMode(15) == 15, "known modes parse");
-    Check(ParseMode(16) == 0 && ParseMode(-1) == 0 && ParseMode(99) == 0, "unknown bits are off");
-    Check(Acts(1) && Acts(3) && !Acts(4) && !Acts(5) && !Acts(0) && !Acts(15 | 4), "log-only never acts");
+    Check(ParseMode(16) == 16 && ParseMode(23) == 23 && ParseMode(31) == 31, "the feedback bit (16) is known");
+    Check(ParseMode(32) == 0 && ParseMode(-1) == 0 && ParseMode(99) == 0 && ParseMode(47) == 0, "unknown bits are off");
+    Check(Acts(1) && Acts(3) && !Acts(4) && !Acts(5) && !Acts(0) && !Acts(15 | 4) && Acts(17) && !Acts(16) && !Acts(23), "log-only never acts; the feedback bit alone does not act");
+    // Feedback: a sampled texture that is the target's colour or depth attachment (names are GL names, 0 = none).
+    Check(SamplesOwnTarget(7, 7, 9) && SamplesOwnTarget(9, 7, 9) && !SamplesOwnTarget(5, 7, 9) && !SamplesOwnTarget(0, 0, 0) && !SamplesOwnTarget(0, 7, 9) &&
+              !SamplesOwnTarget(7, 0, 0), "a texture sampled while it is the target's own attachment");
     // Finite.
     Check(Finite(0.0f) && Finite(-0.0f) && Finite(1e38f) && Finite(std::numeric_limits<float>::denorm_min()), "finite values");
     Check(!Finite(kNan) && !Finite(kInf) && !Finite(-kInf), "NaN and Inf");

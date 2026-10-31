@@ -422,6 +422,10 @@ void Invalidate() {
 }
 // Called before every draw and clear.
 bool g_sceneLog = false; // GXV_SCENELOG=<frame>: one line per scene of that frame
+// GXV_SCENELOG_MIN=<n> (desktop diagnostic): the scene lines of every frame are kept, and printed after a frame that had at least n
+// scenes (the water-surface crossings have 19 to 21 where an ordinary frame in the same place has 16).
+bool g_sceneLogKeep = false;
+std::string g_sceneLogBuf;
 void LogScene() {
     int w = g_rtW, h = g_rtH;
     const char* what = "EFB";
@@ -430,8 +434,11 @@ void LogScene() {
         for (const PoolFbo& f : g_pool)
             if (f.fbo == S.fbo) { w = f.w; h = f.h; what = f.attached ? "texture" : "pass buffer"; }
     }
-    std::fprintf(stderr, "[scene] %2u: %s %dx%d (after %u draws, %u clears, %u copy quads)%s\n", C.scenes, what, w, h, C.draws, C.clears, C.copyQuads,
-                 (S.fbo == g_inUseFbo) ? " same object, re-attached" : "");
+    char line[200];
+    std::snprintf(line, sizeof line, "[scene] %2u: %s %dx%d (after %u draws, %u clears, %u copy quads)%s\n", C.scenes, what, w, h, C.draws, C.clears, C.copyQuads,
+                  (S.fbo == g_inUseFbo) ? " same object, re-attached" : "");
+    if (g_sceneLogKeep) g_sceneLogBuf += line;
+    else std::fputs(line, stderr);
 }
 // What a scene needs of its depth buffer (TouchTarget's argument): whatever it holds, or it starts with a clear of all of it.
 enum { DN_KEEP = 0, DN_CLEARED = 1 };
@@ -1762,15 +1769,39 @@ bool SanitizeRefusesDraw(const CmdBuf& buf, const DrawRec& r, const Program& p) 
             g_san.extremePos += sc.extremePos;
             g_san.nonFiniteAttr += sc.nonFiniteAttr;
             if (sc.badRefs || sc.nonFinitePos || sc.extremePos || sc.nonFiniteAttr || sc.outside) {
-                VGX_LOG_N(16, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u: %u vertices outside the data, %u indices outside the declared range, %u non-finite and %u extreme positions, %u non-finite attributes\n",
+                VGX_LOG_N(16, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u: %u vertices outside the data, %u indices outside the declared range, %u non-finite and %u extreme positions, %u non-finite attributes (first at vertex %u, set 0x%X: bit 0 normal, bit 1+n texture coordinate n); draw: %u vertices, %u indices, layout 0x%X, textures 0x%X (%u %u %u %u), prim %u, %s\n",
                           static_cast<unsigned long long>(buf.frame), static_cast<unsigned>(r.vsId), static_cast<unsigned>(r.fsId), sc.badRefs, sc.outside,
-                          sc.nonFinitePos, sc.extremePos, sc.nonFiniteAttr);
+                          sc.nonFinitePos, sc.extremePos, sc.nonFiniteAttr, sc.firstBadVertex, sc.badAttrMask, r.vtxCount, r.idxCount, r.layoutMask, static_cast<unsigned>(r.texMask),
+                          r.tex[0].texId, r.tex[1].texId, r.tex[2].texId, r.tex[3].texId, static_cast<unsigned>(r.prim), S.fbo == g_efbFbo ? "into the EFB" : "into a pass or copy target");
             }
             if (sc.badRefs || sc.nonFinitePos || sc.extremePos || sc.nonFiniteAttr) bad = true; // (an index outside the declared range alone is only counted)
         }
     }
     if (bad && sanitize::Acts(mode)) { ++g_san.skippedDraws; return true; }
     return false;
+}
+
+// GXV_SANITIZE bit 4 (feedback): the colour and depth textures of the target being drawn into (the EFB's, or the pooled object's
+// attachments), and a check that a draw or copy quad does not sample one of them.
+void TargetTextures(GLuint& color, GLuint& depth, const char*& what) {
+    color = depth = 0;
+    what = "?";
+    if (S.fbo == g_efbFbo) { color = g_efbColor; depth = g_efbDepthTex; what = "EFB"; return; }
+    for (const PoolFbo& f : g_pool)
+        if (f.fbo == S.fbo) { color = f.attached; depth = f.depthTex; what = f.attached == f.color ? "pass buffer" : "texture"; return; }
+}
+void SanitizeFeedbackDraw(const CmdBuf& buf, const DrawRec& r) {
+    GLuint color, depth;
+    const char* what;
+    TargetTextures(color, depth, what);
+    for (int m = 0; m < 8; ++m) {
+        if (!(r.texMask & (1u << m))) continue;
+        if (!sanitize::SamplesOwnTarget(S.tex[m], color, depth)) continue;
+        ++g_san.feedbackDraws;
+        VGX_LOG_N(32, "GXV_SANITIZE: frame %llu draw vs=%u fs=%u samples %s texture %u (guest texture %u, unit %d) while drawing into it (target: %s%s)\n",
+                  static_cast<unsigned long long>(buf.frame), static_cast<unsigned>(r.vsId), static_cast<unsigned>(r.fsId), S.tex[m] == depth ? "the depth" : "the colour", S.tex[m],
+                  static_cast<unsigned>(r.tex[m].texId), m, what, g_passDirectTex && g_inPass ? ", pass drawn straight into the copy texture" : "");
+    }
 }
 
 // GXV_PROF=3: where a draw spends its time (program, state, uniforms, textures, layout, call).
@@ -1917,6 +1948,7 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     } else if (r.prim == PRIM_POINTS) {
         mode = GL_POINTS;
     }
+    if (SanMode() & sanitize::kFeedback) SanitizeFeedbackDraw(buf, r);
     TouchTarget();
     DP(5);
     G(glDrawElements(mode, static_cast<GLsizei>(r.idxCount), GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<size_t>(r.idxOffset) * 2)));
@@ -2252,6 +2284,15 @@ bool EnsureCopyVariant(copyvar::Form form) {
 // Raster state (target, viewport, scissor, masks) is the caller's.
 void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float* m16, const float* add4) {
     if (!EnsureCopyProgram()) return;
+    if (SanMode() & sanitize::kFeedback) { // (GXV_SANITIZE bit 4: a copy quad that reads the texture it writes)
+        GLuint color, depth;
+        const char* what;
+        TargetTextures(color, depth, what);
+        if (sanitize::SamplesOwnTarget(srcTex, color, depth)) {
+            ++g_san.feedbackCopies;
+            VGX_LOG_N(32, "GXV_SANITIZE: copy quad reads texture %u (%s) while drawing into it (target: %s)\n", srcTex, srcTex == depth ? "depth" : "colour", what);
+        }
+    }
     // GXV_COPYVAR (vgx_copyvar.h): a transform that is the identity, the identity with a constant alpha or a constant colour is
     // drawn by a program without the matrix product (and without the uniforms it does not read). Anything else, and a form
     // whose program did not build, goes through the generic program as before.
@@ -5616,7 +5657,10 @@ static void ExecuteFrame(const CmdBuf& buf) {
     g_dprofOn = profMode == 3;
     const double tFrame = prof ? Now() : 0.0;
     static const int64_t sceneLogFrame = DiagnosticInt("GXV_SCENELOG", -1);
-    g_sceneLog = sceneLogFrame >= 0 && static_cast<int64_t>(buf.frame) == sceneLogFrame;
+    static const long sceneLogMin = DiagnosticInt("GXV_SCENELOG_MIN", 0);
+    g_sceneLogKeep = sceneLogMin > 0;
+    g_sceneLog = g_sceneLogKeep || (sceneLogFrame >= 0 && static_cast<int64_t>(buf.frame) == sceneLogFrame);
+    g_sceneLogBuf.clear();
     ++g_serial;
     EvictPrograms();
     AutoQualityFrame(); // (a new render scale, if the controller wants one, takes effect here: between frames)
@@ -6059,6 +6103,9 @@ static void ExecuteFrame(const CmdBuf& buf) {
     if (err != GL_NO_ERROR) ResetCrowd();
     ReportCrowd(buf);
     if (err != GL_NO_ERROR) VGX_LOG_N(32, "GL error 0x%X after frame %llu command buffer\n", err, static_cast<unsigned long long>(buf.frame));
+    if (g_sceneLogKeep && C.scenes >= static_cast<unsigned>(EnvInt("GXV_SCENELOG_MIN", 0)))
+        std::fprintf(stderr, "[scenes] frame %llu: %u scenes, %u copy quads, %u efb swaps, %u hoists, %u texture deletes\n%s", static_cast<unsigned long long>(buf.frame), C.scenes,
+                     C.copyQuads, C.efbSwaps, C.hoists, C.texDeletes, g_sceneLogBuf.c_str());
     if (!g_verify.shadow) WriteCounts(buf.frame);
     if (g_validation) {
         if (g_validateFrame) {
@@ -6079,9 +6126,10 @@ static void ExecuteFrame(const CmdBuf& buf) {
         if (g_san.Total() != reported && buf.frame >= lastFrame + 120) {
             reported = g_san.Total();
             lastFrame = buf.frame;
-            std::fprintf(stderr, "[vgx] GXV_SANITIZE: frame %llu: %llu findings (skipped: %llu draws, %llu copies, %llu uploads; viewport %llu, depth range %llu, copy %llu, upload %llu, index range %llu, vertex refs %llu, non-finite positions %llu, extreme positions %llu, non-finite attributes %llu, uniforms proj/mv/texm/pal/light/tev %llu/%llu/%llu/%llu/%llu/%llu)\n",
+            std::fprintf(stderr, "[vgx] GXV_SANITIZE: frame %llu: %llu findings (skipped: %llu draws, %llu copies, %llu uploads; feedback draws %llu, copies %llu; viewport %llu, depth range %llu, copy %llu, upload %llu, index range %llu, vertex refs %llu, non-finite positions %llu, extreme positions %llu, non-finite attributes %llu, uniforms proj/mv/texm/pal/light/tev %llu/%llu/%llu/%llu/%llu/%llu)\n",
                          static_cast<unsigned long long>(buf.frame), static_cast<unsigned long long>(reported), static_cast<unsigned long long>(g_san.skippedDraws),
-                         static_cast<unsigned long long>(g_san.skippedCopies), static_cast<unsigned long long>(g_san.skippedUploads), static_cast<unsigned long long>(g_san.badViewport),
+                         static_cast<unsigned long long>(g_san.skippedCopies), static_cast<unsigned long long>(g_san.skippedUploads), static_cast<unsigned long long>(g_san.feedbackDraws),
+                         static_cast<unsigned long long>(g_san.feedbackCopies), static_cast<unsigned long long>(g_san.badViewport),
                          static_cast<unsigned long long>(g_san.badDepthRange), static_cast<unsigned long long>(g_san.badCopy), static_cast<unsigned long long>(g_san.badUpload),
                          static_cast<unsigned long long>(g_san.badIndexRange), static_cast<unsigned long long>(g_san.badVertexRefs), static_cast<unsigned long long>(g_san.nonFinitePos),
                          static_cast<unsigned long long>(g_san.extremePos), static_cast<unsigned long long>(g_san.nonFiniteAttr),

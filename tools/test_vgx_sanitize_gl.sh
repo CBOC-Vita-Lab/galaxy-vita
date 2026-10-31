@@ -22,12 +22,15 @@ run() { # <mode|unset> <scenario>
 }
 cases=0
 # Valid input: the same picture and no findings in every mode.
-for mode in unset 0 1 2 3 4 7 15; do run "$mode" valid; cases=$((cases + 1)); done
-for mode in 0 1 2 3 4 7 15; do cmp <(grep '^centre' "$out/valid.unset.log") <(grep '^centre' "$out/valid.$mode.log"); done
+for mode in unset 0 1 2 3 4 7 15 16 23 31; do run "$mode" valid; cases=$((cases + 1)); done
+for mode in 0 1 2 3 4 7 15 16 23 31; do cmp <(grep '^centre' "$out/valid.unset.log") <(grep '^centre' "$out/valid.$mode.log"); done
 # Degenerate input: off keeps the old behaviour (no findings), on skips, log-only counts and skips nothing.
 for scenario in nan-proj viewport copy; do
   for mode in unset 0 1 3 4 5 15; do run "$mode" "$scenario"; cases=$((cases + 1)); done
   cmp <(grep '^centre\|^texture' "$out/$scenario.unset.log") <(grep '^centre\|^texture' "$out/$scenario.0.log")
   cmp <(grep '^centre\|^texture' "$out/$scenario.unset.log") <(grep '^centre\|^texture' "$out/$scenario.4.log")
 done
+# Feedback (bit 4): a copy that reads its own destination is counted with bit 4 and never skipped; the picture is the same in every mode.
+for mode in unset 0 3 4 16 23 31; do run "$mode" feedback-copy; cases=$((cases + 1)); done
+for mode in 0 3 4 16 23 31; do cmp <(grep '^texture' "$out/feedback-copy.unset.log") <(grep '^texture' "$out/feedback-copy.$mode.log"); done
 printf 'PASS: %s GXV_SANITIZE cases (host GLES, software); unset/0 and log-only leave the picture as before, valid input is identical in every mode\n' "$cases"
