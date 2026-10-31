@@ -27,9 +27,10 @@ class PlayerSettingsAssets(unittest.TestCase):
             (module.ROOT / 'platform/src/settings').mkdir(parents=True)
             (module.ROOT / 'vita/vgx-game/sce_sys/livearea/contents').mkdir(parents=True)
             module.main()
-            for relative in ['platform/src/settings/settings_assets.inc', 'platform/src/settings/settings_vita.inc', 'platform/src/settings/settings_playstation.inc', 'vita/vgx-game/sce_sys/livearea/contents/settings.png']:
+            for relative in ['platform/src/settings/settings_assets.inc', 'platform/src/settings/settings_vita.inc', 'platform/src/settings/settings_playstation.inc']:
                 self.assertEqual((module.ROOT / relative).read_bytes(), (ROOT / relative).read_bytes())
         png = (ROOT / 'vita/vgx-game/sce_sys/livearea/contents/settings.png').read_bytes()
+        self.assertFalse((module.ROOT / 'vita/vgx-game/sce_sys/livearea/contents/settings.png').exists())
         self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
         self.assertEqual(struct.unpack('>IIBBBBB', png[16:29]), (280, 64, 8, 3, 0, 0, 0))
         pixels = module.rgba_png(ROOT / 'tools/handheld/assets/settings_vita.png')
@@ -45,3 +46,25 @@ class PlayerSettingsAssets(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TitleLiveArea(unittest.TestCase):
+    def test_title_pictures_are_reproducible(self):
+        try:
+            import cv2, numpy  # noqa: F401
+            from PIL import ImageFont
+            ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 10)
+        except Exception as error:
+            self.skipTest(f'generator dependencies missing: {error}')
+        import subprocess, sys
+        with tempfile.TemporaryDirectory() as temporary:
+            subprocess.run([sys.executable, '-I', str(ROOT / 'tools/handheld/make_livearea_title.py'),
+                            str(ROOT / 'vita/vgx-game/sce_sys/loading-title.rgba'), temporary], check=True, capture_output=True)
+            out = pathlib.Path(temporary)
+            for name, relative in [('icon0.png', 'vita/vgx-game/sce_sys/icon0.png'), ('pic0.png', 'vita/vgx-game/sce_sys/pic0.png'),
+                                   ('bg.png', 'vita/vgx-game/sce_sys/livearea/contents/bg.png'),
+                                   ('startup.png', 'vita/vgx-game/sce_sys/livearea/contents/startup.png'),
+                                   ('settings.png', 'vita/vgx-game/sce_sys/livearea/contents/settings.png')]:
+                self.assertEqual((out / name).read_bytes(), (ROOT / relative).read_bytes(), name)
+                png = (ROOT / relative).read_bytes()
+                self.assertEqual(png[24:26], b'\x08\x03', f'{name}: 8-bit palette PNG')

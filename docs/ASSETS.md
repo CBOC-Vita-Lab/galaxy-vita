@@ -5,12 +5,16 @@
 - The game executable, built from this repository.
 - The compiled-shader seed: the port's own generated shaders, compiled for the
   vitaGL in use. No game data.
-- The app icon and LiveArea pictures in `vita/vgx-game/sce_sys/`: simple
-  original drawings made by `tools/handheld/make_livearea.py`. No retail
-  artwork or screenshot in those generated pictures.
+- The app icon and LiveArea pictures in `vita/vgx-game/sce_sys/` (icon0,
+  pic0, bg, startup and the Settings tile): made by
+  `tools/handheld/make_livearea_title.py` from the title-screen picture below
+  (its two text lines removed, the logo on its own sky), at the owner's
+  request, so the bubble, LiveArea, loading screen and Settings menu all carry
+  the game's own title screen. The earlier generated starfield pictures can
+  still be made with `tools/handheld/make_livearea.py`.
 - New builds include the preserved title-screen loading background described
-  below. It is not original port artwork and is separate from the generated
-  icon and LiveArea pictures.
+  below. It is not original port artwork; the icon and LiveArea pictures are
+  derived from it.
 - License texts for the port and the libraries it uses.
 
 [RELEASE.json](RELEASE.json) records the package and executable hashes.

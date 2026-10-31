@@ -19608,7 +19608,7 @@
     },
     {
       "path": "tests/test_player_settings_assets.py",
-      "sha256": "152c4d6b0531b9ae38d5b99ae06c5b3f4b25e8d6a265beee1caa319827a38d01"
+      "sha256": "40388f31ff99c8af30cf2aa4d9987bec8c6ad96f58c1243d82373e04569d821e"
     },
     {
       "path": "tests/test_release_metadata.py",
@@ -20423,8 +20423,12 @@
       "sha256": "5be85246c0f49655ec74b104dc1e43e9845eaaa9dc015e6ec48400a693679220"
     },
     {
+      "path": "tools/handheld/make_livearea_title.py",
+      "sha256": "b51832e4605908a6732996f8c215373a8a2dc77673890ad19700e9591c04478f"
+    },
+    {
       "path": "tools/handheld/make_settings_assets.py",
-      "sha256": "875f3c6fb57dd79a9e5d8c12879341edf34c614bf6f8e04653d4590314abf9f0"
+      "sha256": "e5ab85bf195a2465da82434c38b2eda4fafe27d7ea209668331ec549c86a27cf"
     },
     {
       "path": "tools/handheld/settings_preview_png.py",
@@ -21608,19 +21612,19 @@
     },
     {
       "path": "vita/vgx-game/sce_sys/icon0.png",
-      "sha256": "301151acb86737cb94e2f4bf3bffbcd3ce0d6b559979e90b6d71d81ccde24797"
+      "sha256": "2b5bb05d1b69277f0b1ce2362dc73870819dc310bcf5fced6c83655b41280ed9"
     },
     {
       "path": "vita/vgx-game/sce_sys/livearea/contents/bg.png",
-      "sha256": "6208f583d7f5b40c82b36a8ed1fcdd3410850603b7cc9375f99ab61ae30780ab"
+      "sha256": "c20a5e4bd1018db95244fade9dc2b09155ce949e0e82e2307d99049b191cbd80"
     },
     {
       "path": "vita/vgx-game/sce_sys/livearea/contents/settings.png",
-      "sha256": "c4e76da75e9a5b6b87f479fbf30d5160443414c9273c80ab68928370b25c318d"
+      "sha256": "2c9a790aea24511383119c0bd579c66dd7e41b2391b79c54de173ec94dae0435"
     },
     {
       "path": "vita/vgx-game/sce_sys/livearea/contents/startup.png",
-      "sha256": "05816dcb11268b9cc5668be5cb40efd2508858f1f1b2343033568480a5c69eae"
+      "sha256": "93208b2a7b6720de9e86b75cf242f37af083171faa58de45cfdda34f4cb050c3"
     },
     {
       "path": "vita/vgx-game/sce_sys/livearea/contents/template.xml",
@@ -21632,7 +21636,7 @@
     },
     {
       "path": "vita/vgx-game/sce_sys/pic0.png",
-      "sha256": "60adb0c1a0c56107a4f29d1f6714db65be5959a628a7ca5abe1414326f56a960"
+      "sha256": "44cd201d88aa5fff21c891ac53351a008f7a7e43d76196e169a04001d95a6f82"
     },
     {
       "path": "vita/vgx-game/settings_runtime.cpp",
