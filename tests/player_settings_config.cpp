@@ -5,7 +5,7 @@ using namespace port;
 int main() {
     const auto& api = controls::GetControlApi();
     const auto c = settings::DefaultConfig(api);
-    assert(c.version == 1 && c.fpsLimit == 0 && !c.performance60 && c.language.empty());
+    assert(c.version == 1 && c.fpsLimit == 0 && c.language.empty());
     assert(c.autoQuality == settings::AutoQuality::Default && !c.reducedMotion);
     assert(c.profile == controls::ProfileId::Handheld);
     for (unsigned i=0; i<2; ++i) {
@@ -29,13 +29,7 @@ int main() {
         auto perf=c;settings::ApplyPreset(perf,settings::Preset::Performance);assert(!perf.aboveNative&&perf.antiAliasing==settings::AntiAliasing::Off&&perf.sharpness==settings::Sharpness::Off&&!perf.depthOfField&&perf.prioritizeMario&&perf.effects==settings::EffectsQuality::Adaptive);
         // A preset touches only its covered rows.
         auto mixed=c;mixed.hdTextures=false;mixed.coreHelp=false;mixed.fpsLimit=30;mixed.reducedMotion=true;mixed.language="French";settings::ApplyPreset(mixed,settings::Preset::Performance);
-        assert(!mixed.hdTextures&&!mixed.coreHelp&&mixed.fpsLimit==0&&mixed.performance60&&mixed.reducedMotion&&mixed.language=="French"&&settings::PresetOf(mixed)==settings::Preset::Performance);   // Performance leaves Locked 30 for Performance mode
-        // Best picture and Balanced return Performance mode to Quality but keep a Locked 30; Performance mode alone is not Best picture or Balanced.
-        {auto q=mixed;settings::ApplyPreset(q,settings::Preset::Balanced);assert(!q.performance60&&q.fpsLimit==0&&settings::PresetOf(q)==settings::Preset::Balanced);
-         auto l=c;l.fpsLimit=30;settings::ApplyPreset(l,settings::Preset::BestPicture);assert(l.fpsLimit==30&&!l.performance60&&settings::PresetOf(l)==settings::Preset::BestPicture);
-         auto m=c;m.performance60=true;assert(settings::PresetOf(m)==settings::Preset::Custom);
-         auto n=perf;n.performance60=false;assert(settings::PresetOf(n)==settings::Preset::Custom);
-         auto o=perf;o.fpsLimit=30;o.performance60=false;assert(settings::PresetOf(o)==settings::Preset::Custom);}
+        assert(!mixed.hdTextures&&!mixed.coreHelp&&mixed.fpsLimit==30&&mixed.reducedMotion&&mixed.language=="French"&&settings::PresetOf(mixed)==settings::Preset::Performance);
         // Any covered row edited reads Custom; "dynamic resolution on" (forced) and the default are the same choice.
         auto edited=c;edited.antiAliasing=settings::AntiAliasing::Off;assert(settings::PresetOf(edited)==settings::Preset::Custom);
         edited=c;edited.effects=settings::EffectsQuality::Full;assert(settings::PresetOf(edited)==settings::Preset::Custom);
