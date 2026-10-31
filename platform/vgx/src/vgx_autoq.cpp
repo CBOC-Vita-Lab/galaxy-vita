@@ -220,6 +220,8 @@ void Controller::SetRung(int to, Why why, uint64_t now) {
     roomAt_ = 0;
     pendingBelow_ = false;
     if (why == Why::NewScene) pendingUndo_ = -1;
+    // (target mode: a change to the rung an undo was waiting for, or above it, has done the undo's work)
+    if (cfg_.targetFps == 30 && pendingUndo_ >= 0 && to >= pendingUndo_) pendingUndo_ = -1;
     if (aniso_ && to != cfg_.maxRung) {
         // (it belongs to the top rung: any other has it off)
         aniso_ = false;
@@ -307,23 +309,49 @@ void Controller::ForgetFxBlocks() {
     anisoBlockLen_ = 0;
 }
 
-void Controller::Remember(uint32_t key, int rung, unsigned fx) {
+void Controller::Remember(uint32_t key, int rung, unsigned fx, int floor) {
     if (key == 0) return;
     for (SceneRung& m : sceneMem_)
-        if (m.key == key) { m.rung = static_cast<int8_t>(rung); m.fx = static_cast<uint8_t>(fx); return; }
-    sceneMem_[sceneNext_ % 32] = SceneRung{key, static_cast<int8_t>(rung), static_cast<uint8_t>(fx)};
+        if (m.key == key) { m.rung = static_cast<int8_t>(rung); m.fx = static_cast<uint8_t>(fx); m.floor = static_cast<int8_t>(floor); return; }
+    sceneMem_[sceneNext_ % 32] = SceneRung{key, static_cast<int8_t>(rung), static_cast<uint8_t>(fx), static_cast<int8_t>(floor)};
     ++sceneNext_;
 }
 
-int Controller::Recall(uint32_t key, unsigned* fx) const {
+int Controller::Recall(uint32_t key, unsigned* fx, int* floor) const {
     if (fx) *fx = 0;
+    if (floor) *floor = kNoRung;
     if (key == 0) return kNoRung;
     for (const SceneRung& m : sceneMem_)
         if (m.key == key) {
             if (fx) *fx = m.fx;
+            if (floor) *floor = m.floor;
             return m.rung;
         }
     return kNoRung;
+}
+
+// A scene starts with what an earlier visit learnt about steps below today: below the rung where one bought nothing, none is
+// taken for maxBlockSec (target mode; elsewhere nothing is ever learnt).
+void Controller::RecallFloor(uint32_t key, uint64_t now) {
+    int floor = kNoRung;
+    Recall(key, nullptr, &floor);
+    sceneFloor_ = cfg_.targetFps == 30 ? floor : kNoRung;
+    sceneFloorUntil_ = sceneFloor_ != kNoRung ? now + static_cast<uint64_t>(cfg_.maxBlockSec * 1e6) : 0;
+}
+
+// A step below today that bought nothing goes back (the quiet moment, or in target mode noGainUndoSec without one). In target
+// mode the block on steps below counts from here: the smaller picture was on screen until now, and a block that ran out while
+// waiting for a quiet moment let the next step down follow the undo within seconds.
+void Controller::UndoBelow(uint64_t now) {
+    const int to = pendingUndo_;
+    pendingUndo_ = -1;
+    pendingBelow_ = false;
+    checking_ = false;
+    SetRung(to, Why::NoGain, now);
+    if (cfg_.targetFps == 30) {
+        belowBlockedUntil_ = now + static_cast<uint64_t>(belowBlockLen_ * 1e6);
+        lastBlockAt_ = now;
+    }
 }
 
 FloorWindow Controller::TakeFloor() {
@@ -479,15 +507,22 @@ bool Controller::Add(const FrameTimes& f) {
         // A load or a shader compile: what came before says nothing about what comes next.
         ResetWindow();
         ResetHolds();
-        checking_ = false;
+        // (target mode: a check of a step below today goes on after a stall in the same scene. The change's own freeze, the new
+        // render targets and the next slow frame, is often just over gapResetMs (0.26 s on the console), and a check dropped
+        // there kept the smaller picture without a verdict: Beach Bowl went 640 -> 592 that way although the GPU time stayed.)
+        if (cfg_.targetFps != 30) checking_ = false;
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0 && cfg_.calm) {
             // A load (calm mode): the rung of the scene left is remembered, the new scene starts at its own remembered
             // rung (or the start rung), applied now, while the load hides it. The same scene after a long gap (a
             // shader compile, the console suspended) keeps its rung and its blocks.
             const uint32_t from = scene_, to = f.scene;
-            Remember(from, rung_, Mem());
+            // (target mode: a scene left before an undo for no gain was made is remembered at the rung the undo goes back to)
+            Remember(from, cfg_.targetFps == 30 && pendingUndo_ >= 0 ? pendingUndo_ : rung_, Mem(), sceneFloor_);
             scene_ = to;
             if (to != 0 && to == from) return false;
+            checking_ = false;
+            if (cfg_.targetFps == 30) pendingUndo_ = -1; // (an undo learnt in the scene left: the new scene starts at its own rung)
+            RecallFloor(to, f.presentUs);
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
@@ -512,6 +547,8 @@ bool Controller::Add(const FrameTimes& f) {
         if (static_cast<double>(interval) > cfg_.longGapMs * 1000.0) {
             // A new scene: nothing learnt about the old one holds, and its rung may be wrong for this one. Back to the
             // start rung (today's picture), from where the next windows decide again.
+            checking_ = false;
+            if (cfg_.targetFps == 30) pendingUndo_ = -1;
             for (int i = 0; i <= kRungs; ++i) { blockUntil_[i] = 0; blockLen_[i] = 0; }
             belowBlockedUntil_ = 0;
             belowBlockLen_ = 0;
@@ -530,8 +567,9 @@ bool Controller::Add(const FrameTimes& f) {
         // scene left goes under the old key, and a remembered rung of the new one is taken while the scene is still
         // fading in (within 60 frames of the return to the start rung).
         Remember(scene_, last_.why == Why::NewScene && sinceChange_ <= 60 ? last_.from : rung_,
-                 last_.why == Why::NewScene && sinceChange_ <= 60 ? steps_ : Mem());
+                 last_.why == Why::NewScene && sinceChange_ <= 60 ? steps_ : Mem(), sceneFloor_);
         scene_ = f.scene;
+        RecallFloor(f.scene, f.presentUs);
         unsigned wantFx = 0;
         const int want = Recall(f.scene, &wantFx);
         if (last_.why == Why::NewScene && sinceChange_ <= 60 && want != kNoRung && want != rung_) {
@@ -547,11 +585,7 @@ bool Controller::Add(const FrameTimes& f) {
         ResetWindow();
         overFrames_ = 0;
         if (pendingUndo_ >= 0 && mayChange) {
-            const int to = pendingUndo_;
-            pendingUndo_ = -1;
-            pendingBelow_ = false;
-            checking_ = false;
-            SetRung(to, Why::NoGain, f.presentUs);
+            UndoBelow(f.presentUs);
             return true;
         }
         if (pendingBelow_ && mayChange && f.presentUs >= belowAt_ && static_cast<double>(f.presentUs - belowAt_) <= cfg_.roomMemorySec * 1e6 &&
@@ -564,6 +598,7 @@ bool Controller::Add(const FrameTimes& f) {
             checkFrom_ = from;
             checkBefore_ = belowBefore_;
             checkSpan_ = 0;
+            checkT_ = 0;
             checkFrames_ = 0;
             return true;
         }
@@ -704,24 +739,35 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     }
 
     if (checking_) {
-        // A step below today's size is kept only if the frames got shorter.
-        checkSpan_ += target ? measureMs * 1000.0 * frames_ : static_cast<double>(present_);
+        // A step below today's size is kept only if the frames got shorter (target mode: if the GPU's busy time per picture,
+        // what a smaller picture is for, fell by a fair share of what the sizes predict; the other stages do not shrink with
+        // the picture, and the frame interval is paced).
+        checkT_ += dt;
+        checkSpan_ += target ? gpuMs * 1000.0 * frames_ : static_cast<double>(present_);
         checkFrames_ += frames_;
-        if (checkSpan_ >= cfg_.checkSec * 1e6) {
+        if (target ? checkT_ >= cfg_.belowCheckSec : checkSpan_ >= cfg_.checkSec * 1e6) {
             checking_ = false;
             const double after = checkSpan_ / 1000.0 / checkFrames_;
+            double need = cfg_.betterFrac;
+            if (target && rung_ < checkFrom_)
+                need = std::max(need, cfg_.gainShare * (1.0 - Cost(rung_) / Cost(checkFrom_)));
             // (undone only when the frames stayed about as long: when they got much longer the scene got heavier during
             // the check, which says nothing against the smaller picture; the Strikers port, cc302e6)
-            if (after > checkBefore_ * (1.0 - cfg_.betterFrac) && after < checkBefore_ * 1.15) {
+            if (after > checkBefore_ * (1.0 - need) && after < checkBefore_ * 1.15) {
                 belowBlockLen_ = belowBlockLen_ > 0 ? std::min(belowBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
                 belowBlockedUntil_ = now + static_cast<uint64_t>(belowBlockLen_ * 1e6);
                 lastBlockAt_ = now;
+                if (target) sceneFloor_ = std::max(sceneFloor_, checkFrom_); // (the scene remembers it with its rung)
                 if (cfg_.calm) {
-                    pendingUndo_ = checkFrom_; // (calm: back at the next quiet moment)
+                    pendingUndo_ = checkFrom_; // (calm: back at the next quiet moment; target mode: within noGainUndoSec)
+                    undoDueAt_ = now + static_cast<uint64_t>(cfg_.noGainUndoSec * 1e6);
                 } else {
                     SetRung(checkFrom_, Why::NoGain, now);
                     return true;
                 }
+            } else if (target && sceneFloor_ != kNoRung && checkFrom_ <= sceneFloor_) {
+                sceneFloor_ = kNoRung; // (a step from there bought speed this time: what the scene learnt before no longer holds)
+                sceneFloorUntil_ = 0;
             }
         }
     }
@@ -805,6 +851,11 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         if (!bound) pendingBelow_ = false;
     }
     if (!mayChange) return false; // (too soon after the last change: the holds go on counting)
+    if (target && cfg_.calm && pendingUndo_ >= 0 && now >= undoDueAt_) {
+        // (target mode: a smaller picture that bought nothing is not kept for want of a quiet moment; nothing else moves first)
+        UndoBelow(now);
+        return true;
+    }
     if (cfg_.aniso && target && rung_ == cfg_.maxRung) {
         if (aniso_) {
             if (overT_ >= cfg_.downHoldSec) {
@@ -855,9 +906,14 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
     }
     // (the half-size step goes before the emergency rung: while it is still to come, or being judged, the rung stays)
     const bool fxFirst = fxActive && rung_ == FxRung() && (trial_ || NextStep(now));
-    if (!checking_ && !fxFirst && rung_ <= kToday && rung_ > cfg_.minRung && boundT_ >= cfg_.belowHoldSec && now >= belowBlockedUntil_ && pendingUndo_ < 0) {
+    // (target mode: and not below the rung where an earlier visit of this scene found that a step bought nothing)
+    const bool floorKnown = target && sceneFloor_ != kNoRung && rung_ <= sceneFloor_ && now < sceneFloorUntil_;
+    if (!checking_ && !fxFirst && !floorKnown && rung_ <= kToday && rung_ > cfg_.minRung && boundT_ >= cfg_.belowHoldSec &&
+        now >= belowBlockedUntil_ && pendingUndo_ < 0) {
         const int from = rung_;
-        const double before = boundFrames_ ? boundSpan_ / 1000.0 / boundFrames_ : winIntervalMs_;
+        // (target mode: the GPU's mean busy time over the GPU-limited stretch, what the step is judged on)
+        const double before = target ? (boundGpuFrames_ ? boundGpuSum_ / boundGpuFrames_ : gpuMs)
+                                     : (boundFrames_ ? boundSpan_ / 1000.0 / boundFrames_ : winIntervalMs_);
         if (cfg_.calm && (!target || boundT_ < 8.0)) {
             // (calm: a step below today only buys a little speed, so it waits for a quiet moment as a step up does)
             pendingBelow_ = true;
@@ -872,6 +928,7 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         checkFrom_ = from;
         checkBefore_ = before;
         checkSpan_ = 0;
+        checkT_ = 0;
         checkFrames_ = 0;
         return true;
     }

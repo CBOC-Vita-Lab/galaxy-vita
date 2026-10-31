@@ -51,7 +51,8 @@
 //   below at or below rung 2, only when load >= downBelow (95 %) AND cpu <= cpuMax (85 %) for belowHoldSec
 //         (1.5 s): the GPU is the limit, not the back end's CPU. After checkSec (2 s) the mean frame interval
 //         must be at least betterFrac (5 %) shorter than before, or the step is undone and steps below are
-//         blocked (a lower picture that buys no speed is not kept).
+//         blocked (a lower picture that buys no speed is not kept). In target mode the check is on the GPU's busy time
+//         instead (see "Below-today trials" further down).
 //   fast  above rung 2, fastFrames (3) frames in a row at a saturated load (>= 97 %) step one rung down at once,
 //         without waiting for a window, and three more such frames after the change step again (the Strikers
 //         port's rule): a picture above today's costs only a few slow frames when an effect overloads the GPU.
@@ -108,10 +109,23 @@
 // A GPU-limited miss can step down
 // at quiet moments after the usual hold, or after 8 s without one. Target-only
 // rung -1 is 480x340, tried only after the old 544x388 floor itself misses.
-// Below-today trials are judged on throughput work, so deliberate 20 Hz pacing
-// does not undo a real GPU saving. Changes are at least 3 s apart (except scene
-// restores). Paced presentation needs exact GPU timers; a late frame fence
-// cannot distinguish callback waiting from GPU work, so it holds the rung.
+// Below-today trials are judged on what a smaller picture is for: the GPU's busy
+// time per picture, so deliberate 20 Hz pacing does not undo a real GPU saving.
+// Changes are at least 3 s apart (except scene restores). Paced presentation
+// needs exact GPU timers; a late frame fence cannot distinguish callback waiting
+// from GPU work, so it holds the rung.
+// Below-today trials in target mode (the console, Beach Bowl, 31 Oct 2026: the GPU's busy time per picture hardly changed
+// from 640x456 to 480x340, 38 ms against 36-38 ms, yet the controller went down every rung to the emergency one, blurrier
+// for nothing): the GPU's mean busy time over checkSec after the step is compared with its mean over the GPU-limited stretch
+// before it, against the saving the sizes predict (1 - Cost(to) / Cost(from): 14 % for 640 -> 592, 23 % for 544 -> 480). The
+// step is kept only when the GPU time fell by at least gainShare (half) of that, and by betterFrac at least, measured over
+// belowCheckSec (4 s): the busy time of a half-second window wanders from 103 % to 117 % of the budget in the water galaxy,
+// so a bare 5 % over 2 s let a step that bought nothing pass by chance. A stall during the check (the change's own freeze is often just over gapResetMs) no longer ends it
+// unjudged (that kept the step without a verdict). A step that bought nothing is undone at the next quiet moment, or after
+// noGainUndoSec (5 s) without one, and steps below are blocked for blockSec (doubling) from the undo, not from the verdict
+// (a long wait for a quiet moment used up most of the block). A scene remembers, with its rung, the rung below which a step
+// bought nothing; the next visit takes no step below it for maxBlockSec (a stage whose GPU time does not scale with the
+// picture does not try the useless drop again on every visit; after that it may try once more, in case it was the moment).
 //
 // Floor protection by degrees (Config::fxStep / Config::bgStep, GXV_AUTOQ_FXSTEP=1|2, target mode, default off): the things
 // that mean least to a player go first, the picture size and the emergency rung last. The order of degrading is
@@ -227,6 +241,11 @@ struct Config {
     double anisoRatio = 1.15;    // GPU time with it / without it, assumed (not measured on a console yet)
     // A late picture (interval over budgetMs + 3 %) is blamed on a stage when that stage's work is at least this share of the budget
     double causeShare = 0.85;
+    // Target mode: a step below today's size is kept only when the GPU's busy time fell by this share of the saving the sizes
+    // predict (and by betterFrac at least); a step that bought nothing waits at most noGainUndoSec for a quiet moment to be undone.
+    double gainShare = 0.5;
+    double noGainUndoSec = 5.0;
+    double belowCheckSec = 4.0;  // ... judged over this long (checkSec in the other modes): the GPU time of a water stage wanders
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
     static Config Legacy() {
         Config c;
@@ -370,7 +389,12 @@ private:
     bool checking_ = false;
     int checkFrom_ = kToday;
     double checkBefore_ = 0, checkSpan_ = 0;
+    double checkT_ = 0;              // target mode: seconds the check has measured (checkSpan_ is a sum of GPU time there)
     unsigned checkFrames_ = 0;
+    uint64_t undoDueAt_ = 0;         // target mode: an undo still waiting for a quiet moment is made in play from here
+    int sceneFloor_ = kNoRung;       // target mode: in this scene a step below this rung bought nothing (kNoRung: none known)
+    uint64_t sceneFloorUntil_ = 0;   // ... and, remembered from an earlier visit, no step below it is taken until then
+    void UndoBelow(uint64_t now);
     // blocks
     uint64_t blockUntil_[kRungs + 1] = {};
     double blockLen_[kRungs + 1] = {};
@@ -391,11 +415,12 @@ private:
     double belowBefore_ = 0;
     uint64_t roomAt_ = 0;            // when that window ended (0: no room seen since the last change or overload)
     uint32_t scene_ = 0;             // the key of the scene being played
-    struct SceneRung { uint32_t key; int8_t rung; uint8_t fx; };
+    struct SceneRung { uint32_t key; int8_t rung; uint8_t fx; int8_t floor; };
     SceneRung sceneMem_[32] = {};
     unsigned sceneNext_ = 0;
-    void Remember(uint32_t key, int rung, unsigned fx = 0);
-    int Recall(uint32_t key, unsigned* fx = nullptr) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
+    void Remember(uint32_t key, int rung, unsigned fx = 0, int floor = kNoRung);
+    int Recall(uint32_t key, unsigned* fx = nullptr, int* floor = nullptr) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
+    void RecallFloor(uint32_t key, uint64_t now);
     unsigned NextStep(uint64_t now) const;
     void SetSteps(unsigned to, Why why, uint64_t now);
     void SetSceneSteps(unsigned to, uint64_t now);

@@ -16,6 +16,10 @@
 //    lowers nothing, at the bottom rung and above it; the floor census blames those pictures on the right stage.
 // 6. The floor census: pictures, late pictures and their time, causes, stalls and quiet moments, reset by TakeFloor.
 // 7. A scene remembers the step with its rung.
+// 8. A step below today's size is judged on the GPU's busy time against the saving the sizes predict: a scene whose GPU time
+//    hardly changes with the picture (Beach Bowl on the console) keeps today's size, the useless step undone and blocked even
+//    when the change's own freeze is a stall, never two steps down in a row, not retried on the next visit of the scene; a
+//    scene whose GPU time scales with the picture still steps down and keeps it.
 #include "../platform/vgx/src/vgx_autoq.h"
 
 #include <algorithm>
@@ -142,7 +146,9 @@ uint64_t Digest(const Config& cfg, unsigned modeMask, unsigned* fxChanges = null
     return fnv.h;
 }
 constexpr uint64_t kGoldenCalm = 0x5ee9eca5260f8fddull;
-constexpr uint64_t kGoldenLegacy = 0x254473b927eca165ull;
+// (legacy: retaken when a step below today in target mode came to be judged on the GPU's busy time over belowCheckSec, 4 s of
+// wall time: the same changes, the "no gain" verdicts of the target-30 fence-clock traces 2-2.4 s later)
+constexpr uint64_t kGoldenLegacy = 0x3b340e35fcf827d2ull;
 
 // ---------------------------------------------------------------------------------------------------- a model of the pipeline
 struct Load {
@@ -170,6 +176,9 @@ struct Sim {
     unsigned lateFrames = 0, frames = 0;
     bool invariantBroken = false;
     double lastFxAt = -100, minFxGap = 1e9;
+    uint64_t freezeUs = 0;   // the interval of the picture after a change of rung (the console: new render targets, 0.26 s)
+    bool freezeNext = false;
+    double belowSec = 0;     // time spent below today's rung
     Sim(const Config& c, uint32_t seed, double n) : ctl(c), rng(seed), noise(n) {}
     void Frame(const Load& l, bool quiet = false, uint32_t scene = 0, uint64_t forceIntervalUs = 0) {
         std::uniform_real_distribution<double> u(-noise, noise);
@@ -177,8 +186,10 @@ struct Sim {
         const double gpu = (l.fixedGpuMs + l.pixGpuMs * Cost(ctl.Current())) * (1.0 + u(rng)) / (ctl.FxStepOn() ? l.fxGain : 1.0) / (ctl.BgStepOn() ? l.bgGain : 1.0);
         const double work = std::max({gms, bms, gpu}) + l.extraMs;
         // the picture rate is the 60 Hz retrace clock: two, three, ... retraces per picture
-        const uint64_t interval = forceIntervalUs ? forceIntervalUs
+        const uint64_t interval = forceIntervalUs ? forceIntervalUs : freezeNext ? freezeUs
             : static_cast<uint64_t>(std::max(2.0, std::ceil(work * 1000.0 / 16683.0 - 1e-9)) * 16683.0);
+        freezeNext = false;
+        if (ctl.Current() < kToday) belowSec += static_cast<double>(interval) / 1e6;
         game += static_cast<uint32_t>(gms * 500.0) * 2u;
         turns += 2;
         backend += static_cast<uint32_t>(bms * 1000.0);
@@ -199,7 +210,10 @@ struct Sim {
         const int before = ctl.Current();
         const bool changed = ctl.Add(f);
         t += static_cast<double>(interval) / 1e6;
-        if (changed || ctl.Current() != before) ev.push_back({t, 'R', before, ctl.Current(), ctl.LastChange().why});
+        if (changed || ctl.Current() != before) {
+            ev.push_back({t, 'R', before, ctl.Current(), ctl.LastChange().why});
+            freezeNext = freezeUs > 0 && ctl.Current() != before;
+        }
         if (ctl.Steps() != stepsPrev) {
             for (unsigned bit = 1; bit <= 2; bit <<= 1) {
                 const bool was = (stepsPrev & bit) != 0, is = (ctl.Steps() & bit) != 0;
@@ -533,6 +547,134 @@ int main(int argc, char** argv) {
         Check(bOff, "a new scene starts at today's size with the steps off");
         Check(aBack, "the scene seen before comes back with its rung and its steps");
         Check(!s.invariantBroken, "no step is on above today's rung");
+    }
+
+    std::printf("a step below today's size is judged on the GPU's busy time\n");
+    {
+        // Beach Bowl as the console measured it (31 Oct 2026): 38 ms of GPU a picture at 640x456, 36-38 ms at 592x422 and at
+        // 480x340: nearly all of it does not scale with the picture. The steps buy nothing either. Every change of the picture
+        // freezes it for 0.26 s (over gapResetMs). Without pauses and with one each minute.
+        Load beach;
+        beach.gameMs = 14;
+        beach.fixedGpuMs = 34;
+        beach.pixGpuMs = 4;
+        beach.fxGain = beach.bgGain = 1.0;
+        for (int pauses = 0; pauses < 2; ++pauses) {
+            Sim s(Target(true), 80 + pauses, 0.05);
+            s.freezeUs = 260000;
+            s.Run(beach, 300, pauses ? 60 : 0);
+            if (verbose) s.Print(pauses ? "Beach Bowl, flat GPU time, a pause each minute" : "Beach Bowl, flat GPU time, no pause");
+            bool downTwice = false, undoneAll = true, undoSoon = true;
+            int lowest = kToday;
+            for (size_t i = 0; i < s.ev.size(); ++i) {
+                const Event& e = s.ev[i];
+                if (e.kind != 'R') continue;
+                lowest = std::min(lowest, e.to);
+                if (e.to < e.from && e.from <= kToday) {
+                    // the next change of rung must be the undo, for no gain, within 4 s check + 5 s wait + settling and a window
+                    int next = -1;
+                    for (size_t j = i + 1; j < s.ev.size(); ++j)
+                        if (s.ev[j].kind == 'R') { next = static_cast<int>(j); break; }
+                    if (next < 0) undoneAll = false;
+                    else {
+                        if (s.ev[next].to < s.ev[next].from) downTwice = true;
+                        if (s.ev[next].why != Why::NoGain || s.ev[next].to != e.from) undoneAll = false;
+                        if (s.ev[next].t - e.t > 11.0) undoSoon = false;
+                    }
+                }
+            }
+            char line[240];
+            std::printf("    %s: %u changes of rung, lowest rung %d, %.1f s of 300 below 640x456\n", pauses ? "a pause each minute" : "no pause",
+                        s.Count('R'), lowest, s.belowSec);
+            Check(lowest >= 1 && !downTwice, "flat GPU time: never two steps down in a row, never below 592x422, never the emergency rung");
+            Check(undoneAll, "... every step below 640x456 is undone for no gain");
+            std::snprintf(line, sizeof line, "... undone %s within 11 s of the step", pauses ? "at a pause or in play" : "in play without a pause");
+            Check(undoSoon, line);
+            Check(s.belowSec < 30.0 && s.Count('R') <= 8, "... the picture is at 640x456 nearly all the time and changes rarely (blocks doubling)");
+            Check(s.ctl.Current() == kToday, "... and ends at 640x456");
+        }
+    }
+    {
+        // GPU time that scales with the picture (the plaza's kind): 3 + 36 x Cost ms, 39 ms at 640x456, 34 ms at 592x422,
+        // 29 ms at 544x388. Smaller pictures are taken and kept, also with the freeze.
+        Load plaza;
+        plaza.fixedGpuMs = 3;
+        plaza.pixGpuMs = 36;
+        plaza.fxGain = plaza.bgGain = 1.0;
+        Sim s(Target(true), 90, 0.05);
+        s.freezeUs = 260000;
+        s.Run(plaza, 120);
+        if (verbose) s.Print("GPU time that scales with the picture");
+        Check(s.Index('R', 0, 1) >= 0 && s.ctl.Current() <= 1, "scaling GPU time: the picture goes below 640x456 and stays there");
+        bool noGain = false;
+        for (const Event& e : s.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
+        Check(!noGain, "... no step is undone for no gain");
+        // and in legacy rules the same
+        Config legacy = Config::Legacy();
+        legacy.targetFps = 30;
+        legacy.minRung = kEmergency;
+        legacy.budgetMs = 1000.0 / 30.0;
+        Sim l(legacy, 91, 0.05);
+        l.Run(plaza, 120);
+        noGain = false;
+        for (const Event& e : l.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
+        Check(l.ctl.Current() <= 1 && !noGain, "... and with the legacy rules (GXV_AUTOQ_CALM=0)");
+        // much heavier: down to the emergency rung, each step kept
+        Load heavy = plaza;
+        heavy.pixGpuMs = 60; // 63 ms at 640x456, 36.6 ms at 480x340
+        Sim h(Target(true), 92, 0.05);
+        h.freezeUs = 260000;
+        h.Run(heavy, 150);
+        noGain = false;
+        for (const Event& e : h.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
+        if (verbose) h.Print("GPU time that scales, much heavier");
+        Check(h.ctl.Current() == kEmergency && !noGain, "... a much heavier one reaches 480x340, each step kept");
+    }
+    {
+        // A step that buys a little (5-7 %: more than betterFrac, much less than half of the predicted 14 %) is not kept either.
+        Load little;
+        little.fixedGpuMs = 30;
+        little.pixGpuMs = 14; // 44 ms at 640x456, 42 ms at 592x422 (-4.6 %)
+        little.fxGain = little.bgGain = 1.0;
+        Sim s(Target(true), 93, 0.02);
+        s.Run(little, 60);
+        if (verbose) s.Print("a step that buys a little");
+        const int down = s.Index('R', 0, 1);
+        Check(down >= 0 && down + 1 < static_cast<int>(s.ev.size()) && s.ev[down + 1].why == Why::NoGain && s.ev[down + 1].to == kToday,
+              "a step that saves much less than half of the predicted GPU time is undone");
+    }
+    {
+        // The scene remembers it: Beach Bowl (key 333), another stage, Beach Bowl again: no useless step on the second visit.
+        Load beach;
+        beach.gameMs = 14;
+        beach.fixedGpuMs = 34;
+        beach.pixGpuMs = 4;
+        beach.fxGain = beach.bgGain = 1.0;
+        Load light;
+        light.pixGpuMs = 5;
+        Load plaza;
+        plaza.fixedGpuMs = 3;
+        plaza.pixGpuMs = 36;
+        plaza.fxGain = plaza.bgGain = 1.0;
+        Sim s(Target(true), 94, 0.05);
+        s.freezeUs = 260000;
+        s.Run(beach, 40, 0, 333);
+        const bool firstTried = s.Index('R', 0, 1) >= 0;
+        s.Frame(light, false, 444, 2500000); // a load, another stage
+        s.Run(light, 10, 0, 444);
+        s.Frame(beach, false, 333, 2500000); // a load, Beach Bowl again
+        const double back = s.t;
+        s.Run(beach, 120, 0, 333);
+        int below = -1;
+        for (size_t i = 0; i < s.ev.size(); ++i)
+            if (s.ev[i].t >= back && s.ev[i].kind == 'R' && s.ev[i].to < kToday) { below = static_cast<int>(i); break; }
+        s.Frame(plaza, false, 555, 2500000); // a load, a stage whose GPU time scales: nothing learnt elsewhere holds it back
+        const double plazaFrom = s.t;
+        s.Run(plaza, 60, 0, 555);
+        if (verbose) s.Print("Beach Bowl, another stage, Beach Bowl again, a scaling stage");
+        Check(firstTried, "setup: the first visit tries the step below 640x456 (and undoes it)");
+        Check(below < 0, "the second visit of the stage takes no step below 640x456 (remembered with the scene)");
+        Check(s.Index('R', plazaFrom, 1) >= 0, "a stage whose GPU time scales still steps down");
     }
 
     std::printf("%s (%d failed)\n", g_failures ? "FAILED" : "all checks passed", g_failures);

@@ -170,7 +170,9 @@ uint64_t Digest(const Config& cfg) {
 }
 // Golden digests, taken with the controller before Config::recover existed.
 constexpr uint64_t kGoldenCalm = 0x5ee9eca5260f8fddull;
-constexpr uint64_t kGoldenLegacy = 0x254473b927eca165ull;
+// (legacy: retaken when a step below today in target mode came to be judged on the GPU's busy time over belowCheckSec, 4 s of
+// wall time: the same changes, the "no gain" verdicts of the target-30 fence-clock traces 2-2.4 s later)
+constexpr uint64_t kGoldenLegacy = 0x3b340e35fcf827d2ull;
 
 } // namespace
 
