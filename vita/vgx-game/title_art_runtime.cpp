@@ -134,12 +134,36 @@ bool Sink(void* context, int which, const uint8_t* png, size_t length) {
     return all;
 }
 
+// Can a file be made in `dir` (a test write, removed again)?
+bool Writable(const char* dir) {
+    char probe[112];
+    std::snprintf(probe, sizeof probe, "%s/.smgart-probe", dir);
+    const SceUID f = sceIoOpen(probe, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    if (f < 0) return false;
+    sceIoClose(f);
+    sceIoRemove(probe);
+    return true;
+}
+
 // Makes the pictures from `rgba`, records the stamp. Returns true when every file was written.
 bool MakePictures(const uint8_t* rgba, const char* titleId) {
     const uint64_t t0 = NowUs();
     SinkContext context{titleId};
     int made = 0;
-    const bool built = BuildPictures(rgba, Sink, &context, &made);
+    // On the console a homebrew game may not be allowed to change its own folder or the home screen's copy of its pictures
+    // (both refused on a retail Vita with the default settings): then the pictures are not made at all (they take about 13 s of
+    // a spare core) and the stamp says so, so it is not tried at every start. The capture still gives the loading screen and Settings.
+    char appDir[96], metaDir[96];
+    std::snprintf(appDir, sizeof appDir, "ux0:app/%s/sce_sys", titleId);
+    std::snprintf(metaDir, sizeof metaDir, "ur0:appmeta/%s", titleId);
+    bool built = false;
+    if (!Writable(appDir) && !Writable(metaDir)) {
+        port_log_summary("title art: the console does not let the game change its home-screen pictures (%s and %s refused a test write); "
+                         "the loading screen and Settings use the capture", appDir, metaDir);
+        built = true;  // (nothing to try again at the next start)
+    } else {
+        built = BuildPictures(rgba, Sink, &context, &made);
+    }
     char iconPath[96];
     std::snprintf(iconPath, sizeof iconPath, "ux0:app/%s/sce_sys/icon0.png", titleId);
     Stamp stamp;

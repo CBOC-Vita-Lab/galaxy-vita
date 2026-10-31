@@ -16,7 +16,7 @@ mkdir -p "$out/syn"
 # the worker, with the console's headers (types only) and a fake console
 "$cxx" "${flags[@]}" -Wno-deprecated-declarations -I"$root/platform/vgx/src" -idirafter "$VITASDK/arm-vita-eabi/include" "$root/tests/title_art_runtime.cpp" -o "$out/runtime"
 for mode in disabled enabled-start titleart-off-in-worker first-run write-once package-update old-bubble-version force unsettled not-a-title \
-            unsupported-format tear appmeta-denied app-denied low-heap title-id title-id-invalid title-id-failed corrupt-capture; do
+            unsupported-format tear appmeta-denied app-denied both-denied low-heap title-id title-id-invalid title-id-failed corrupt-capture; do
   "$out/runtime" "$mode" | tail -1
 done
 # 32-bit ARM (the console's width) under qemu, when the cross compiler and qemu-arm are at hand: the made-up title must give the very

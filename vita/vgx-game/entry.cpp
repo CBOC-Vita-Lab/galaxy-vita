@@ -66,7 +66,8 @@ namespace {
 void LoadEnvFile(const char* path) {
     FILE* f = std::fopen(path, "r");
     if (!f) return;
-    char line[512];
+    // (2 KiB: a PETARI_STAGE tour of every galaxy is about 1.1 KiB on one line; a longer line was cut and the cut name crashed the stage loader)
+    static char line[2048];
     int n = 0;
     while (std::fgets(line, sizeof(line), f)) {
         char* s = line;

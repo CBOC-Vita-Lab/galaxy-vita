@@ -307,6 +307,21 @@ int main(int argc, char** argv) {
         std::puts("PASS: tear");
         return 0;
     }
+    if (mode == "both-denied") {
+        world::denied.push_back("ux0:app/");
+        world::denied.push_back("ur0:appmeta/");
+        Main(0, nullptr);
+        ExpectCapture(world::frameA);
+        Check(Logged("does not let the game change its home-screen pictures"), "both folders refused: said once, no pictures made");
+        Check(!Logged("picture files written") || Logged("0 of 0 picture files written"), "no picture work when nothing could be written");
+        const auto snapshot = world::files;
+        world::clockUs = 0;
+        world::displayQueries = 0;
+        Main(0, nullptr);
+        Check(world::files == snapshot && world::displayQueries == 0, "not tried again at the next start");
+        std::puts(("PASS: " + mode).c_str());
+        return 0;
+    }
     if (mode == "appmeta-denied" || mode == "app-denied") {
         world::denied.push_back(mode == "app-denied" ? "ux0:app/" : "ur0:appmeta/");
         Main(0, nullptr);
