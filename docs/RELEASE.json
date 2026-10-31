@@ -6,11 +6,11 @@
   "titleId": "SMGV00001",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "95c889571455c440faa12387e5c00f168d59bd57b200a8a16c1a596952929bb2",
-    "runtimeSha256": "b1a8bbef3365e64a94605230ab1b1ffe9a6e6e9bba5785b517ad4b7a619acb84"
+    "sha256": "91a72785f79068ba2fb2da74b08751cbad38e07c72618c960863a18835ad2969",
+    "runtimeSha256": "b2aa158dc2d13c584f776e9bbc7e1f36248cfe579eded40129feddc01cb48f4c"
   },
   "source": {
-    "revision": "6c77f230b3b61bf83a228a947a353ed86f44e7a8",
+    "revision": "0a5bdf6b5fb8caa72fabb3126d582a3736c1cc66",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {
@@ -34,10 +34,11 @@
   },
   "verification": {
     "hostTests": "python3 -m unittest discover -s tests; the tools/test_*.sh host suites",
-    "emulator": "Vita3K (correctness only): boot, Gateway Galaxy, the Comet Observatory, shader cache migration on update and fresh install",
+    "emulator": "Vita3K (correctness only): boot, title, warm-up of the shader list, the packaged seed read in place",
     "earlierConsoleRuns": "Two test builds from this source line ran on a PS Vita on 23 Oct 2026 (automatic quality before and after the calm rules)",
-    "physicalVita": false,
-    "desktopInstaller": false
+    "physicalVita": true,
+    "desktopInstaller": false,
+    "consoleRuns": "31 Oct 2026 on a PS Vita: 1.0 vs 1.2 on the same scripted routes in 11 galaxies, tours through all 45 galaxies in one session, a fresh-install start (title in 13 s) and Locked 30; the final build boots in 12.6 s and ran Matter Splatter"
   },
   "publicReleaseAccepted": false
 }
