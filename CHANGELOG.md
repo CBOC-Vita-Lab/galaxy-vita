@@ -1,49 +1,45 @@
-# Version 1.2 — November 2026
+# Version 1.2 — October 31, 2026
 
-The smooth-play update: aiming for a steady 30 with the full picture.
-
-### Smoother play
-- **Back to 1.0's speed, and past it.** 1.1 made every player rebuild their shaders during play and added work to every frame. Both are undone: your existing shader cache is used again, and the package brings the extra shaders 1.2 needs already prepared.
-- **30 FPS is the floor.** In every picture rate, dynamic quality watches the whole frame's work and lowers resolution only when a scene would otherwise fall under 30, then brings it back within seconds.
-- **Lock it at 30.** Settings > Picture rate now offers **Locked 30** (an even 30 FPS, every frame, at full effects) or **Up to 60** (the default). Locked 30 replaces 1.1's "30 FPS" and "Steady 30", and it never drops to 20.
-- **The game and the renderer work side by side again.** Under a 30 FPS cap they had started taking turns, so each frame cost both of them added together. This was the main cause of the slow Comet Observatory.
-- **No more drops to 15 FPS.** When a scene is just too busy for the processor, the game now keeps showing every picture and slows down a touch, as the Wii did, instead of halving the frame rate.
-- **Less work every frame.** Matching pieces of scenery are drawn together, lights are worked out once instead of twice, screen copies use their own small programs, and sound mixing has moved off the game's own processor core.
-- **Movies on the Vita's video hardware.** The title video and cutscenes are decoded by the console's JPEG hardware, with the software decoder as a fallback.
-- **The newest vitaGL**, with its speed improvements.
-
-### Your own pictures
-- **No game artwork in the package.** The first time you reach the title screen, the game saves that picture on your card (`ux0:data/smg/art`) and makes the loading screen and the Settings background from it. Until then the loading screen is a plain starfield. Where the console lets a game change its own home-screen pictures, the bubble and LiveArea pictures are made from it as well (shown after a restart); a console with the default settings does not, and keeps the package's plain bubble. `GXV_TITLEART=0` turns it off.
-
-### Settings
-- **A fuller Settings menu.** The Display page now has a **Preset** (Best picture, Balanced, Performance; any covered row you change reads Custom), **Dynamic resolution**, **Sharper when possible**, **Prioritize Mario**, **Anti-aliasing**, **Sharpness** (Auto, Off, Strong), **HD textures** (it says when the pack is not installed), **Effects quality**, **Depth of field**, **Core plan**, Reduced motion and Game language, each with a two-line explanation at the bottom and a button legend. The Controls page shows a table of what every button does in the current layout, and the moves that use them. The heading is drawn in the game's own menu font, over the title picture.
-- **Tilt, your way.** Settings > Controls has **Tilt sensitivity** (50% to 200%, 100% is the game's own feel) and **Tilt with** (Motion sensor or Left stick; a console without a motion sensor always uses the stick) for Star Ball and ray surfing, applied from the next launch.
+The picture-perfect update: a sharper, correct picture, a 30 FPS floor in most of the game, and a real Settings menu.
 
 ### Better picture
-- **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
-- **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.
-- **Ground-pound and black-hole trails are back,** along with the right colours on about 85 other effects (Dino Piranha, Mario, Dodoryu, Kingfin and more) and a few shadows and bubbles. Colours written in the game's effect list were being read with their bytes in the wrong order.
-- **Mario's eyes in HD.** With the optional HD textures, Mario's eyes now use the sharper HD images too. The white or stuck-closed eyes that made 1.1 leave them out came from a colour rule the port now follows exactly.
-- **Sparkles and rain lines at full size.** Thin-line and dot effects (the spin sparkles, rain, depth-of-field strips) were drawn one pixel wide; they now have the Wii's widths.
-- **Lumas have their colours back.** They could show up as white blobs; a Wii colour rule the port missed is now followed.
-- **Queen Bee's fur** looks as it should.
-- **Textures as sharp or soft as the game asks for,** including the dome floors and the Dark Matter Plant, and water keeps the game's own distant detail.
-- **Trails, bump and water effects** follow the Wii's rules more closely.
-- **Reduced motion works in play.** Settings > Display > Reduced motion now cuts camera shake to a quarter of its size and the screen blur on explosions and the first-person camera to half, and the Star Pointer still hits what you see. Nothing else about how the game plays changes.
+- **Bowser no longer twists and spins** in his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
+- **Lumas have their colours back** instead of showing up as white blobs.
+- **Ground-pound and black-hole trails are back,** with the right colours on about 85 other effects.
+- **Matter Splatter's walkways appear as they should** when the light reaches them, instead of flashing black.
+- **Mario's eyes in HD** with the optional HD textures, and **Queen Bee's fur** looks right.
+- **Sparkles and rain at full size,** and textures as sharp or soft as the game asks for.
+- **A sharper picture by default.** Most galaxies now stay at 640×456 or better, where 1.0 often stepped down.
+
+### Smoother play
+- **A 30 FPS floor.** The quality system now puts 30 FPS first: in a heavy scene it lowers the sharpness and the effects that matter least, keeps Mario at full quality, and brings everything back within seconds when there's room.
+- **Locked 30.** Prefer an even, steady picture? Settings > Picture rate > **Locked 30** holds a smooth 30 every frame.
+- **No first-visit freezes.** Every galaxy's graphics come ready-made in the package, so entering a galaxy for the first time no longer stops the game for seconds.
+- **Much faster start.** The title screen comes up in about 20 seconds (1.0 took about 40), and the first launch after installing is just as quick.
+- **Rock solid in long sessions.** A memory problem that could crash the game after many galaxies in one sitting is fixed (tested through all 45 galaxies in a row).
+- **Movies on the Vita's video hardware,** and sound mixing on its own core.
+
+### Settings
+- **A full Settings menu,** from the game's LiveArea screen: picture presets, sharpness, anti-aliasing, effects, HD textures, depth of field, reduced motion, language, and a Controls page that shows what every button does. It's drawn in the game's own font, over your own title screen.
+- **Tilt your way.** Tilt sensitivity on a simple 1–10 scale, and steer the Star Ball and Manta Ray with the left stick instead of tilting, if you prefer.
+- **Mouse-style aiming** for the Star Bit pointer, as an option.
+- **Reduced motion** now really works in play: much less camera shake and blur.
 
 ### Controls and gameplay
-- **Music keeps playing after sleep or the Home menu.**
+- **Music keeps playing** after sleep or the Home menu.
 - **Dialogue no longer skips to the end** when a finger rests on the screen.
-- **Spins answer at once.** A Square or R spin right after a jump used to come a third of a second late (or not when expected); it now spins the moment the game allows, and quick taps always count.
-- **PS TV with a PS3 or PS4 controller:** R2 shoots Star Bits, the right stick moves the pointer, and the D-pad keeps the camera.
-- **Mouse-style aiming** for the Star Bit pointer, as an option in Settings > Controls.
+- **Spins answer at once,** even right after a jump.
+- **PS TV with a PS3 or PS4 controller:** R2 shoots Star Bits, the right stick moves the pointer, the D-pad keeps the camera.
+- **Tidier hints.** Rewritten prompts for the Vita's controls wrap at whole words.
+
+### Your own title screen
+- **No game artwork in the download.** The first time you reach the title screen, the game saves it on your memory card and uses it for the loading screen and the Settings background. The CBOC Vita Installer builds the home-screen bubble from your own game; a manual install keeps a plain star (the console doesn't let a game change its own bubble).
 
 ### Steadier start
-- **The loading screen can't hang at 99%.** If the game is running but the title isn't recognised, the title picture fades out by itself. If loading truly stalls, the screen says what it is waiting for.
-- **Clearer graphics errors.** A missing or broken shader compiler, or a graphics start-up failure, now names the exact step.
-- **Safer graphics driver.** Running out of graphics memory skips a frame instead of freezing the Vita.
+- **The loading screen can't hang at 99%,** and a real stall says what it's waiting for.
+- **Clearer errors** if the shader compiler or the graphics fail to start, and running out of graphics memory skips a frame instead of freezing the Vita.
 
-Updating? Install the new VPK over the old one. Your saves and settings are kept.
+Updating? Install the new VPK over the old one. Your saves and settings are kept. The full engineering list is in [docs/SOURCE.md](docs/SOURCE.md#version-12).
 
 # Version 1.1 — October 26, 2026
 

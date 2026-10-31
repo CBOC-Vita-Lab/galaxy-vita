@@ -3,14 +3,14 @@
 Thanks for playing! If something here bothers you, or you find something new, open an [issue on GitHub](https://github.com/CBOC-Vita-Lab/galaxy-vita/issues).
 
 ## Performance
-- **The Comet Observatory and the biggest boss fights are the heaviest scenes.** They can run below the rest of the game. The picture steps down a little there on its own.
-- **A galaxy's first visit starts at standard sharpness.** It moves up at your first pause if the Vita has room, and remembers that afterwards.
-- **The first launch is slower** while the graphics are prepared. Later launches are quicker.
-- **The first loading screen is a plain starfield, and the home-screen bubble is a plain star.** The game makes its own pictures from your title screen the first time you reach it: the loading screen and Settings background from the next start on, the bubble after the console's home screen has refreshed (a restart). Delete `ux0:data/smg/art/title.rgba` to make them again, or add `GXV_TITLEART=0` to `ux0:data/smg/env.txt` to switch it off.
+- **The heaviest scenes dip below 30.** Beach Bowl's water, Bonefin, the Bowser fights and Matter Splatter's dark matter are the hardest work for the Vita. The picture gets less sharp there on its own and usually holds about 30, but the busiest moments can dip into the 20s. **Locked 30** (Settings > Picture rate) keeps an even 30 where the Vita can.
+- **The Comet Observatory runs at about 38 fps,** a little below 1.0's 42: the picture fixes cost a little there.
+- **A 60 fps "Performance" mode** is being worked on for a later update.
+- **With a manual install, the home-screen bubble is a plain star.** The console doesn't let a game change its own bubble pictures; the CBOC Vita Installer builds the bubble from your own game. The loading screen and Settings background use your own title screen (from your second start on). Delete `ux0:data/smg/art/title.rgba` to capture it again, or add `GXV_TITLEART=0` to `ux0:data/smg/env.txt` to switch it off.
 
 ## Gameplay
 - **Rear touch is off by default**, so fingers holding the Vita never move the pointer by accident. Turn it on in the pause menu with Triangle.
-- **A brief pause the first time some effects appear.** The Vita prepares each new graphics effect once, which can take a fraction of a second. The package comes with the effects of the whole game prepared ahead, and anything new is kept, so it happens at most once.
+- **A rare brief pause the first time an effect appears.** The package comes with the graphics of every galaxy prepared ahead; anything it doesn't have is prepared once (a fraction of a second) and kept.
 
 ## Install
 - The game needs your own `RMGE01` (Wii, USA) disc image. Other regions aren't supported yet.
