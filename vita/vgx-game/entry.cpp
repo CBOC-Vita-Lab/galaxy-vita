@@ -333,6 +333,8 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // Anisotropic filtering as the top quality step (first given up under load); the HD pack's textures trilinear.
     setenv("GXV_AUTOQ_ANISO", "1", 0);
     setenv("GXV_HDTEX_TRILINEAR", "1", 0);
+    // Half precision only in fragment shaders proven to stay within one 8-bit level of the float result.
+    setenv("GXV_FS_HALF", "1", 0);
     // TEV inputs A, B, C read the low 8 bits of a colour register, as on the Wii (the Lumas were white without it).
     setenv("GXV_FIX_TEVIN", "1", 0);
     // Lost quality comes back sooner: a step up after 10 s of room in a row (not 20); a failed step still blocks itself.
