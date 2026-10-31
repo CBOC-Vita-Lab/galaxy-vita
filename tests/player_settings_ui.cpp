@@ -29,8 +29,23 @@ int main() {
     s.working.hdTextures=false;s.working.coreHelp=false;s.working.reducedMotion=true;s.working.language="French";Tap(s,Right);Tap(s,Right);
     assert(!s.working.hdTextures&&!s.working.coreHelp&&s.working.reducedMotion&&s.working.language=="French");s.working.hdTextures=true;s.working.coreHelp=true;s.working.reducedMotion=false;s.working.language="";
     Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Down);assert(s.row==RowRate);Tap(s,Right);assert(s.working.fpsLimit==30&&session.active.fpsLimit==0&&PresetOf(s.working)==Preset::BestPicture); // the rate is not in a preset
-    Tap(s,Right);assert(s.working.fpsLimit==0);Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Left);assert(s.working.fpsLimit==0);Tap(s,Right);assert(s.working.fpsLimit==30);
+    Tap(s,Down);assert(s.row==RowRate);
+    // Picture mode: Quality (default) -> Performance -> Locked 30 -> Quality. Performance reads as the Performance preset only with the preset's own rows; Locked 30 is not in a preset.
+    assert(!s.working.performance60&&s.working.fpsLimit==0);
+    Tap(s,Right);assert(s.working.performance60&&s.working.fpsLimit==0&&!s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Off&&session.active.fpsLimit==0&&!session.active.performance60&&PresetOf(s.working)==Preset::Custom);
+    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==30);Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==0);
+    Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Left);assert(s.working.performance60&&s.working.fpsLimit==0);Tap(s,Left);assert(!s.working.performance60&&s.working.fpsLimit==0);
+    s.working.aboveNative=true;s.working.antiAliasing=AntiAliasing::Auto;                                // (the rows the mode switched off, put back)
+    Tap(s,Right);Tap(s,Right);assert(s.working.fpsLimit==30&&PresetOf(s.working)==Preset::Custom);       // Performance then Locked 30: Sharper and anti-aliasing are off
+    s.working.aboveNative=true;s.working.antiAliasing=AntiAliasing::Auto;assert(PresetOf(s.working)==Preset::BestPicture);   // Locked 30 itself is not in a preset
+    // The Performance preset selects Performance mode (and leaves Locked 30); the others go back to Quality, keeping a Locked 30.
+    s.row=RowPreset;Tap(s,Left);assert(PresetOf(s.working)==Preset::Performance&&s.working.performance60&&s.working.fpsLimit==0);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value).find("Performance")!=std::string::npos);DisplayRowView(s,RowSharper,rv);assert(std::string(rv.value)=="Off");}
+    Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture&&!s.working.performance60&&s.working.fpsLimit==0);
+    // Performance mode with the Sharper row turned back on says it does nothing there.
+    s.working.performance60=true;s.working.aboveNative=true;{RowView rv;DisplayRowView(s,RowSharper,rv);assert(std::string(rv.value).find("not used in Performance")!=std::string::npos);}
+    s.working.performance60=false;
+    s.row=RowRate;
     // Editing any covered row reads Custom; putting it back reads the preset again.
     struct Covered {unsigned row;const char* what;};
     for(const Covered c:{Covered{RowDynamic,"dynamic"},Covered{RowSharper,"sharper"},Covered{RowMario,"mario"},Covered{RowAntiAliasing,"aa"},Covered{RowSharpness,"sharpness"},Covered{RowEffects,"effects"},Covered{RowDepthOfField,"dof"}}) {

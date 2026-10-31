@@ -15,7 +15,7 @@ enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
 enum class AntiAliasing : uint8_t { Auto, Off };
 enum class Sharpness : uint8_t { Auto, Off, Strong };
 enum class EffectsQuality : uint8_t { Adaptive, Full };
-// Keys: above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, motion_gain,
+// Keys: perf_mode, above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, motion_gain,
 // motion_source. (Every optional
 // key sorts before "schema" and "reduced_motion" stays the last line of a fresh file, so a cut-short write is still caught as incomplete.)
 // The Preset row is not stored: it is read from the rows a preset covers (Dynamic resolution, Sharper when possible, Prioritize
@@ -24,6 +24,10 @@ enum class Preset : uint8_t { BestPicture, Balanced, Performance, Custom };
 struct Config {
     uint32_t version = 1;
     int fpsLimit = 0;
+    // Performance (60 FPS) mode of the Picture mode row: aim for 60 instead of 30 as the floor, giving up effects and then picture size first
+    // (GXV_AUTOQ_TARGET=60), and the picture extras that only cost GPU time (sizes above native, multisampling, anisotropic filtering).
+    // Only with fpsLimit 0 (up to 60); Quality is fpsLimit 0 with this off, Locked 30 is fpsLimit 30. Optional key perf_mode.
+    bool performance60 = false;
     AutoQuality autoQuality = AutoQuality::Default;
     controls::ProfileId profile = controls::ProfileId::Handheld;
     std::string language;

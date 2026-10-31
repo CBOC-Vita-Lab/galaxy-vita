@@ -5,7 +5,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 ### Smoother play
 - **Back to 1.0's speed, and past it.** 1.1 made every player rebuild their shaders during play and added work to every frame. Both are undone: your existing shader cache is used again, and the package brings the extra shaders 1.2 needs already prepared.
 - **30 FPS is the floor.** In every picture rate, dynamic quality watches the whole frame's work and lowers resolution only when a scene would otherwise fall under 30, then brings it back within seconds.
-- **Lock it at 30.** Settings > Picture rate now offers **Locked 30** (an even 30 FPS, every frame, at full effects) or **Up to 60** (the default). Locked 30 replaces 1.1's "30 FPS" and "Steady 30", and it never drops to 20.
+- **Lock it at 30.** Settings > Picture mode now offers **Quality** (up to 60, never below 30, then the sharpest picture; the default), **Performance** (aims for 60 and gives up sharpness and effects first) or **Locked 30** (an even 30 FPS, every frame, at full effects). Locked 30 replaces 1.1's "30 FPS" and "Steady 30", and it never drops to 20.
 - **The game and the renderer work side by side again.** Under a 30 FPS cap they had started taking turns, so each frame cost both of them added together. This was the main cause of the slow Comet Observatory.
 - **No more drops to 15 FPS.** When a scene is just too busy for the processor, the game now keeps showing every picture and slows down a touch, as the Wii did, instead of halving the frame rate.
 - **Less work every frame.** Matching pieces of scenery are drawn together, lights are worked out once instead of twice, screen copies use their own small programs, and sound mixing has moved off the game's own processor core.
@@ -17,6 +17,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 
 ### Settings
 - **A fuller Settings menu.** The Display page now has a **Preset** (Best picture, Balanced, Performance; any covered row you change reads Custom), **Dynamic resolution**, **Sharper when possible**, **Prioritize Mario**, **Anti-aliasing**, **Sharpness** (Auto, Off, Strong), **HD textures** (it says when the pack is not installed), **Effects quality**, **Depth of field**, **Core plan**, Reduced motion and Game language, each with a two-line explanation at the bottom and a button legend. The Controls page shows a table of what every button does in the current layout, and the moves that use them. The heading is drawn in the game's own menu font, over the title picture.
+- **A 60 FPS mode.** Settings > Picture mode > **Performance** aims for 60 FPS like a console's performance mode: it lowers effects, then picture size, and never uses sizes above 640x456, multisampling or anisotropic filtering; the Performance preset selects it, and Quality and Locked 30 play exactly as before.
 - **Tilt, your way.** Settings > Controls has **Tilt sensitivity** (50% to 200%, 100% is the game's own feel) and **Tilt with** (Motion sensor or Left stick; a console without a motion sensor always uses the stick) for Star Ball and ray surfing, applied from the next launch.
 
 ### Better picture

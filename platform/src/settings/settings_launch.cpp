@@ -15,8 +15,11 @@ bool Space(char c) {return c==' '||c=='\t'||c=='\r'||c=='\n'||c=='\v'||c=='\f';}
 // "not set by env.txt", so the menu's choice may replace it; any other value is env.txt's and wins, as an override.
 struct Choice {const char* key; const char* neutral; const char* startup; const char* (*want)(const Config&);};
 // Rung 2 is the game's own 640x456 picture (vgx_autoq.h kToday): the ladder's highest step when Sharper when possible is off.
-const char* WantMax(const Config& c) {return c.aboveNative?nullptr:"2";}
-const char* WantMsaa(const Config& c) {return c.antiAliasing==AntiAliasing::Off?"0":nullptr;}
+// Performance (60 FPS) mode adds what only costs GPU time: no sizes above native, no multisampling, no anisotropic filtering, and aims at 60.
+const char* WantMax(const Config& c) {return c.aboveNative&&!c.performance60?nullptr:"2";}
+const char* WantMsaa(const Config& c) {return c.antiAliasing==AntiAliasing::Off||c.performance60?"0":nullptr;}
+const char* WantAniso(const Config& c) {return c.performance60?"0":nullptr;}
+const char* WantTarget(const Config& c) {return c.performance60?"60":nullptr;}
 const char* WantSharpen(const Config& c) {return c.sharpness==Sharpness::Off?"off":c.sharpness==Sharpness::Strong?"0.8":nullptr;} // 0.8: the largest amount "auto" ever uses
 const char* WantHd(const Config& c) {return c.hdTextures?nullptr:"0";}
 const char* WantFxStep(const Config& c) {return c.prioritizeMario&&c.effects==EffectsQuality::Adaptive?nullptr:"0";}
@@ -32,6 +35,7 @@ const char* WantTiltStick(const Config& c) {return c.tiltStick?"1":nullptr;}
 constexpr Choice kChoices[]={
     {"GXV_AUTOQ_MAX","8",nullptr,WantMax},{"GXV_AUTOQ_MSAA","1",nullptr,WantMsaa},{"GXV_SHARPEN","auto",nullptr,WantSharpen},{"GXV_HDTEX","1",nullptr,WantHd},
     {"GXV_AUTOQ_FXSTEP","2","2",WantFxStep},{"GXV_CHARAA_AUTO","2","2",WantCharaAuto},{"GXV_DOF","1",nullptr,WantDof},{"GXV_CORE3_IO","1","1",WantCore},
+    {"GXV_AUTOQ_TARGET","30","30",WantTarget},{"GXV_AUTOQ_ANISO","1","1",WantAniso},
     {"GXV_TILT_GAIN","100",nullptr,WantTiltGain},{"GXV_TILT_STICK","0",nullptr,WantTiltStick}};
 bool SameValue(const char* a,const char* b) {
     if(std::strcmp(a,b)==0)return true;
@@ -47,6 +51,8 @@ std::string ChoiceLabel(const char* key,const char* raw) {
     if(!std::strcmp(key,"GXV_AUTOQ_FXSTEP"))return "Load steps "+r;
     if(!std::strcmp(key,"GXV_CHARAA_AUTO"))return r=="0"?"Mario edge smoothing off":"Mario edge smoothing "+r;
     if(!std::strcmp(key,"GXV_DOF"))return r=="0"?"Depth of field off":"Depth of field "+r;
+    if(!std::strcmp(key,"GXV_AUTOQ_TARGET"))return r=="60"?"Dynamic quality aims for 60":r=="30"?"Dynamic quality holds 30":"Dynamic quality target "+r;
+    if(!std::strcmp(key,"GXV_AUTOQ_ANISO"))return r=="0"?"Anisotropic filtering off":"Anisotropic filtering "+r;
     if(!std::strcmp(key,"GXV_TILT_GAIN"))return "Tilt sensitivity "+r+"%";
     if(!std::strcmp(key,"GXV_TILT_STICK"))return r=="0"?"Tilt from the motion sensor":"Tilt from the left stick";
     return r=="0"?"System core help off":"System core help "+r;
@@ -94,12 +100,10 @@ LanguageCatalog ReadLanguages() {
 }
 std::vector<Override> ApplyStartup(const Config& config,bool enabled) {
     std::vector<Override> overrides;if(!enabled)return overrides;
-    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_AUTOQ_TARGET","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP","GXV_MOUSE_AIM","GXV_REDUCED_MOTION"}) {
+    for(const auto* key:{"GXV_FPS_LIMIT","GXV_PACE","GXV_FXHALF","GXV_AUTOQ","GXV_AUTOQ_LEVEL","GXV_AUTOQ_CYCLE","PETARI_LANGUAGE","GXV_REMAP","GXV_MOUSE_AIM","GXV_REDUCED_MOTION"}) {
         if(const char* raw=std::getenv(key)) {
             // Remapping is on by default (the start-up default sets GXV_REMAP=1); only turning it off is an override.
             if(std::strcmp(key,"GXV_REMAP")==0&&std::strcmp(raw,"1")==0)continue;
-            // The 30 FPS floor of dynamic quality is on by default (GXV_AUTOQ_TARGET=30, set at start-up) in every picture rate.
-            if(std::strcmp(key,"GXV_AUTOQ_TARGET")==0&&std::strcmp(raw,"30")==0)continue;
             // Reduced motion is an override only when env.txt disagrees with the Settings choice (the game reads it as on or off).
             if(std::strcmp(key,"GXV_REDUCED_MOTION")==0&&motion::ParseSwitch(raw)==config.reducedMotion)continue;
             std::string effective=raw;

@@ -55,15 +55,15 @@ int main() {
     // Picture and speed choices (Display page). Each maps to a start-up switch; the game's own defaults set nothing; env.txt wins and a
     // value that disagrees with the menu is reported as a developer override.
     {
-        const char* all[]={"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_AUTOQ_FXSTEP","GXV_CHARAA_AUTO","GXV_DOF","GXV_CORE3_IO","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_AUTOQ","GXV_FPS_LIMIT","GXV_REDUCED_MOTION"};
+        const char* all[]={"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_AUTOQ_FXSTEP","GXV_CHARAA_AUTO","GXV_DOF","GXV_CORE3_IO","GXV_AUTOQ_TARGET","GXV_AUTOQ_ANISO","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_AUTOQ","GXV_FPS_LIMIT","GXV_REDUCED_MOTION"};
         auto clear=[&]{for(auto k:all)unsetenv(k);};
-        auto startup=[&]{setenv("GXV_AUTOQ_FXSTEP","2",1);setenv("GXV_CHARAA_AUTO","2",1);setenv("GXV_CORE3_IO","1",1);};  // what vita/vgx-game/entry.cpp sets before Settings runs
+        auto startup=[&]{setenv("GXV_AUTOQ_TARGET","30",1);setenv("GXV_AUTOQ_ANISO","1",1);setenv("GXV_AUTOQ_FXSTEP","2",1);setenv("GXV_CHARAA_AUTO","2",1);setenv("GXV_CORE3_IO","1",1);};  // what vita/vgx-game/entry.cpp sets before Settings runs
         auto env=[&](const char* k)->std::string{const char* v=getenv(k);return v?v:"<unset>";};
         auto base=DefaultConfig(port::controls::GetControlApi());
         // Best picture (the defaults): nothing is set and nothing is an override.
         clear();startup();assert(ApplyStartup(base,true).empty());
         for(auto k:{"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_DOF","GXV_TILT_GAIN","GXV_TILT_STICK"})assert(!getenv(k));
-        assert(env("GXV_AUTOQ_FXSTEP")=="2"&&env("GXV_CHARAA_AUTO")=="2"&&env("GXV_CORE3_IO")=="1");
+        assert(env("GXV_AUTOQ_FXSTEP")=="2"&&env("GXV_CHARAA_AUTO")=="2"&&env("GXV_CORE3_IO")=="1"&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_AUTOQ_ANISO")=="1");   // Quality: the start-up values untouched
         // Each choice on its own.
         struct One {const char* what;void (*edit)(Config&);const char* key;const char* value;};
         const One ones[]={
@@ -91,6 +91,13 @@ int main() {
         // The presets: Balanced caps at the game's own rung, Performance adds no multisampling, no sharpening and no depth of field.
         {clear();startup();auto c=base;ApplyPreset(c,Preset::Balanced);assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_MSAA")=="<unset>"&&env("GXV_SHARPEN")=="<unset>");}
         {clear();startup();auto c=base;ApplyPreset(c,Preset::Performance);assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_SHARPEN")=="off"&&env("GXV_DOF")=="0"&&env("GXV_AUTOQ_FXSTEP")=="2");}
+        // Performance (60 FPS) mode: aims at 60 and drops what only costs GPU time; Locked 30 and Quality leave all of that alone. Mario and HD textures stay their own rows.
+        {clear();startup();auto c=base;c.performance60=true;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_AUTOQ_TARGET")=="60"&&env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_ANISO")=="0"&&env("GXV_HDTEX")=="<unset>"&&env("GXV_AUTOQ_FXSTEP")=="2"&&env("GXV_CHARAA_AUTO")=="2"&&env("GXV_FPS_LIMIT")=="<unset>");}
+        {clear();startup();auto c=base;ApplyPreset(c,Preset::Performance);assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_TARGET")=="60"&&env("GXV_AUTOQ_ANISO")=="0");}
+        {clear();startup();auto c=base;c.performance60=true;c.hdTextures=false;c.prioritizeMario=false;ApplyStartup(c,true);assert(env("GXV_HDTEX")=="0"&&env("GXV_CHARAA_AUTO")=="0"&&env("GXV_AUTOQ_TARGET")=="60");}
+        {clear();startup();auto c=base;c.fpsLimit=30;assert(ApplyStartup(c,true).empty());assert(env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_AUTOQ_ANISO")=="1"&&env("GXV_AUTOQ_MAX")=="<unset>"&&env("GXV_AUTOQ_MSAA")=="<unset>"&&env("GXV_FPS_LIMIT")=="30");}
+        {clear();startup();auto c=base;c.fpsLimit=kSteady30;assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_FPS_LIMIT")=="30");}
         // Values that came from env.txt win. Agreeing values are not overrides, disagreeing ones are, and are kept.
         struct Env {const char* key;const char* value;void (*edit)(Config&);bool override;};
         const Env envs[]={
@@ -104,6 +111,10 @@ int main() {
             {"GXV_AUTOQ_FXSTEP","1",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.effects=EffectsQuality::Full;},false},{"GXV_AUTOQ_FXSTEP","1",[](Config& c){c.effects=EffectsQuality::Full;},true},
             {"GXV_CHARAA_AUTO","0",[](Config&){},true},{"GXV_CHARAA_AUTO","1",[](Config&){},true},{"GXV_CHARAA_AUTO","0",[](Config& c){c.prioritizeMario=false;},false},
             {"GXV_CORE3_IO","0",[](Config&){},true},{"GXV_CORE3_IO","0",[](Config& c){c.coreHelp=false;},false},
+            {"GXV_AUTOQ_TARGET","60",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_TARGET","60",[](Config&){},true},
+            {"GXV_AUTOQ_TARGET","0",[](Config&){},true},{"GXV_AUTOQ_TARGET","45",[](Config& c){c.performance60=true;},true},
+            {"GXV_AUTOQ_ANISO","0",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_ANISO","0",[](Config&){},true},{"GXV_AUTOQ_ANISO","2",[](Config&){},true},{"GXV_AUTOQ_ANISO","2",[](Config& c){c.performance60=true;},true},
+            {"GXV_AUTOQ_MAX","2",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_MAX","8",[](Config& c){c.performance60=true;},true},{"GXV_AUTOQ_MSAA","0",[](Config& c){c.performance60=true;},false},
             {"GXV_TILT_GAIN","100",[](Config&){},false},{"GXV_TILT_GAIN","150",[](Config& c){c.tiltPercent=150;},false},
             {"GXV_TILT_GAIN","150",[](Config&){},true},{"GXV_TILT_GAIN","100",[](Config& c){c.tiltPercent=50;},true},{"GXV_TILT_GAIN","75",[](Config& c){c.tiltPercent=75;},false},
             {"GXV_TILT_STICK","1",[](Config& c){c.tiltStick=true;},false},{"GXV_TILT_STICK","1",[](Config&){},true},{"GXV_TILT_STICK","0",[](Config& c){c.tiltStick=true;},true},{"GXV_TILT_STICK","0",[](Config&){},false}};

@@ -93,13 +93,15 @@ void Change(UiState& s,int direction) {
             ApplyPreset(s.working,static_cast<Preset>((index+direction+3)%3));break;
         }
         case RowRate: {
-            // Right moves along the screen (Locked 30, Up to 60) and wraps; the locked 30 needs the driver capability.
-            if(!s.session->features.fixed30&&(s.working.fpsLimit==30||s.working.fpsLimit==kSteady30)) {s.message="Fixed 30 FPS unavailable in this build";break;}
-            if(s.working.fpsLimit==kSteady30)s.working.fpsLimit=30;
-            std::vector<int> rates{0};if(s.session->features.fixed30)rates.push_back(30);
-            auto at=std::find(rates.begin(),rates.end(),s.working.fpsLimit);const int n=static_cast<int>(rates.size());
-            const int index=at==rates.end()?0:static_cast<int>(at-rates.begin());
-            s.working.fpsLimit=rates[static_cast<size_t>((index+direction+n)%n)];break;
+            // Right moves along the screen (Quality, Performance, Locked 30) and wraps; the locked 30 needs the driver capability.
+            const bool locked=s.working.fpsLimit==30||s.working.fpsLimit==kSteady30;
+            if(!s.session->features.fixed30&&locked) {s.message="Fixed 30 FPS unavailable in this build";break;}
+            const int n=s.session->features.fixed30?3:2;
+            const int index=locked?2:s.working.performance60?1:0,next=(index+direction+n)%n;
+            s.working.fpsLimit=next==2?30:0;s.working.performance60=next==1;
+            // Performance mode never uses the sizes above native or multisampling: show them off so the rows say what will happen.
+            if(next==1) {s.working.aboveNative=false;s.working.antiAliasing=AntiAliasing::Off;}
+            break;
         }
         // On and the default are one choice on the console; turning it back on returns to the default (no switch is forced).
         case RowDynamic: s.working.autoQuality=s.working.autoQuality==AutoQuality::Disabled?AutoQuality::Default:AutoQuality::Disabled;break;
@@ -263,20 +265,30 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
             v.label="Preset";const auto p=PresetOf(c);
             Put(v.value,p==Preset::BestPicture?"Best picture":p==Preset::Balanced?"Balanced":p==Preset::Performance?"Performance":"Custom");
             v.help1="Sets dynamic resolution, Sharper, Mario, anti-aliasing, sharpness, effects and depth of field together.";
-            v.help2="Change any of them and this reads Custom. Picture rate, HD textures, core plan and language are not in a preset.";break;
+            v.help2="Change any of them and this reads Custom. The Performance preset also selects Performance mode.";break;
         }
         case RowRate:
-            v.label="Picture rate";Put(v.value,(c.fpsLimit==30||c.fpsLimit==kSteady30)?(s.session->features.fixed30?"Locked 30":"Locked 30 (unavailable here)"):"Up to 60");
-            if(!s.session->features.fixed30&&(c.fpsLimit==30||c.fpsLimit==kSteady30)) {v.help1="Locked 30 is saved, but this build cannot hold it. The current rate is unchanged.";v.help2="";}
-            else if(c.fpsLimit!=0) {v.help1="Locked 30: an even 30 FPS, every frame, at full effects.";v.help2="Steadier than a rate that wanders, and kinder to the battery.";}
-            else {v.help1="Up to 60: as fast as each scene allows, with 30 as the floor.";v.help2="Scenes that cannot reach 60 run at 30 (or between) rather than dropping in size first.";}
+            v.label="Picture mode";
+            if(c.fpsLimit==30||c.fpsLimit==kSteady30) {
+                Put(v.value,s.session->features.fixed30?"Locked 30":"Locked 30 (unavailable here)");
+                if(!s.session->features.fixed30) {v.help1="Locked 30 is saved, but this build cannot hold it. The current mode is unchanged.";v.help2="";}
+                else {v.help1="Locked 30: an even 30 FPS, every frame, at full effects.";v.help2="Steadier than a rate that wanders, and kinder to the battery.";}
+            } else if(c.performance60) {
+                Put(v.value,"Performance (aims for 60)");
+                v.help1="Aims for 60 FPS: under load it lowers effects first, then the picture size. No sizes above 640x456 or multisampling.";
+                v.help2="Smoother, less sharp. Sharper when possible and Anti-aliasing do nothing here; the Preset row's Performance selects it.";
+            } else {
+                Put(v.value,"Quality (up to 60)");
+                v.help1="Quality: up to 60 FPS where a scene allows, never below 30, then the sharpest picture the GPU has room for.";
+                v.help2="The default. Performance aims for 60 instead and gives up sharpness first; Locked 30 holds an even 30.";
+            }
             break;
         case RowDynamic:
             v.label="Dynamic resolution";Put(v.value,OnOff(c.autoQuality!=AutoQuality::Disabled));
             v.help1="Lets the picture size follow the GPU: sharper when there is room, smaller only to hold 30 FPS.";
             v.help2="Off keeps the game's own 640x456 picture all the time; Sharper, Mario and Anti-aliasing then do nothing.";break;
         case RowSharper:
-            v.label="Sharper when possible";Put(v.value,OnOff(c.aboveNative));
+            v.label="Sharper when possible";std::snprintf(v.value,sizeof v.value,"%s%s",OnOff(c.aboveNative),c.performance60&&c.aboveNative?"  (not used in Performance)":"");
             v.help1="On: when the GPU has room the picture grows up to the screen's own 960x544, then smooths edges.";
             v.help2="Off: never above the game's 640x456 picture. Balanced and Performance turn this off.";break;
         case RowMario:
@@ -284,7 +296,7 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
             v.help1="On: under load, effects, background textures and picture size give way before Mario's quality,";
             v.help2="and Mario and Luigi get their own edge smoothing when the picture shrinks. Off: no Mario-first ladder.";break;
         case RowAntiAliasing:
-            v.label="Anti-aliasing";Put(v.value,c.antiAliasing==AntiAliasing::Auto?"Auto":"Off");
+            v.label="Anti-aliasing";std::snprintf(v.value,sizeof v.value,"%s%s",c.antiAliasing==AntiAliasing::Auto?"Auto":"Off",c.performance60&&c.antiAliasing==AntiAliasing::Auto?"  (not used in Performance)":"");
             v.help1="Auto: smooths jagged edges with 2x or 4x multisampling when the GPU has room (needs Sharper when possible).";
             v.help2="Off: no multisampling; the picture then tops out at 960x544 without it.";break;
         case RowSharpness:
