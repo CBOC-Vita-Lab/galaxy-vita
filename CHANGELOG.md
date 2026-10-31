@@ -15,6 +15,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 ### Better picture
 - **Bowser no longer twists and spins** during his battle introductions (also fixed: the Bowser Jr. ending, three Polta scenes and a Dino Piranha scene).
 - **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.
+- **Ground-pound and black-hole trails are back,** along with the right colours on about 85 other effects (Dino Piranha, Mario, Dodoryu, Kingfin and more) and a few shadows and bubbles. Colours written in the game's effect list were being read with their bytes in the wrong order.
 - **Lumas have their colours back.** They could show up as white blobs; a Wii colour rule the port missed is now followed.
 - **Queen Bee's fur** looks as it should.
 - **Textures as sharp or soft as the game asks for,** including the dome floors and the Dark Matter Plant, and water keeps the game's own distant detail.
