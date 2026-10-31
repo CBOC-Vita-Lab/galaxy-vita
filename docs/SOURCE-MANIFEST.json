@@ -18908,7 +18908,7 @@
     },
     {
       "path": "platform/src/port/handheld_ui.cpp",
-      "sha256": "f46f1f246571c1d409cef499c7e76c3d9146676b4069680c80d70fa90d2094b7"
+      "sha256": "db70d784e548d84eed80826ecc8d6e31cc06bac0f5dc759b4e48de178bd9f4a3"
     },
     {
       "path": "platform/src/port/missing_game.cpp",
@@ -19324,7 +19324,7 @@
     },
     {
       "path": "tests/control_prompts.cpp",
-      "sha256": "174ae684a6f91c1eb1f6394802998b84bfcb544d1228885df60818a1e0bc6a3e"
+      "sha256": "f8dac12c5016ba39fe2ff12506ad58f38aa2a61199bf008c098baa70a5dfb8a8"
     },
     {
       "path": "tests/core_layout_test.cpp",
@@ -20180,7 +20180,7 @@
     },
     {
       "path": "tests/vita_handheld_texture.cpp",
-      "sha256": "823572e927f7cc426e2b2bec3786b6b39c4739b320c82a2d0d864e98cd6a4999"
+      "sha256": "756d55b5e1426d6a7d5b33a95b683af3f3a738979990c152d520d1a29e1a2462"
     },
     {
       "path": "tests/vita_host_bookkeeping.cpp",
