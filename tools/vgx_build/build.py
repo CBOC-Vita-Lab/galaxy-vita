@@ -38,8 +38,10 @@ OUTPUT_DIRS = ("logs", "vita-source", "vita-source-lto", "vita-vgx-runtime", "vi
 PROFDATA_MAGIC = b"\xfflprofi\x81"
 # Functions with internal linkage are keyed in a profile by "<source path>:<name>", so a profile recorded in another
 # checkout names them with that checkout's path.
-PROFILE_PATH_RX = re.compile(rb"(/[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*)/decomp/(?:src|libs|include)/")
-PROFILE_TEXT_PATH_RX = re.compile(rb"^(/[^:\n]*?)/decomp/(?:src|libs|include)/", re.M)
+# (the game units are under decomp/, the renderer's under platform/ and vita/runtime/)
+PROFILE_TREES = rb"(?:decomp/(?:src|libs|include)|platform/(?:src|vgx|include)|vita/(?:runtime|include))"
+PROFILE_PATH_RX = re.compile(rb"(/[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)*)/" + PROFILE_TREES + rb"/")
+PROFILE_TEXT_PATH_RX = re.compile(rb"^(/[^:\n]*?)/" + PROFILE_TREES + rb"/", re.M)
 
 
 def digest(path):
@@ -69,7 +71,7 @@ def build_environment(sdk, build, inherited, logging=False):
     env = dict(inherited)
     for key in ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
                 "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH",
-                "VITA_VGX_CFLAGS", "VITA_EXTRA_CFLAGS", "VITA_MEM1_MIB", "VITA_MEM2_MIB"):
+                "VITA_VGX_CFLAGS", "VITA_EXTRA_CFLAGS", "VITA_MEM1_MIB", "VITA_MEM2_MIB", "VITA_PGO_PROFILE"):
         env.pop(key, None)
     env.update(VITASDK=str(sdk), PATH=str(sdk / "bin") + os.pathsep + env.get("PATH", ""),
                CPATH=str(build / "case-shim"), VITA_VGX_CFLAGS=VGX_FLAGS)
@@ -122,7 +124,8 @@ def prepare_profile(profile, root, directory, env):
         found = PROFILE_TEXT_PATH_RX.search(body)
         if found:
             prefix = found.group(1).decode()
-            body = re.sub(rb"^" + re.escape(found.group(1)) + rb"(?=/decomp/)", str(root).encode(), body, flags=re.M)
+            body = re.sub(rb"^" + re.escape(found.group(1)) + rb"(?=/(?:decomp|platform|vita)/)", str(root).encode(), body,
+                          flags=re.M)
         text.write_bytes(body)
         rewritten = directory / "profile-rewritten.profdata"
         run([tool, "merge", "-o", rewritten, text], env)
@@ -230,7 +233,8 @@ def main():
     parser.add_argument("--logging", action="store_true",
                         help="a test build that keeps the port's log (ux0:data/smg/log.txt); never for a release")
     parser.add_argument("--pgo-profile", type=Path, default=None, metavar="FILE.profdata",
-                        help="compile the game units with this merged clang profile, .profdata or .profdata.gz (-fprofile-use; tools/pgo/README.md); "
+                        help="compile the game units and the renderer's units (platform/vgx/src, platform/src/gx) with this merged clang profile, "
+                             ".profdata or .profdata.gz (-fprofile-use; tools/pgo/README.md); "
                              "default none: the plain build")
     parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.2)")
     args = parser.parse_args()
@@ -283,7 +287,7 @@ def main():
     if args.pgo_profile is not None:
         if not args.pgo_profile.is_file():
             raise ValueError(f"--pgo-profile: no such file {args.pgo_profile}")
-        if args.stage in ("source", "all"):
+        if args.stage in ("source", "runtime", "all"):
             pgo = prepare_profile(args.pgo_profile.resolve(), ROOT, build / "pgo", env)
         elif args.stage == "lto":
             print("Note: --pgo-profile applies when the source stage is configured; the lto stage reuses its commands",
@@ -315,8 +319,9 @@ def main():
             database = json.loads((source_build / "compile_commands.json").read_text())
             if not database or any(not Path(row["file"]).is_relative_to(ROOT) for row in database):
                 raise ValueError("Compile database belongs to a different source checkout")
+            runtime_env = dict(env, VITA_PGO_PROFILE=str(pgo)) if pgo else env
             run([sys.executable, "-I", HERE / "vita_runtime_gen_vgx.py", ROOT, source_build,
-                 runtime, deps, args.label], env, logs / "runtime-configure.log")
+                 runtime, deps, args.label], runtime_env, logs / "runtime-configure.log")
             run(["ninja", "-C", runtime, f"-j{args.jobs}"], env, logs / "runtime.log")
             run([sys.executable, "-I", HERE / "vita_runtime_report_vgx.py", ROOT, runtime], env, logs / "runtime-report.log")
         else:

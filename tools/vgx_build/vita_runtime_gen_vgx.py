@@ -11,6 +11,9 @@ so the flag set is exactly the one of the 1,834 game units) but
     shim, the prebuilt vitaGL headers); same ABI flags (-fno-short-enums) as the platform code that calls them.
 
 usage: vita_runtime_gen_vgx.py <galaxy-root> <vita-source-build-dir> <runtime-build-dir> <vitagl-deps-dir> [commit]
+
+Environment: VITA_PGO_PROFILE=<merged .profdata> compiles the renderer's units (platform/vgx/src, platform/src/gx) with
+-fprofile-use (build.py --pgo-profile sets it).
 """
 import json
 import os
@@ -31,6 +34,10 @@ EXCLUDE_REGEX = [
     (re.compile(r"^platform/src/gx/vita_[a-z_]+\.cpp$"), "older sceGxm renderer"),
     (re.compile(r"^vita/runtime/gpu_[a-z_]+\.cpp$"), "older sceGxm renderer"),
 ]
+
+
+# The runtime units a profile (tools/pgo/smg.profdata.gz) is recorded for: the renderer, as the armhf harness builds it.
+PGO_PREFIXES = ("platform/vgx/src/", "platform/src/gx/")
 
 
 def base_command(entry):
@@ -98,6 +105,9 @@ def esc(text):
 def main():
     root, source_build, out, deps = (Path(a).resolve() for a in sys.argv[1:5])
     commit = sys.argv[5] if len(sys.argv) > 5 else "unknown"
+    pgo_profile = os.environ.get("VITA_PGO_PROFILE", "")
+    if pgo_profile and not Path(pgo_profile).is_file():
+        raise SystemExit(f"VITA_PGO_PROFILE: no such file {pgo_profile}")
     database = json.loads((source_build / "compile_commands.json").read_text())
     bases = {suffix: base_command(next(e for e in database if e["file"].endswith(suffix)))
              for suffix in (".c", ".cpp")}
@@ -139,6 +149,10 @@ def main():
                 extra.append("-fshort-enums")
         # Experiment switch: extra compiler flags for every runtime unit (for example -ftrivial-auto-var-init=zero).
         extra = extra + shlex.split(os.environ.get("VITA_EXTRA_CFLAGS", ""))
+        # Profile-guided optimisation (build.py --pgo-profile, tools/pgo/README.md): the renderer's units, i.e. the vgx front end
+        # and back end and the GX glue they are fed by.  Every other runtime unit stays as it was (the profile has nothing for it).
+        if pgo_profile and source.endswith(".cpp") and source.startswith(PGO_PREFIXES):
+            extra.append(f"-fprofile-use={pgo_profile}")
         obj = out / "objects" / (source + ".obj")
         lines.append(f"build {obj}: cc {root / source}")
         lines.append(f"  cmd = {esc(shlex.join(cmd))}")

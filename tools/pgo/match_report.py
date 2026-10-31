@@ -31,12 +31,28 @@ PROFD = re.compile(r"^@__profd_(\S+) = .*?\{ i64 (-?\d+), i64 (-?\d+), ", re.M)
 PROFC = re.compile(r"^@__profc_(\S+) = .*?\[(\d+) x i64\]", re.M)
 
 
-def load(db):
+def load(db, select):
     rows = {}
     for row in json.loads(Path(db).read_text()):
-        if "/decomp/" not in row["file"]:
+        if not select.search(row["file"]):
             continue
         rows[row["file"]] = row.get("arguments") or shlex.split(row["command"])
+    return rows
+
+
+def load_ninja(path, select):
+    """The units of a build.ninja made by tools/vgx_build/vita_runtime_gen_vgx.py (the Vita build's runtime stage):
+    {source: arguments}, the command followed by its extra flags, as ninja runs them."""
+    rows, source, cmd = {}, None, None
+    for line in Path(path).read_text().splitlines():
+        if line.startswith("build ") and ": cc " in line:
+            source, cmd = line.split(": cc ", 1)[1].strip(), None
+        elif source and line.startswith("  cmd = "):
+            cmd = shlex.split(line[len("  cmd = "):].replace("$$", "$"))
+        elif source and cmd is not None and line.startswith("  extra = "):
+            if select.search(source):
+                rows[source] = cmd + shlex.split(line[len("  extra = "):].replace("$$", "$"))
+            source, cmd = None, None
     return rows
 
 
@@ -107,20 +123,27 @@ def profile_records(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--vita-db", required=True)
+    ap.add_argument("--vita-db", help="compile_commands.json of the Vita source stage (the game units)")
+    ap.add_argument("--vita-ninja", help="build.ninja of the Vita runtime stage (the renderer and platform units)")
     ap.add_argument("--armhf-db", required=True)
-    ap.add_argument("--profile", required=True)
+    ap.add_argument("--select", default="/decomp/", help="regular expression: the source paths to compare (default the game units; "
+                    "/platform/vgx/src/|/platform/src/gx/ for the renderer)")
+    ap.add_argument("--profile", help="merged .profdata (or its text form); without it only the names and CFG hashes are compared")
     ap.add_argument("--units", type=int, default=120, help="sample size (0: every unit)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--flags", default="-flto=thin")
     ap.add_argument("--json", type=Path)
     args = ap.parse_args()
-    vita, arm = load(args.vita_db), load(args.armhf_db)
+    select = re.compile(args.select)
+    if bool(args.vita_db) == bool(args.vita_ninja):
+        ap.error("give one of --vita-db and --vita-ninja")
+    vita = load(args.vita_db, select) if args.vita_db else load_ninja(args.vita_ninja, select)
+    arm = load(args.armhf_db, select)
     files = sorted(set(vita) & set(arm))
     random.seed(args.seed)
     sample = files if args.units <= 0 else random.sample(files, min(args.units, len(files)))
-    profile = profile_records(args.profile)
+    profile = profile_records(args.profile) if args.profile else {}
     flags = ["-fprofile-generate"] + args.flags.split()
     with tempfile.TemporaryDirectory() as work:
         jobs = [(f, db[f], work, tag, flags) for f in sample for tag, db in (("vita", vita), ("arm", arm))]
@@ -166,9 +189,10 @@ def main():
     print(f"functions instrumented: armhf {n_arm}, vita {n_vita}")
     print(f"  same name and CFG hash on both: {same} ({100.0 * same / max(n_arm, 1):.2f} % of armhf)")
     print(f"  same name, different CFG hash:  {diff_hash}; only in armhf: {only_arm}; only in vita: {only_vita}")
-    print(f"  executed in the profile: armhf {executed_arm}; of them matched on vita {executed_same} "
-          f"({100.0 * executed_same / max(executed_arm, 1):.2f} %)")
-    print(f"  counter-weighted match of the executed functions: {100.0 * weight_same / max(weight_arm, 1):.3f} %")
+    if args.profile:
+        print(f"  executed in the profile: armhf {executed_arm}; of them matched on vita {executed_same} "
+              f"({100.0 * executed_same / max(executed_arm, 1):.2f} %)")
+        print(f"  counter-weighted match of the executed functions: {100.0 * weight_same / max(weight_arm, 1):.3f} %")
     if args.json:
         args.json.write_text(json.dumps(rows))
 

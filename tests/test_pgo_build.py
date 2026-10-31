@@ -26,6 +26,23 @@ TEXT = """:ir
 1
 500
 
+{root}/platform/vgx/src/vgx_draw.cpp;_ZN3vgxL1fEv
+# Func Hash:
+942389666994816329
+# Num Counters:
+2
+# Counter Values:
+40
+2
+
+{root}/platform/src/gx/gx_fifo.cpp;_ZL1gv
+# Func Hash:
+942389666994816330
+# Num Counters:
+1
+# Counter Values:
+9
+
 _ZN4Game1gEv
 # Func Hash:
 742261418966908927
@@ -104,11 +121,47 @@ class PgoBuildTests(unittest.TestCase):
                                                    dict(os.environ))
             text = show_text(out)
             self.assertIn("/work/checkout/decomp/src/Game/a.cpp;_ZL1fv", text)
+            # the renderer's units (runtime stage) are named the same way
+            self.assertIn("/work/checkout/platform/vgx/src/vgx_draw.cpp;_ZN3vgxL1fEv", text)
+            self.assertIn("/work/checkout/platform/src/gx/gx_fifo.cpp;_ZL1gv", text)
             self.assertNotIn("/recorded/elsewhere", text)
             self.assertIn("_ZN4Game1gEv", text)           # the external-linkage function is untouched
             self.assertIn("1000\n1\n500", text)           # counters survive the round trip
             self.assertIn(":ir", text)                    # still an IR-level profile
             self.assertFalse((Path(directory) / "pgo/profile.txt").exists())
+
+    def test_runtime_generator_profiles_only_the_renderer_units(self):
+        gen = TOOLS / "vita_runtime_gen_vgx.py"
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root, source_build, out, deps = (base / n for n in ("root", "src-build", "out", "deps"))
+            for rel in ("platform/vgx/src/vgx_draw.cpp", "platform/vgx/src/vgx_backend_null.cpp",
+                        "platform/src/gx/gx_fifo.cpp", "platform/src/gx/vita_efb.cpp", "platform/src/audio/ai_dsp.cpp",
+                        "platform/src/gx/readme.c", "vita/runtime/flat_view.cpp"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("")
+            source_build.mkdir()
+            (source_build / "compile_commands.json").write_text(json.dumps([
+                {"directory": str(root), "file": str(root / "decomp/x.cpp"), "command": f"clang++ -O2 -fprofile-use=/old.profdata -c x.cpp -o x.o"},
+                {"directory": str(root), "file": str(root / "decomp/y.c"), "command": "clang -O2 -c y.c -o y.o"}]))
+            profile = base / "p.profdata"
+            profile.write_bytes(b"\xfflprofi\x81")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("VITA_")}
+            for with_profile in (False, True):
+                run_env = dict(env, VITA_PGO_PROFILE=str(profile)) if with_profile else env
+                subprocess.run([sys.executable, "-I", gen, root, source_build, out, deps, "t"], env=run_env, check=True,
+                               capture_output=True)
+                lines = (out / "build.ninja").read_text().splitlines()
+                cmds = {}
+                for i, line in enumerate(lines):
+                    if line.startswith("build ") and ": cc " in line:
+                        cmds[line.split(": cc ")[1]] = lines[i + 1] + lines[i + 2]
+                used = sorted(Path(k).relative_to(root).as_posix() for k, v in cmds.items() if "-fprofile-use=" in v.split("extra =")[-1])
+                self.assertTrue(all("-fprofile-use=/old" not in v for v in cmds.values()))     # the game units' profile is stripped
+                if with_profile:
+                    self.assertEqual(used, ["platform/src/gx/gx_fifo.cpp", "platform/vgx/src/vgx_draw.cpp"])
+                else:
+                    self.assertEqual(used, [])
 
     def test_source_stage_passes_the_profile_to_cmake_only_when_asked(self):
         calls = []
