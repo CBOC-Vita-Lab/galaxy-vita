@@ -18567,6 +18567,10 @@
       "sha256": "dfe4103a2de443d77199b97f4519f38021c5823d9a514e01822c6118ce81e323"
     },
     {
+      "path": "platform/include/port/settings_backdrop.h",
+      "sha256": "1961d65a0851f0253d777eca487b8bcb6b51abe54eb6cae48932c3ffb8dc7778"
+    },
+    {
       "path": "platform/include/port/settings_font.h",
       "sha256": "84b33463195cf014d632a10c7d76ddc93e0e6031b52be90fd1a66c9a04d972a1"
     },
@@ -18580,7 +18584,7 @@
     },
     {
       "path": "platform/include/port/settings_ui.h",
-      "sha256": "75983426faac330a6c76348110642a8267d6e3818f09b59fdb77908586ce75e8"
+      "sha256": "1a1431e4ebb66fadffd6299fed6a3347be20e0cc6ed95ea5eedf9c48880217cb"
     },
     {
       "path": "platform/include/port/vclock.h",
@@ -18944,7 +18948,7 @@
     },
     {
       "path": "platform/src/settings/settings_draw.cpp",
-      "sha256": "3b0cd2a291a7bd0ecc12ddf5139a18f44a79b2635934e67adaa438d927316735"
+      "sha256": "13f6c0205139a58e31f562b4b71fb1e183425332bd0ac1df616886ce3c1c162a"
     },
     {
       "path": "platform/src/settings/settings_font.cpp",
@@ -19504,7 +19508,7 @@
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "7d7e148c3935991c925070c76636d7ba26f0a017ba67b69640e6f7b0be4787ca"
+      "sha256": "24150dd2e94d161a88836f3fd7ceacc8b2a6214bb80b881621b06ea8e4d57a85"
     },
     {
       "path": "tests/pointer_aim.cpp",
@@ -19521,6 +19525,10 @@
     {
       "path": "tests/settings_audio.cpp",
       "sha256": "cda794a90c7a8495af24f9b7f75f87ba6b430840955762402f95eb487b569834"
+    },
+    {
+      "path": "tests/settings_backdrop_check.h",
+      "sha256": "81f59dd6257eb3f51794faf0d6c4872a8cdf38b5e7769b0e3e95780a30e07ce9"
     },
     {
       "path": "tests/settings_font_allocation.cpp",
@@ -19544,7 +19552,7 @@
     },
     {
       "path": "tests/settings_runtime.cpp",
-      "sha256": "6c730c8f91bb66f9515286378ee8cb067242add124567431e0fdf3c6e2faeae1"
+      "sha256": "b111f82a2e5499de0ca590fda2826d51e4a6863355e7f34b43f9a80e25282f44"
     },
     {
       "path": "tests/settings_save_guard.cpp",
@@ -20596,7 +20604,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "73319e07fbcc579723d8d4f6aa0060ed758fc41986a2d7558e88ced5d20b58df"
+      "sha256": "d144fae7165273b49562120f6447dd794ae7538bc6a022327591c6848538ec1c"
     },
     {
       "path": "tools/push_data.py",
@@ -20800,7 +20808,7 @@
     },
     {
       "path": "tools/test_player_settings.sh",
-      "sha256": "384e6b1a0051fe0b83848aa8495428237cc5c6a4a04ff2a7f381c4f250be6b7a"
+      "sha256": "dc362e8c7eea4d5dcd02f440ff0efcc99f248b77a8f1bc8bc49413091b5de139"
     },
     {
       "path": "tools/test_pointer_aim.sh",
@@ -20844,7 +20852,7 @@
     },
     {
       "path": "tools/test_settings_runtime.sh",
-      "sha256": "4c27da7bbc5169e813b27f694eada76585e6033fafeed2ffe8db8da7dfa58799"
+      "sha256": "46d643cb43ec42cdaaa635dab5a14d5c4a66ee3eeb0d39292afd677b18efb33b"
     },
     {
       "path": "tools/test_settings_save_guard.sh",
@@ -21640,7 +21648,7 @@
     },
     {
       "path": "vita/vgx-game/settings_runtime.cpp",
-      "sha256": "49c070d5c1a933101894c51718d0d55cf9ee3efbae3d834c918c27de9031e621"
+      "sha256": "6143dd878452aa635867350d7a6fe2ae672159afab7aef5fa3b475d83dfb86c3"
     },
     {
       "path": "vita/vgx-game/settings_runtime.h",
