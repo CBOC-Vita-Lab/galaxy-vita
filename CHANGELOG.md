@@ -24,7 +24,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 ### Controls and gameplay
 - **Music keeps playing after sleep or the Home menu.**
 - **Dialogue no longer skips to the end** when a finger rests on the screen.
-- **Quick Square spins always count.**
+- **Spins answer at once.** A Square or R spin right after a jump used to come a third of a second late (or not when expected); it now spins the moment the game allows, and quick taps always count.
 - **PS TV with a PS3 or PS4 controller:** R2 shoots Star Bits, the right stick moves the pointer, and the D-pad keeps the camera.
 - **Mouse-style aiming** for the Star Bit pointer, as an option in Settings > Controls.
 
