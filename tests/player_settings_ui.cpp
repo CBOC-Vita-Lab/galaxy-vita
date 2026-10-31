@@ -107,14 +107,14 @@ int main() {
         Tap(a,Reset);assert(a.modal==Modal::None&&a.working.mouseAim);                 // Square has nothing to reset here
         Tap(a,Down);assert(a.row==aimRow+1&&a.row==aimRow+ExtraTiltWith);
         // Tilt with: Motion sensor (default) or Left stick, on a console that has the sensor; Reset has nothing to do here.
-        assert(!a.working.tiltStick&&a.working.tiltPercent==100);
+        assert(!a.working.tiltStick&&a.working.tiltLevel==5);
         Tap(a,Right);assert(a.working.tiltStick&&Dirty(a));Tap(a,Left);assert(!a.working.tiltStick);Tap(a,Accept);assert(a.working.tiltStick);Tap(a,Reset);assert(a.modal==Modal::None&&a.working.tiltStick);Tap(a,Accept);assert(!a.working.tiltStick);
-        // Tilt sensitivity: 50..200 in steps of 25, stopping at both ends (no wrap); Square puts it back to 100.
+        // Tilt sensitivity: levels 1 to 10, stopping at both ends (no wrap); Square puts it back to 5, the game's own.
         Tap(a,Down);assert(a.row==aimRow+ExtraTiltGain);
-        Tap(a,Right);assert(a.working.tiltPercent==125);Tap(a,Right);Tap(a,Right);Tap(a,Right);assert(a.working.tiltPercent==200);Tap(a,Right);assert(a.working.tiltPercent==200);
-        Tap(a,Reset);assert(a.working.tiltPercent==100&&a.modal==Modal::None);
-        Tap(a,Left);Tap(a,Left);assert(a.working.tiltPercent==50);Tap(a,Left);assert(a.working.tiltPercent==50&&Dirty(a));Tap(a,Accept);assert(a.working.tiltPercent==75);
-        Tap(a,Reset);assert(a.working.tiltPercent==100&&a.working.mouseAim);
+        Tap(a,Right);assert(a.working.tiltLevel==6);for(int i=0;i<4;++i)Tap(a,Right);assert(a.working.tiltLevel==10);Tap(a,Right);assert(a.working.tiltLevel==10);
+        Tap(a,Reset);assert(a.working.tiltLevel==5&&a.modal==Modal::None);
+        for(int i=0;i<4;++i)Tap(a,Left);assert(a.working.tiltLevel==1);Tap(a,Left);assert(a.working.tiltLevel==1&&Dirty(a));Tap(a,Accept);assert(a.working.tiltLevel==2);
+        Tap(a,Reset);assert(a.working.tiltLevel==5&&a.working.mouseAim);
         Tap(a,Down);assert(a.row==aimRow+kControlExtras);Tap(a,Accept);assert(a.saveRequested&&a.working.mouseAim);
         // A console without a motion sensor (a PS TV): Tilt with reads Left stick and cannot be changed; sensitivity still can; a saved Left stick is left as saved.
         {
@@ -123,7 +123,7 @@ int main() {
             RowView rv;ControlsRowView(n,n.row,rv);assert(std::string(rv.value)=="Left stick"&&std::string(rv.help1).find("no motion sensor")!=std::string::npos);
             Tap(n,Right);assert(n.working.tiltStick&&!Dirty(n)&&n.message.find("no motion sensor")!=std::string::npos);
             auto sensor=aimSession;UiState y;Begin(y,sensor);y.page=Page::Controls;y.row=aimRow+ExtraTiltWith;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="Motion sensor");y.working.tiltStick=true;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="Left stick"&&std::string(rv.help1).find("no motion sensor")==std::string::npos);
-            y.row=aimRow+ExtraTiltGain;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="100%  (as game)");y.working.tiltPercent=150;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="150%");
+            y.row=aimRow+ExtraTiltGain;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="5 (normal)");y.working.tiltLevel=7;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="7");y.working.tiltLevel=1;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="1 (lowest)");y.working.tiltLevel=10;ControlsRowView(y,y.row,rv);assert(std::string(rv.value)=="10 (highest)");
         }
         Begin(a,aimSession);Arm(a);Tap(a,NextPage);a.row=0;Tap(a,Right);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::PlayStation);
         Tap(a,Left);assert(a.working.profileChosen&&a.working.profile==controls::ProfileId::Handheld&&Dirty(a));

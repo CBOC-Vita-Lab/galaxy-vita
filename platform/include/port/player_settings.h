@@ -15,7 +15,7 @@ enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
 enum class AntiAliasing : uint8_t { Auto, Off };
 enum class Sharpness : uint8_t { Auto, Off, Strong };
 enum class EffectsQuality : uint8_t { Adaptive, Full };
-// Keys: above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, motion_gain,
+// Keys: above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, motion_level,
 // motion_source. (Every optional
 // key sorts before "schema" and "reduced_motion" stays the last line of a fresh file, so a cut-short write is still caught as incomplete.)
 // The Preset row is not stored: it is read from the rows a preset covers (Dynamic resolution, Sharper when possible, Prioritize
@@ -42,10 +42,11 @@ struct Config {
     EffectsQuality effects = EffectsQuality::Adaptive; // effects_quality
     bool depthOfField = true;              // depth_of_field: the game's own depth-of-field blur
     bool coreHelp = true;                  // core_plan: Auto (true) lets disc read-ahead and a movie decoder use the system core
-    // Tilt levels (Star Ball, ray surfing): how far the lean is scaled, in percent (50..200 in steps of 25; 100 is the game's own, unchanged
-    // steering; platform/include/port/tilt_gain.h), and whether the left stick steers them instead of the console's motion sensor.
-    // Optional keys motion_gain and motion_source (sensor | stick). A console without a motion sensor always steers by the stick.
-    int tiltPercent = 100;
+    // Tilt levels (Star Ball, ray surfing): how far the lean is scaled, on a 1 to 10 scale (5 is the game's own, unchanged steering, 1 half and
+    // 10 double; platform/include/port/tilt_gain.h), and whether the left stick steers them instead of the console's motion sensor.
+    // Optional keys motion_level and motion_source (sensor | stick); a 1.2 beta file's motion_gain (a percentage) is read as the nearest level.
+    // A console without a motion sensor always steers by the stick.
+    int tiltLevel = 5;
     bool tiltStick = false;
     std::array<controls::ProfileMapping, 2> profiles;
 };

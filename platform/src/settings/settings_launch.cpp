@@ -25,8 +25,8 @@ const char* WantDof(const Config& c) {return c.depthOfField?nullptr:"0";}
 const char* WantCore(const Config& c) {return c.coreHelp?nullptr:"0";}
 // Tilt (Star Ball, ray surfing): the percentage as text ("100", the game's own, sets nothing) and the left stick as the source.
 const char* WantTiltGain(const Config& c) {
-    static constexpr const char* text[]={"50","75",nullptr,"125","150","175","200"};
-    return tilt::ValidPercent(c.tiltPercent)?text[(c.tiltPercent-tilt::kMinPercent)/tilt::kStepPercent]:nullptr;
+    static constexpr const char* text[tilt::kLevels]={"50","63","75","88",nullptr,"120","140","160","180","200"};   // the percentages of port/tilt_gain.h; level 5 is the game's own
+    return tilt::ValidLevel(c.tiltLevel)?text[c.tiltLevel-1]:nullptr;
 }
 const char* WantTiltStick(const Config& c) {return c.tiltStick?"1":nullptr;}
 constexpr Choice kChoices[]={

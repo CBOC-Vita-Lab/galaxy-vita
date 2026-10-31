@@ -34,7 +34,7 @@ bool KnownAction(const controls::ControlApi& api,const std::string& s) {
 }
 // Keys 1.1 files do not have: absent means the default, and (profile_chosen) marks a file written before the 1.2 pad defaults.
 bool IsOptionalKey(const std::string& key) {
-    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan","motion_gain","motion_source"})if(key==k)return true;
+    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan","motion_gain","motion_level","motion_source"})if(key==k)return true;
     return false;
 }
 bool Managed(const std::string& key,const controls::ControlApi& api) {
@@ -46,7 +46,7 @@ bool Managed(const std::string& key,const controls::ControlApi& api) {
 StoreResult Error(StoreStatus s,const std::string& message) { return {s,message}; }
 bool ValidConfig(const Config& c,const controls::ControlApi& api,std::string& error) {
     if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1 ||
-       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1 || !tilt::ValidPercent(c.tiltPercent)) {error="Invalid settings value";return false;}
+       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1 || !tilt::ValidLevel(c.tiltLevel)) {error="Invalid settings value";return false;}
     if(c.language.size()>64 || std::any_of(c.language.begin(),c.language.end(),[](unsigned char ch){return ch<32||ch>126||ch=='=';})) {error="Invalid language name";return false;}
     for(unsigned i=0;i<2;++i) if(!api.validate(c.profiles[i],static_cast<controls::ProfileId>(i),controls::NominalCaps(static_cast<controls::ProfileId>(i)),error)) return false;
     return true;
@@ -59,7 +59,7 @@ std::map<std::string,std::string> Values(const Config& c) {
         {"above_native",c.aboveNative?"1":"0"},{"mario_first",c.prioritizeMario?"1":"0"},{"anti_aliasing",c.antiAliasing==AntiAliasing::Auto?"auto":"off"},
         {"picture_sharpness",c.sharpness==Sharpness::Auto?"auto":c.sharpness==Sharpness::Off?"off":"strong"},{"hd_textures",c.hdTextures?"1":"0"},
         {"effects_quality",c.effects==EffectsQuality::Adaptive?"adaptive":"full"},{"depth_of_field",c.depthOfField?"1":"0"},{"core_plan",c.coreHelp?"auto":"off"},
-        {"motion_gain",std::to_string(c.tiltPercent)},{"motion_source",c.tiltStick?"stick":"sensor"}};
+        {"motion_level",std::to_string(c.tiltLevel)},{"motion_source",c.tiltStick?"stick":"sensor"}};
     for(unsigned i=0;i<2;++i) for(const auto& b:c.profiles[i].bindings)
         v[std::string("bind.")+(i?"playstation.":"handheld.")+b.action]=b.buttons[0]+(b.buttons[1].empty()?"":","+b.buttons[1]);
     return v;
@@ -112,6 +112,7 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     // intentional defaults before a primary may displace a valid backup.
     for(const auto& value:Values(d.config))if(!IsOptionalKey(value.first)&&!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
+    bool haveLevel=false;int oldGain=0;
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
         if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=(v=="30"||v=="steady30")?30:0; /* 1.1's "Steady 30" is the 1.2 locked 30 */ }
@@ -128,10 +129,15 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
         else if(k=="effects_quality") { if(v!="adaptive"&&v!="full")return Error(StoreStatus::Malformed,"Invalid effects quality");d.config.effects=v=="adaptive"?EffectsQuality::Adaptive:EffectsQuality::Full; }
         else if(k=="depth_of_field") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid depth of field");d.config.depthOfField=v=="1"; }
         else if(k=="core_plan") { if(v!="auto"&&v!="off")return Error(StoreStatus::Malformed,"Invalid core plan");d.config.coreHelp=v=="auto"; }
-        else if(k=="motion_gain") {
+        else if(k=="motion_level") {
+            int level=0;auto parsed=std::from_chars(v.data(),v.data()+v.size(),level);
+            if(v.empty()||parsed.ec!=std::errc{}||parsed.ptr!=v.data()+v.size()||!tilt::ValidLevel(level))return Error(StoreStatus::Malformed,"Invalid tilt sensitivity");
+            d.config.tiltLevel=level;haveLevel=true;
+        }
+        else if(k=="motion_gain") {   // 1.2 beta: a percentage, 50 to 200 in steps of 25. Read, never written again; motion_level wins when both are there.
             int percent=0;auto parsed=std::from_chars(v.data(),v.data()+v.size(),percent);
-            if(v.empty()||parsed.ec!=std::errc{}||parsed.ptr!=v.data()+v.size()||!tilt::ValidPercent(percent))return Error(StoreStatus::Malformed,"Invalid tilt sensitivity");
-            d.config.tiltPercent=percent;
+            if(v.empty()||parsed.ec!=std::errc{}||parsed.ptr!=v.data()+v.size()||percent<tilt::kMinPercent||percent>tilt::kMaxPercent||percent%25!=0)return Error(StoreStatus::Malformed,"Invalid tilt sensitivity");
+            oldGain=percent;
         }
         else if(k=="motion_source") { if(v!="sensor"&&v!="stick")return Error(StoreStatus::Malformed,"Invalid tilt source");d.config.tiltStick=v=="stick"; }
         else if(k=="profile_chosen") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid profile choice");d.config.profileChosen=v=="1"; }
@@ -150,6 +156,7 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     // player who sets Star Bits back to Circle keeps it.
     if(!seen.count("profile_chosen")&&controls::PadDefaultsEnabled()&&controls::SameBindings(d.config.profiles[1],controls::LegacyPlayStationDefaults()))
         d.config.profiles[1]=api.defaults(controls::ProfileId::PlayStation);
+    if(!haveLevel&&oldGain)d.config.tiltLevel=tilt::LevelOfPercent(oldGain);
     std::string error;
     if(!ValidConfig(d.config,api,error))return Error(StoreStatus::Malformed,error);
     result=std::move(d);return {StoreStatus::Ok,""};

@@ -74,9 +74,9 @@ void Change(UiState& s,int direction) {
                     else s.working.tiltStick=!s.working.tiltStick;
                     break;
                 default: {
-                    // Steps of 25 from 50 to 200, stopping at both ends.
-                    const int next=s.working.tiltPercent+direction*tilt::kStepPercent;
-                    if(next>=tilt::kMinPercent&&next<=tilt::kMaxPercent)s.working.tiltPercent=next;
+                    // Levels 1 to 10, stopping at both ends.
+                    const int next=s.working.tiltLevel+direction;
+                    if(tilt::ValidLevel(next))s.working.tiltLevel=next;
                     break;
                 }
             }
@@ -190,7 +190,7 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
     if(event&(PreviousPage|NextPage)) {s.page=s.page==Page::Display?Page::Controls:Page::Display;s.row=0;s.bindingSlot=0;s.changedAt=now;return;}
     if(event&Reset&&s.page==Page::Controls) {
         if(!s.session->features.remap)s.message="Remapping unavailable in this build";
-        else if(ExtraRow(s)) {if(ExtraAt(s)==ExtraTiltGain)s.working.tiltPercent=tilt::kDefaultPercent;} // Tilt sensitivity back to 100%
+        else if(ExtraRow(s)) {if(ExtraAt(s)==ExtraTiltGain)s.working.tiltLevel=tilt::kDefaultLevel;} // Tilt sensitivity back to 5, the game's own
         else if(s.row>0&&s.row<=s.session->controls->actionCount) {s.action=s.session->controls->actions[s.row-1].id;s.picker=0;ModalOpen(s,Modal::ButtonPicker);}
         else ModalOpen(s,Modal::ResetProfile);
         return;
@@ -344,9 +344,9 @@ void ControlsRowView(const UiState& s,unsigned row,RowView& v) {
         v.help2="Select sets level again with the sensor. The stick suits a propped-up console. Applies from the next launch.";return;
     }
     if(row==api.actionCount+1+ExtraTiltGain) {
-        v.label="Tilt sensitivity";std::snprintf(v.value,sizeof v.value,"%d%%%s",s.working.tiltPercent,s.working.tiltPercent==tilt::kDefaultPercent?"  (as game)":"");
-        v.help1="How far a lean steers Star Ball and ray surfing: 50% takes a bigger tip, 200% a smaller one, in steps of 25.";
-        v.help2="100% is the game's own feel (Triangle sets it). The sensor and the stick both follow it. Applies from the next launch.";return;
+        v.label="Tilt sensitivity";std::snprintf(v.value,sizeof v.value,"%d%s",s.working.tiltLevel,s.working.tiltLevel==tilt::kDefaultLevel?" (normal)":s.working.tiltLevel==1?" (lowest)":s.working.tiltLevel==tilt::kLevels?" (highest)":"");
+        v.help1="How far a lean steers Star Ball and ray surfing, from 1 to 10: higher steers more for the same tilt, lower needs a bigger tip.";
+        v.help2="5 is the game's own feel (Triangle sets it). The sensor and the stick both follow it. Applies from the next launch.";return;
     }
     if(row>api.actionCount)return;
     const auto& action=api.actions[row-1];v.label=action.label;v.help1=action.label;

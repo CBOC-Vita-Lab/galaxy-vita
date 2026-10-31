@@ -78,8 +78,8 @@ int main(int argc,char** argv) {
      const unsigned tiltRow=static_cast<unsigned>(session.controls->actionCount)+1+ExtraTiltWith,gainRow=tiltRow+1;
      state.row=tiltRow;if(!render("controls-tilt-with-sensor",state))return false;state.working.tiltStick=true;if(!render("controls-tilt-with-stick",state))return false;
      state.controller.motion=false;state.row=tiltRow;if(!render("controls-tilt-with-no-sensor",state))return false;state.controller.motion=true;
-     state.working.tiltStick=false;state.row=gainRow;if(!render("controls-tilt-gain-100",state))return false;
-     state.working.tiltPercent=50;if(!render("controls-tilt-gain-50",state))return false;state.working.tiltPercent=200;if(!render("controls-tilt-gain-200",state))return false;state.working.tiltPercent=100;}
+     state.working.tiltStick=false;state.row=gainRow;if(!render("controls-tilt-gain-5",state))return false;
+     state.working.tiltLevel=1;if(!render("controls-tilt-gain-1",state))return false;state.working.tiltLevel=7;if(!render("controls-tilt-gain-7",state))return false;state.working.tiltLevel=10;if(!render("controls-tilt-gain-10",state))return false;state.working.tiltLevel=5;}
     state.modal=Modal::Capture;state.action="jump";if(!render("capture",state))return false;
     state.candidate=port::controls::Circle;if(!render("capture-release",state))return false;
     state.modal=Modal::ButtonPicker;state.picker=6;if(!render("button-picker",state))return false;

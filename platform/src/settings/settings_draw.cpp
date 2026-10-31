@@ -296,7 +296,7 @@ void Legend(Raster& r,const UiState& state,const SettingsSession& session) {
         const bool extra=state.row>session.controls->actionCount&&state.row<=session.controls->actionCount+kControlExtras;
         l.text(extra?"Left/Right: change":"Left/Right: slot");l.gap();
         if(!extra) {l.icon(Icon::Cross);l.text("rebind");l.gap();}
-        if(extra) {if(state.row==session.controls->actionCount+1+ExtraTiltGain) {l.icon(Icon::Triangle);l.text("100%");l.gap();}}
+        if(extra) {if(state.row==session.controls->actionCount+1+ExtraTiltGain) {l.icon(Icon::Triangle);l.text("reset to 5");l.gap();}}
         else if(session.features.remap) {l.icon(Icon::Triangle);l.text(state.row>0&&state.row<=session.controls->actionCount?"button list":"reset profile");l.gap();}
         l.text("L / R: page");l.gap();
     }

@@ -1,4 +1,4 @@
-// Tilt sensitivity (platform/include/port/tilt_gain.h): 100% leaves the vector alone bit for bit, the lean grows and shrinks with the
+// Tilt sensitivity (platform/include/port/tilt_gain.h): the 1 to 10 scale and its percentages, 100% leaves the vector alone bit for bit, the lean grows and shrinks with the
 // percentage and never reverses, the result stays unit length, nothing becomes NaN at the extremes, the stick path of
 // vita/runtime/input.cpp gives the same answers, and the switch parses as the menu writes it.
 //   tilt_gain            the arithmetic
@@ -33,10 +33,18 @@ int main(int argc, char** argv) {
         return 0;
     }
     // The menu's values and the switch's parsing.
-    for (int p = 0; p <= 300; ++p) assert(ValidPercent(p) == (p >= 50 && p <= 200 && p % 25 == 0));
+    for (int l = -2; l <= 14; ++l) assert(ValidLevel(l) == (l >= 1 && l <= 10));
+    // The scale: 1 is half, 5 the game's own (100 %), 10 double, rising at every step, and an invalid level reads as the game's own.
+    const int want[10] = {50, 63, 75, 88, 100, 120, 140, 160, 180, 200};
+    for (int l = 1; l <= 10; ++l) { assert(PercentOfLevel(l) == want[l - 1]); assert(LevelOfPercent(want[l - 1]) == l); if (l > 1) assert(PercentOfLevel(l) > PercentOfLevel(l - 1)); }
+    assert(PercentOfLevel(0) == 100 && PercentOfLevel(11) == 100 && PercentOfLevel(5) == kDefaultPercent && kDefaultLevel == 5);
+    // The 1.2 beta's percentages (50 to 200 in steps of 25) map to the nearest level; anything else too, ties to the lower level.
+    const int beta[7][2] = {{50, 1}, {75, 3}, {100, 5}, {125, 6}, {150, 7}, {175, 9}, {200, 10}};
+    for (const auto& b : beta) assert(LevelOfPercent(b[0]) == b[1]);
+    assert(LevelOfPercent(0) == 1 && LevelOfPercent(999) == 10 && LevelOfPercent(150) == 7 && LevelOfPercent(94) == 4 && LevelOfPercent(95) == 5);
     assert(ParsePercent(nullptr) == 100 && ParsePercent("") == 100 && ParsePercent("abc") == 100 && ParsePercent("150x") == 100);
-    assert(ParsePercent("100") == 100 && ParsePercent("50") == 50 && ParsePercent("200") == 200 && ParsePercent("75") == 75);
-    assert(ParsePercent("10") == 50 && ParsePercent("-5") == 50 && ParsePercent("900") == 200 && ParsePercent("130") == 125 && ParsePercent("0100") == 100);
+    assert(ParsePercent("100") == 100 && ParsePercent("50") == 50 && ParsePercent("200") == 200 && ParsePercent("75") == 75 && ParsePercent("63") == 63 && ParsePercent("130") == 130);
+    assert(ParsePercent("10") == 50 && ParsePercent("-5") == 50 && ParsePercent("900") == 200 && ParsePercent("0100") == 100);
 
     // 100% is today's behaviour bit for bit: any vector, even one that is not unit length or not finite, is untouched.
     const V odd[] = {{0, -1, 0}, {0.3f, -0.9f, 0.1f}, {0.6f, 0.1f, -0.7f}, {5, 6, 7}, {0, 0, 0},
@@ -46,9 +54,9 @@ int main(int argc, char** argv) {
         assert(std::memcmp(&v, &w, sizeof v) == 0);
     }
     // Level: nothing to scale, at every percentage.
-    for (int p = 50; p <= 200; p += 25) { const V l = Scaled({0, -1, 0}, p); assert(l.x == 0 && l.y == -1 && l.z == 0); }
+    for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) { const V l = Scaled({0, -1, 0}, p); assert(l.x == 0 && l.y == -1 && l.z == 0); }
     // Not finite input is left alone at every percentage (never made worse).
-    for (int p = 50; p <= 200; p += 25) {
+    for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) {
         V n{std::numeric_limits<float>::quiet_NaN(), -1, 0}; Scale(n.x, n.y, n.z, p); assert(std::isnan(n.x) && n.y == -1 && n.z == 0);
         V i{0.1f, -std::numeric_limits<float>::infinity(), 0}; Scale(i.x, i.y, i.z, p); assert(i.x == 0.1f && std::isinf(i.y));
     }
@@ -57,7 +65,7 @@ int main(int argc, char** argv) {
     for (float heading = 0; heading < 360; heading += 37) for (float degrees = 0.5f; degrees <= 120; degrees += 4.5f) {
         const V base = Lean(degrees, heading);
         float last = -1;
-        for (int p = 50; p <= 200; p += 25) {
+        for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) {
             const V w = Scaled(base, p);
             assert(std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z));
             assert(std::fabs(Len(w) - 1.0f) < 2e-6f);
@@ -78,14 +86,14 @@ int main(int argc, char** argv) {
     assert(std::fabs(LeanOf(Scaled(Lean(100, 10), 150)) - 100.0f) < 0.02f && std::fabs(LeanOf(Scaled(Lean(100, 10), 50)) - 50.0f) < 0.02f);
     assert(std::fabs(LeanOf(Scaled(Lean(20, 0), 200)) - 40.0f) < 0.02f && std::fabs(LeanOf(Scaled(Lean(20, 0), 50)) - 10.0f) < 0.02f);
     // Tiny leans (the noise around level) and a lean of exactly 180 degrees stay finite.
-    for (float tiny : {1e-9f, 1e-7f, 1e-5f, 1e-3f}) for (int p = 50; p <= 200; p += 25) {
+    for (float tiny : {1e-9f, 1e-7f, 1e-5f, 1e-3f}) for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) {
         const V w = Scaled({tiny, -1, tiny}, p); assert(std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z) && std::fabs(Len(w) - 1.0f) < 1e-5f);
     }
-    for (int p = 50; p <= 200; p += 25) { const V w = Scaled({1e-3f, 1, 0}, p); assert(std::isfinite(w.x) && std::isfinite(w.y) && std::fabs(Len(w) - 1.0f) < 1e-5f); }
+    for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) { const V w = Scaled({1e-3f, 1, 0}, p); assert(std::isfinite(w.x) && std::isfinite(w.y) && std::fabs(Len(w) - 1.0f) < 1e-5f); }
 
     // The stick path: the full stick is a 40.5 degree lean (0.65 of the unit circle); sensitivity scales that the same way, straight
     // left stays straight left, the centre stays level, and the corner of the stick square (|x|,|y| = 1) stays finite and unit.
-    for (int p = 50; p <= 200; p += 25) {
+    for (int lv = 1; lv <= kLevels; ++lv) for (int p = PercentOfLevel(lv), once = 1; once; once = 0) {
         const V full = Scaled(Stick(1, 0), p);
         const float want = std::fmin(std::asin(0.65f) * 180.0f / 3.14159265f * p / 100.0f, 85.0f);
         assert(std::fabs(LeanOf(full) - want) < 0.02f && std::fabs(full.z) < 1e-6f && full.x > 0);

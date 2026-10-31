@@ -15,15 +15,28 @@
 namespace port {
 namespace tilt {
 
-constexpr int kMinPercent = 50, kMaxPercent = 200, kStepPercent = 25, kDefaultPercent = 100;
+constexpr int kMinPercent = 50, kMaxPercent = 200, kDefaultPercent = 100;
 constexpr float kMaxAngle = 85.0f * 3.14159265358979f / 180.0f;
 
-// A percentage the menu offers: 50, 75, 100, ... 200.
-inline bool ValidPercent(int percent) {
-    return percent >= kMinPercent && percent <= kMaxPercent && (percent - kMinPercent) % kStepPercent == 0;
+// The menu's scale: 1 (half the steering) to 10 (double), 5 the game's own feel (100 %).
+constexpr int kLevels = 10, kDefaultLevel = 5;
+inline bool ValidLevel(int level) { return level >= 1 && level <= kLevels; }
+// The percentage of each level: 50, 63, 75, 88, 100, 120, 140, 160, 180, 200.
+inline int PercentOfLevel(int level) {
+    static constexpr int percent[kLevels] = {50, 63, 75, 88, 100, 120, 140, 160, 180, 200};
+    return ValidLevel(level) ? percent[level - 1] : kDefaultPercent;
+}
+// The level nearest to a percentage (the 1.2 beta stored 50 to 200 in steps of 25 as motion_gain); a tie goes to the lower level.
+inline int LevelOfPercent(int percent) {
+    int best = kDefaultLevel, distance = 1 << 20;
+    for (int level = 1; level <= kLevels; ++level) {
+        const int d = std::abs(PercentOfLevel(level) - percent);
+        if (d < distance) { distance = d; best = level; }
+    }
+    return best;
 }
 
-// The switch's value: a whole number, held to the range and rounded down to a step; unset, empty or anything else is 100.
+// The switch's value (a percentage, for env.txt): a whole number held to 50..200; unset, empty or anything else is 100.
 inline int ParsePercent(const char* v) {
     if (!v || !*v) return kDefaultPercent;
     char* end = nullptr;
@@ -31,7 +44,7 @@ inline int ParsePercent(const char* v) {
     if (end == v || *end) return kDefaultPercent;
     if (parsed < kMinPercent) return kMinPercent;
     if (parsed > kMaxPercent) return kMaxPercent;
-    return kMinPercent + static_cast<int>((parsed - kMinPercent) / kStepPercent) * kStepPercent;
+    return static_cast<int>(parsed);
 }
 
 // Scale the lean of the down vector (x, y, z) by `percent`. y is -cos(lean), so a level console is (0, -1, 0). A vector that is

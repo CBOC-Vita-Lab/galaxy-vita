@@ -76,9 +76,9 @@ int main() {
             {"core off",[](Config& c){c.coreHelp=false;},"GXV_CORE3_IO","0"},
             {"effects full",[](Config& c){c.effects=EffectsQuality::Full;},"GXV_AUTOQ_FXSTEP","0"},
             {"mario off",[](Config& c){c.prioritizeMario=false;},"GXV_CHARAA_AUTO","0"},
-            {"tilt 50",[](Config& c){c.tiltPercent=50;},"GXV_TILT_GAIN","50"},{"tilt 75",[](Config& c){c.tiltPercent=75;},"GXV_TILT_GAIN","75"},
-            {"tilt 125",[](Config& c){c.tiltPercent=125;},"GXV_TILT_GAIN","125"},{"tilt 150",[](Config& c){c.tiltPercent=150;},"GXV_TILT_GAIN","150"},
-            {"tilt 175",[](Config& c){c.tiltPercent=175;},"GXV_TILT_GAIN","175"},{"tilt 200",[](Config& c){c.tiltPercent=200;},"GXV_TILT_GAIN","200"},
+            {"tilt 1",[](Config& c){c.tiltLevel=1;},"GXV_TILT_GAIN","50"},{"tilt 2",[](Config& c){c.tiltLevel=2;},"GXV_TILT_GAIN","63"},{"tilt 3",[](Config& c){c.tiltLevel=3;},"GXV_TILT_GAIN","75"},
+            {"tilt 4",[](Config& c){c.tiltLevel=4;},"GXV_TILT_GAIN","88"},{"tilt 6",[](Config& c){c.tiltLevel=6;},"GXV_TILT_GAIN","120"},{"tilt 7",[](Config& c){c.tiltLevel=7;},"GXV_TILT_GAIN","140"},
+            {"tilt 8",[](Config& c){c.tiltLevel=8;},"GXV_TILT_GAIN","160"},{"tilt 9",[](Config& c){c.tiltLevel=9;},"GXV_TILT_GAIN","180"},{"tilt 10",[](Config& c){c.tiltLevel=10;},"GXV_TILT_GAIN","200"},
             {"tilt stick",[](Config& c){c.tiltStick=true;},"GXV_TILT_STICK","1"}};
         for(const auto& one:ones) {
             clear();startup();auto c=base;one.edit(c);
@@ -104,8 +104,8 @@ int main() {
             {"GXV_AUTOQ_FXSTEP","1",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.effects=EffectsQuality::Full;},false},{"GXV_AUTOQ_FXSTEP","1",[](Config& c){c.effects=EffectsQuality::Full;},true},
             {"GXV_CHARAA_AUTO","0",[](Config&){},true},{"GXV_CHARAA_AUTO","1",[](Config&){},true},{"GXV_CHARAA_AUTO","0",[](Config& c){c.prioritizeMario=false;},false},
             {"GXV_CORE3_IO","0",[](Config&){},true},{"GXV_CORE3_IO","0",[](Config& c){c.coreHelp=false;},false},
-            {"GXV_TILT_GAIN","100",[](Config&){},false},{"GXV_TILT_GAIN","150",[](Config& c){c.tiltPercent=150;},false},
-            {"GXV_TILT_GAIN","150",[](Config&){},true},{"GXV_TILT_GAIN","100",[](Config& c){c.tiltPercent=50;},true},{"GXV_TILT_GAIN","75",[](Config& c){c.tiltPercent=75;},false},
+            {"GXV_TILT_GAIN","100",[](Config&){},false},{"GXV_TILT_GAIN","140",[](Config& c){c.tiltLevel=7;},false},
+            {"GXV_TILT_GAIN","150",[](Config&){},true},{"GXV_TILT_GAIN","100",[](Config& c){c.tiltLevel=1;},true},{"GXV_TILT_GAIN","75",[](Config& c){c.tiltLevel=3;},false},{"GXV_TILT_GAIN","63",[](Config& c){c.tiltLevel=2;},false},{"GXV_TILT_GAIN","140",[](Config& c){c.tiltLevel=6;},true},
             {"GXV_TILT_STICK","1",[](Config& c){c.tiltStick=true;},false},{"GXV_TILT_STICK","1",[](Config&){},true},{"GXV_TILT_STICK","0",[](Config& c){c.tiltStick=true;},true},{"GXV_TILT_STICK","0",[](Config&){},false}};
         for(const auto& e:envs) {
             clear();startup();setenv(e.key,e.value,1);auto c=base;e.edit(c);
@@ -118,7 +118,7 @@ int main() {
         // The earlier choices still work with the new ones set.
         setenv("GXV_AUTOQ","1",1);assert(ApplyStartup(base,true).size()==1);
         // The tilt choices: the default sets nothing, and the label of a developer override names what env.txt did.
-        {clear();startup();auto c=base;c.tiltPercent=200;c.tiltStick=true;setenv("GXV_TILT_GAIN","50",1);setenv("GXV_TILT_STICK","0",1);
+        {clear();startup();auto c=base;c.tiltLevel=10;c.tiltStick=true;setenv("GXV_TILT_GAIN","50",1);setenv("GXV_TILT_STICK","0",1);
          const auto o=ApplyStartup(c,true);assert(o.size()==2&&o[0].key=="GXV_TILT_GAIN"&&o[0].effectiveLabel=="Tilt sensitivity 50%"&&o[1].key=="GXV_TILT_STICK"&&o[1].effectiveLabel=="Tilt from the motion sensor");
          assert(env("GXV_TILT_GAIN")=="50"&&env("GXV_TILT_STICK")=="0");}
         clear();unsetenv("GXV_AUTOQ_FXSTEP");unsetenv("GXV_CHARAA_AUTO");unsetenv("GXV_CORE3_IO");
