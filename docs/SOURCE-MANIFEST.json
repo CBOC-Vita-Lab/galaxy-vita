@@ -24,7 +24,15 @@
     },
     {
       "path": "armhf/CMakeLists.txt",
-      "sha256": "bcc5b8c9d1ceb96c57a81712801ee45bbfae16c2b9b2dcafa3f0727bcee5d86d"
+      "sha256": "913f6d6ee5b82458537dd03c164cf979b3b3d52997bf39059d7f7c7473d2ff4e"
+    },
+    {
+      "path": "armhf/glstub/GLES2/gl2.h",
+      "sha256": "249e71ed051a204e8f4cc236b7c3eaae7daab926b38d5b5945e894ac25e5a172"
+    },
+    {
+      "path": "armhf/glstub/GLES2/gl2ext.h",
+      "sha256": "b3adf106d95b8934f690943f2921308b90be5b766c4c8ba250c792de56400201"
     },
     {
       "path": "armhf/glue/audio_out.cpp",
@@ -41,6 +49,10 @@
     {
       "path": "armhf/glue/vclock.cpp",
       "sha256": "1b97b19c69d13614cedc09c9d76c5b5dd8e3acf5f239290c65318a4cd2320244"
+    },
+    {
+      "path": "armhf/glue/vgl_stub.cpp",
+      "sha256": "9aeb195445e66856081cc77eb936c3d1137caea4721f88aa39b8a172f499a223"
     },
     {
       "path": "armhf/pgo/pgo_exit.cpp",
@@ -18536,7 +18548,7 @@
     },
     {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "bc9d1dd67d8868c52f5b467c4860913c988e841ddde5aa75905f09d263addb79"
+      "sha256": "e4fe795b56f4268e17e04391ee5d68029c52505fa13c392d2f2bf6ca1a7d502a"
     },
     {
       "path": "platform/include/port/pointer_aim.h",
@@ -18588,7 +18600,11 @@
     },
     {
       "path": "platform/include/port/settings_ui.h",
-      "sha256": "70342709e27bf6410e57d932fa25a99fe62f2eddd10ce3c84067133f2cd492b7"
+      "sha256": "73fb3473dc8c62444fbe1137b4187a17d2c8722cf9737e0007ce82947703f75c"
+    },
+    {
+      "path": "platform/include/port/tilt_gain.h",
+      "sha256": "40cb19cc2bca9c27ab7eba6b85a4f6c83f3280e9a19f175392502ae41981d3d7"
     },
     {
       "path": "platform/include/port/title_art.h",
@@ -18892,7 +18908,7 @@
     },
     {
       "path": "platform/src/port/handheld_ui.cpp",
-      "sha256": "686cdb849f03b30866adfa56484d3e3e27f069998da0a03effa629b581263a44"
+      "sha256": "f46f1f246571c1d409cef499c7e76c3d9146676b4069680c80d70fa90d2094b7"
     },
     {
       "path": "platform/src/port/missing_game.cpp",
@@ -18952,7 +18968,7 @@
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "f8383b87d0a45bc1ec8dcefbfeae467b128fd55175c4e31427ce5aa1fcd7bedb"
+      "sha256": "e14dd4b68dd99d648804201e419458e04242be99a30b2ad327cae49564198e6e"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18960,7 +18976,7 @@
     },
     {
       "path": "platform/src/settings/settings_draw.cpp",
-      "sha256": "93a7ef4fea72ccbd8d8a4125b8c8b78ac650cd16ce58bc9aedf6ef158277a61d"
+      "sha256": "8c7335772f808a25b6c7e77a588f36d210b178f518f24d7270f9186a416a3b22"
     },
     {
       "path": "platform/src/settings/settings_font.cpp",
@@ -18968,7 +18984,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "fb92cd58004a9d3b597dc4873c571315a1569dfc961b18040640a293a3b1e859"
+      "sha256": "fff40d0439830b76a34a432b78e5dc4b3dd17dd32a5ecb049b2b7bc80ba8d1cf"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18980,7 +18996,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "7cab5db2eb6c445625c13dbcf2f68dfe4e6ecd88b3f846fc1da95e66a9b5032e"
+      "sha256": "de9928be078b28dabfb613ba6d53666ce81bae3cea2e11843d8f9be6567bbf29"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19496,7 +19512,7 @@
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "76a940554a5c7ffae6721b0cdec0f6cc105fea29296bca84d38646892de24b15"
+      "sha256": "497189fde9f070549fdfa261907fe02b55c4e9839953e5e389dda07ee0ead5a8"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19512,7 +19528,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "e8f49406e56d5569ef29131a526845ba56d3517553e0c97da57badbdac50f5a4"
+      "sha256": "a8f45e586cad2de00efabc6884a1f94026e9e0763e925f0b27607cfe5fc17492"
     },
     {
       "path": "tests/player_settings_pad.cpp",
@@ -19520,11 +19536,11 @@
     },
     {
       "path": "tests/player_settings_store.cpp",
-      "sha256": "dd26d199580a68c20690940edb294ecee63e0c72f90901dc2533bdb9873fcec9"
+      "sha256": "4f917f43a52db345cc4a5055514a1f78df5c4f51f344c63b2af2fcf872b08a4a"
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "f423d99842e62a0a49d2c95ad398daaeca1ab78e35c3822ffc32f85c1f980880"
+      "sha256": "739f6aeae3a43af7d893b970bef15dcc93d239d7a2d80b6ad52d1b3bbc834788"
     },
     {
       "path": "tests/pointer_aim.cpp",
@@ -19628,7 +19644,7 @@
     },
     {
       "path": "tests/test_pgo_build.py",
-      "sha256": "a3c9cc78d6e38c1314ca7960039d58507c3969b5f520cb0f70f008d4ae5600c2"
+      "sha256": "ba518e55f7cc48c8bd192f3a2e684e726b7412936f91a3680ce152c8dd171b88"
     },
     {
       "path": "tests/test_player_audit.py",
@@ -19681,6 +19697,10 @@
     {
       "path": "tests/tilt_consumers.cpp",
       "sha256": "ddcef6ae25059d7ca795ab60017ab8878c57a45f387f20f8e317cf0674d48d76"
+    },
+    {
+      "path": "tests/tilt_gain.cpp",
+      "sha256": "29e474d3dd08b2d0e295ad310e505e4508c16c1bd5f8ce8bb8246a1c01fd5e2d"
     },
     {
       "path": "tests/title_art.cpp",
@@ -20104,7 +20124,7 @@
     },
     {
       "path": "tests/vita_controls.cpp",
-      "sha256": "76327a6ea75049fd2ad56884c16ba27807d89af04c61911e5f020f561b8ae3dc"
+      "sha256": "69592a39a7e27d43f02dd91524a34f6daeff685285996287b75e3fdd48181f66"
     },
     {
       "path": "tests/vita_csv_status.cpp",
@@ -20576,11 +20596,15 @@
     },
     {
       "path": "tools/pgo/README.md",
-      "sha256": "be375f37a9d748f678f43f5da8f7ff961f29461f327dfd377432179cf8062259"
+      "sha256": "6c8b3a8522f7ef1f36e408e8dacd8b3b329ea4d540f0df4fbfd8b9b38b37cf72"
     },
     {
       "path": "tools/pgo/build_profile_rt.sh",
       "sha256": "d226b7e2ff62f001f815aabdbdb177a46adfac43780f02688afe30f984af17ea"
+    },
+    {
+      "path": "tools/pgo/check_vita_profile.py",
+      "sha256": "83bd84fc4684c3e6dbd86e4f90c9b600ab7f20599b40003cc1941c59d8f93f34"
     },
     {
       "path": "tools/pgo/make_tour_route.py",
@@ -20588,7 +20612,7 @@
     },
     {
       "path": "tools/pgo/match_report.py",
-      "sha256": "3375a0527a0c01b2ef9eace2c02bf73756a0e5e905f97a5eb3f7ff155b3934ef"
+      "sha256": "c02e89f595201897d54e52314d849f398f71935141d6b140469df0e5ca6b9ab6"
     },
     {
       "path": "tools/pgo/routes/opening.txt",
@@ -20616,7 +20640,11 @@
     },
     {
       "path": "tools/pgo/smg.profdata.gz",
-      "sha256": "09f8d5bb8b6f882c22dc628f78f0875726882e96e5827ef60e9c45a1ad6a505b"
+      "sha256": "a4cb723e901b352d83b969a533f1829d4cacd959d0ee51fe3f3c4d6803eadc70"
+    },
+    {
+      "path": "tools/pgo/vita_env.sh",
+      "sha256": "069373c0f269b3c27bba7b691f4e25002e5241c262661ee75aba582927a9594e"
     },
     {
       "path": "tools/pnginfo.py",
@@ -20672,7 +20700,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "b7645d230f57c476745f1bba6d2457c9b64e82045ef554b3ba1c3e089024428c"
+      "sha256": "a62a371ffbdde4685ee8c8af28d6bedab41802b1d88a626eefb9c95f1477e3e3"
     },
     {
       "path": "tools/push_data.py",
@@ -20868,7 +20896,7 @@
     },
     {
       "path": "tools/test_pgo_build.sh",
-      "sha256": "30c8e3962d4e3301d01bcae3366ae0e69d56ed59e63fbed1467e11a66f4193aa"
+      "sha256": "14388b4714036c56b5d2c1c20bf7d6e8afa46c8c1a9cfc2ae90d93092dc8778c"
     },
     {
       "path": "tools/test_phase_cpu.sh",
@@ -20949,6 +20977,10 @@
     {
       "path": "tools/test_thp_hw_fixup.sh",
       "sha256": "473a897f100183923c8f9e78a77771831adc7f01275c27099e3cc5e1f9f4ef54"
+    },
+    {
+      "path": "tools/test_tilt_gain.sh",
+      "sha256": "64af44b92ccf491f62e913669cd23c76da38f65f5fa8c4eccce1cf2a5bf9e4d2"
     },
     {
       "path": "tools/test_title_art.sh",
@@ -21280,7 +21312,7 @@
     },
     {
       "path": "tools/test_vita_controls.sh",
-      "sha256": "94cccd981a217f57117e3aa6377db7feae82424cdfcb333c5ccbed2d3ac6fa07"
+      "sha256": "a2099e093080b7c21f6a909c7ff3720ba9998796c5c821be26af40f55d07bf89"
     },
     {
       "path": "tools/test_vita_csv_status.sh",
@@ -21400,7 +21432,7 @@
     },
     {
       "path": "tools/vgx_build/build.py",
-      "sha256": "52de9b61defffa3380185b9b7ba1cb2ea893a01aab60c6c1cf5538811416ae09"
+      "sha256": "e868c0419f398444161d6f3c508cbc58d3547fa159918d1a76cf5dca9443c986"
     },
     {
       "path": "tools/vgx_build/inputs.json",
@@ -21412,7 +21444,7 @@
     },
     {
       "path": "tools/vgx_build/vita_runtime_gen_vgx.py",
-      "sha256": "8375d009fdbf7b64fa64019cdee9eac17c99da280190d2e40204abb1efff21e9"
+      "sha256": "618300e5722f948bb87e5f361ff29e6ce0879338b3aeabde7d266906f2a86aa4"
     },
     {
       "path": "tools/vgx_build/vita_runtime_report_vgx.py",
@@ -21664,7 +21696,7 @@
     },
     {
       "path": "vita/runtime/input.cpp",
-      "sha256": "0ae6b93d00a187226aba9fcc6aac5f22011a63a899d928a462c6ae44eaa314e4"
+      "sha256": "5c869fcb2178b730f7190f3bc235afcf69d47fe4104ebea94d0961f0227ca495"
     },
     {
       "path": "vita/runtime/input.h",
