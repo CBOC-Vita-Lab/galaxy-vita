@@ -17,6 +17,7 @@ The smooth-play update: aiming for a steady 30 with the full picture.
 - **Matter Splatter's ground** no longer flashes black, and leftover shine, light and shadow darkening are gone.
 - **Ground-pound and black-hole trails are back,** along with the right colours on about 85 other effects (Dino Piranha, Mario, Dodoryu, Kingfin and more) and a few shadows and bubbles. Colours written in the game's effect list were being read with their bytes in the wrong order.
 - **Mario's eyes in HD.** With the optional HD textures, Mario's eyes now use the sharper HD images too. The white or stuck-closed eyes that made 1.1 leave them out came from a colour rule the port now follows exactly.
+- **Sparkles and rain lines at full size.** Thin-line and dot effects (the spin sparkles, rain, depth-of-field strips) were drawn one pixel wide; they now have the Wii's widths.
 - **Lumas have their colours back.** They could show up as white blobs; a Wii colour rule the port missed is now followed.
 - **Queen Bee's fur** looks as it should.
 - **Textures as sharp or soft as the game asks for,** including the dome floors and the Dark Matter Plant, and water keeps the game's own distant detail.

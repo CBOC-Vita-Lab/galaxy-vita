@@ -308,6 +308,8 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // alpha, which GXV_TEVWRAP=2 now wraps as the Wii does (checked frame by frame in the Gateway wake-up close-up). GXV_HDTEX_EYES=0
     // keeps the game's own eye images.
     setenv("GXV_HDTEX_EYES", "1", 0);
+    // GX lines and points at their GX width and size (spin sparkles, rain lines, depth-of-field strips), drawn as triangles.
+    setenv("GXV_FIX_LINES", "1", 0);
     // Pad defaults for a PS TV (GAL-032): with a DS3 or DS4 on the PlayStation profile R2 shoots Star Bits, the right stick moves the
     // pointer, the D-pad is the camera. The Vita handheld's own controls are not touched. GXV_PAD_DEFAULTS=0 in env.txt gives the 1.1 pad layout.
     setenv("GXV_PAD_DEFAULTS", "1", 0);
