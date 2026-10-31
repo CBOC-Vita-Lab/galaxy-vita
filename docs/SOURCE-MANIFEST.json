@@ -18548,7 +18548,7 @@
     },
     {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "f1be2f3250e27f117502c2af1cb4d99f3651d79631763b265542d1410f502d42"
+      "sha256": "e4fe795b56f4268e17e04391ee5d68029c52505fa13c392d2f2bf6ca1a7d502a"
     },
     {
       "path": "platform/include/port/pointer_aim.h",
@@ -18968,7 +18968,7 @@
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "60173c404a694e265b6e7e5a367ff5a0407dc4e09c4c972036081bc5823f5ec8"
+      "sha256": "e14dd4b68dd99d648804201e419458e04242be99a30b2ad327cae49564198e6e"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18984,7 +18984,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "51fbf0e40fa0085f032a9016f7f5ee75eb15846f98629bb54b7416defa9da7ab"
+      "sha256": "fff40d0439830b76a34a432b78e5dc4b3dd17dd32a5ecb049b2b7bc80ba8d1cf"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18996,7 +18996,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "111eee7a1725669b334879e2258669a09bb35bf74595f84dd5907452220f8c8d"
+      "sha256": "de9928be078b28dabfb613ba6d53666ce81bae3cea2e11843d8f9be6567bbf29"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19260,7 +19260,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "56f8e0eb638c99bb4bd7bb4ce549bf5acb6716e7d1d523b9db185bbafffb8d2b"
+      "sha256": "7173f9fd67ee3f800bc6956a8a3bf1b15e2df96945d07e576148e911d33589b0"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",
@@ -19516,7 +19516,7 @@
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "222637aa6b2e297a90f38058dba81c8551c2a7ab22f93a1ba1d7859d034b4d0c"
+      "sha256": "497189fde9f070549fdfa261907fe02b55c4e9839953e5e389dda07ee0ead5a8"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19532,7 +19532,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "3fcda3f0f25b31a3f7005c8809d16956c341a5c1d361a47c8bb8f9d478646b00"
+      "sha256": "a8f45e586cad2de00efabc6884a1f94026e9e0763e925f0b27607cfe5fc17492"
     },
     {
       "path": "tests/player_settings_pad.cpp",
@@ -19540,11 +19540,11 @@
     },
     {
       "path": "tests/player_settings_store.cpp",
-      "sha256": "772d3430c0b0263f1fc969588fa86bf2b2eeea865a64a59f91449f66dc2ad798"
+      "sha256": "4f917f43a52db345cc4a5055514a1f78df5c4f51f344c63b2af2fcf872b08a4a"
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "6723b14893c0856df4705301cc68b020c0dfe9113a56f19807c6d208ec5f3e00"
+      "sha256": "739f6aeae3a43af7d893b970bef15dcc93d239d7a2d80b6ad52d1b3bbc834788"
     },
     {
       "path": "tests/pointer_aim.cpp",
@@ -20124,7 +20124,7 @@
     },
     {
       "path": "tests/vita_coldtrace_export.cpp",
-      "sha256": "aba5bec54b41bfda1ba84fed2af3bd1bff3043bd7ba278cade8982b46fd651f3"
+      "sha256": "a533d183568aae611b19b1e995da6ff830e78eaa655252966c03f4118b593261"
     },
     {
       "path": "tests/vita_coldtrace_fixture.h",
@@ -20132,7 +20132,7 @@
     },
     {
       "path": "tests/vita_coldtrace_wrap.cpp",
-      "sha256": "a8bbc4017597d074ac36a37acc53873814a7340b92eb9233a31e195faf56b883"
+      "sha256": "75b5b124c21bbc7866839030c13c0420f73071d323ccfb8b2c01908d6b25433b"
     },
     {
       "path": "tests/vita_controls.cpp",
@@ -20216,7 +20216,7 @@
     },
     {
       "path": "tests/vita_seed_cache.cpp",
-      "sha256": "940172417ee6c66ea06139c9cbb417beb96503cb93872eaeb5228aa75d27a3b2"
+      "sha256": "9028f86916869bf81d0c2bc59c7a6aa2909958155a301757642527002e0a8e10"
     },
     {
       "path": "tests/vita_shader_cache.cpp",
@@ -20712,7 +20712,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "757882ca4d59d2d29191f78cdad6927926f4b80770db9d9cc3b6e9b54bab0d13"
+      "sha256": "a62a371ffbdde4685ee8c8af28d6bedab41802b1d88a626eefb9c95f1477e3e3"
     },
     {
       "path": "tools/push_data.py",
@@ -21392,7 +21392,7 @@
     },
     {
       "path": "tools/test_vita_seed_cache.sh",
-      "sha256": "043b402e1978e3acc9c6894654431d9408b3c61f9f2151bd3839590ba0abf555"
+      "sha256": "76dad275803bcfb07ff9757bfe2b807d9de602d15221c627b5da79f65ae5ff31"
     },
     {
       "path": "tools/test_vita_shader_cache.sh",
@@ -21756,7 +21756,7 @@
     },
     {
       "path": "vita/vgx-game/coldtrace_wrap.cpp",
-      "sha256": "a8c70ec7705567a9a2d47008c6d2452e4a486675e87172b2602a1cbe98bbd42c"
+      "sha256": "05faa612c9cc3eed028901c2c2dd12253120c779d0c28c32d7233ec81a628f6d"
     },
     {
       "path": "vita/vgx-game/entry.cpp",
