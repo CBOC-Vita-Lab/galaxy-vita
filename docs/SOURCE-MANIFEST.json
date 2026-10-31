@@ -18608,7 +18608,7 @@
     },
     {
       "path": "platform/include/port/title_art.h",
-      "sha256": "104dbe0e29e0fe852d21426e6cabbc80593e71aa035bea65889ab63342593732"
+      "sha256": "5280236f2d7cd47b892060bff42da72051848bcdc19a1aba073c80b66cb70bee"
     },
     {
       "path": "platform/include/port/title_art_png.h",
@@ -19704,7 +19704,7 @@
     },
     {
       "path": "tests/title_art.cpp",
-      "sha256": "5a56364478fc0e54afef25f3abc11ed0fa543e5cd4388697725341c11021a369"
+      "sha256": "265f3a07b266b3aa3b02bb17acba4d65406271fd486e1c863a236ac475be9994"
     },
     {
       "path": "tests/title_art_fixture.h",
@@ -20516,7 +20516,7 @@
     },
     {
       "path": "tools/handheld/make_livearea_title.py",
-      "sha256": "5fe647f85fb81c993b127d246580756b2bdee3349799682d05b9608b299ee622"
+      "sha256": "ceb4e8e2e363725385127eba865a2d6b0d052c5d2dd37a2a5b20500beb951bb3"
     },
     {
       "path": "tools/handheld/make_settings_assets.py",
