@@ -19064,11 +19064,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_autoq.cpp",
-      "sha256": "926cd1a8e863f28665c4c19f7461da66bd54d471ab09b8a2b06f405224fc099f"
+      "sha256": "2e5d683453663d5e2d2b5a12e64345f3a7445f801f3f427617173e04dd0d8fd0"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.h",
-      "sha256": "bc7c4ceba5f5a5525fec4f314ea8d2a5914900225ea390ddf8c83a82ae427c91"
+      "sha256": "0f572b5bc1c55db417704e7c3e4bf9fc9c717abdb2630a0b8289e1f0774d4a73"
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
@@ -19740,7 +19740,7 @@
     },
     {
       "path": "tests/vgx_autoq_fxstep.cpp",
-      "sha256": "0e543d1e29ae81e4c50d1cb5df855daa37c1c4e1aae8d11395ca3c650e340e0e"
+      "sha256": "1a1e9575fedf993c11d4b6f206e4b0ced62324e520955381b0dcab09ab725d05"
     },
     {
       "path": "tests/vgx_autoq_gl_test.cpp",
