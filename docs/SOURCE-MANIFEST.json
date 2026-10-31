@@ -18548,7 +18548,7 @@
     },
     {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "e4fe795b56f4268e17e04391ee5d68029c52505fa13c392d2f2bf6ca1a7d502a"
+      "sha256": "367b004aef73034b62680cce9987be3cbc87d65e62823d5567784d3ce97647f6"
     },
     {
       "path": "platform/include/port/pointer_aim.h",
@@ -18604,7 +18604,7 @@
     },
     {
       "path": "platform/include/port/tilt_gain.h",
-      "sha256": "40cb19cc2bca9c27ab7eba6b85a4f6c83f3280e9a19f175392502ae41981d3d7"
+      "sha256": "ed8e240cbb52719f506bc62cba2190539621a1c3782fecfaa4fafaca4210a4a9"
     },
     {
       "path": "platform/include/port/title_art.h",
@@ -18968,7 +18968,7 @@
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "e14dd4b68dd99d648804201e419458e04242be99a30b2ad327cae49564198e6e"
+      "sha256": "4ddc5698432c02d3b3e09c2c2a1539eae2a7543a1b62217fcd1bdbcd7e683a97"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18976,7 +18976,7 @@
     },
     {
       "path": "platform/src/settings/settings_draw.cpp",
-      "sha256": "8c7335772f808a25b6c7e77a588f36d210b178f518f24d7270f9186a416a3b22"
+      "sha256": "519b957ec5712a3c0b78d52e4186a252d6fae22c6b43c300d7e41c15916250b3"
     },
     {
       "path": "platform/src/settings/settings_font.cpp",
@@ -18984,7 +18984,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "fff40d0439830b76a34a432b78e5dc4b3dd17dd32a5ecb049b2b7bc80ba8d1cf"
+      "sha256": "4f917f11d8371e83af4192c021845914e783888cfe5ed44ee26a606cd33f3575"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18996,7 +18996,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "de9928be078b28dabfb613ba6d53666ce81bae3cea2e11843d8f9be6567bbf29"
+      "sha256": "6ccfd6c2377ea8372953bd8e93b740a66dd76203ebfbbdf678d21c0314df94b7"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19516,7 +19516,7 @@
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "497189fde9f070549fdfa261907fe02b55c4e9839953e5e389dda07ee0ead5a8"
+      "sha256": "c3463d3db594e18c796fe279dd2b8c13975bb55d1dfec2cd49361c3a672feeea"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19532,7 +19532,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "a8f45e586cad2de00efabc6884a1f94026e9e0763e925f0b27607cfe5fc17492"
+      "sha256": "cb2bb1cd4f7013265aa06bf2152983a9289ab51772f3cc3ed27263e96e7a1f09"
     },
     {
       "path": "tests/player_settings_pad.cpp",
@@ -19540,11 +19540,11 @@
     },
     {
       "path": "tests/player_settings_store.cpp",
-      "sha256": "4f917f43a52db345cc4a5055514a1f78df5c4f51f344c63b2af2fcf872b08a4a"
+      "sha256": "413ff580e2fe3bf4205bdddcb95ab3c708c6eb62bb9977a4d24b70b3d6138edd"
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "739f6aeae3a43af7d893b970bef15dcc93d239d7a2d80b6ad52d1b3bbc834788"
+      "sha256": "de601ce2e6f4e03017c2c66798969a54af78badeb6abf622f9761ce37652b19e"
     },
     {
       "path": "tests/pointer_aim.cpp",
@@ -19704,7 +19704,7 @@
     },
     {
       "path": "tests/tilt_gain.cpp",
-      "sha256": "29e474d3dd08b2d0e295ad310e505e4508c16c1bd5f8ce8bb8246a1c01fd5e2d"
+      "sha256": "1647b2ce5dba9cf28e9a0557a3dc7ee5835ad2a56b623a67831d7c6f58a1fa50"
     },
     {
       "path": "tests/title_art.cpp",
@@ -20712,7 +20712,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "a62a371ffbdde4685ee8c8af28d6bedab41802b1d88a626eefb9c95f1477e3e3"
+      "sha256": "edb62fe4fe9e9764fc411b97f9df5bb95497f9125087b5d6126cd1a2fcef76e6"
     },
     {
       "path": "tools/push_data.py",
@@ -20992,7 +20992,7 @@
     },
     {
       "path": "tools/test_tilt_gain.sh",
-      "sha256": "64af44b92ccf491f62e913669cd23c76da38f65f5fa8c4eccce1cf2a5bf9e4d2"
+      "sha256": "f334c985e861cd1e068879f589711c7933a5bb0dddd99ab3ce2471df4f4e19e9"
     },
     {
       "path": "tools/test_title_art.sh",
@@ -21332,7 +21332,7 @@
     },
     {
       "path": "tools/test_vita_controls.sh",
-      "sha256": "a2099e093080b7c21f6a909c7ff3720ba9998796c5c821be26af40f55d07bf89"
+      "sha256": "2807d650d2f251e9ab8041b0f6bd49197a6e308981d0edec6804623621c54e95"
     },
     {
       "path": "tools/test_vita_csv_status.sh",
