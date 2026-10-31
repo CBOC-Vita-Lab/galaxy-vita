@@ -19716,7 +19716,7 @@
     },
     {
       "path": "tests/title_art_runtime.cpp",
-      "sha256": "56f3a9787957ae4c18ecc7fc35cc45fa1d556acd58358386c663d747d016e8e0"
+      "sha256": "36f692c3e5239b0597c5f2e379398c37f24e8f6b45b3d8edf5c5b914a0f6c7bf"
     },
     {
       "path": "tests/vgx_aniso_gl_test.cpp",
@@ -20996,7 +20996,7 @@
     },
     {
       "path": "tools/test_title_art.sh",
-      "sha256": "936ec49bf3a3fbac512767cbff9b9091a8d4d68d64115427fd2f0819ee828bfe"
+      "sha256": "a9e84d509c5652345e3e81e869b91bf088e0bd9566425d1e9af54a9042071400"
     },
     {
       "path": "tools/test_vgx_aniso_gl.sh",
@@ -21760,7 +21760,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "183bc2177ca777ba0c50a1fe75d3a94d2aec60baa507f82a8bc8249982222487"
+      "sha256": "e210bcda7278a33847274a8fafef8938cebde61b187819e6fbfb43d4503e9538"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
@@ -21808,7 +21808,7 @@
     },
     {
       "path": "vita/vgx-game/title_art_runtime.cpp",
-      "sha256": "52892846a721b7eef8b15bf7e547bef268ae40e73ce32fc93b9b7fd0de5244e9"
+      "sha256": "455c5611b744dbec37f56c63b3c56042955379eeaca8656b634fad293f282ffe"
     },
     {
       "path": "vita/vgx-game/title_art_runtime.h",
