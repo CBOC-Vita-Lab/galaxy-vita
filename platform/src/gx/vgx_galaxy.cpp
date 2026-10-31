@@ -79,6 +79,7 @@ void SubmitToBackend(CmdBuf&) {}
 } // namespace vgx
 
 extern "C" void port_input_latency_frame_done(unsigned long long shown); // input/wpad.cpp
+extern "C" void port_host_heap_summary(void) __attribute__((weak));  // os/os_thread.cpp (absent in some host tests)
 
 namespace {
 
@@ -242,6 +243,8 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             hitches = 0;
             longest = 0;
             CharaPerfLine();
+            static unsigned windows = 0;
+            if (++windows % 6 == 0 && port_host_heap_summary) port_host_heap_summary();  // (every 30 s: the C heap's use, so a slow growth shows before it runs out)
         }
         sPerf = w;
         return;

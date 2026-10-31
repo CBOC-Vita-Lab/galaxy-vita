@@ -1070,7 +1070,7 @@ static void portHeapMark(size_t request) {
     const PortHeapStats hs = portHeapStats();
     unsigned prev = markKiB.load();
     if (hs.arenaKiB >= prev + 4096u && markKiB.compare_exchange_strong(prev, hs.arenaKiB))
-        port_log("host heap: arena %u KiB, in use %u KiB (a %lu KiB request)", hs.arenaKiB, hs.inUseKiB, static_cast<unsigned long>(request / 1024u));
+        port_log_summary("host heap: arena %u KiB, in use %u KiB (a %lu KiB request)", hs.arenaKiB, hs.inUseKiB, static_cast<unsigned long>(request / 1024u));
     busy = false;
 }
 
@@ -1158,12 +1158,21 @@ extern "C" void port_host_heap_log(const char* when) {
 #endif
 }
 
+// One line in the player's basic log: how full the C heap is (written every 30 s with the frame-rate lines).
+extern "C" void port_host_heap_summary(void) {
+    const PortHeapStats hs = portHeapStats();
+    port_log_summary("memory: C heap in use %u KiB (arena %u KiB, free %u KiB in %u pieces); the game's `new` holds %u KiB", hs.inUseKiB, hs.arenaKiB,
+                     hs.freeKiB, hs.pieces, port_host_new_live_kib());
+}
+
 extern "C" void port_host_alloc_failed(size_t size, int align) {
     const PortHeapStats hs = portHeapStats();
 #if defined(__vita__)
-    port_log("FATAL: host heap exhausted: a request for %lu KiB (alignment %d) found no room; C heap arena %u KiB, in use %u KiB, free %u KiB in %u pieces, "
-             "releasable at the top %u KiB",
-             static_cast<unsigned long>(size / 1024u), align, hs.arenaKiB, hs.inUseKiB, hs.freeKiB, hs.pieces, hs.topKiB);
+    // (the player's basic log as well: the full log is off in player builds, and this is the last line before the abort)
+    port_log_summary("FATAL: host heap exhausted: a request for %lu KiB (alignment %d) found no room; C heap arena %u KiB, in use %u KiB, free %u KiB in %u pieces, "
+             "releasable at the top %u KiB; the game's `new` holds %u KiB",
+             static_cast<unsigned long>(size / 1024u), align, hs.arenaKiB, hs.inUseKiB, hs.freeKiB, hs.pieces, hs.topKiB, port_host_new_live_kib());
+    port_log_flush();
 #else
     fprintf(stderr, "FATAL: host heap exhausted: a request for %zu KiB (alignment %d) found no room (in use %u KiB)\n", size / 1024u, align, hs.inUseKiB);
     fflush(stderr);
