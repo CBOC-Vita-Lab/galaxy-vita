@@ -7,6 +7,7 @@
 extern "C" {
 decltype(sceIoOpen) __real_sceIoOpen;
 void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, SceMode mode);
+SceUID vgxvita_openShaderCacheFallback_v1(const char* path, SceUID failed);
 void port_vgx_shader_bucket_open_guard_v1() {}
 }
 
@@ -124,12 +125,21 @@ CHECK_ABI(sceGxmTransferFinish);
 #endif
 
 // Functional in both builds: only vitaGL's exact private-cache write shape needs
-// preparation. Other opens avoid even errno/TLS access in the normal build.
+// preparation, and only a failed open with its exact cache-lookup shape (SCE_O_RDONLY, mode 0777: its
+// compile/link-time lookup of a compiled shader) is looked up again in the package's read-only seed
+// (vgxvita_openShaderCacheFallback_v1, which matches the path against vitaGL's cache folder itself).
+// Other opens avoid even errno/TLS access in the normal build.
 namespace {
 void PrepareCacheWrite(const char* path, int flags, SceMode mode) {
     const int saved = errno;
     vgxvita_prepareShaderCacheWrite_v1(path, flags, mode);
     errno = saved;
+}
+SceUID CacheReadFallback(const char* path, SceUID failed) {
+    const int saved = errno;
+    const SceUID fd = vgxvita_openShaderCacheFallback_v1(path, failed);
+    errno = saved;
+    return fd;
 }
 #if !VGX_COLDTRACE
 // Keep argument saves and errno access out of the ordinary open/read dispatcher.
@@ -137,10 +147,14 @@ __attribute__((noinline)) SceUID OpenPrivateShaderCache(const char* path, int fl
     PrepareCacheWrite(path, flags, mode);
     return __real_sceIoOpen(path, flags, mode);
 }
+__attribute__((noinline)) SceUID ReadPrivateShaderCache(const char* path, int flags, SceMode mode) {
+    const SceUID fd = __real_sceIoOpen(path, flags, mode);
+    return fd >= 0 ? fd : CacheReadFallback(path, fd);
+}
 #endif
 }
 extern "C" SceUID __wrap_sceIoOpen(const char* path, int flags, SceMode mode) {
-    static_assert((SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC) == 0x602);
+    static_assert((SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC) == 0x602 && SCE_O_RDONLY == 0x0001);
     if (flags == (SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC) && mode == 0777) {
 #if VGX_COLDTRACE
         PrepareCacheWrite(path, flags, mode);
@@ -149,8 +163,12 @@ extern "C" SceUID __wrap_sceIoOpen(const char* path, int flags, SceMode mode) {
 #endif
     }
 #if VGX_COLDTRACE
-    return Observe(Phase::Open, IoClass::Meta, 0, [&] { return __real_sceIoOpen(path, flags, mode); });
+    const SceUID fd = Observe(Phase::Open, IoClass::Meta, 0, [&] { return __real_sceIoOpen(path, flags, mode); });
+    // (the seed's open goes through this wrapper again, mode 0, and is observed there as an Open of its own)
+    if (fd < 0 && flags == SCE_O_RDONLY && mode == 0777) return CacheReadFallback(path, fd);
+    return fd;
 #else
+    if (flags == SCE_O_RDONLY && mode == 0777) return ReadPrivateShaderCache(path, flags, mode);
     return __real_sceIoOpen(path, flags, mode);
 #endif
 }

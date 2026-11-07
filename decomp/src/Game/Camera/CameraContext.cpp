@@ -4,6 +4,7 @@
 #include "Game/Util/SystemUtil.hpp"
 
 #ifdef TARGET_PC
+#include "port/reduced_motion.h"
 #include "Game/Demo/DemoDirector.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/System/GameSystem.hpp"
@@ -17,6 +18,11 @@
 extern "C" float port_camera_zoom(void);
 extern "C" void port_log(const char* fmt, ...);  // (platform/src/port/perf.cpp) PETARI_ZOOM: handhelds look a little closer
 
+static long EnvInt(const char* name, long fallback) {
+    const char* value = getenv(name);
+    return value && *value ? strtol(value, nullptr, 0) : fallback;
+}
+
 // The zoom is for playing the game.  The logo, title and thank-you scenes and the file-select stage are composed against the whole
 // frame (the title's 3D logo and its letterbox border), and a cutscene (a demo, or a camera the stage scripts: an "event camera")
 // is framed by the game for the whole picture, so they all keep the original field of view.
@@ -25,7 +31,10 @@ static bool inGameScene() {
     if (pSystem == nullptr || pSystem->mSceneController == nullptr) {
         return false;
     }
-    return MR::isEqualSceneName("Game") && !MR::isStageFileSelect();
+    // GXV_ASTRO_DOME_ZOOM_GUARD=1 preserves the dome's Pull Star framing; default off, read once.
+    static const bool domeZoomGuard = EnvInt("GXV_ASTRO_DOME_ZOOM_GUARD", 0) == 1;
+    return MR::isEqualSceneName("Game") && !MR::isStageFileSelect() &&
+           !(domeZoomGuard && MR::isEqualStageName("AstroDome"));
 }
 
 static bool inCutscene() {
@@ -167,7 +176,13 @@ void CameraContext::updateProjectionMtx() {
     mProjection.makePerspective(mFovy, getAspect(), mNearZ, mFarZ);
 
     TProj3f trans;
+#ifdef TARGET_PC
+    // Reduced motion (GXV_REDUCED_MOTION, port/reduced_motion.h): the shake in the projection is a quarter of its size. This is the one
+    // projection the renderer, screen positions, the Star Pointer hit-test and the HUD marks all read, so the pointer hits what is on screen.
+    trans.makeTrans(port::motion::ShakeScale(mShakeOffset.x), port::motion::ShakeScale(mShakeOffset.y));
+#else
     trans.makeTrans(mShakeOffset.x, mShakeOffset.y);
+#endif
 
     mProjection.concat(trans, mProjection);
 }

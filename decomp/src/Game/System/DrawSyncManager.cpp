@@ -1,6 +1,20 @@
 #include "Game/System/DrawSyncManager.hpp"
 #include "Game/System/GameSystem.hpp"
 #include "Game/Util/SingletonHolder.hpp"
+#ifdef TARGET_PC
+#include "port/hot_knob.h"
+#include <cstdlib>
+
+// GXV_DRAWSYNC_QUIET (default 1, exact; ported from Producdevity's fork, "DrawSync: no thread wake-ups for break points the port
+// ignores"): the DrawSync thread only keeps a FIFO of break-point addresses to drive GXEnableBreakPt / GXDisableBreakPt, which do
+// nothing in the port (platform/src/gx/gx_fifo.cpp), and nothing else reads that FIFO. Each pushBreakPoint and each draw-sync token
+// sent it a message, which made it ready at a higher priority than the game's thread: two guest thread switches (two host-thread
+// hand-offs of the "CPU", os_thread.cpp) per break point and per token, on core 0. With the switch on, no message is sent; the
+// token callbacks (TalkPeekZ, StarPointerDirector, LensFlare) still run from the token interrupt as before. 0 = the old messages.
+static bool drawSyncQuiet() {
+    return PORT_HOT_KNOB(bool, [] { const char* e = getenv("GXV_DRAWSYNC_QUIET"); return !(e && *e && atoi(e) == 0); }());
+}
+#endif
 
 DrawSyncManager* DrawSyncManager::sInstance;
 
@@ -160,6 +174,9 @@ void DrawSyncManager::reset(bool preparing) {
 
 void DrawSyncManager::drawSyncCallbackSub(u16 token) {
     if (token == 0) {
+#ifdef TARGET_PC
+        if (drawSyncQuiet()) return;
+#endif
         if ((mFlags & 2) == 0) {
             OSSendMessage(&mQueue, reinterpret_cast< OSMessage >(token), OS_MESSAGE_BLOCK);
         }
@@ -171,6 +188,9 @@ void DrawSyncManager::drawSyncCallbackSub(u16 token) {
         if (mTokenRanges[i].mCallback != nullptr && mTokenRanges[i].mStart <= token && token <= mTokenRanges[i].mEnd) {
             mTokenRanges[i].mCallback->drawSyncCallback(token);
 
+#ifdef TARGET_PC
+            if (drawSyncQuiet()) break;
+#endif
             if ((mFlags & 2) == 0) {
                 OSSendMessage(&mQueue, reinterpret_cast< OSMessage >(token), OS_MESSAGE_BLOCK);
             }
@@ -183,6 +203,9 @@ void DrawSyncManager::drawSyncCallbackSub(u16 token) {
 void DrawSyncManager::pushBreakPoint() {
     if ((mFlags & 3) == 0) {
         GXFlush();
+#ifdef TARGET_PC
+        if (drawSyncQuiet()) return;  // (the break point's address would only feed the FIFO above)
+#endif
         GXFifoObj fifoObj;
         GXGetCPUFifo(&fifoObj);
 

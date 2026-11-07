@@ -1,5 +1,8 @@
 #include "JSystem/JAudio2/JASAudioThread.hpp"
 #include "port/game_progress.h"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#endif
 #include "JSystem/JAudio2/JASAiCtrl.hpp"
 #include "JSystem/JAudio2/JASChannel.hpp"
 #include "JSystem/JAudio2/JASDSPChannel.hpp"
@@ -33,6 +36,10 @@ void JASAudioThread::stop() {
 volatile int JASAudioThread::snIntCount;
 
 void* JASAudioThread::run() {
+#ifdef TARGET_PC
+    // (GXV_AUDIO_CPU1, platform/src/os/os_thread.cpp: this is the thread that may run on the second virtual CPU)
+    if (port_audio_thread_mark) port_audio_thread_mark();
+#endif
     OSInitFastCast();
     JASDriver::initAI(DMACallback);
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_DSP_BOOT);

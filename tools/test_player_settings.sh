@@ -11,17 +11,19 @@ run_test() {
 }
 case "${1:-all}" in
   config|store) run_test "$1" ;;
+  pad) run_test pad; GXV_PAD_DEFAULTS=1 local/settings-tests/pad ;;
   launch) run_test launch platform/src/settings/settings_launch.cpp ;;
   font) run_test font platform/src/settings/settings_font.cpp ;;
   ui) run_test ui platform/src/settings/settings_font.cpp platform/src/settings/settings_ui.cpp platform/src/settings/settings_draw.cpp ;;
   preview)
     "$CXX" "${flags[@]}" "${core[@]}" platform/src/settings/settings_font.cpp platform/src/settings/settings_ui.cpp platform/src/settings/settings_draw.cpp tools/preview_player_settings.cpp -o local/settings-tests/preview
     output=${PREVIEW_OUT:-local/settings-preview}
-    mkdir -p "$output"
+    mkdir -p "$output"  # (SETTINGS_BACKDROP_CAPTURE=<a title capture> adds the real-backdrop frames; the package carries none)
     args=("$output")
     if [[ -n ${SETTINGS_FONT_ARCHIVE:-} ]]; then args+=("$SETTINGS_FONT_ARCHIVE"); fi
     local/settings-tests/preview "${args[@]}"
-    python3 tools/handheld/settings_preview_png.py "$output" ;;
-  all) bash "$0" config; bash "$0" store; bash "$0" launch; bash "$0" font; bash "$0" ui; bash "$0" preview ;;
-  *) echo 'usage: test_player_settings.sh [config|store|launch|ui|preview|all]' >&2; exit 2 ;;
+    python3 tools/handheld/settings_preview_png.py "$output"
+    for sub in "$output"/backdrop-*; do [[ -d $sub ]] && python3 tools/handheld/settings_preview_png.py "$sub"; done; true ;;
+  all) bash "$0" config; bash "$0" store; bash "$0" pad; bash "$0" launch; bash "$0" font; bash "$0" ui; bash "$0" preview ;;
+  *) echo 'usage: test_player_settings.sh [config|store|pad|launch|font|ui|preview|all]' >&2; exit 2 ;;
 esac

@@ -172,5 +172,66 @@ int main() {
     Require(wrap.Next(0xffffffffu, 2) == 0, "two-vblank cadence crosses unsigned counter wrap");
     wrap.Shown(1);
     Require(wrap.Next(2, 2) == 3, "a wait overshoot rebases on the actual shown vblank");
-    std::puts("PASS: simulated clocks: steady 30, spike, recovery, quiet gates, no oscillation, catch-up, backlog, counter wrap, cadence oracle");
+    // The slot wait against a fake display. Vblanks come every 16683 us; the fake counter can lag a wake by one vblank (the thread is
+    // woken before the counter is updated), which is the case GXV_PACE_VBLANK_COUNT is for.
+    struct FakeDisplay {
+        uint32_t counter = 100;        // the counter as the API reports it
+        unsigned waitCalls = 0;
+        unsigned lagWakes = 0;         // this many of the next wakes read the counter before its update
+        int failAt = -1;               // the n-th WaitVblank (0-based) fails
+        uint32_t Count() const { return counter; }
+        int WaitVblank() {
+            if (failAt >= 0 && static_cast<int>(waitCalls) == failAt) { ++waitCalls; return -1; }
+            ++waitCalls;
+            if (lagWakes) { --lagWakes; pendingBump = true; return 0; }   // woke, counter not yet moved
+            if (pendingBump) { pendingBump = false; ++counter; }          // the late update lands
+            ++counter;
+            return 0;
+        }
+        bool pendingBump = false;
+    };
+    for (int counted = 0; counted <= 1; ++counted) {
+        const bool c = counted != 0;
+        FakeDisplay d;                         // Count()+1 = 101 is the next vblank
+        port::pace::SlotWaitResult r = port::pace::WaitForSlot(d, 101, c);
+        Require(r.waits == 0 && r.shown == 101 && d.waitCalls == 0, "a slot that is the next vblank needs no wait");
+        d = FakeDisplay{};
+        r = port::pace::WaitForSlot(d, 90, c);
+        Require(r.waits == 0 && r.shown == 101, "a slot that has already passed needs no wait and shows on the next vblank");
+        d = FakeDisplay{};
+        r = port::pace::WaitForSlot(d, 102, c);
+        Require(r.waits == 1 && r.shown == 102 && d.counter == 101, "one vblank to wait: one wait, exact counter");
+        d = FakeDisplay{};
+        r = port::pace::WaitForSlot(d, 0xfffffffeu + 0, c);   // far behind in unsigned order but ahead in signed: treated as passed
+        Require(r.waits == 0, "a due value behind the counter (wrapped compare) is not waited for");
+        d = FakeDisplay{};
+        d.counter = 0xfffffffeu;
+        r = port::pace::WaitForSlot(d, 1, c);
+        Require(r.waits == 2 && r.shown == 1 && !r.failed, "waiting across the counter wrap");
+        d = FakeDisplay{};
+        d.failAt = 0;
+        r = port::pace::WaitForSlot(d, 110, c);
+        Require(r.failed && r.waits == 0, "a failed wait stops the loop");
+        d = FakeDisplay{};
+        r = port::pace::WaitForSlot(d, 150, c);
+        Require(r.waits == 8, "the guard limits the loop to 8 waits");
+    }
+    {
+        // A wake that reads the old counter: the older loop waits one vblank too many, the counted loop does not.
+        FakeDisplay a, b;
+        a.lagWakes = b.lagWakes = 1;
+        const port::pace::SlotWaitResult legacy = port::pace::WaitForSlot(a, 102, false);
+        const port::pace::SlotWaitResult fixed = port::pace::WaitForSlot(b, 102, true);
+        Require(legacy.waits == 2 && legacy.shown == 103, "the older loop is one vblank late when the counter lags a wake");
+        Require(fixed.waits == 1 && fixed.shown == 102, "the counted loop shows on the slot");
+        // No lag: identical results.
+        FakeDisplay c, e;
+        const port::pace::SlotWaitResult x = port::pace::WaitForSlot(c, 105, false), y = port::pace::WaitForSlot(e, 105, true);
+        Require(x.waits == y.waits && x.shown == y.shown && c.waitCalls == e.waitCalls, "with a counter that is never late both loops agree");
+        // A thread that slept through two vblanks: the counter is ahead of the count, and is believed in both loops.
+        struct Sleeper : FakeDisplay { int WaitVblank() { counter += 2; ++waitCalls; return 0; } } s1, s2;
+        const port::pace::SlotWaitResult p = port::pace::WaitForSlot(s1, 103, false), q = port::pace::WaitForSlot(s2, 103, true);
+        Require(p.shown == 103 && q.shown == 103 && p.waits == 1 && q.waits == 1, "a long sleep: the counter is ahead and is believed");
+    }
+    std::puts("PASS: simulated clocks: steady 30, spike, recovery, quiet gates, no oscillation, catch-up, backlog, counter wrap, cadence oracle, slot wait");
 }

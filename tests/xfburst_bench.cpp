@@ -10,6 +10,7 @@ static GXData gxState;
 extern "C" GXData* const __GXData = &gxState;
 static unsigned publications;
 extern "C" int port_vgx_player() { return 1; }
+extern "C" int port_vgx_seg_idle() { return 0; } // (GXV_SEG_IDLE: gx_fifo.cpp __PortGXFifoIdlePoint, not used here)
 extern "C" int port_vgx_active() { return 1; }
 extern "C" uint8_t* port_vgx_publish(uint8_t* p, int flags) {
     ++publications;

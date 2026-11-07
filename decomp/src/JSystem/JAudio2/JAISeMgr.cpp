@@ -1,4 +1,9 @@
 #include "JSystem/JAudio2/JAISeMgr.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "JSystem/JAudio2/JAISoundHandles.hpp"
 #include "JSystem/JAudio2/JAISoundInfo.hpp"
 #include "JSystem/JAudio2/JASReport.hpp"
@@ -165,6 +170,7 @@ bool JAISeMgr::isUsingSeqData(const JAISeqDataRegion& seqDataRegion) {
 }
 
 int JAISeMgr::releaseSeqData(const JAISeqDataRegion& seqDataRegion) {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the main thread drives JAudio here, never in a window; port/audio_cpu1.h)
     bool success = false;
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         switch (mCategoryMgrs[i].JAISeCategoryMgr::releaseSeqData(seqDataRegion)) {
@@ -196,18 +202,21 @@ void JAISeMgr::getCategoryArrangement(JAISeCategoryArrangement* arrangement) {
 }
 
 void JAISeMgr::stop() {
+    PORT_AUDIO_TOUCH();
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         mCategoryMgrs[i].stop();
     }
 }
 
 void JAISeMgr::stop(u32 fadeTime) {
+    PORT_AUDIO_TOUCH();
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         mCategoryMgrs[i].stop(fadeTime);
     }
 }
 
 void JAISeMgr::stopSoundID(JAISoundID id) {
+    PORT_AUDIO_TOUCH();
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         mCategoryMgrs[i].stopSoundID(id);
     }
@@ -260,6 +269,7 @@ JAISe* JAISeMgr::newSe_(int category, u32 priority) {
 }
 
 void JAISeMgr::calc() {
+    PORT_AUDIO_TOUCH();
     mParams.calc();
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         mCategoryMgrs[i].JAISeMgr_calc_();
@@ -270,6 +280,7 @@ void JAISeMgr::calc() {
 }
 
 void JAISeMgr::mixOut() {
+    PORT_AUDIO_TOUCH();
     for (int i = 0; i < NUM_CATEGORIES; i++) {
         mCategoryMgrs[i].JAISeMgr_mixOut_(mParams, mSoundActivity);
     }
@@ -284,6 +295,7 @@ int JAISeMgr::getNumActiveSe() const {
 }
 
 bool JAISeMgr::startSound(JAISoundID id, JAISoundHandle* handle, const TVec3f* posPtr) {
+    PORT_AUDIO_TOUCH();
     if (handle != nullptr && handle->isSoundAttached()) {
         (*handle)->stop();
     }

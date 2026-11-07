@@ -13,6 +13,8 @@ void port_vita_input_shutdown(void);
 // Only requests a reset. Consumed first by the next NORMAL poll, never by UI raw sampling.
 void port_vita_input_settings_rearm(void);
 int port_vita_input_raw_init(void);
+// 1 when the controller in use is an external pad (DS3 / DS4 on a PS TV), 0 for the handheld's own controls. Valid before init.
+int port_vita_input_external_pad(void);
 
 #ifdef __cplusplus
 }

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "../../include/port/hot_knob.h"
 #if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(PORT_DSPFIR_NO_NEON)
 #include <arm_neon.h>
 #endif
@@ -17,7 +18,7 @@ inline long EnvInt(const char* name, long fallback) {
 }
 inline int Mode() {
     // GXV_DSPFIR: 1 uses exact NEON voice FIR; 2 compares PCM/history to the original and restores on mismatch. Default off.
-    static const long mode = EnvInt("GXV_DSPFIR", 0);
+    const long mode = PORT_HOT_KNOB(long, EnvInt("GXV_DSPFIR", 0));  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h; every voice of every mixed sub-frame asks)
     return mode == 1 || mode == 2 ? static_cast<int>(mode) : 0;
 }
 inline int16_t Clamp(int64_t value) { return value < -32768 ? -32768 : value > 32767 ? 32767 : static_cast<int16_t>(value); }

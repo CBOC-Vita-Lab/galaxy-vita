@@ -8,6 +8,7 @@
 #include "JSystem/JKernel/JKRHeap.hpp"
 #include <cstdio>
 #include <mem.h>
+#include "port/hot_knob.h"
 
 J3DError J3DDisplayListObj::newDisplayList(u32 maxSize) {
     mMaxSize = ALIGN_NEXT(maxSize, 0x20);
@@ -80,6 +81,112 @@ u32 J3DDisplayListObj::endPatch() {
     GDSetCurrent(NULL);
     return mSize;
 }
+
+#ifdef TARGET_PC
+// ============================================================== (1.3 port) game-side cuts of the J3D state lists
+// The front end (core 2) is the limit of the frame rate, and what it costs is mostly per list call (finding the list's entry,
+// its generation, the replay), not per register. Three exact cuts of what the draw pass sends, each behind a switch read once:
+//   GXV_J3D_DIFFKEEP=1  (here) J3DMaterial::diff makes a differed list (J3DShapePacket's: the animated TEV colours, texture
+//                       matrices, fog, ... of one instance) on every drawn turn, into the other of its two buffers, mostly with the
+//                       bytes the current one holds (stopped animations, fog). It is now made aside and stored, in the other buffer
+//                       as before, only when the bytes differ; otherwise nothing is written and the current buffer stays. The
+//                       front end then finds the list where it was, its memory not written since (no compare of its bytes, nor of
+//                       the material lists sharing its 4 KiB), and the game makes no write notification for it.
+//   GXV_J3D_MATMERGE=1  (DrawBuffer.cpp) the material list and the first packet's differed list, sent one after the other, become
+//                       one list call when the differed list has not changed since the last picture.
+//   GXV_J3D_DIFFSKIP=1  (DrawBuffer.cpp) a differed list with the bytes of the one sent just before it (instances of a model in the
+//                       same state) is not sent when nothing between could have changed what it writes.
+// The front end receives the same register writes in an order with the same effect: see J3DPortDL.hpp and DrawBuffer.cpp.
+#include <cstdlib>
+#include <cstring>
+extern "C" void port_log(const char* fmt, ...);
+
+namespace {
+int j3dPortEnv(const char* pName, int fallback) {
+    const char* e = getenv(pName);
+    return (e != nullptr && *e != '\0') ? atoi(e) : fallback;
+}
+u32 sJ3DPortPicture = 1;
+// (one list made aside at a time: J3DDisplayListObj::sGDLObj, which it uses, is one too)
+u8 sDiffScratch[0x1000] __attribute__((aligned(32)));
+bool sDiffScratchOn = false;
+J3DPortListStats sJ3DPortLogBase;
+}  // namespace
+
+J3DPortListStats gJ3DPortListStats;
+
+// (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h): every material diff, material packet and shape drawer asks.
+bool J3DPortDiffKeepOn() {
+    return PORT_HOT_KNOB(bool, j3dPortEnv("GXV_J3D_DIFFKEEP", 1) != 0);
+}
+bool J3DPortMatMergeOn() {
+    return PORT_HOT_KNOB(bool, j3dPortEnv("GXV_J3D_MATMERGE", 1) != 0);
+}
+bool J3DPortDiffSkipOn() {
+    return PORT_HOT_KNOB(bool, j3dPortEnv("GXV_J3D_DIFFSKIP", 1) != 0);
+}
+u32 J3DPortPicture() {
+    return sJ3DPortPicture;
+}
+
+// GameSystem::frameLoop, before a picture is drawn. The counters, per picture over the last 300 pictures.
+extern "C" void port_j3d_picture_begin(void) {
+    ++sJ3DPortPicture;
+    if (sJ3DPortPicture % 300 != 0) {
+        return;
+    }
+    const J3DPortListStats& c = gJ3DPortListStats;
+    const J3DPortListStats& b = sJ3DPortLogBase;
+    const u32 drawers = c.drawers - b.drawers;
+    if (drawers != 0 || c.diffMade != b.diffMade) {
+        const double n = 300.0;
+        port_log("j3d lists: per picture %.1f material lists (%.1f merged with a differed list, GXV_J3D_MATMERGE), differed lists %.1f sent, "
+                 "%.1f merged, %.1f not sent (GXV_J3D_DIFFSKIP); merged lists made %.2f; differed lists made %.1f, %.1f of them unchanged "
+                 "and not stored (GXV_J3D_DIFFKEEP)",
+                 drawers / n, (c.matMerged - b.matMerged) / n, (c.diffSent - b.diffSent) / n, (c.diffMerged - b.diffMerged) / n,
+                 (c.diffSkipped - b.diffSkipped) / n, (c.mergeWrites - b.mergeWrites) / n, (c.diffMade - b.diffMade) / n,
+                 (c.diffKept - b.diffKept) / n);
+    }
+    sJ3DPortLogBase = c;
+}
+
+void J3DDisplayListObj::beginDiffDL() {
+    if (!J3DPortDiffKeepOn() || mMaxSize > sizeof(sDiffScratch) || mpDisplayList[0] == nullptr) {
+        sDiffScratchOn = false;
+        beginDL();
+        return;
+    }
+    // (beginDL's, writing into the scratch buffer and without the swap)
+    sDiffScratchOn = true;
+    sInterruptFlag = OSDisableInterrupts();
+    GDInitGDLObj(&sGDLObj, sDiffScratch, mMaxSize);
+    GDSetCurrent(&sGDLObj);
+}
+
+u32 J3DDisplayListObj::endDiffDL() {
+    ++gJ3DPortListStats.diffMade;
+    if (!sDiffScratchOn) {
+        return endDL();
+    }
+    sDiffScratchOn = false;
+    GDPadCurr32();
+    OSRestoreInterrupts(sInterruptFlag);
+    const u32 size = GDGetGDLObjOffset(&sGDLObj);
+    GDSetCurrent(NULL);
+    if (size == mSize && memcmp(mpDisplayList[0], sDiffScratch, size) == 0) {
+        // The bytes the current buffer holds: it stays the one called, unwritten (what endDL would have stored, in the other buffer,
+        // is these same bytes).
+        ++gJ3DPortListStats.diffKept;
+        return mSize;
+    }
+    // (endDL's: into the other buffer, which becomes the current one, and the write made known as GDFlushCurrToMem does)
+    swapBuffer();
+    memcpy(mpDisplayList[0], sDiffScratch, size);
+    mSize = size;
+    DCFlushRange(mpDisplayList[0], mMaxSize);
+    return mSize;
+}
+#endif
 
 int J3DPacket::entry(J3DDrawBuffer* pBuffer) {
     return 1;
@@ -154,11 +261,19 @@ void J3DMatPacket::addShapePacket(J3DShapePacket* pShape) {
 }
 
 void J3DMatPacket::beginDiff() {
+#ifdef TARGET_PC
+    mpInitShapePacket->getDisplayListObj()->beginDiffDL();  // (GXV_J3D_DIFFKEEP)
+#else
     mpInitShapePacket->beginDL();
+#endif
 }
 
 void J3DMatPacket::endDiff() {
+#ifdef TARGET_PC
+    mpInitShapePacket->getDisplayListObj()->endDiffDL();
+#else
     mpInitShapePacket->endDL();
+#endif
 }
 
 bool J3DMatPacket::isSame(J3DMatPacket* pOther) const {

@@ -30,7 +30,64 @@
 #include "Game/System/GameSequenceFunction.hpp"
 #include "Game/Camera/CameraDirector.hpp"
 #ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include "port/hot_knob.h"  // (PETARI_VIEW_PLAYER)
+extern "C" void port_log_summary(const char* fmt, ...);
 extern "C" int port_turn_skipped(void);  // (platform/src/port/perf.cpp)
+extern "C" int port_turn_skipped_raw(void);
+extern "C" int port_gx_drawdone_defer_mode(void);
+// The view pass of the turns without a picture, left out (PETARI_SKIP_VIEWCALC or GXV_DRAWDONE_DEFER=3): made at the start of the
+// next turn that draws, after the deferred draw-done wait, from the same state (no update() has run since the last calcAnim), with
+// the same lists and view matrix as the left-out pass. drop: the scene is going away.
+static bool sViewPending = false;
+// GXV_PAR_VIEW (par13; decomp/src/Game/LiveActor/ModelManager.cpp): the view pass's matrix arithmetic is recorded between begin and
+// end and computed at end on the game thread and a worker; end returns when all of it is done. Off: both do nothing.
+extern "C" void port_par_view_begin(void);
+extern "C" void port_par_view_end(void);
+extern "C" int port_view_pending(void) { return sViewPending ? 1 : 0; }
+// PETARI_VIEW_PLAYER (forkB, 6 Nov; after Producdevity's fork, ee487a3; default 1): when the pass is left out of a turn, the player's
+// draw buffer still has its pass in that turn (GameScene::calcAnim) and the flush makes the rest. MarioActor::calcViewAndEntry is
+// not only matrices: decideShadowMode, calcFogLighting (a fade stepped once a call), the footprints and the blur model advance once
+// a turn in the original; left out with the rest, they advanced once a picture (slower fades with frame skipping or
+// GXV_DRAWDONE_DEFER=4). Its pass runs only where it may write its buffers without waiting: the last picture's draw-done wait made
+// (always with GXV_DRAWDONE_DEFER <= 2, whose wait comes before calcAnim); otherwise (modes 3 and 4 with the front end still on the
+// last picture) the flush makes the whole pass as before. 0: the whole pass is left to the flush, as before.
+// sPlayerViewDone: the player's pass was made in the last calcAnim (the flush makes the rest only).
+static bool sPlayerViewDone = false;
+extern "C" int port_gx_drawdone_pending(void);
+static bool portViewPlayerOn() {
+    return PORT_HOT_KNOB(int, [] { const char* e = getenv("PETARI_VIEW_PLAYER"); return e && *e == '0' ? 0 : 1; }()) != 0;  // (GXV_HOT_KNOBS)
+}
+extern "C" void port_view_flush(int drop) {
+    if (!sViewPending) {
+        return;
+    }
+    sViewPending = false;
+    const bool playerDone = sPlayerViewDone;
+    sPlayerViewDone = false;
+    if (!drop) {
+        port_par_view_begin();
+        if (playerDone) {
+            SceneFunction::executeCalcViewAndEntryListExceptPlayer();
+        } else {
+            SceneFunction::executeCalcViewAndEntryList();
+        }
+        port_par_view_end();
+    }
+}
+// PETARI_PAUSE_FREEZE (pauseFreezeStep below): the renderer's picture-size generation (platform/src/port/perf.cpp), and whether
+// this is a handheld (platform/src/gx/vgx_galaxy.cpp).
+extern "C" u32 port_render_size_gen(void);
+extern "C" int port_handheld(void);
+// GXV_DRAW_PROF (draw7; platform/src/port/perf.cpp): GameScene::draw's stages timed when asked for.
+extern "C" int port_draw_prof_on(void);
+extern "C" void port_draw_prof_stage(int stage, int64_t ns);
+#if defined(__vita__) && PORT_LOGGING
+extern "C" u32 port_workload_anim_begin(void);
+extern "C" void port_workload_anim_end(u32 token);
+extern "C" void port_workload_view_entry_begin(void);
+extern "C" void port_workload_view_entry_end(void);
+#endif
 #include "Game/Camera/CameraHolder.hpp"
 #include "Game/Camera/CameraManEvent.hpp"
 #include "Game/Camera/CameraManGame.hpp"
@@ -59,6 +116,16 @@ extern "C" int port_turn_skipped(void);  // (platform/src/port/perf.cpp)
 #include "Game/Util/StringUtil.hpp"
 #include "Game/Util/SystemUtil.hpp"
 #include <JSystem/J3DGraphBase/J3DSys.hpp>
+#ifdef TARGET_PC
+#include "Game/Effect/EffectSystem.hpp"
+#include "Game/Screen/CaptureScreenDirector.hpp"
+#include "Game/Screen/ImageEffectLocalUtil.hpp"
+#include "Game/System/GameSystem.hpp"
+#include "Game/System/GameSystemObjHolder.hpp"
+#include "Game/Util/SingletonHolder.hpp"
+#include <JSystem/JParticle/JPAEmitterManager.hpp>
+#include <JSystem/JUtility/JUTTexture.hpp>
+#endif
 
 namespace {
     CometRetryButton* getCometRetryButton() {
@@ -84,6 +151,10 @@ namespace NrvGameScene {
 
 GameScene::GameScene()
     : Scene("GameScene"), _14(0), mScenarioCamera(nullptr), mPauseCtrl(nullptr), mPauseSeq(nullptr), mStageClearSeq(nullptr), mDraw3D(true), _29(1) {
+#ifdef TARGET_PC
+    mPauseFreezePictures = 0;
+    mPauseFreezeSizeGen = 0;
+#endif
 }
 
 GameScene::~GameScene() {
@@ -249,6 +320,7 @@ void GameScene::update() {
                     sGameplayFrames = 0;
                     sAllFrames = 0;
                     OSReport("port: jumping to %s scenario %d\n", name, (int)scenario);
+                    port_log_summary("tour: jumping to %s scenario %d (%d of the list)", name, (int)scenario, sIndex);
                     MR::requestChangeStageInGameMoving(name, scenario);
                 }
             }
@@ -332,12 +404,21 @@ void GameScene::update() {
         }
     }
     {
-        // Debug: PETARI_POSLOG=1 logs the player's position once a second.
-        static const bool posLog = getenv("PETARI_POSLOG") != nullptr;
+        // Debug: PETARI_POSLOG=1 logs the player's position once a second; =2 every frame, with the camera's position and whether the
+        // camera and the player are in water (the water-surface crossings).
+        static const char* posLogEnv = getenv("PETARI_POSLOG");
+        static const bool posLog = posLogEnv != nullptr;
+        static const s32 posEvery = posLogEnv != nullptr && atoi(posLogEnv) >= 2 ? 1 : 60;
         static s32 sPosFrames = 0;
-        if (posLog && MR::isExistMario() && isNerve(GET_NERVE(GameScene, GameSceneAction)) && ++sPosFrames % 60 == 0) {
+        if (posLog && MR::isExistMario() && isNerve(GET_NERVE(GameScene, GameSceneAction)) && ++sPosFrames % posEvery == 0) {
             const TVec3f* p = MR::getPlayerPos();
-            OSReport("port: player at %.1f %.1f %.1f%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "");
+            if (posEvery == 1) {
+                const TVec3f cam = MR::getCamPos();
+                OSReport("port: player at %.1f %.1f %.1f%s cam %.1f %.1f %.1f%s%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "", cam.x, cam.y, cam.z,
+                         MR::isCameraInWater() ? " (camera in water)" : "", MR::isPlayerSwimming() ? " (swimming)" : "");
+            } else {
+                OSReport("port: player at %.1f %.1f %.1f%s\n", p->x, p->y, p->z, MR::isOnGroundPlayer() ? " (on the ground)" : "");
+            }
         }
     }
     {
@@ -405,25 +486,173 @@ void GameScene::update() {
     }
 }
 
+#ifdef TARGET_PC
+// GXV_LIGHT_DEDUP=2 (decomp/src/Game/Map/LightFunction.cpp): the whole scene's drawing is one scope in which a light load already in
+// light memory is not sent again (level 1: only the draw-buffer passes, DrawBufferGroup.cpp).
+extern "C" int port_light_scope_enter(int level);
+extern "C" void port_light_scope_exit(int opened);
+#endif
+
 void GameScene::draw() const {
+#ifdef TARGET_PC
+    const int lightScope = port_light_scope_enter(2);
+#endif
     MR::drawInit();
     LightFunction::initLightRegisterAll();
     drawOdhCapture();
     CategoryList::execute(MR::DrawType_MiiFaceIcon);
     CategoryList::execute(MR::DrawType_MiiFaceNew);
+#ifdef TARGET_PC
+    // (PETARI_PAUSE_FREEZE: behind the pause menu, the 3D picture of the first pictures again instead of the whole scene)
+    const s32 freeze = pauseFreezeStep();
+    if (freeze == 2) {
+        drawPauseFreeze();
+    } else if (port_draw_prof_on()) {
+        // (GXV_DRAW_PROF: the stages timed)
+        const int64_t t0 = port_host_time_ns();
+        drawMirror();
+        const int64_t t1 = port_host_time_ns();
+        draw3D();
+        port_draw_prof_stage(3, t1 - t0);
+        port_draw_prof_stage(4, port_host_time_ns() - t1);
+        if (freeze == 1) {
+            capturePauseFreeze();
+        }
+    } else {
+        drawMirror();
+        draw3D();
+        if (freeze == 1) {
+            capturePauseFreeze();
+        }
+    }
+#else
     drawMirror();
     draw3D();
+#endif
 #ifdef TARGET_PC
     port_gx_marker(PORT_GX_MARK_HUD_BEGIN);
-#endif
+    if (port_draw_prof_on()) {
+        const int64_t t0 = port_host_time_ns();
+        draw2D();
+        port_draw_prof_stage(5, port_host_time_ns() - t0);
+    } else {
+        draw2D();
+    }
+#else
     draw2D();
+#endif
 #ifdef TARGET_PC
     port_gx_marker(PORT_GX_MARK_HUD_END);
 #endif
     MR::reinitGX();
+#ifdef TARGET_PC
+    port_light_scope_exit(lightScope);
+#endif
 }
 
+#ifdef TARGET_PC
+// PETARI_PAUSE_FREEZE=1 (the Vita's default, vita/vgx-game/entry.cpp; 0 = off, the original drawing): while the pause menu is up
+// the game's logic stands still (exePauseMenu moves only the menu's layouts), yet every picture drew the whole 3D scene again,
+// with its effects, bloom and indirect passes: the same picture, at ~88 ms of GPU a picture (the 3D scene and its particle
+// sprites; ~10 FPS measured on 4 Nov). Now the first pictures of the pause draw the scene as always and copy it, at the end of
+// draw3D, into the game's own screen-capture texture (CaptureScreenDirector, the one the indirect effects, the camera cover and
+// the system wipe use); the pictures after that draw that copy as one screen-sized rectangle (as CameraCover does) and skip
+// the mirror and draw3D. The 2D (the menu, its dimmed backdrop, 2D effects) is drawn as always on top. The menu closing puts
+// the nerve back to GameSceneAction: the next picture draws the scene again (calcAnim kept running every turn, so its lists
+// are current).
+//   The copy is taken again whenever the renderer changes its picture size (the automatic quality steps in quiet moments,
+// such as this one: port_render_size_gen), and the scene is drawn normally whenever someone else asked for the screen
+// texture (a capture timing: the system wipe of "quit", the screen preserver), so the copy never stands in for theirs.
+//   Not identical in one respect: effects that move in a pause (the "PAUSE_IGNORE" 3D group, few) stand still in the copy.
+// PETARI_PAUSE_FREEZE=2 freezes only while no such effect is alive (exact, but then not in every stage).
+namespace {
+    // the pictures drawn and copied before the copy stands in (the first after the menu opened already shows the final state:
+    // GXV_DL_LAZY / GXV_ANIM_LOD / the deferred view pass are flushed before every picture; the second is margin)
+    const s32 cPauseFreezeCapturePictures = 2;
+
+    int pauseFreezeMode() {
+        static const int mode = [] {
+            const char* e = getenv("PETARI_PAUSE_FREEZE");
+            return e && *e ? atoi(e) : 0;
+        }();
+        return mode;
+    }
+
+    // The 3D emitters that keep moving while the game is paused (ParticleCalcExecutor::movementIgnorePause3D: group 1).
+    s32 pauseIgnoreEmitters3D() {
+        if (!MR::isExistSceneObj(SceneObj_EffectSystem)) {
+            return 0;
+        }
+        const JPAEmitterManager* pManager = MR::getEffectSystem()->mEmitterManager;
+        if (pManager == nullptr || pManager->gidMax < 2) {
+            return 0;
+        }
+        return static_cast< s32 >(pManager->pEmtrUseList[1].getNumLinks());
+    }
+}  // namespace
+
+// 0: draw as always; 1: draw as always and copy the 3D picture; 2: draw the copy instead of the 3D scene.
+s32 GameScene::pauseFreezeStep() const {
+    const s32 was = mPauseFreezePictures;
+    mPauseFreezePictures = 0;
+    const int mode = pauseFreezeMode();
+    if (mode <= 0 || !port_handheld() || !mDraw3D || isPlayMovie() || !isNerve(GET_NERVE(GameScene, GameScenePauseMenu))) {
+        return 0;
+    }
+    const GameSystem* pSystem = SingletonHolder< GameSystem >::get();
+    const CaptureScreenDirector* pDirector = pSystem != nullptr && pSystem->mObjHolder != nullptr ? pSystem->mObjHolder->mCaptureScreenDirector : nullptr;
+    if (pDirector == nullptr || pDirector->getCurrentTiming() != nullptr) {
+        return 0;  // (the texture is someone else's now: their capture must not be painted over, nor stand in for the scene)
+    }
+    const s32 moving = pauseIgnoreEmitters3D();
+    if (mode == 2 && moving != 0) {
+        return 0;
+    }
+    s32 n = was + 1;
+    const u32 sizeGen = port_render_size_gen();
+    if (n > cPauseFreezeCapturePictures && sizeGen != mPauseFreezeSizeGen) {
+        n = 1;  // (a new picture size: the copy has the old one; draw and copy again)
+    }
+    if (n > cPauseFreezeCapturePictures + 1) {
+        n = cPauseFreezeCapturePictures + 1;  // (frozen; the count stays put)
+    }
+    mPauseFreezePictures = n;
+    if (n <= cPauseFreezeCapturePictures) {
+        mPauseFreezeSizeGen = sizeGen;
+        return 1;
+    }
+    if (was == cPauseFreezeCapturePictures) {
+        port_log_summary("pause: the 3D picture behind the menu is drawn from a copy (PETARI_PAUSE_FREEZE=%d; %d effects that move in a pause held still)",
+                         mode, (int)moving);
+    }
+    return 2;
+}
+
+// The 3D picture, as draw3D left it, into the screen-capture texture (as the camera cover and the system wipe capture it).
+void GameScene::capturePauseFreeze() const {
+    SingletonHolder< GameSystem >::get()->mObjHolder->mCaptureScreenDirector->capture();
+}
+
+// The copy over the whole picture (no blending, no depth), then the state draw3D leaves for draw2D: the default viewport, the
+// camera's view and projection, the player's light and a cleared Z buffer. (The copy's alpha is not written: the EFB keeps its
+// cleared alpha, which nothing in the 2D reads.)
+void GameScene::drawPauseFreeze() const {
+    MR::setDefaultViewportAndScissor();
+    JUTTexture texture(MR::getScreenResTIMG(), 0);
+    ImageEffectLocalUtil::setupDrawTexture();
+    ImageEffectLocalUtil::drawTexture(&texture, 1, 0, 255, ImageEffectLocalUtil::TexDrawType_0);
+    GXSetDither(GX_TRUE);
+    MR::loadViewMtx();
+    MR::loadProjectionMtx();
+    MR::loadLightPlayer();
+    MR::clearZBuffer();
+}
+#endif
+
 void GameScene::calcAnim() {
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    const u32 animToken = port_workload_anim_begin();
+#endif
     if (isPlayMovie()) {
         SceneFunction::executeCalcAnimListOnPlayingMovie();
     } else {
@@ -433,15 +662,41 @@ void GameScene::calcAnim() {
     if (!isNerve(GET_NERVE(GameScene, GameSceneTimeUp))) {
         CategoryList::execute(MR::CalcAnimType_AnimParticleIgnorePause);
     }
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    port_workload_anim_end(animToken);
+#endif
 
 #ifdef TARGET_PC
     // A turn without a picture (frame skipping on the handhelds) needs no view matrices or draw-list entries: the next turn that
     // draws computes them again from the same state (they are not read by the game's logic).
-    if (port_turn_skipped()) {
+    const int ddMode = port_gx_drawdone_defer_mode();
+    if (port_turn_skipped() || (ddMode == 3 && port_turn_skipped_raw()) || ddMode == 4) {
+        sViewPending = true;  // (made by port_view_flush before the next picture)
+        // PETARI_VIEW_PLAYER (above): the player's pass in every turn, where it needs no wait for the front end
+        sPlayerViewDone = portViewPlayerOn() && (ddMode < 3 || !port_gx_drawdone_pending());
+        if (sPlayerViewDone) {
+            port_par_view_begin();  // (GXV_PAR_VIEW)
+            SceneFunction::executeCalcViewAndEntryListPlayer();
+            port_par_view_end();
+        }
         return;
     }
+    sViewPending = false;
+    sPlayerViewDone = false;
+#endif
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    port_workload_view_entry_begin();
+#endif
+#ifdef TARGET_PC
+    port_par_view_begin();  // (GXV_PAR_VIEW)
 #endif
     SceneFunction::executeCalcViewAndEntryList();
+#ifdef TARGET_PC
+    port_par_view_end();
+#endif
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    port_workload_view_entry_end();
+#endif
 }
 
 void GameScene::notifyEndScenarioStarter() {

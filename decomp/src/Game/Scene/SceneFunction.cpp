@@ -9,6 +9,36 @@
 #include "Game/Util/SingletonHolder.hpp"
 #include "Game/Util/SystemUtil.hpp"
 
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#if defined(__vita__) && PORT_LOGGING
+extern "C" u32 port_workload_anim_category_begin(unsigned domain, unsigned category);
+#endif
+#ifdef TARGET_PC
+extern "C" void port_anim_lod_set_category(int type);
+extern "C" void port_workload_anim_category_end(u32 token);
+#endif
+#endif
+
+#ifdef TARGET_PC
+// GXV_DRAW_PROF (draw7; platform/src/port/perf.cpp): each draw list's outermost call timed when asked for (a constant's test otherwise).
+extern "C" int port_draw_prof_on(void);
+extern "C" void port_draw_prof_begin(void);
+extern "C" void port_draw_prof_end(int row);
+#define PORT_DRAW_PROF(row, call)            \
+    do {                                     \
+        if (port_draw_prof_on()) {           \
+            port_draw_prof_begin();          \
+            call;                            \
+            port_draw_prof_end(row);         \
+        } else {                             \
+            call;                            \
+        }                                    \
+    } while (0)
+#else
+#define PORT_DRAW_PROF(row, call) call
+#endif
+
 namespace {
     SceneDataInitializer* getSceneDataInitializer() {
         return MR::getSceneObj< SceneDataInitializer >(SceneObj_SceneDataInitializer);
@@ -79,51 +109,89 @@ void SceneFunction::allocateDrawBufferActorList() {
 }
 
 void CategoryList::execute(MR::MovementType type) {
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    const u32 animToken = port_workload_anim_category_begin(1, static_cast<unsigned>(type));
+#endif
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
+#ifdef TARGET_PC
+    port_anim_lod_set_category(0x100 | static_cast< int >(type));  // (GXV_ANIM_PROF's movement rows; no calc-anim type: no deferral)
     pListExecutor->executeMovement(type);
+    port_anim_lod_set_category(-1);
+#else
+    pListExecutor->executeMovement(type);
+#endif
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    port_workload_anim_category_end(animToken);
+#endif
 }
 
 void CategoryList::execute(MR::CalcAnimType type) {
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    const u32 animToken = port_workload_anim_category_begin(0, static_cast<unsigned>(type));
+#endif
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
+#ifdef TARGET_PC
+    port_anim_lod_set_category(static_cast< int >(type));  // (GXV_ANIM_LOD: LiveActor::calcAnim)
     pListExecutor->executeCalcAnim(type);
+    port_anim_lod_set_category(-1);
+#else
+    pListExecutor->executeCalcAnim(type);
+#endif
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    port_workload_anim_category_end(animToken);
+#endif
 }
 
 void CategoryList::execute(MR::DrawType type) {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->executeDraw(type);
+    PORT_DRAW_PROF(static_cast< int >(type), pListExecutor->executeDraw(type));
 }
 
 void CategoryList::entryDrawBuffer2D() {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->entryDrawBuffer2D();
+    PORT_DRAW_PROF(0x300, pListExecutor->entryDrawBuffer2D());
 }
 
 void CategoryList::entryDrawBuffer3D() {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->entryDrawBuffer3D();
+    PORT_DRAW_PROF(0x301, pListExecutor->entryDrawBuffer3D());
 }
+
+#ifdef TARGET_PC
+void CategoryList::entryDrawBufferPlayer() {
+    NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
+
+    pListExecutor->entryDrawBufferPlayer();
+}
+
+void CategoryList::entryDrawBuffer3DExceptPlayer() {
+    NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
+
+    pListExecutor->entryDrawBuffer3DExceptPlayer();
+}
+#endif
 
 void CategoryList::entryDrawBufferMirror() {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->entryDrawBufferMirror();
+    PORT_DRAW_PROF(0x302, pListExecutor->entryDrawBufferMirror());
 }
 
 void CategoryList::drawOpa(MR::DrawBufferType type) {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->drawOpa(type);
+    PORT_DRAW_PROF(0x100 | static_cast< int >(type), pListExecutor->drawOpa(type));
 }
 
 void CategoryList::drawXlu(MR::DrawBufferType type) {
     NameObjListExecutor* pListExecutor = SingletonHolder< GameSystem >::get()->mSceneController->getNameObjListExecutor();
 
-    pListExecutor->drawXlu(type);
+    PORT_DRAW_PROF(0x200 | static_cast< int >(type), pListExecutor->drawXlu(type));
 }
 
 void CategoryList::requestMovementOn(MR::MovementType type) {

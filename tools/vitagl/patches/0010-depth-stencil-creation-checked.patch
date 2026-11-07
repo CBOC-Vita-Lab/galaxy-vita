@@ -1,0 +1,89 @@
+diff --git a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -494,7 +494,9 @@ void init_display_color_surfaces(GLboolean is_swap) {
+ 	}
+ }
+ 
+-void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {
++// Creates a depth (and stencil) surface. GL_FALSE: an allocation failed; everything allocated here is freed (nothing was submitted)
++// and *surface is untouched, so a surface that is still valid stays valid. *surface is written only when the new one is complete.
++GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil) {
+ 	// Calculating sizes for depth and stencil surfaces
+ 	unsigned int depth_stencil_width = VGL_ALIGN(w, SCE_GXM_TILE_SIZEX);
+ #ifndef DEPTH_STENCIL_HACK
+@@ -507,6 +509,10 @@ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface
+ 
+ 	// Allocating depth surface
+ 	void *depth_buffer = gpu_alloc_mapped_aligned_for_gpu(SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT, 4 * depth_stencil_samples);
++	if (!depth_buffer) {
++		vgl_log("%s:%d Failed to allocate a depth surface of %u bytes.\n", __FILE__, __LINE__, 4 * depth_stencil_samples);
++		return GL_FALSE;
++	}
+ 
+ #ifdef STORE_DEPTH_STENCIL
+ 	// Initializing mask update bit to 1
+@@ -517,10 +523,16 @@ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface
+ 	// Allocating stencil surface
+ #ifndef DEPTH_STENCIL_HACK
+ 	void *stencil_buffer = has_stencil ? gpu_alloc_mapped_aligned_for_gpu(SCE_GXM_DEPTHSTENCIL_SURFACE_ALIGNMENT, depth_stencil_samples) : NULL;
++	if (has_stencil && !stencil_buffer) {
++		vgl_log("%s:%d Failed to allocate a stencil surface of %u bytes.\n", __FILE__, __LINE__, depth_stencil_samples);
++		vgl_free(depth_buffer); // Never submitted: free it right away
++		return GL_FALSE;
++	}
+ #endif
+ 
+-	// Initializing depth and stencil surfaces
+-	vglDepthStencilSurfaceInit(surface,
++	// Initializing depth and stencil surfaces on a private copy
++	SceGxmDepthStencilSurface new_surface = *surface; // (starts as a copy, so any field the init leaves alone is as it always was)
++	vglDepthStencilSurfaceInit(&new_surface,
+ 		has_stencil ? SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M_S8 : SCE_GXM_DEPTH_STENCIL_FORMAT_DF32M,
+ 		SCE_GXM_DEPTH_STENCIL_SURFACE_LINEAR,
+ 		msaa_mode == SCE_GXM_MULTISAMPLE_4X ? depth_stencil_width * 2 : depth_stencil_width,
+@@ -532,13 +544,19 @@ void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface
+ #endif
+ 
+ #ifdef STORE_DEPTH_STENCIL
+-	sceGxmDepthStencilSurfaceSetForceLoadMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
+-	sceGxmDepthStencilSurfaceSetForceStoreMode(surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
++	sceGxmDepthStencilSurfaceSetForceLoadMode(&new_surface, SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
++	sceGxmDepthStencilSurfaceSetForceStoreMode(&new_surface, SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
+ #endif
++	*surface = new_surface;
++	return GL_TRUE;
+ }
+ 
+ void init_display_depth_stencil_surfaces(void) {
+-	init_depth_stencil_buffer(DISPLAY_WIDTH, DISPLAY_HEIGHT, &gxm_depth_stencil_surface, GL_TRUE);
++	// The display has no surface to fall back to: failing here is a fail-stop, not a console that draws into null memory
++	if (!init_depth_stencil_buffer(DISPLAY_WIDTH, DISPLAY_HEIGHT, &gxm_depth_stencil_surface, GL_TRUE)) {
++		vgl_log("%s:%d Display depth/stencil surface could not be allocated: stopping.\n", __FILE__, __LINE__);
++		abort();
++	}
+ }
+ 
+ void start_shader_patcher(void) {
+@@ -739,7 +757,8 @@ GLboolean scene_reset(void) {
+ 			
+ 			// If the depthbuffer is dirty, we re-gen it
+ 			if (!(active_write_fb->depthbuffer_state & DEPTHBUFFER_READY)) {
+-				init_depth_stencil_buffer(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL);
++				if (!init_depth_stencil_buffer(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL))
++					return scene_begin_failed(); // No depth surface: the framebuffer keeps its state and the scene is not begun
+ 				active_write_fb->depthbuffer_ptr = &active_write_fb->depthbuffer;
+ 				active_write_fb->depthbuffer_state |= DEPTHBUFFER_READY;
+ 			}
+diff --git a/source/shared.h b/source/shared.h
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -1213,7 +1213,7 @@ void init_gxm(void); // Inits sceGxm
+ void init_gxm_context(SceGxmContext **ctx, uint8_t ctx_slot); // Inits sceGxm context
+ void create_display_render_target(void); // Creates render target for the display
+ void init_display_color_surfaces(GLboolean is_swap); // Creates color surfaces for the display
+-void init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces
++GLboolean init_depth_stencil_buffer(uint32_t w, uint32_t h, SceGxmDepthStencilSurface *surface, GLboolean has_stencil); // Creates depth and stencil surfaces; GL_FALSE: allocation failed, *surface untouched
+ void init_display_depth_stencil_surfaces(void); // Creates depth and stencil surfaces for the display
+ void start_shader_patcher(void); // Creates a shader patcher instance
+ GLboolean scene_reset(void); // Resets drawing scene if required: GL_FALSE means no scene began, so the caller must submit nothing

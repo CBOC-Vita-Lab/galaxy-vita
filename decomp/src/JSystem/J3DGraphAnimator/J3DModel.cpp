@@ -262,7 +262,19 @@ void J3DModel::update() {
     entry();
 }
 
+#ifdef TARGET_PC
+// GXV_PAR_VIEW (par13; decomp/src/Game/LiveActor/ModelManager.cpp): while the view pass records its matrix jobs, a model whose buffer
+// has one pending runs it before anything here writes the joints it reads (calc) or swaps the halves it writes (viewCalc).
+extern bool gPortParViewOpen;
+extern "C" void port_par_view_touch(void* buf);
+#endif
+
 void J3DModel::calc() {
+#ifdef TARGET_PC
+    if (gPortParViewOpen) {
+        port_par_view_touch(mMtxBuffer);
+    }
+#endif
     j3dSys.setModel(this);
 
     if (checkFlag(J3DMdlFlag_SkinPosCpu)) {
@@ -336,7 +348,28 @@ void J3DModel::entry() {
     }
 }
 
-void J3DModel::viewCalc() {
+#ifdef TARGET_PC
+// (1.3) The view pass's matrix buffers (draw, normal, bump) are read by the front end through indexed loads, straight from memory, every
+// time: no cache of the port keys on them (the display-list cache, the material lists and the texture cache follow lists, vertex
+// arrays and textures). The write notification a data-cache store becomes (two barriers and four atomics on a line the front end's
+// core reads) is skipped for them; GXV_MTX_NOTIFY=1 restores it.
+extern "C" int port_mtx_notify_on(void);
+#define J3D_MTX_STORE(p, n) do { if (port_mtx_notify_on()) DCStoreRange((p), (n)); } while (0)
+#define J3D_MTX_STORE_NOSYNC(p, n) do { if (port_mtx_notify_on()) DCStoreRangeNoSync((p), (n)); } while (0)
+#else
+#define J3D_MTX_STORE(p, n) DCStoreRange((p), (n))
+#define J3D_MTX_STORE_NOSYNC(p, n) DCStoreRangeNoSync((p), (n))
+#endif
+#ifdef TARGET_PC
+extern "C" void port_gx_view_write_from(void*);  // (GXV_DRAWDONE_DEFER 3/4: a view pass outside the drawn turn's own waits for the front end)
+#endif
+__attribute__((noinline)) void J3DModel::viewCalc() {
+#ifdef TARGET_PC
+    if (gPortParViewOpen) {
+        port_par_view_touch(mMtxBuffer);  // (GXV_PAR_VIEW)
+    }
+    port_gx_view_write_from(__builtin_return_address(0));
+#endif
     mMtxBuffer->swapDrawMtx();
     mMtxBuffer->swapNrmMtx();
 
@@ -352,19 +385,19 @@ void J3DModel::viewCalc() {
         mMtxBuffer->calcDrawMtx(getMtxCalcMode(), mBaseScale, mBaseTransformMtx);
         calcNrmMtx();
         calcBumpMtx();
-        DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
-        DCStoreRange(getNrmMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx33));
+        J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+        J3D_MTX_STORE(getNrmMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx33));
     } else if (checkFlag(J3DMdlFlag_SkinNrmCpu)) {
         mMtxBuffer->calcDrawMtx(getMtxCalcMode(), mBaseScale, mBaseTransformMtx);
         calcBBoardMtx();
-        DCStoreRange(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+        J3D_MTX_STORE(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
     } else {
         mMtxBuffer->calcDrawMtx(getMtxCalcMode(), mBaseScale, mBaseTransformMtx);
         calcNrmMtx();
         calcBBoardMtx();
         calcBumpMtx();
-        DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
-        DCStoreRange(getNrmMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx33));
+        J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+        J3D_MTX_STORE(getNrmMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx33));
     }
 
     prepareShapePackets();
@@ -379,7 +412,7 @@ void J3DModel::calcBumpMtx() {
             J3DMaterial* material = getModelData()->getMaterialNodePointer(i);
             if (material->getNBTScale()->mbHasScale == TRUE) {
                 material->getShape()->calcNBTScale(*material->getNBTScale()->getScale(), getNrmMtxPtr(), getBumpMtxPtr(bumpMtxIdx));
-                DCStoreRange(getBumpMtxPtr(bumpMtxIdx), mModelData->getDrawMtxNum() * sizeof(Mtx33));
+                J3D_MTX_STORE(getBumpMtxPtr(bumpMtxIdx), mModelData->getDrawMtxNum() * sizeof(Mtx33));
                 bumpMtxIdx++;
             }
         }

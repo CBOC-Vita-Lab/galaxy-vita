@@ -365,6 +365,11 @@ void NormalMapBase::shapeAnalyzeDraw(J3DModel* pModel) const {
 }
 
 void NormalMapBase::drawShape(J3DModel* pModel, J3DShape* pShape) const {
+#ifdef TARGET_PC
+    if (gPortParViewAsync) {
+        port_par_view_touch_out(pModel->getDrawMtxPtr());  // (GXV_PAR_VIEW=2, J3DSys.hpp: its draw matrices are read below)
+    }
+#endif
     GXCallDisplayList(pShape->getVcdVatCmd(), J3DShape::kVcdVatDLSize);
     u16 groupCount = pShape->getMtxGroupNum();
     for (u16 i = 0; i < groupCount; i++) {

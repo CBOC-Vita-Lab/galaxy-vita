@@ -22,7 +22,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
         -Wl,--wrap=glDrawElements,--wrap=glFinish,--wrap=glGetError,--wrap=glReadPixels,--wrap=getenv \
         -Wl,--wrap=glCompressedTexImage2D,--wrap=glTexImage2D,--wrap=glGenerateMipmap \
         -Wl,--wrap=printf,--wrap=vprintf,--wrap=fprintf,--wrap=vfprintf,--wrap=puts,--wrap=putchar,--wrap=fputs,--wrap=fputc,--wrap=putc,--wrap=fwrite \
-        -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party -Itests -I/fixture \
+        -Itests/autoq_clock_stubs -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party -Itests -I/fixture \
         -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
         tests/vgx_texture_upload.cpp platform/vgx/src/vgx_shadergen.cpp vita/vgx-game/silent_stdio.cpp /fixture/frozen-texture.o \
         -o /fixture/texture-upload -lEGL -lGLESv2 -pthread -lm -l:libasan.so.8 -l:libubsan.so.1

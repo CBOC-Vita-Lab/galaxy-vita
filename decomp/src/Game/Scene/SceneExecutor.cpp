@@ -90,7 +90,16 @@ void SceneFunction::executeMovementListOnPlayingMovie() {
     CategoryList::execute(MR::MovementType_Movie);
 }
 
+#ifdef TARGET_PC
+extern "C" void port_par_anim_dispatch(void);  // (GXV_PAR_ANIM: decomp/src/Game/LiveActor/ModelManager.cpp)
+extern "C" void port_par_late_prepare(void);   // (GXV_PAR_LATE, par2: decomp/src/Game/LiveActor/ModelManager.cpp)
+extern "C" void port_par_late_end(void);
+#endif
+
 void SceneFunction::executeCalcAnimList() {
+#ifdef TARGET_PC
+    port_par_late_prepare();  // (GXV_PAR_LATE: this turn's joint computations of par-anim's models handed to the fourth core)
+#endif
     MR::loadViewMtx();
     CategoryList::execute(MR::CalcAnimType_Environment);
     CategoryList::execute(MR::CalcAnimType_MapObj);
@@ -107,6 +116,10 @@ void SceneFunction::executeCalcAnimList() {
     CategoryList::execute(MR::CalcAnimType_MirrorMapObj);
     CategoryList::execute(MR::MovementType_ShadowControllerHolder);
     CategoryList::execute(MR::CalcAnimType_AnimParticle);
+#ifdef TARGET_PC
+    port_par_late_end();       // (GXV_PAR_LATE: no late job is read after calc-anim)
+    port_par_anim_dispatch();  // (GXV_PAR_ANIM: the next computations of the models that computed lately go to the worker)
+#endif
 }
 
 void SceneFunction::executeCalcAnimListOnPlayingMovie() {
@@ -143,6 +156,22 @@ void SceneFunction::executeCalcViewAndEntryList() {
     MR::loadViewMtx();
     CategoryList::entryDrawBuffer3D();
 }
+
+#ifdef TARGET_PC
+void SceneFunction::executeCalcViewAndEntryListPlayer() {
+    MR::loadViewMtx();
+    CategoryList::entryDrawBufferPlayer();
+}
+
+void SceneFunction::executeCalcViewAndEntryListExceptPlayer() {
+    TMtx34f mtx;
+    mtx.identity();
+    PSMTXCopy(mtx, j3dSys.mViewMtx);
+    CategoryList::entryDrawBuffer2D();
+    MR::loadViewMtx();
+    CategoryList::entryDrawBuffer3DExceptPlayer();
+}
+#endif
 
 void SceneFunction::executeCalcViewAndEntryList2D() {
     TMtx34f mtx;

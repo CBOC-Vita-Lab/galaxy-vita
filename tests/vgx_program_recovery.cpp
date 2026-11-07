@@ -5,21 +5,37 @@
 #include "vgx_backend_quiet.cpp"
 #pragma clang diagnostic pop
 #undef main
+#define GXV_RECIPE_SEED_BATCH 1
+#include "../platform/vgx/src/vgx_recipe_seed.h"
 
 namespace {
 unsigned programCreates = 0, shaderCreates = 0, invalidHandles = 0, links = 0;
 unsigned quadDraws = 0;
-unsigned failProgram = 0, failShader = 0;
+unsigned failProgram = 0, failShader = 0, failLinks = 0, failCompiles = 0;
 GLuint failedHandle = 0;
 bool failLink = false;
 bool Invalid(GLuint id) { return id == 0 || id == ~0u; }
-void RegisterPair(bool invalidSource = false) {
+void RegisterPair(bool invalidSource = false, bool invalidLink = false, bool invalidFragment = false) {
     static vgx::ShaderSource vertex, fragment;
     vertex.id = 3; fragment.id = 4; fragment.fragment = true;
+    vertex.keyHash = 0x1234; fragment.keyHash = 0x5678;
     vertex.text = invalidSource ? "not valid shader source" :
         "attribute vec4 a_pos; uniform mat4 u_proj; void main(){gl_Position=u_proj*a_pos;}";
     fragment.text = "precision mediump float; void main(){gl_FragColor=vec4(0.25,0.75,0.5,1.0);}";
+    if (invalidFragment) fragment.text = "not valid fragment source";
+    if (invalidLink) {
+        vertex.text = "attribute vec4 a_pos; varying vec4 mismatch; void main(){gl_Position=a_pos;mismatch=a_pos;}";
+        fragment.text = "precision mediump float; varying vec3 mismatch; void main(){gl_FragColor=vec4(mismatch,1.0);}";
+    }
     vgx::backend::RegisterShader(&vertex); vgx::backend::RegisterShader(&fragment);
+}
+size_t AuditLines() {
+    return std::count_if(fixture::summaryLines.begin(), fixture::summaryLines.end(),
+        [](const std::string& s) { return s.find("[resource-audit]") == 0; });
+}
+bool AuditHas(const char* part) {
+    return std::any_of(fixture::summaryLines.begin(), fixture::summaryLines.end(),
+        [part](const std::string& s) { return s.find("[resource-audit]") == 0 && s.find(part) != std::string::npos; });
 }
 void RequireGreenPixels(bool copy = false) {
     const auto pixels = Read();
@@ -59,21 +75,29 @@ extern "C" void __wrap_glAttachShader(GLuint program,GLuint shader) {
     if (Invalid(program) || Invalid(shader)) ++invalidHandles;
     __real_glAttachShader(program,shader);
 }
+// GXV_FS_HALF: what the back end hands vitaGL (the weak vitaGL patch-0012 function is a recorder here)
+namespace { bool lowOn = false, lowAtLink = false, fsMarker = false; unsigned lowCalls = 0, fsParts = 0, vsParts = 0; }
+extern "C" void vglUseLowPrecisionFragmentOnly(GLboolean on) { lowOn = on; ++lowCalls; }
 extern "C" void __real_glShaderSource(GLuint,GLsizei,const GLchar* const*,const GLint*);
 extern "C" void __wrap_glShaderSource(GLuint shader,GLsizei count,const GLchar* const* parts,const GLint* lengths) {
     if (Invalid(shader)) ++invalidHandles;
+    if (count > 0 && std::strstr(parts[count - 1], "gl_FragColor")) { fsParts = count; fsMarker = count == 3 && std::strstr(parts[1], "GXV_FS_HALF") != nullptr; }
+    else if (count > 0 && std::strstr(parts[count - 1], "gl_Position")) vsParts = count;
     __real_glShaderSource(shader,count,parts,lengths);
 }
 extern "C" void __real_glCompileShader(GLuint);
 extern "C" void __wrap_glCompileShader(GLuint shader) {
     if (Invalid(shader)) ++invalidHandles;
+    if (failCompiles) { --failCompiles; return; }
     __real_glCompileShader(shader);
 }
 extern "C" void __real_glLinkProgram(GLuint);
 extern "C" void __wrap_glLinkProgram(GLuint program) {
     ++links;
+    lowAtLink = lowOn;
     if (Invalid(program)) ++invalidHandles;
     if (failLink) { failLink = false; return; }
+    if (failLinks) { --failLinks; return; }
     __real_glLinkProgram(program);
 }
 extern "C" void __real_glDrawArrays(GLenum,GLint,GLsizei);
@@ -83,6 +107,8 @@ extern "C" void __wrap_glDrawArrays(GLenum mode,GLint first,GLsizei count) {
 int main(int argc,char** argv) {
     Require(argc == 2,"choose one allocation recovery scenario");
     const std::string mode = argv[1];
+    const char* auditEnv = std::getenv("GXV_RESOURCE_AUDIT");
+    const bool audit = auditEnv && std::strcmp(auditEnv,"1") == 0;
     Context();
 #if VGX_COLDTRACE
     Require(vgx::coldtrace::g_recorder.Arm(TraceClock,TraceThread,1),"recovery paths arm RAM tracing");
@@ -113,14 +139,109 @@ int main(int argc,char** argv) {
         Require(vgx::backend::Init(32,32),"real backend initialized");
         using namespace vgx::backend;
         g_serial = 41;
-        if (mode == "source-error") {
-            RegisterPair(true); const auto firstLinks = links;
+        if (mode == "seed-sweep") {
+            const char* path = std::getenv("RECOVERY_SEED_FILE");
+            std::vector<uint8_t> bytes; vgx::recipe::List list;
+            Require(path && vgx::recipe::Read(path,vgx::recipe::kMaxListSize,bytes) && vgx::recipe::Parse(bytes,list),
+                    "caller-supplied shader recipe passes the production structural parser");
+            std::vector<vgx::ShaderSource> vertex(list.vs.size()), fragment(list.fs.size());
+            for (size_t i=0;i<vertex.size();++i) {
+                vgx::GenerateVertexShader(list.vs[i],vertex[i]); vertex[i].id=i;
+                vertex[i].keyHash=vgx::HashKey(&list.vs[i],sizeof(list.vs[i])); RegisterShader(&vertex[i]); CompileShader(false,i);
+                Require(g_vs[i]!=0,"every recipe vertex key compiles through the actual backend and Mesa");
+            }
+            for (size_t i=0;i<fragment.size();++i) {
+                vgx::GenerateFragmentShader(list.fs[i],fragment[i]); fragment[i].id=i; fragment[i].fragment=true;
+                fragment[i].keyHash=vgx::HashKey(&list.fs[i],sizeof(list.fs[i])); RegisterShader(&fragment[i]); CompileShader(true,i);
+                Require(g_fs[i]!=0,"every recipe fragment key compiles through the actual backend and Mesa");
+            }
+            unsigned pairs=0;
+            for (const auto& record:list.records) if (record.type==3) {
+                Require(GetProgram(record.v[0],record.v[1]).ok,"every recorded recipe pair links through the actual backend and Mesa"); ++pairs;
+            }
+            char report[160]; const int n=std::snprintf(report,sizeof report,"seed sweep: vertex=%zu fragment=%zu pairs=%u Mesa-only; no native patcher or route coverage claim\n",vertex.size(),fragment.size(),pairs);
+            ::write(2,report,n);
+        } else if (mode == "source-error") {
+            RegisterPair(true); const auto firstLinks = links, firstShaders = shaderCreates;
             Require(!GetProgram(3,4).ok,"invalid source is rejected");
             ++g_serial;
             for (unsigned i=0; i<128; ++i) Require(!GetProgram(3,4).ok,"source error stays rejected");
-            Require(links == firstLinks + 1,"a deterministic source/link failure is not retried every draw or frame");
+            Require(links == firstLinks && shaderCreates == firstShaders + 2,
+                    "a rejected source never links and neither stage recompiles before the retry delay");
+        } else if (mode == "compile-exhaustion" || mode == "fragment-compile-exhaustion" || mode == "link-exhaustion" || mode == "injected-link-exhaustion") {
+            const bool fragmentFailure = mode == "fragment-compile-exhaustion";
+            const bool compile = mode == "compile-exhaustion" || fragmentFailure;
+            RegisterPair(compile && !fragmentFailure, mode == "link-exhaustion", fragmentFailure);
+            if (mode == "injected-link-exhaustion") failLinks = 4;
+            const auto firstLinks = links, firstShaders = shaderCreates;
+            const uint64_t serials[] = {41,101,221,461};
+            for (unsigned n=0;n<4;++n) {
+                g_serial = serials[n]; g_progFrame = 1000+n;
+                Require(!GetProgram(3,4).ok,"each deliberately failed compile/link remains unavailable");
+                Require(compile ? (fragmentFailure ? g_fsAttempts[4] : g_vsAttempts[3]).failures == n+1 : g_programs.at((3u<<16)|4u).failures == n+1,
+                        "four-attempt counter advances exactly once at each scheduled retry");
+                const auto shaders = shaderCreates, programs = programCreates;
+                for (unsigned i=0;i<128;++i) Require(!GetProgram(3,4).ok,"failed program stays unavailable in this serial");
+                ++g_serial; Require(!GetProgram(3,4).ok,"one serial later is still in delayed backoff");
+                Require(shaderCreates == shaders && programCreates == programs,"delayed retry never reallocates early");
+            }
+            g_serial = 100000;
+            auto commands = Triangle(); commands.draws.resize(1); commands.cmds={{vgx::CMD_DRAW,0}};
+            commands.draws[0].vsId=3; commands.draws[0].fsId=4;
+            const auto draws = actualDraws; Execute(commands);
+            Require(actualDraws == draws,"exhausted compile/link omits the real draw even much later");
+            Require(links == firstLinks + (compile ? 0 : 4) && shaderCreates == firstShaders + (compile ? 5 : 2),
+                    "exact GL call counts establish four failed attempts, with successful stages retained");
+            Require(!audit || (AuditHas("disposition=exhausted") && AuditHas("stage=draw-skip") &&
+                    AuditHas("frame=1003") && AuditHas("attempt=4") && AuditHas("0000000000001234")),
+                    "quiet basic log retains exhaustion, frame, attempt, hash and omitted-draw evidence");
+        } else if (mode == "link-recovered" || mode == "compile-recovered") {
+            RegisterPair(); failLinks=mode == "link-recovered"; failCompiles=mode == "compile-recovered"; g_progFrame=2000;
+            Require(!GetProgram(3,4).ok,"injected false compile/link status defers the program");
+            g_serial+=60; Require(GetProgram(3,4).ok,"later successful link recovers without changing policy");
+            RenderRecovered();
+            Require(!audit || AuditHas("disposition=recovered"),"a recorded failure has a later success record");
+        } else if (mode == "declared-white") {
+            RegisterPair(); Require(GetProgram(3,4).ok,"texture fallback fixture links");
+            auto commands = Triangle(); commands.draws.resize(1); commands.cmds={{vgx::CMD_DRAW,0}};
+            auto& draw=commands.draws[0]; draw.vsId=3; draw.fsId=4;
+            const auto before=AuditLines(); Execute(commands);
+            Require(AuditLines()==before,"ordinary untextured draw does not report missing textures");
+            draw.texMask=1; draw.tex[0].texId=0; Execute(commands);
+            Require(!audit || AuditHas("reason=zero-id"),"declared zero ID is reported in the quiet basic log");
+            draw.tex[0].texId=65000; Execute(commands);
+            g_tex.resize(10); draw.tex[0].texId=9; Execute(commands);
+            Require(!audit || (AuditHas("reason=out-of-range") && AuditHas("reason=no-gl-name") && AuditHas("slot=0")),
+                    "out-of-range and absent GL names are distinguished for declared slots");
+            const auto once=AuditLines();
+            for (unsigned i=0;i<512;++i) Execute(commands);
+            Require(!audit || AuditLines()<once+20,"repeated fallback records are deduplicated with bounded summaries");
+            for (unsigned i=0;i<1024;++i) { draw.tex[0].texId=1000+i; Execute(commands); }
+            Require(!audit || (AuditLines()<200 && AuditHas("suppressed=")),"unique fallback floods are capped with a suppression summary");
+            RequireGreenPixels();
+        } else if (mode == "fs-half" || mode == "fs-half-off" || mode == "fs-half-eligible") {
+            // GXV_FS_HALF: off (the default) the sources are the two parts they always were and vitaGL's precision mode is never touched;
+            // 2 (every shader): the fragment source has the marker part in front of its text and the low-precision mode is on around the link only;
+            // 1 (eligible shaders only): the choice is in the shader text (half types), so the source is still the two parts, with no marker, and
+            // vitaGL's precision mode is never touched either.
+            if (mode == "fs-half") setenv("GXV_FS_HALF","2",1); else if (mode == "fs-half-eligible") setenv("GXV_FS_HALF","1",1); else unsetenv("GXV_FS_HALF");
+            RegisterPair(); Require(GetProgram(3,4).ok,"program links with the switch");
+            RenderRecovered();
+            Require(vsParts == 2,"the vertex source is always the two parts");
+            if (mode == "fs-half") {
+                Require(fsParts == 3 && fsMarker,"the fragment source carries the marker (its compiled-shader cache key differs)");
+                Require(lowAtLink && !lowOn && lowCalls == 2,"low precision is on during the link and off again after it");
+            } else {
+                Require(fsParts == 2 && !fsMarker && lowCalls == 0 && !lowAtLink,"switch off or 1: no marker, vitaGL's precision mode untouched");
+            }
+        } else if (mode == "audit-read-once") {
+            RegisterPair(true); Require(!GetProgram(3,4).ok,"invalid source exercises first audit read");
+            setenv("GXV_RESOURCE_AUDIT",audit ? "0" : "1",1);
+            g_serial+=60; Require(!GetProgram(3,4).ok,"invalid source exercises another audit read");
+            Require(audit ? AuditHas("attempt=2") : AuditLines()==0,"audit switch is read once independently of diagnostic build flags");
         } else if (mode == "missing-source") {
             Require(!GetProgram(3,4).ok,"unregistered source cannot be linked");
+            Require(!audit || AuditHas("stage=missing-source"),"unregistered sources are identified without a bogus compiler error");
             RegisterPair();
             Require(GetProgram(3,4).ok,"later shader registration is not poisoned by a missing-source cache entry");
             RenderRecovered();
@@ -245,14 +366,19 @@ int main(int argc,char** argv) {
         Require(invalidHandles == 0 && glGetError() == GL_NO_ERROR,"recovery leaves a valid real GL pipeline");
     }
     Require(invalidHandles == 0 && glGetError() == GL_NO_ERROR,"all recovery scenarios leave real GL valid");
+    Require(audit || AuditLines()==0,"audit off emits no resource log records");
 #if VGX_COLDTRACE
     vgx::coldtrace::g_recorder.RequestFreeze();
     const auto view = vgx::coldtrace::g_recorder.Frozen();
     Require(view.data && view.data->worstCount > 0 && !view.clockErrors,"allocation failure returns close RAM trace scopes cleanly");
 #endif
-    char report[256];
-    const int length = std::snprintf(report,sizeof report,"{\"mode\":\"%s\",\"trace\":%d,\"passed\":true,\"program_creates\":%u,\"shader_creates\":%u,\"invalid_handle_calls\":%u,\"physical_vita\":false}\n",
-                                   mode.c_str(),VGX_COLDTRACE,programCreates,shaderCreates,invalidHandles);
+    for (const auto& line : fixture::summaryLines)
+        if (line.find("[resource-audit]") == 0 && line.find("disposition=exhausted") != std::string::npos) {
+            ::write(2,line.data(),line.size()); ::write(2,"\n",1);
+        }
+    char report[512];
+    const int length = std::snprintf(report,sizeof report,"{\"mode\":\"%s\",\"trace\":%d,\"audit\":%d,\"audit_lines\":%zu,\"passed\":true,\"program_creates\":%u,\"shader_creates\":%u,\"links\":%u,\"draws\":%u,\"invalid_handle_calls\":%u,\"physical_vita\":false}\n",
+                                   mode.c_str(),VGX_COLDTRACE,audit,AuditLines(),programCreates,shaderCreates,links,actualDraws,invalidHandles);
     Require(length > 0 && size_t(length) < sizeof report,"bounded recovery test result");
     Require(::write(STDOUT_FILENO,report,length) == length,"recovery result written");
 }

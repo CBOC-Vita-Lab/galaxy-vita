@@ -105,6 +105,7 @@ extern volatile void* __memReg;
 
 #define GX_CP_IDLE_REG_READ_U16(a) GX_CP_REG_READ_U16(a)
 
+#ifdef __MWERKS__
 #define GX_WRITE_CP_STRM_REG(addr, vtxfmt, data)                                                                                                     \
     {                                                                                                                                                \
         GX_WRITE_U8(CP_OPCODE(0, 1));                                                                                                                \
@@ -118,6 +119,18 @@ extern volatile void* __memReg;
         GX_WRITE_U32(CP_XF_LOADREGS((addr), (cnt)));                                                                                                 \
         GX_WRITE_U32((data));                                                                                                                        \
     }
+#else
+/* The same bytes as one batched command (GXV_FIFO_BATCH, port/gx_fifo.h); each argument once (no call site has side effects). */
+#define GX_WRITE_CP_STRM_REG(addr, vtxfmt, data)                                                                                                     \
+    {                                                                                                                                                \
+        __PortGXFifo_op_u8_u32((u8)CP_OPCODE(0, 1), (u8)CP_STREAM_REG((vtxfmt), (addr)), (u32)(data));                                              \
+    }
+
+#define GX_WRITE_XF_REG(addr, data, cnt)                                                                                                             \
+    {                                                                                                                                                \
+        __PortGXFifo_op_u32_u32((u8)CP_OPCODE(0, 0x2), (u32)CP_XF_LOADREGS((addr), (cnt)), (u32)(data));                                            \
+    }
+#endif
 
 #define GX_WRITE_XF_MEM_U32(addr, data) GX_WRITE_U32(data)
 #define GX_WRITE_XF_MEM_F32(addr, data) GX_WRITE_F32(data)

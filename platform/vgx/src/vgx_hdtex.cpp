@@ -87,6 +87,21 @@ const char* NameOf(const PackEntry& e) {
     return e.nameOff < g_names.size() ? &g_names[e.nameOff] : "?";
 }
 
+// Mario's or Luigi's: one of the entry's names ("<archive>:<texture>", space separated) is from the archive of Mario or his forms,
+// Luigi or his forms (tools/hdtex/selection.txt), not the NPC Luigi, Peach, the Lumas or the key items (GXV_CHARAA_AUTO).
+bool IsPlayerEntry(const PackEntry& e) {
+    static const char* const kArchives[] = {"Mario:", "MarioHair:", "BeeMario:", "TeresaMario:", "InvincibleMarioMat:", "Luigi:", "BeeLuigi:", "TeresaLuigi:"};
+    const char* n = NameOf(e);
+    for (bool start = true; *n; ++n) {
+        if (start) {
+            for (const char* a : kArchives)
+                if (!std::strncmp(n, a, std::strlen(a))) return true;
+        }
+        start = *n == ' ';
+    }
+    return false;
+}
+
 void Note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void Note(const char* fmt, ...) {
     char buf[320];
@@ -120,6 +135,7 @@ bool Replace(const TexReplaceQuery& q, TexUpload& up) {
     g_lookupNs.fetch_add(t1 - t0, std::memory_order_relaxed);
     if (it == g_index.end() || it->key != key || it->origW != q.width || it->origH != q.height || it->origFmt != q.fmt) return false;
     if (q.inPack) *q.inPack = true; // (GXV_CHARAA: one of the characters' and key items' textures, replaced or not)
+    if (q.player && IsPlayerEntry(*it)) *q.player = true;
     if (g_mode == 3) return false;   // (identification only)
     const PackEntry& e = *it;
     // Eye textures (iris and eyelids of Mario, Luigi, Peach, Rosalina...): with the pack's replacements players

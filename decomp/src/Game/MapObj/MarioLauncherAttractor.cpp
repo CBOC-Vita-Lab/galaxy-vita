@@ -2,6 +2,9 @@
 #include "Game/Gravity/GravityCreator.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "port/grav_memo.h"  // (GXV_MO_GRAVMEMO, mapobjcut: writers of a gravity's fields move port_grav_gen)
+#endif
 
 namespace NrvMarioLauncherAttractor {
     NEW_NERVE(MarioLauncherAttractorNrvWait, MarioLauncherAttractor, Wait);
@@ -19,6 +22,9 @@ void MarioLauncherAttractor::init(const JMapInfoIter& rIter) {
     mGravityCreator->createFromJMap(rIter);
     PlanetGravity* pGravity = mGravityCreator->getGravity();
     pGravity->mGravityType = GRAVITY_TYPE_MARIO_LAUNCHER;
+#ifdef TARGET_PC
+    PortGravBump();  // (after registration)
+#endif
 
     // Set clipping & scale
     f32 scale = pGravity->mRange / 1000.0f;

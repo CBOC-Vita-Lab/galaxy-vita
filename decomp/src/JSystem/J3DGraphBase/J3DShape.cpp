@@ -116,9 +116,13 @@ u16 J3DShape::countBumpMtxNum() const {
 }
 
 void J3DLoadCPCmd(u8 addr, u32 val) {
+#ifdef TARGET_PC
+    __PortGXFifo_op_u8_u32(8, addr, val);  // (the same 6 bytes, batched: GXV_FIFO_BATCH, port/gx_fifo.h)
+#else
     GXCmd1u8(8);
     GXCmd1u8(addr);
     GXCmd1u32(val);
+#endif
 }
 
 static void J3DLoadArrayBasePtr(GXAttr attr, void* data) {

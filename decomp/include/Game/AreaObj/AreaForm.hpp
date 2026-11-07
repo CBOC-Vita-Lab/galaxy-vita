@@ -51,6 +51,10 @@ public:
 
     void updateBoxParam();
     void calcWorldMtx(TPos3f*) const;
+#ifdef TARGET_PC
+    void portUpdateReject();
+    void portSnapshot(f32*) const;
+#endif
 
     /* 0x08 */ int _8;
     /* 0x0C */ TVec3f mTranslation;
@@ -58,6 +62,15 @@ public:
     /* 0x24 */ TVec3f mScale;
     /* 0x30 */ TBox3f mBounding;
     /* 0x48 */ TPos3f _48;
+#ifdef TARGET_PC
+    // GXV_HL_AREACUBE (hivelogic, AreaForm.cpp): a world box around the cube with a margin, for a quick "outside" answer while the
+    // cube follows nothing (_4 null). Set by updateBoxParam, the only writer of _48 and mBounding.
+    /* 0x78 */ f32 mPortRejectLo[3];
+    /* 0x84 */ f32 mPortRejectHi[3];
+    /* 0x90 */ u8 mPortRejectMode;   // 0 no box (the full test always), 1 box used, 2 verify (both computed, the full answer used)
+    /* 0x94 */ f32 mPortSnap[18];    // _48 and mBounding as the box was built from them (mode 2 checks they have not changed)
+    /* 0xDC */ const char* mPortOwner;  // the area's name, for the verify log (AreaObj.cpp)
+#endif
 };
 
 class AreaFormSphere : public AreaForm {

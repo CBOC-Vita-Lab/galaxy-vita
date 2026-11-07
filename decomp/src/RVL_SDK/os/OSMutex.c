@@ -4,7 +4,8 @@
 #include "port/port.h"
 
 static void traceMutexContext(const char* operation, OSMutex* mutex, OSThread* current, void* caller) {
-    if (current != NULL && port_is_game_thread()) return;
+    // (GXV_LC_MUTEX_FAST=1: no check, see port_lc_mutex_fast; the TLS read is the cost)
+    if (current != NULL && (port_lc_mutex_fast() || port_is_game_thread())) return;
     static unsigned reported;
     if (__atomic_fetch_add(&reported, 1, __ATOMIC_RELAXED) < 4) {
         port_log("native-mutex context op=%s mutex=%p current=%p caller=%p guest=%d owns=%d",

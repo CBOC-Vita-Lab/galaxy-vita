@@ -36,7 +36,7 @@ The release VPK (`Galaxy-Vita.vpk`, title ID `SMGV00001`) holds:
 | --- | --- |
 | `eboot.bin` | the build above |
 | `sce_sys/param.sfo`, `sce_sys/livearea/contents/template.xml` | `vita/vgx-game` (CMake, `vita_create_vpk`) |
-| `sce_sys/icon0.png`, `pic0.png`, `livearea/contents/bg.png`, `startup.png` | `vita/vgx-game/sce_sys/`, drawn by `tools/handheld/make_livearea.py` (original art) |
+| `sce_sys/icon0.png`, `pic0.png`, `livearea/contents/bg.png`, `startup.png` | `vita/vgx-game/sce_sys/`, drawn by `tools/handheld/make_livearea.py` (original art; the package carries no game artwork, the game makes its own pictures on the console, see [ASSETS.md](ASSETS.md)) |
 | `shadercache/` | the compiled-shader seed: the shaders the port generates, compiled once with the Vita's own compiler, so the first launch has less to do |
 
 `cmake --build /build/vita-vgx-game` makes `smg-vgx.vpk` from the first three. The release adds

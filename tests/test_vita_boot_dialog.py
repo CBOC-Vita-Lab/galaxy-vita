@@ -25,6 +25,27 @@ def function(source, signature):
     return source[start:end]
 
 
+def playprogress(host):
+    """The in-play branded progress screen's gate (production Enabled/Allowed), for ShowProgressBar.
+
+    The screen itself (loading::Init/Render, its fades) is not modelled: this fixture's paths reach ShowProgressBar
+    only during the loading screen, where Allowed() is false, and a path that reaches it anyway fails loudly.
+    """
+    begin = host.find("namespace playprogress {")
+    if begin < 0:
+        return ""
+    body = host[begin:host.index("}  // namespace playprogress", begin)]
+    return "\n".join((
+        "namespace playprogress {",
+        "bool g_failed = false;",
+        function(body, "bool Enabled()"),
+        function(body, "bool Allowed()"),
+        'bool Ready() { std::fprintf(stderr, "unmodelled: in-play branded progress screen\\n"); std::abort(); }',
+        "void Show(uint32_t, uint32_t) {}",
+        "}",
+    ))
+
+
 HARNESS = r'''
 #include <atomic>
 #include <cstdint>
@@ -33,6 +54,8 @@ HARNESS = r'''
 #include <mutex>
 #include <string>
 #include "vgx_common.h"
+#include "vgx_boot_watch.h"
+#define GXV_BASIC_LOG(...) port_log(__VA_ARGS__)
 #if !defined(LEGACY) && __has_include("port/boot_dialog.h")
 #include "port/boot_dialog.h"
 #else
@@ -71,6 +94,7 @@ uint64_t NowUs() { return 1000000; }
 unsigned NowMs() { return 1000; }
 void port_log(const char*, ...) {}
 @ENV_LONG@
+@SECONDS@
 constexpr int GL_FALSE = 0;
 void vglSwapBuffers(int) { ++swaps; }
 namespace loading {
@@ -83,8 +107,12 @@ bool DrawPicture() { ++splashPresents; return true; }
 unsigned pending = 0;
 unsigned WarmPending() { return pending; }
 unsigned WarmTotal() { return 1; }
+bool WarmCapacityYielded() { return false; }
 void SetWarmBudget(double) {}
+void SetProgressHostDraws(bool) {}
 }
+// GXV_PRESENT_SYNC stamp queue: only fed when SyncDisplay is the display callback, which this fixture never installs.
+inline void NoteSwap(uint32_t) {}
 namespace splash {
 @PHASES@
 constexpr int kShaders = 4;
@@ -92,6 +120,7 @@ std::atomic<int> g_phase{kGl}, g_stagePermille{0}, g_stage{0};
 std::atomic<bool> g_titleSeen{false}, g_failed{false}, g_faded{false};
 std::atomic<uint64_t> g_titleSeenUs{0};
 bool g_heldForShaders = false, g_warmAfterTitle = false;
+uint64_t g_holdSinceUs = 0;
 std::atomic<uint32_t> g_frameId{1};
 std::mutex g_picLock;
 uint32_t* g_pic[2]{};
@@ -118,6 +147,7 @@ uint32_t Cadence() {
     return periodUs;
 }
 }
+@PLAYPROGRESS@
 @SHOW@
 @IDLE@
 @IDLE_GAP@
@@ -251,16 +281,20 @@ class BootDialogTests(unittest.TestCase):
                     return subprocess.check_output(["git", "show", f"{BASE}:{path}"], cwd=ROOT, text=True)
                 return (ROOT / path).read_text()
             host = read(HOST)
-            start = host.index("    g_lastStats = stats;", host.index("void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {"))
+            present = re.search(r"(?:bool|void) PresentDisplayCopy\(unsigned efb, int x, int y, int w, int h\) \{", host)
+            start = host.index("    g_lastStats = stats;", present.start())
             start = host.index("\n", start) + 1
             boundary = "    if (!GamePresentAllowed(" if "bool GamePresentAllowed(" in host else "    if (efb == 0"
             end = host.index(boundary, start)
             code = HARNESS.replace("@DRAW@", function(read(DRAW), "void SaveDataHandleSequence::draw() const"))
             code = code.replace("@PHASES@", re.search(r"enum Phase \{[^}]+\};", host)[0])
+            code = code.replace("@PLAYPROGRESS@", playprogress(host))
             for tag, signature, fallback in (
                 ("ENV_LONG", "void EnvLong(const char* name, long& value, long lo, long hi)", ""),
+                ("SECONDS", "long ReadSeconds(const char* name, long fallback)", ""),
                 ("ACTIVE", "inline bool Active()", ""),
-                ("TITLE", "void NoteTitleVisible(const char* how)", ""),
+                ("TITLE", "void NoteTitleVisible(const char* how, bool genuineTitle = false)"
+                 if revision == "production" else "void NoteTitleVisible(const char* how)", ""),
                 ("CONFIGURE", "void ConfigureDialog()", "void ConfigureDialog() {}"),
                 ("HANDLE", "bool HandleDialog()", ""),
                 ("PRESENT", "bool PresentFrame(bool force)", ""),
@@ -271,7 +305,8 @@ class BootDialogTests(unittest.TestCase):
                 ("NEEDS_SERVICE", 'extern "C" int port_vgx_vita_splash_active(void)', ""),
             ):
                 code = code.replace("@" + tag + "@", function(host, signature) if signature in host else fallback)
-            code = code.replace("@DECISION@", host[start:end])
+            # This fixture tests splash decisions, not the hook's scene certificate.
+            code = code.replace("@DECISION@", host[start:end].replace("return false;", "return;"))
             cadence_start = host.index("        uint32_t periodUs = 33000u;")
             cadence_end = host.index("        const uint64_t used =", cadence_start)
             code = code.replace("@CADENCE@", host[cadence_start:cadence_end])
@@ -282,7 +317,7 @@ class BootDialogTests(unittest.TestCase):
             binary = source.with_suffix("")
             command = [cxx, "-std=c++17", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-DTARGET_PC",
                        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I" + str(ROOT / "platform/include"),
-                       "-I" + str(ROOT / "platform/vgx/src"), str(source), str(other), "-o", str(binary)]
+                       "-I" + str(ROOT / "platform/vgx/src"), "-I" + str(ROOT / "platform/vgx/vita"), str(source), str(other), "-o", str(binary)]
             if revision == "legacy":
                 command.append("-DLEGACY")
             result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)

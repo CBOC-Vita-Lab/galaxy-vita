@@ -9,9 +9,23 @@ aim Star Bits, touch the screen where you used to point the Wii Remote, and tilt
 
 ![Mario in Good Egg Galaxy on the PS Vita](store/screenshots/01-good-egg.png)
 
-**[Download the latest version](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [Install guide](MANUAL-INSTALL.md) · [Controls](CONTROLS.md) · [What's in 1.0](CHANGELOG.md)
+**[Download the latest version](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [Install guide](MANUAL-INSTALL.md) · [Controls](CONTROLS.md) · [What's new](CHANGELOG.md)
 
 You'll need your own copy of the game (Wii, USA, `RMGE01`).
+
+## New In Version 2.0
+
+The biggest update yet. Galaxy now runs at the Vita's full 960×544 resolution at a locked-in 30 FPS, and a new Performance mode pushes toward 60.
+
+- **Full resolution, steady 30.** Quality mode draws at up to the Vita's native 960×544 and holds 30 FPS in every galaxy we tested, from Good Egg to the Bowser fights.
+- **Up to 60 FPS.** Pick Performance mode and lighter galaxies run at 50 to 60 FPS. When a scene is too heavy for 60, it settles on a smooth 30 instead of a choppy 40.
+- **Honeyhive, Beach Bowl and the Bowser fights hold 30.** These used to drop into the teens and 20s.
+- **All four of the Vita's CPU cores.** With the CapUnlocker plug-in, the game spreads its work across every core the Vita has.
+- **More control in the pause menu.** Camera zoom, rear-touch aiming, a right-stick Star Bit pointer and Star Bit reach, all one button away.
+- **Gameplay fixes.** Enemies that grab Mario hurt him again like on the Wii, hidden-star missions work properly, rear touch works right after visiting Settings, and spins come out even right after a jump.
+- **Plus everything from 1.2.** Bowser, the Lumas and about 85 effects look the way they should, a full Settings menu, no freezes on a galaxy's first visit, a 20-second start, music after sleep and full PS TV support.
+
+The full list is in [What's New](CHANGELOG.md), and [Known Issues](KNOWN-ISSUES.md) covers what's still being worked on.
 
 ## Touch Controls, Built For The Vita
 
@@ -26,28 +40,36 @@ Galaxy was made for the Wii pointer, so touch got more work than anything else i
   Select re-centers it.
 - **Buttons where the Wii used motion.** Spin with Square or R instead of shaking a remote, and shoot Star Bits with Circle.
 - **Settings in the pause menu.** A panel in the game's own style: L and R set the camera zoom (1.0× to 2.0×), Triangle
-  turns rear touch aiming on or off.
+  turns rear touch aiming on or off, Square makes the right stick move the camera or the Star Bit pointer, and Select sets
+  how far from the pointer Star Bits are collected (Star Bit reach).
 
 The full list is in [Controls](CONTROLS.md).
 
 ## How Smooth Is It?
 
-Frames per second (fps) is how many new pictures you see each second. 60 is the most the Vita's screen can show, and many
-console games aim for 30. Measured with this exact version on a PS Vita, in scripted 2½-minute runs of running, jumping,
-triple jumps, spins, camera turns and pauses:
+Choose your style in Settings > Display > Picture mode:
+
+- **Quality** (default): the sharpest picture at a steady 30 FPS.
+- **Performance**: as close to 60 FPS as each scene allows.
+- **Locked 30**: always full 960×544, always 30 FPS when the Vita can manage it.
+
+Measured on a real PS Vita at the widest camera zoom, the toughest view in the game:
+
+| Galaxy | Quality | Performance | Locked 30 |
+|---|---|---|---|
+| **Good Egg** | **30 FPS**, up to 960 wide | **54 FPS** | 30, at 960×544 |
+| **Beach Bowl** | **30 FPS**, up to 784 wide | 30 FPS | 25, at 960×544 |
+| **Honeyhive** | **30 FPS**, up to 848 wide | **42 FPS** | 30, at 960×544 |
+| **Bowser's Star Reactor** | **29 FPS**, up to 848 wide | **45 FPS** | 30, at 960×544 |
+
+At the default camera zoom, Performance mode hits 60 FPS in Good Egg and 54 in Honeyhive. For comparison, version 1.2 ran Honeyhive at 12 FPS from this view.
 
 | | |
 |---|---|
-| **Good Egg Galaxy** | **51 fps** on average (41 at its lowest, 56 at its highest) |
-| **Comet Observatory**, the busiest place in the game | **43 fps** on average (32 lowest, 55 highest) |
-| **Quiet moments and menus** | a full **60 fps** |
-| **Stutters longer than a tenth of a second while playing** | **0** |
-| **Game speed** | Full speed: the game keeps its 60 updates a second. When a moment is too busy, a picture is skipped instead of the game slowing down. |
-| **Sharpness** | 640×456 up to the Vita's full 960×544 with anti-aliasing, chosen automatically. It only changes during pauses and fades, so it never hitches mid-jump. |
-| **Graphics effects compiled ahead of time** | 1,131, so new effects don't pause the game |
-| **Download** | about 6 MB (2.5 GB on the memory card with your game files) |
+| **Start-up** | the title screen in about 20 seconds |
+| **Download** | about 9 MB (2.5 GB on the memory card with your game files) |
 
-(The lowest and highest numbers are averages over 5-second stretches.)
+Every galaxy, zoom and mode we measured is in [Performance](docs/PERFORMANCE.md).
 
 ![The Comet Observatory on the PS Vita](store/screenshots/02-comet-observatory.png)
 
@@ -66,17 +88,6 @@ call it one of the best games ever made, and it plays wonderfully on a handheld.
   work is shared across all three of the Vita's CPU cores.
 - **It keeps full game speed.** The game runs its 60 steps a second. If a moment is too busy to draw every frame, a
   frame is skipped rather than the game slowing down.
-
-## What's In Version 1.0
-
-- **Rear touch Star Bit aiming, front touch pointing and tilt steering** (above).
-- **Smooth play, without the hitches.** The picture quality adjusts itself to what each scene can handle, and it saves those changes for pauses and screen fades instead of the middle of a jump. Each galaxy remembers its best setting for next time.
-- **Sharper picture.** The game renders above the Wii's resolution wherever the Vita has room, up to the screen's full 960×544, with anti-aliased edges when there's GPU to spare.
-- **Optional HD Mario and friends.** Turn your own game files into sharper Mario, Luigi, Peach, Rosalina, Lumas, Toads, Bowser, Bowser Jr., Power Stars, launch stars and power-ups, made for the Vita screen. [How](tools/hdtex/README.md).
-- **Vita button prompts.** The game's own text shows Cross, Circle, Triangle, Square, L and START instead of Wii buttons.
-- **The whole game,** with its menus, storybook, movies, music and normal in-game saves.
-
-First launch takes a little longer while the graphics are prepared. See [Known Issues](KNOWN-ISSUES.md) for what's still being worked on.
 
 ## Install
 
@@ -110,7 +121,7 @@ Open [CBOC Vita Installer](https://github.com/CBOC-Vita-Lab/vita-installer/relea
 | **Rear touch** (optional) | Slide to aim the pointer |
 | **START** | Pause |
 
-**In the pause menu:** L and R set the camera zoom, and Triangle turns rear touch aiming on or off. Your choices are saved for next time. The full list is in [Controls](CONTROLS.md).
+**In the pause menu:** L and R set the camera zoom, Triangle turns rear touch aiming on or off, Square switches the right stick between camera and pointer, and Select sets Star Bit reach. **Settings:** tap Settings on the game's LiveArea screen, before playing or while the game runs. Your choices are saved for next time. The full list is in [Controls](CONTROLS.md).
 
 ## Download Contents
 

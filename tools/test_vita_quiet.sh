@@ -26,9 +26,9 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
     clang++ "${common[@]}" -DPORT_LOGGING=0 -fno-builtin tests/vita_silent_log.cpp vita/vgx-game/silent_stdio.cpp \
       /results/msl_printf.o "${wraps[@]}" -o /results/silent-logger -l:libasan.so.8 -l:libubsan.so.1
     clang++ "${common[@]}" -DPORT_GX_VGX=1 -DPORT_GX_VGX_ONLY=1 -Iplatform/vgx/include -Iplatform/vgx/src \
-      tests/vita_quiet_fps.cpp -o /results/fps -l:libasan.so.8 -l:libubsan.so.1
+      tests/vita_quiet_fps.cpp /results/msl_printf.o -o /results/fps -l:libasan.so.8 -l:libubsan.so.1
     clang++ "${common[@]}" -DPORT_LOGGING=0 -DPORT_GX_VGX=1 -DPORT_GX_VGX_ONLY=1 -Iplatform/vgx/include -Iplatform/vgx/src \
-      tests/vita_quiet_fps.cpp -o /results/silent-fps -l:libasan.so.8 -l:libubsan.so.1
+      tests/vita_quiet_fps.cpp /results/msl_printf.o -o /results/silent-fps -l:libasan.so.8 -l:libubsan.so.1
     if test "${1:-}" = logger; then exec /results/logger /results/quiet.log; fi
     if test "${1:-}" = silent; then exec /results/silent-logger /results/silent.log; fi
     if test "${1:-}" = silent-fps; then exec /results/silent-fps; fi

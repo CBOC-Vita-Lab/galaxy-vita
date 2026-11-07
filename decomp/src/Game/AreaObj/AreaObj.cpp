@@ -8,6 +8,10 @@
 #include "Game/Util/ObjUtil.hpp"
 #include <algorithm>
 #include <functional.hpp>
+#ifdef TARGET_PC
+extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
+#include "port/move_prof.h"  // (hivelogic: GXV_ANIM_PROF=1/3 times the area lookups, "move-sys:" in the basic log)
+#endif
 
 AreaObj::AreaObj(int formType, const char* pName)
     : NameObj(pName), mFormType(formType), mIsValid(true), _15(true), mIsAwake(true), mObjArg0(-1), mObjArg1(-1), mObjArg2(-1), mObjArg3(-1),
@@ -55,6 +59,11 @@ void AreaObj::init(const JMapInfoIter& rIter) {
     if (MR::getObjectName(&name, rIter)) {
         setName(name);
     }
+#ifdef TARGET_PC
+    if (mFormType == AreaForm::Type_Cube1 || mFormType == AreaForm::Type_Cube2) {
+        static_cast< AreaFormCube* >(mForm)->mPortOwner = mName;  // (GXV_HL_AREACUBE=2: the name in the verify log)
+    }
+#endif
 
     MR::getAreaObjManager(getManagerName())->entry(this);
     MR::getAreaObjManager(getManagerName());
@@ -109,6 +118,11 @@ void AreaObjMgr::entry(AreaObj* pAreaObj) {
 }
 
 AreaObj* AreaObjMgr::find_in(const TVec3f& rVec) const {
+#ifdef TARGET_PC
+    PORT_MOVE_SYS(1);
+    port_logic_count(8, 1);
+    port_logic_count(9, static_cast< unsigned >(mArray.size()));  // (an upper bound: it stops at the first hit from the end)
+#endif
     AreaObj* const* Begin = mArray.begin();
     AreaObj* const* End = mArray.end();
     AreaObj* const* p = std::rfind_if(

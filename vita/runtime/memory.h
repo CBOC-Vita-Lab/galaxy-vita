@@ -44,6 +44,16 @@ int port_vita_thread_stack(void** base, uint32_t* size);
 // audio output and the other helpers.
 int port_vita_pin_core(int core);
 int port_vita_thread_class(int cls);  // 1 clocks, 2 disc reader, 3 game and renderer, 4 background (see memory.cpp)
+// Thread layout switches (port/core_layout.h): GXV_CORE0_ALONE keeps every thread but the game's off core 0, GXV_CORE3_IO lets the disc
+// read-ahead worker and one movie decoder use the system core. All default off.
+int port_vita_core0_alone(void);
+int port_vita_thread_helper(void);  // a helper thread without a class: off core 0 under GXV_CORE0_ALONE; returns the mask set or 0
+int port_vita_thread_io(int kind, int index);  // 0 disc worker, 1 movie decoder (index 2 only); returns the mask, 0 = unchanged
+// The fourth core (1.3; port/core_layout.h): 1 when a probe proved it (once per process; one "clocks/cores" basic-log line), else 0.
+int port_vita_core3_available(void);
+// A fourth-core part's thread asks for the system core on itself (1 audio output, 2 DSP mixer, 3 front-end finishing thread) when its
+// switch is on and the core is proven; `planned` is the mask to go back to on a refusal. Returns the mask afterwards, 0 = did not ask.
+int port_vita_thread_core3(int part, int planned);
 
 #ifdef __cplusplus
 }

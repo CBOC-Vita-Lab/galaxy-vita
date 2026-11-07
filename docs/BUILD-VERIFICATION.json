@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
-  "releaseId": "galaxy-v1.1",
-  "sourceRevision": "039060aa587b8b30bf68e7bc94ab231324941093",
-  "driver": "python3 -I tools/vgx_build/build.py all",
+  "releaseId": "galaxy-v1.2",
+  "sourceRevision": "0a5bdf6b5fb8caa72fabb3126d582a3736c1cc66",
+  "driver": "python3 -I tools/vgx_build/build.py all --pgo-profile tools/pgo/smg.profdata.gz",
   "note": "SHA-256 of the release build's artifacts. tools/update-checksums.py fills `runtime` from the VPK's eboot.bin; the others are recorded from the build directory. A value that is not a SHA-256 is not checked by `build.py verify`.",
   "sha256": {
-    "runtimeArchive": "5dcb480030bc0faf458020846b71a9c2b4ff214f8a3beba339a8419e363f2fc8",
-    "elf": "100c0770c29f83cee6037329da9eb2b31cc5fd5e5ccd198dc16863094aeb0910",
-    "velf": "25c864b44e7adbe59a8e289aed4a661b8fcebaf123a54eaf315423c4fcdde71b",
-    "runtime": "2435735b633df3047cea89eea424e891e5ee3105d5c04911900345310fb7b264"
+    "runtimeArchive": "41739cf13cc580e4aad1dec5909c905b118207b5169eafc311676517d1438e27",
+    "elf": "1093a0fa2f41144add94595d47eb5378d0efaa8384325c870ace0d49a51736fd",
+    "velf": "54a7b8347666b4361164441c3373d462b36e86d6939f64f7d38e90c3438d749b",
+    "runtime": "8512cfc6bd12f5d1571c4405e1157138b82901d956ea32474409fa56001c313e"
   }
 }

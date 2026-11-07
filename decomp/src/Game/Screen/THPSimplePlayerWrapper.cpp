@@ -1,4 +1,9 @@
 #include "Game/Screen/THPSimplePlayerWrapper.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/MemoryUtil.hpp"
 #include "Game/Util/NerveUtil.hpp"
@@ -229,6 +234,7 @@ bool THPSimplePlayerWrapper::setBuffer(u8* pBuffer) {
 }
 
 bool THPSimplePlayerWrapper::preLoad(s32 loop) {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the movie's sound state is shared with the audio thread's mix callback; port/audio_cpu1.h)
     if (!mOpen || mPreFetchState) {
         return false;
     }
@@ -246,6 +252,7 @@ bool THPSimplePlayerWrapper::preLoad(s32 loop) {
 }
 
 bool THPSimplePlayerWrapper::loadStop() {
+    PORT_AUDIO_TOUCH();
     if (mOpen && !mAudioState) {
         mPreFetchState = 0;
 
@@ -282,6 +289,7 @@ bool THPSimplePlayerWrapper::loadStop() {
 }
 
 s32 THPSimplePlayerWrapper::decode(s32 audio) {
+    PORT_AUDIO_TOUCH();
     bool isValid = mReadBuffer[mNextDecodeIndex].isValid == true;
     if (isValid) {
         u32* compSize = (u32*)mReadBuffer[mNextDecodeIndex].ptr + 2;
@@ -845,6 +853,7 @@ void THPSimplePlayerWrapper::resetAudioParams() {
 }
 
 bool THPSimplePlayerWrapper::setVolume(s32 volume, s32 time) {
+    PORT_AUDIO_TOUCH();
     if (!isAudioProcessValid()) {
         return false;
     }

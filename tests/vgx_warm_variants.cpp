@@ -1,7 +1,14 @@
 // Exercise the real backend with Mesa; no game assets or physical GPU claims.
 #include "../platform/vgx/src/vgx_coldtrace.h"
+#include <cstddef>
+// The Vita-shaped host test has real Mesa textures, not vitaGL's allocator.
+constexpr int VGL_MEM_VRAM = 0;
+size_t vglMemFree(int) { return 256u << 20; }
+size_t vglMemTotal(int) { return 256u << 20; }
+void* vglGetTexDataPointer(unsigned) { static unsigned backing; return &backing; }
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
+extern "C" void port_log(const char*, ...) {}
 #include <EGL/egl.h>
 #include <array>
 #include <cstdio>
@@ -104,6 +111,28 @@ int main(int argc, char** argv) {
         Require(vgx::backend::g_programs.at(1u << 16).usedSerial == vgx::backend::g_serial &&
                 vgx::backend::g_progsThisFrame == 1, "skipped warm work retains program-use accounting in later frames");
         if (!dedup) ++expected;
+    } else if (mode == "alpha-zero") {
+        auto& rs = b.draws[0].rs;
+        rs.blend = 1; rs.blendSrc = vgx::BF_SRC_ALPHA; rs.blendDst = vgx::BF_INV_SRC_ALPHA;
+        variant.blendKey = vgx::BlendKey(rs);
+        vgx::backend::WarmVariant(variant);
+        rs.dstAlphaZero = 1;
+        variant.blendKey = vgx::BlendKey(rs);
+        vgx::backend::WarmVariant(variant);
+        GLint srcAlpha = -1, dstAlpha = -1, srcRgb = -1, dstRgb = -1;
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha); glGetIntegerv(GL_BLEND_DST_ALPHA, &dstAlpha);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &srcRgb); glGetIntegerv(GL_BLEND_DST_RGB, &dstRgb);
+        Require(srcAlpha == GL_ZERO && dstAlpha == GL_ZERO && srcRgb == GL_SRC_ALPHA && dstRgb == GL_ONE_MINUS_SRC_ALPHA,
+                "warm override installs separate alpha factors without changing RGB factors");
+#if !defined(PORT_RUNTIME_DIAGNOSTICS) || PORT_RUNTIME_DIAGNOSTICS
+        Require(vgx::backend::C.fragVariants == 2, "diagnostics count ordinary and zero-alpha fragment variants separately");
+#endif
+        vgx::backend::WarmVariant(variant);
+        expected = dedup ? 2 : 3;
+        rs.dstAlphaZero = 0;
+        Draw(b);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcAlpha); glGetIntegerv(GL_BLEND_DST_ALPHA, &dstAlpha);
+        Require(srcAlpha == GL_SRC_ALPHA && dstAlpha == GL_ONE_MINUS_SRC_ALPHA, "ordinary draw restores alpha factors after override warmup");
     } else if (mode == "execute") {
         b.cmds.push_back({vgx::CMD_DRAW,0});
         b.copyDisp.push_back({{0,0,32,32},{},false}); b.cmds.push_back({vgx::CMD_COPY_DISP,0});

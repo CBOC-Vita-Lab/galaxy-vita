@@ -8,6 +8,9 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include <JSystem/JUtility/JUTTexture.hpp>
 #include <JSystem/JUtility/JUTVideo.hpp>
+#ifdef TARGET_PC
+#include "port/depth_of_field.h"
+#endif
 
 void DepthOfFieldBlur_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -44,6 +47,13 @@ void DepthOfFieldBlur::draw() const {
     if (!isSomething()) {
         return;
     }
+
+    // Settings > Display > Depth of field = Off (GXV_DOF=0): the blur is not drawn at all.
+#ifdef TARGET_PC
+    if (!port::dof::Enabled()) {
+        return;
+    }
+#endif
 
     CopyFilterNegater negator;
     ImageEffectLocalUtil::capture(_18, 4, 0, GX_TF_RGB565, false, 0);

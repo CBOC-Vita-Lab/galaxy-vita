@@ -5,6 +5,21 @@
 #include "Game/Util/CollisionPartsFilter.hpp"
 #include "Game/Util/MathUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
+#include <cstring>
+#ifdef TARGET_PC
+extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
+#include "port/shadow_memo_hooks.h"  // (shadowmemo2: zone lists and zone spheres report their changes)
+#define PORT_SHADOWMEMO_RESHAPE()          \
+    do {                                   \
+        if (port_shadowmemo_armed) {       \
+            port_shadowmemo_reshape();     \
+        }                                  \
+    } while (0)
+#else
+#define PORT_SHADOWMEMO_RESHAPE() \
+    do {                          \
+    } while (0)
+#endif
 
 CollisionCategorizedKeeper::CollisionCategorizedKeeper(s32 category)
     : NameObj("\x92\x6e\x8c\x60\x83\x52\x83\x8a\x83\x57\x83\x87\x83\x93\x83\x4a\x83\x65\x83\x53\x83\x8a\x83\x4c\x81\x5b\x83\x70\x81\x5b"), mHitInfoArray(), _10(), mPartsCount(), mCategory(category), mZonesInitialized(),
@@ -39,21 +54,25 @@ void CollisionCategorizedKeeper::movement() {
 }
 
 void CollisionCategorizedKeeper::addToZone(CollisionParts* pParts, s32 zone) {
+    PORT_SHADOWMEMO_RESHAPE();
     mZones[zone]->addParts(pParts);
     mPartsCount++;
 }
 
 void CollisionCategorizedKeeper::removeFromZone(CollisionParts* pParts, s32 zone) {
+    PORT_SHADOWMEMO_RESHAPE();
     mZones[zone]->eraseParts(pParts);
     mPartsCount--;
 }
 
 void CollisionCategorizedKeeper::addToGlobal(CollisionParts* pParts) {
+    PORT_SHADOWMEMO_RESHAPE();
     mZones[0]->addParts(pParts);
     mPartsCount++;
 }
 
 void CollisionCategorizedKeeper::removeFromGlobal(CollisionParts* pParts) {
+    PORT_SHADOWMEMO_RESHAPE();
     mZones[0]->eraseParts(pParts);
     mPartsCount--;
 }
@@ -124,6 +143,9 @@ s32 CollisionCategorizedKeeper::checkStrikePoint(const TVec3f& rPosition, HitInf
 s32 CollisionCategorizedKeeper::checkStrikeBall(const TVec3f& rPosition, f32 ballRadius, bool moving, const CollisionPartsFilterBase* pPartsFilter,
                                                 const TriangleFilterBase* pTriangleFilter) {
     MR::getCollisionDirector();
+#ifdef TARGET_PC
+    port_logic_count(6, 1);
+#endif
     _10 = 0;
     s32 hitCount = 0;
 
@@ -267,13 +289,22 @@ s32 CollisionCategorizedKeeper::checkStrikeBallWithThickness(const TVec3f& rPosi
     return hitCount;
 }
 
+#ifdef TARGET_PC
+s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec3f& rDirection, s32 maxHits,
+                                                const CollisionPartsFilterBase* pPartsFilter, const TriangleFilterBase* pTriangleFilter,
+                                                bool nearestOnly) {
+#else
 s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec3f& rDirection, s32 maxHits,
                                                 const CollisionPartsFilterBase* pPartsFilter, const TriangleFilterBase* pTriangleFilter) {
+#endif
     MR::getCollisionDirector();
 
     if (maxHits == 0) {
         maxHits = 32;
     }
+#ifdef TARGET_PC
+    port_logic_count(5, 1);
+#endif
 
     _10 = 0;
     s32 hitCount = 0;
@@ -337,7 +368,11 @@ s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec
                 continue;
             }
 
+#ifdef TARGET_PC
+            hitCount += pParts->checkStrikeLine(&mHitInfoArray[hitCount], maxHits - hitCount, rStart, rDirection, pTriangleFilter, nearestOnly);
+#else
             hitCount += pParts->checkStrikeLine(&mHitInfoArray[hitCount], maxHits - hitCount, rStart, rDirection, pTriangleFilter);
+#endif
 
             if (maxHits <= hitCount) {
                 _10 = hitCount;
@@ -497,6 +532,7 @@ CollisionZone* CollisionCategorizedKeeper::getZone(int zone) {
         for (int i = 0; i < count; i++) {
             mZones.push_back(new CollisionZone(i));
         }
+        PORT_SHADOWMEMO_RESHAPE();
 
         mZonesInitialized = true;
     }
@@ -515,7 +551,33 @@ void CollisionZone::addParts(CollisionParts* pParts) {
     }
 }
 
+#ifdef TARGET_PC
+namespace {
+    // (shadowmemo2: a non-zero zone's culling sphere reports a change when calcMinMaxAndRadius returns; zone 0 is never culled)
+    struct PortZoneMemoGuard {
+        CollisionZone* mZone;
+        bool mMemo;
+        f32 mWas[4];
+        explicit PortZoneMemoGuard(CollisionZone* pZone) : mZone(pZone), mMemo(port_shadowmemo_armed != 0 && pZone->mZoneID != 0) {
+            mWas[0] = pZone->mCenter.x;
+            mWas[1] = pZone->mCenter.y;
+            mWas[2] = pZone->mCenter.z;
+            mWas[3] = pZone->mRadius;
+        }
+        ~PortZoneMemoGuard() {
+            const f32 now[4] = {mZone->mCenter.x, mZone->mCenter.y, mZone->mCenter.z, mZone->mRadius};
+            if (mMemo && std::memcmp(mWas, now, sizeof(now)) != 0) {
+                port_shadowmemo_zone(mZone, mWas, mWas[3], now, now[3]);
+            }
+        }
+    };
+}  // namespace
+#endif
+
 void CollisionZone::calcMinMaxAndRadius() {
+#ifdef TARGET_PC
+    PortZoneMemoGuard portMemoGuard(this);
+#endif
     CollisionParts** pCurrent;
     mMin.zero();
     mMax.zero();

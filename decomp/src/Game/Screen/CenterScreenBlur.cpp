@@ -5,6 +5,9 @@
 #include "Game/Util/DemoUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
+#ifdef TARGET_PC
+#include "port/reduced_motion.h"
+#endif
 
 namespace NrvCenterScreenBlur {
     NEW_NERVE(CenterScreenBlurNrvFadeIn, CenterScreenBlur, FadeIn);
@@ -38,6 +41,14 @@ void CenterScreenBlur::draw() const {
 
     f32 a = mOffset * mBlendRate;
     u8 b = mAlpha * mBlendRate;
+
+#ifdef TARGET_PC
+    // Reduced motion (GXV_REDUCED_MOTION): the zoom blur is drawn at half strength (its length and fades are not changed).
+    if (port::motion::Enabled()) {
+        a = port::motion::BlurScale(a);
+        b = static_cast< u8 >(port::motion::BlurScale(static_cast< f32 >(mAlpha) * mBlendRate));
+    }
+#endif
 
     MR::drawFullScreenBlur(a, a, b, b);
 }

@@ -7,11 +7,13 @@
 // ("wrap") semantics.
 #include <string.h>
 
+#define PORT_GX_FIFO_BATCH_OWNER 1  // (this file defines __PortGXFifoBatch, port/gx_fifo.h)
 #include "gpu.h"
 #include "vgx_galaxy.h"
 #include "port/gx_fifo.h"
 #include "port/heap_routing.h"
 #include "port/port.h"
+#include "port/hot_knob.h"
 #include "revolution/gx.h"
 #include "revolution/gx/GXFifo.h"
 #include "revolution/gx/GXPerf.h"
@@ -29,20 +31,25 @@
 extern "C" {
 uint8_t* __PortGXFifoPtr;
 uint8_t* __PortGXFifoLimit;
+// GXV_FIFO_BATCH (default 1, read once in port_gx_init): multi-element GX commands written as one batch, see port/gx_fifo.h.
+// 0 until then (element-wise), and with GXV_FIFO_BATCH=0 in env.txt.
+#if !defined(PORT_GX_FIFO_BATCH_WEAK)
+int __PortGXFifoBatch = 0;
+#endif
 }
 
 #if defined(TARGET_PC)
 namespace {
 int xfBurstMode() {
-    static const int mode = [] {
+    // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h; every GXLoadPosMtxImm / GXLoadTexMtxImm of the game asks)
+    return PORT_HOT_KNOB(int, [] {
         const int saved = errno;
         // Default-off exact XF payload batching: 1 fast, 2 original-write oracle.
         // Cache once; preserve errno even when EnvInt rejects an overflow value.
         const long value = vgx::EnvInt("GXV_XFBURST", 0);
         errno = saved;
         return value == 1 || value == 2 ? int(value) : 0;
-    }();
-    return mode;
+    }());
 }
 
 bool overlaps(uintptr_t a, size_t an, uintptr_t b, size_t bn) {
@@ -152,9 +159,9 @@ static void setLinkedLimit() {
 }
 // The other staging segment (player thread: see vgx_galaxy.cpp).
 static uint8_t* sStagingOther;
-static void publishLinked(bool full) {
+static void publishLinked(bool full, int extraFlags = 0) {
     uint8_t* const p = __PortGXFifoPtr;
-    int flags = full ? 1 : 0;
+    int flags = (full ? 1 : 0) | extraFlags;
     // A flush right after "draw done" or a draw-sync token: the game is about to wait for it.
     // (GXFlush pads with 32 zero bytes first, as on the console's write-gather pipe.)
     if (p - sStaging >= 37 && p[-1] == 0 && p[-32] == 0 && p[-37] == 0x61 && (p[-36] == 0x45 || p[-36] == 0x47 || p[-36] == 0x48)) flags |= 2;
@@ -219,6 +226,16 @@ extern "C" void __PortGXFifoFlush(void) {
     }
     __PortGXFifoPtr = sStaging + left;
     sInFlush = false;
+}
+
+// GXV_SEG_IDLE (platform/src/gx/vgx_galaxy.cpp, port_vgx_publish): the game thread at the start of a turn, between its draws; it
+// takes the other staging segment now if the player thread has parsed everything published. Only while the FIFO writes into the
+// staging buffer (not while a display list is recorded) and the player thread runs. Game thread only.
+extern "C" void __PortGXFifoIdlePoint(void) {
+    if (!sLinked || !sStaging || sInFlush || !port_vgx_seg_idle()) {
+        return;
+    }
+    publishLinked(false, 4);
 }
 
 extern "C" void __PortGXFifoOverflow(void) {
@@ -405,6 +422,51 @@ u32 __PortGXPeekZ(u16 x, u16 y) {
 
 }  // extern "C"
 
+#if defined(TARGET_PC)
+// GXV_FXMERGE (default 0 for now, the console A/B decides; 1: on; read once, GXV_HOT_KNOBS): JParticle's particle loops go to the
+// front end as port-private commands (the gathering: decomp/src/RVL_SDK/gx/GXDisplayList.c; the front end and why its pictures are the
+// same: platform/vgx/src/vgx_state.cpp, FxMergeRun). Only while the FIFO writes into the staging buffer that the vgx front end reads:
+// not while a display list is recorded, not with another renderer.
+static bool sFxForeign;
+static int fxMergeKnob() {
+    return PORT_HOT_KNOB(int, [] {
+        const int saved = errno;
+        const long v = vgx::EnvInt("GXV_FXMERGE", 0);
+        errno = saved;
+        return v == 1 ? 1 : 0;
+    }());
+}
+extern "C" int __PortGXFxMergeOk(void) {
+    return fxMergeKnob() && !sFxForeign && sLinked && sStaging && port_vgx_active() && __PortGXFifoPtr >= sStaging &&
+           __PortGXFifoPtr < sStaging + kStagingSize;
+}
+// A run of bytes into the stream, as element writes would put them: up to the limit, then __PortGXFifoOverflow (a publish step, or the
+// end of the segment), and on.
+extern "C" void __PortGXFifoWriteBytes(const void* src, uint32_t n) {
+    const uint8_t* s = static_cast<const uint8_t*>(src);
+    while (n) {
+        const size_t room = __PortGXFifoLimit > __PortGXFifoPtr ? static_cast<size_t>(__PortGXFifoLimit - __PortGXFifoPtr) : 0;
+        if (!room) {
+            __PortGXFifoOverflow();
+            continue;
+        }
+        const size_t k = n < room ? n : room;
+        memcpy(__PortGXFifoPtr, s, k);
+        __PortGXFifoPtr += k;
+        s += k;
+        n -= static_cast<uint32_t>(k);
+        if (__PortGXFifoPtr >= __PortGXFifoLimit) __PortGXFifoOverflow();
+    }
+}
+// The gathering found the write position moved between two of its items: a GX call it does not take was made inside a particle loop
+// (JPAResource's list of particle functions should rule that out). The order of that picture's commands may be wrong; from now on the
+// particle loops are sent as before.
+extern "C" void __PortGXFxForeign(void) {
+    if (!sFxForeign) port_log("gx: GXV_FXMERGE: a GX write inside a particle loop that the gathering does not take; gathering off from now on");
+    sFxForeign = true;
+}
+#endif
+
 // PE interrupts are forwarded to the handlers the GX library registered.
 extern "C" void port_call_sdk_interrupt(int interrupt);
 
@@ -412,6 +474,14 @@ static void peTokenIrq() { port_call_sdk_interrupt(__OS_INTERRUPT_PI_PE_TOKEN); 
 static void peFinishIrq() { port_call_sdk_interrupt(__OS_INTERRUPT_PI_PE_FINISH); }
 
 extern "C" void port_gx_init(void) {
+#if defined(TARGET_PC)
+    {
+        const int saved = errno;
+        __PortGXFifoBatch = vgx::EnvInt("GXV_FIFO_BATCH", 1) == 1 ? 1 : 0;
+        errno = saved;
+        port_log("gx: command batching %s (GXV_FIFO_BATCH)", __PortGXFifoBatch ? "on" : "off");
+    }
+#endif
     __PortGXFifoPtr = sOverflowSink;
     __PortGXFifoLimit = sOverflowSink + sizeof(sOverflowSink) - 16;
     port_irq_set_handler(PORT_IRQ_PE_TOKEN, peTokenIrq);

@@ -575,8 +575,53 @@ inline f32 J3DHermiteInterpolation(__REGISTER f32 pp1, __REGISTER s16 const* pp2
 #endif
 }
 
+#ifdef TARGET_PC
+// GXV_LC_KEYSEARCH (logiccut, 6 Nov; default 0): the key search below with integer compares (port/key_search.h says why, and why the
+// interval found is the original's). Every keyed channel of every animated joint (BCK) and every animated TEV / colour register
+// (BRK, BPK) runs one search per evaluation. A NaN frame or key time gives up and the original runs.
+#include "port/hot_knob.h"
+#include "port/key_search.h"
+namespace {
+    inline bool lcKeySearch() {
+        return PORT_HOT_KNOB(int, [] { const char* e = getenv("GXV_LC_KEYSEARCH"); return e && *e ? atoi(e) : 0; }()) != 0;
+    }
+}  // namespace
+
+// The original search and interpolation below; false (nothing written) when the integer search gives up.
+template < typename T >
+static bool lcKeyFrameInterpolation(f32 frame, J3DAnmKeyTableBase* pKeyTable, T* pData, f32* pOut) {
+    const u32 stride = pKeyTable->mType == 0 ? 3 : 4;
+    const T* pKey = nullptr;
+    switch (port::keysearch::Find< T >(frame, pKeyTable->mMaxFrame, stride, pData, &pKey)) {
+    case port::keysearch::kBeforeFirst:
+        *pOut = pData[1];
+        return true;
+    case port::keysearch::kAfterLast:
+        *pOut = pData[(pKeyTable->mMaxFrame - 1) * stride + 1];
+        return true;
+    case port::keysearch::kBetween:
+        if (stride == 3) {
+            *pOut = J3DHermiteInterpolation(frame, &pKey[0], &pKey[1], &pKey[2], &pKey[3], &pKey[4], &pKey[5]);
+        } else {
+            *pOut = J3DHermiteInterpolation(frame, &pKey[0], &pKey[1], &pKey[3], &pKey[4], &pKey[5], &pKey[6]);
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+#endif
+
 template < typename T >
 f32 J3DGetKeyFrameInterpolation(f32 frame, J3DAnmKeyTableBase* pKeyTable, T* pData) {
+#ifdef TARGET_PC
+    if (lcKeySearch()) {
+        f32 out;
+        if (lcKeyFrameInterpolation(frame, pKeyTable, pData, &out)) {
+            return out;
+        }
+    }
+#endif
     if (frame < pData[0]) {
         return pData[1];
     }

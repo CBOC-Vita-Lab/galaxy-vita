@@ -26,6 +26,8 @@ size_t port_vgx_consume(const uint8_t* data, size_t len);
 int port_vgx_player(void);
 void port_vgx_stream_setup(uint8_t* segment0, uint8_t* segment1, size_t size);
 uint8_t* port_vgx_publish(uint8_t* writePosition, int flags);
+// GXV_SEG_IDLE: nonzero when the game's idle points may change segments (port_vgx_publish flag 4; gx_fifo.cpp __PortGXFifoIdlePoint).
+int port_vgx_seg_idle(void);
 // The game made [p, p + n) visible to the GPU (data-cache flush / store) or a bulk write
 // landed there (disc, save file, movie decode): cached decodes of it are checked again.
 void port_vgx_notify_write(const void* p, size_t n);

@@ -259,6 +259,41 @@ void J3DModelLoader::readInformation(J3DModelInfoBlock const* i_block, u32 i_fla
 inline J3DMtxCalcNoAnmBase::J3DMtxCalcNoAnmBase() {
 }
 
+#ifdef TARGET_PC
+#include <new>
+// GXV_PAR_ANIM (joint15; decomp/include/Game/Animation/XanimeSpecWalk.hpp): which of the three basic matrix calculators above a
+// model data's is (its init decides how J3DJointTree::calc starts the walk): 0 Basic, 1 Softimage, 2 Maya, -1 none of them. By the
+// object's vtable, against one probe of each (made here, where their constructors are; never destroyed). Game thread only.
+typedef J3DMtxCalcNoAnm< J3DMtxCalcCalcTransformBasic, J3DMtxCalcJ3DSysInitBasic > PortMtxCalcBasic;
+typedef J3DMtxCalcNoAnm< J3DMtxCalcCalcTransformSoftimage, J3DMtxCalcJ3DSysInitSoftimage > PortMtxCalcSoftimage;
+typedef J3DMtxCalcNoAnm< J3DMtxCalcCalcTransformMaya, J3DMtxCalcJ3DSysInitMaya > PortMtxCalcMaya;
+extern "C" int port_j3d_basic_calc_kind(const J3DMtxCalc* calc) {
+    struct Probes {
+        const void* vt[3];
+    };
+    static const Probes probes = [] {
+        alignas(PortMtxCalcBasic) static unsigned char m0[sizeof(PortMtxCalcBasic)];
+        alignas(PortMtxCalcSoftimage) static unsigned char m1[sizeof(PortMtxCalcSoftimage)];
+        alignas(PortMtxCalcMaya) static unsigned char m2[sizeof(PortMtxCalcMaya)];
+        Probes p;
+        p.vt[0] = *reinterpret_cast< const void* const* >(new (static_cast< void* >(m0)) PortMtxCalcBasic());
+        p.vt[1] = *reinterpret_cast< const void* const* >(new (static_cast< void* >(m1)) PortMtxCalcSoftimage());
+        p.vt[2] = *reinterpret_cast< const void* const* >(new (static_cast< void* >(m2)) PortMtxCalcMaya());
+        return p;
+    }();
+    if (calc == NULL) {
+        return -1;
+    }
+    const void* vt = *reinterpret_cast< const void* const* >(calc);
+    for (int i = 0; i < 3; i++) {
+        if (vt == probes.vt[i]) {
+            return i;
+        }
+    }
+    return -1;
+}
+#endif
+
 static _GXCompType getFmtType(_GXVtxAttrFmtList* i_fmtList, _GXAttr i_attr) {
     for (; i_fmtList->attr != GX_VA_NULL; i_fmtList++) {
         if (i_fmtList->attr == i_attr) {

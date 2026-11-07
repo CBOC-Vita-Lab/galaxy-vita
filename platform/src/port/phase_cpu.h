@@ -1,8 +1,15 @@
 #pragma once
 
-#if PORT_PHASE_CPU_COMPILED
+#if PORT_PHASE_CPU_COMPILED || (defined(__vita__) && PORT_LOGGING)
+#define PORT_PHASE_CPU_AVAILABLE 1
+#else
+#define PORT_PHASE_CPU_AVAILABLE 0
+#endif
+
+#if PORT_PHASE_CPU_AVAILABLE
 #include <errno.h>
 #include "../../vgx/src/vgx_common.h"
+#include "port/hot_knob.h"
 
 namespace port::phasecpu {
 
@@ -12,14 +19,14 @@ struct PreserveErrno {
 };
 
 inline bool Enabled() {
-    // Default-off native phase CPU/wall diagnostics. Read on first frame begin,
-    // not library load or checkpoints: native startup
-    // may set controls after loading. EnvInt retains its established prefix syntax.
-    static const bool enabled = [] {
+    // Default-off phase CPU/wall diagnostics. Read on first runtime use, not
+    // library load: startup may set controls after loading. EnvInt retains its
+    // established prefix syntax.
+    // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h; every game progress checkpoint asks)
+    return PORT_HOT_KNOB(bool, [] {
         PreserveErrno keep;
         return vgx::EnvInt("GXV_PHASECPU", 0) == 1;
-    }();
-    return enabled;
+    }());
 }
 
 struct Stamp { int64_t wall = 0, cpu = 0; };
@@ -95,8 +102,8 @@ inline void Report(const State& s) {
 }
 
 inline void Begin() {
-    PreserveErrno keep;
     if (!Enabled()) return;
+    PreserveErrno keep;
     State& s = state;
     if (!s.serial) s.serial = nextSerial.fetch_add(1, std::memory_order_relaxed);
     if (s.active) ++s.abandoned;
@@ -109,21 +116,23 @@ inline void Begin() {
 }
 
 inline void Checkpoint(uint32_t phase) {
+    if (!Enabled()) return;
+    PreserveErrno keep;
     State& s = state;
     if (!s.active) return;
-    PreserveErrno keep;
     CloseInterval(s, Read(s));
     if (!phase || phase >= PORT_GAME_PHASE_COUNT) { ++s.unknown; phase = 0; }
     s.phase = phase;
 }
 
 inline void End() {
+    if (!Enabled()) return;
+    PreserveErrno keep;
     State& s = state;
     if (!s.active) {
         if (s.serial) ++s.orphanEnds;
         return;
     }
-    PreserveErrno keep;
     const Stamp now = Read(s);
     CloseInterval(s, now);
     s.active = false;

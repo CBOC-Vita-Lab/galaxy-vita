@@ -20,3 +20,21 @@ GXV_SETTINGS=1 "$out/test" off
 "$out/test" on
 "$out/test" calibration
 "$out/test" escape
+# 1.2 external pad layout (GAL-032) and mouse-style aiming (GAL-031)
+GXV_PAD_DEFAULTS=1 "$out/test" off
+GXV_PAD_DEFAULTS=1 "$out/test" default
+GXV_PAD_DEFAULTS=1 "$out/test" on
+GXV_PAD_DEFAULTS=1 "$out/test" pad
+GXV_PAD_DEFAULTS=1 "$out/test" padhandheld
+"$out/test" padlegacy
+GXV_MOUSE_AIM=1 "$out/test" mouse
+GXV_MOUSE_AIM=1 GXV_PAD_DEFAULTS=1 "$out/test" mousepad
+# Tilt sensitivity (GXV_TILT_GAIN) and Tilt with (GXV_TILT_STICK): the sensor path, the left stick on the handheld, and a pad without a sensor
+"$out/test" tilt 100 sensor
+for p in 50 63 75 88 120 140 160 180 200; do
+  GXV_TILT_GAIN=$p "$out/test" tilt $p sensor
+  GXV_TILT_GAIN=$p GXV_TILT_STICK=1 "$out/test" tilt $p stick
+  GXV_TILT_GAIN=$p GXV_PAD_DEFAULTS=1 "$out/test" tiltpad $p
+done
+GXV_TILT_STICK=1 "$out/test" tilt 100 stick
+GXV_PAD_DEFAULTS=1 "$out/test" tiltpad 100

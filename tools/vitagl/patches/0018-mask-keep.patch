@@ -1,0 +1,94 @@
+diff -ruN a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c	2026-11-06 15:25:33.983671058 -0500
++++ b/source/gxm.c	2026-11-06 15:27:12.904374492 -0500
+@@ -701,6 +701,38 @@
+ 	return GL_FALSE;
+ }
+ 
++#if defined(STORE_DEPTH_STENCIL) && defined(DEPTH_HINT) && defined(MASK_SKIP) && defined(MASK_KEEP)
++// MASK_KEEP (Galaxy port, patch 0018; needs DEPTH_HINT and MASK_SKIP, which build-vitagl.sh patches in): a framebuffer-object scene
++// that does not load its depth/stencil surface (the DEPTH_HINT gave load = GL_FALSE: vgl_mask_skip_next, set by apply_depth_hint just
++// before this) starts with the surface's background mask. With the scissor test off, update_scissor_test would draw a quad over the
++// whole target to set the mask everywhere; the background mask is made "set" instead and that quad is left out (tests.c). With the
++// scissor test on the background is made "clear", as MASK_SKIP expects (it then draws only the region quad). A scene that loads its
++// surface takes the stored mask and is not touched. Called as the depth/stencil argument of sceGxmBeginScene, i.e. after
++// apply_depth_hint and right before the scene begins (the background is part of the surface the scene is begun with).
++// vgl_mask_keep_ds names the surface whose scene may leave the quad out; update_scissor_test takes it once.
++// Off until vglSetMaskKeep(GL_TRUE) (the Galaxy host: GXV_VGL_MASKKEEP=1), so one library serves both sides of an A/B; while it is off
++// every such scene is begun with the background mask clear, which is what MASK_SKIP has always assumed (a surface that had it set while
++// the switch was on gets it cleared again at its next unloaded scene, before MASK_SKIP relies on it).
++GLboolean vgl_mask_keep_on = GL_FALSE;
++void vglSetMaskKeep(GLboolean on) { vgl_mask_keep_on = on ? GL_TRUE : GL_FALSE; }
++SceGxmDepthStencilSurface *vgl_mask_keep_ds = NULL;
++uint32_t vgl_mask_keeps = 0;
++uint32_t vglGetMaskKeeps(void) { return vgl_mask_keeps; }
++static SceGxmDepthStencilSurface *vgl_mask_keep(SceGxmDepthStencilSurface *ds) {
++	vgl_mask_keep_ds = NULL;
++	if (ds && vgl_mask_skip_next) {
++		const GLboolean keep = vgl_mask_keep_on && !scissor_test_state;
++		vglDepthStencilSurfaceSetBackgroundMask(ds, keep);
++		if (keep)
++			vgl_mask_keep_ds = ds;
++	}
++	return ds;
++}
++#define VGL_MASK_KEEP(ds) vgl_mask_keep(ds)
++#else
++#define VGL_MASK_KEEP(ds) (ds)
++#endif
++
+ GLboolean scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
+ 		// The attempts of this frame are used up: nothing is touched, nothing is submitted
+@@ -808,7 +840,7 @@
+ #endif
+ 					NULL, NULL, NULL,
+ 					&active_write_fb->colorbuffer,
+-					active_write_fb->depthbuffer_ptr);
++					VGL_MASK_KEEP(active_write_fb->depthbuffer_ptr));
+ #ifdef LOG_ERRORS
+ 			if (r)
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on framebuffer 0x%08X.\n", __FILE__, __LINE__, get_gxm_error_literal(r), active_write_fb);
+diff -ruN a/source/tests.c b/source/tests.c
+--- a/source/tests.c	2026-11-06 15:25:33.984360940 -0500
++++ b/source/tests.c	2026-11-06 15:25:54.471186323 -0500
+@@ -255,6 +255,39 @@
+ 
+ void update_scissor_test() {
+ 	const float scissor_depth = 1.0f;
++#if defined(STORE_DEPTH_STENCIL) && defined(DEPTH_HINT) && defined(MASK_SKIP) && defined(MASK_KEEP)
++	{
++		// MASK_KEEP (patch 0018, see gxm.c vgl_mask_keep): the update at the start of a framebuffer-object scene that began without
++		// loading its depth/stencil surface, with the scissor test off, on a surface whose background mask was set for it: the mask is
++		// set on every pixel already, which is all the full-target quad below would do. Only the region and its clip are set as the
++		// quad's path leaves them (the whole target). Nothing is drawn, no program, viewport, cull or stencil state is touched.
++		extern GLboolean vgl_mask_skip_next;
++		extern SceGxmDepthStencilSurface *vgl_mask_keep_ds;
++		extern uint32_t vgl_mask_keeps;
++		SceGxmDepthStencilSurface *kept = vgl_mask_keep_ds;
++		vgl_mask_keep_ds = NULL; // (one use: a later update in the scene draws as before)
++		if (kept && vgl_mask_skip_next && !scissor_test_state && !is_rendering_display && in_use_framebuffer && in_use_framebuffer->depthbuffer_ptr == kept) {
++			vgl_mask_skip_next = GL_FALSE;
++			vgl_mask_keeps++;
++			const uint32_t active_w = in_use_framebuffer->width, active_h = in_use_framebuffer->height;
++			region.x = region.gl_x < 0 ? 0 : region.gl_x;
++			region.w = region.gl_w;
++			region.h = region.gl_h;
++			region.y = active_h - region.gl_y - region.gl_h;
++			if (region.y < 0)
++				region.y = 0;
++			if (region.x + region.w > active_w)
++				region.w = active_w - region.x;
++			if (region.y + region.h > active_h)
++				region.h = active_h - region.y;
++#ifndef DISABLE_TILE_CLIPPER
++			sceGxmSetRegionClip(gxm_context, SCE_GXM_REGION_CLIP_OUTSIDE, 0, 0, active_w - 1, active_h - 1);
++#endif
++			dirty_scissor_state = GL_FALSE;
++			return;
++		}
++	}
++#endif
+ 
+ 	// Setting current vertex program to clear screen one and fragment program to scissor test one
+ 	sceGxmSetVertexProgram(gxm_context, clear_vertex_program_patched);

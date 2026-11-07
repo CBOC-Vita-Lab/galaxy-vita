@@ -137,6 +137,7 @@ void port_irq_poll_at(void* site);  // the same, naming the code to blame in the
 // Boots the OS layer and runs `entry` as the Wii default thread (priority 16).
 void port_os_boot(void (*entry)(void));
 int port_is_game_thread(void);
+int port_lc_mutex_fast(void); /* GXV_LC_MUTEX_FAST (os_thread.cpp): 1 = OSMutex.c skips its diagnostic caller check */
 // Stronger than TLS membership: a parked guest thread does not own the CPU.
 int port_owns_game_cpu(void);
 int64_t port_host_time_ns(void);  // monotonic
@@ -147,6 +148,17 @@ void port_host_sleep_ns(int64_t ns);
 int port_vita_thread_class(int cls) __attribute__((weak));
 static inline void port_thread_class(int cls) {
     if (port_vita_thread_class) port_vita_thread_class(cls);
+}
+// Thread layout (PS Vita only; port/core_layout.h): a helper thread that has no class (log writer, watchdog) calls port_thread_helper();
+// with GXV_CORE0_ALONE=1 it moves off the game's core 0. The disc read-ahead worker and a movie decoder call port_thread_io(): with
+// GXV_CORE3_IO=1 they try the system core and keep it only when the kernel grants it. Both do nothing elsewhere and with the switches off.
+int port_vita_thread_helper(void) __attribute__((weak));
+int port_vita_thread_io(int kind, int index) __attribute__((weak));
+static inline int port_thread_helper(void) {
+    return port_vita_thread_helper ? port_vita_thread_helper() : 0;  // the mask applied; 0: nothing changed (switch off, or not Vita)
+}
+static inline void port_thread_io(int kind, int index) {
+    if (port_vita_thread_io) port_vita_thread_io(kind, index);
 }
 
 // Freezes the game: the video retrace and audio DMA clocks stop, so the game
@@ -165,6 +177,7 @@ void port_vi_retrace(void);
 void port_skip_set_hold_seconds(float seconds);  // 0 turns skipping off
 int port_skip_inject_a(void);                    // A as the game should read it, -1: as pressed
 void port_skip_indicator(float* progress, int* forwarding, unsigned* skips);
+int port_skip_context_kind(void);                // PORT_SKIP_* of the dialogue or cutscene on screen, 0 none (cutscene_skip.cpp)
 int port_input_real_a(void);  // controller 0's A button as the player presses it (wpad.cpp)
 // The camera's left and right turns swapped (the invert_camera setting; the
 // game's side is port_input_camera_inverted in port/compat.h).

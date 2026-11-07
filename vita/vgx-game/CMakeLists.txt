@@ -21,7 +21,7 @@ if(VGL_SHADER_READER_ARCHIVE)
     set(vgl_archive "${VGL_SHADER_READER_ARCHIVE}")
 endif()
 set(SMG_TITLE_ID "SMGV00001" CACHE STRING "Title ID")
-add_executable(galaxy_native main.cpp entry.cpp settings_runtime.cpp fd_guard.cpp)
+add_executable(galaxy_native main.cpp entry.cpp settings_runtime.cpp title_art_runtime.cpp fd_guard.cpp)
 target_link_options(galaxy_native PRIVATE "-Wl,--wrap=_lseek_r")
 if(VGL_SHADER_READER_ARCHIVE)
     # Both sides must be compiled in; an unchanged driver/runtime fails the link.
@@ -72,8 +72,8 @@ target_include_directories(galaxy_native PRIVATE "${root}/platform/include" "${r
 target_include_directories(galaxy_native PRIVATE "${root}/platform/vgx/src" "${root}/vita/runtime")
 target_compile_features(galaxy_native PRIVATE cxx_std_20)
 target_compile_options(galaxy_native PRIVATE -O2 -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb
-    -fsigned-char -fshort-wchar -fno-fast-math -ffunction-sections -fdata-sections)
-set_source_files_properties(entry.cpp settings_runtime.cpp PROPERTIES COMPILE_OPTIONS "-fno-short-enums")
+    -fsigned-char -fshort-wchar -fno-builtin-wcslen -fno-fast-math -ffunction-sections -fdata-sections)
+set_source_files_properties(entry.cpp settings_runtime.cpp title_art_runtime.cpp PROPERTIES COMPILE_OPTIONS "-fno-short-enums")
 set_source_files_properties(main.cpp PROPERTIES COMPILE_OPTIONS "-fshort-enums")
 # The SDK converter appends SCE metadata to RX before the next load segment.
 target_link_options(galaxy_native PRIVATE -Wl,--gc-sections -Wl,--no-undefined -Wl,-Map,galaxy_native.map
@@ -82,6 +82,9 @@ target_link_options(galaxy_native PRIVATE -Wl,--gc-sections -Wl,--no-undefined -
     -Wl,--wrap=pte_osSemaphoreCancellablePend)
 # -pthread, NOT -lpthread: VitaSDK's spec turns it into --whole-archive -lpthread (libstdc++ finds its
 # thread functions through weak references; see the Strikers Makefile.vita).
+# libstdc++'s __gthread_active_p() is the test "is pthread_cancel linked" (gthr-posix.h): without it every std::mutex and
+# std::condition_variable silently does nothing (Strikers hit this). The link fails here rather than producing such a program.
+target_link_options(galaxy_native PRIVATE "-Wl,--require-defined=pthread_cancel")
 target_link_libraries(galaxy_native PRIVATE -Wl,--start-group "${RUNTIME_ARCHIVE}"
     -Wl,--whole-archive "${GAME_ARCHIVE}" -Wl,--no-whole-archive -Wl,--end-group
     "${vgl_archive}" "${VGL_DEPS}/lib/libvitashark.a" "${VGL_DEPS}/lib/libSceShaccCgExt.a"
@@ -90,15 +93,15 @@ target_link_libraries(galaxy_native PRIVATE -Wl,--start-group "${RUNTIME_ARCHIVE
     SceGxm_stub SceDisplay_stub SceCtrl_stub SceMotion_stub SceTouch_stub SceAudio_stub
     SceKernelThreadMgr_stub SceSysmem_stub SceIofilemgr_stub SceProcessmgr_stub
     SceShaccCg_stub SceCommonDialog_stub SceKernelDmacMgr_stub SceAppUtil_stub SceAppMgr_stub SceLibKernel_stub
-    SceRtc_stub ScePower_stub m)
+    SceRtc_stub ScePower_stub SceJpeg_stub m)
 vita_create_self(eboot.bin galaxy_native)
 # ATTRIBUTE2=12: the extended (about 365 MiB) memory budget, as the Strikers package sets it.
 set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
-# Bubble and LiveArea are original drawings; the preserved title background is documented in docs/ASSETS.md.
+# Bubble and LiveArea pictures here are original drawings (tools/handheld/make_livearea.py). The package carries no game artwork:
+# the game makes the loading-screen, Settings and bubble pictures from the player's own title screen on the first start
+# (title_art_runtime.cpp, docs/ASSETS.md).
 set(sys "${CMAKE_CURRENT_SOURCE_DIR}/sce_sys")
-include("${CMAKE_CURRENT_LIST_DIR}/loading_artwork.cmake")
-vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 01.10 NAME "Super Mario Galaxy"
-    ${smg_loading_picture}
+vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 02.00 NAME "Super Mario Galaxy"
     FILE "${sys}/icon0.png" sce_sys/icon0.png
     FILE "${sys}/pic0.png" sce_sys/pic0.png
     FILE "${sys}/livearea/contents/bg.png" sce_sys/livearea/contents/bg.png

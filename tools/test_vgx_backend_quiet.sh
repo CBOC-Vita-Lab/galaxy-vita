@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
+docker run --rm --name "galaxy-backend-quiet-$$" --pull=never --platform linux/arm64 --network none --cpus=2 \
   --mount "type=bind,source=$root,target=/work,readonly" -w /work \
   -e "QUIET_DIAGNOSTICS=${1:-default 1 0}" -e "QUIET_TRACES=${2:-0 1}" -e "QUIET_TARGET=${3:-all}" \
   -e EGL_PLATFORM=surfaceless -e LIBGL_ALWAYS_SOFTWARE=1 -e GALLIUM_DRIVER=softpipe \
@@ -21,7 +21,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
         clang++ -std=c++17 -stdlib=libc++ -O1 -g -DVGX_NO_NEON -D__VGX_VITA__ -DPORT_LOGGING=0 -DVGX_COLDTRACE=$trace \
           -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--wrap=glDrawElements,--wrap=glFinish,--wrap=glGetError,--wrap=glReadPixels,--wrap=getenv \
           -Wl,--wrap=printf,--wrap=vprintf,--wrap=fprintf,--wrap=vfprintf,--wrap=puts,--wrap=putchar,--wrap=fputs,--wrap=fputc,--wrap=putc,--wrap=fwrite \
-          -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party "${options[@]}" \
+          -Itests/autoq_clock_stubs -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party "${options[@]}" \
           -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
           tests/vgx_backend_quiet.cpp platform/vgx/src/vgx_shadergen.cpp vita/vgx-game/silent_stdio.cpp \
           -o /tmp/backend-quiet -lEGL -lGLESv2 -pthread -l:libasan.so.8 -l:libubsan.so.1

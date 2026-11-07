@@ -80,14 +80,38 @@ void C_QUATSlerp(const Quaternion* p, const Quaternion* q, Quaternion* r, f32 t)
 f32 C_VECMag(const Vec*);
 
 /* Paired Single Vector */
+#if defined(TARGET_PC) && !defined(PORT_MTX_DEFINE)
+// (port) The smallest helpers inline: their definitions (platform/src/sdk/mtx.c, PORT_MTX_DEFINE) are outside the game's
+// link-time optimisation, where a call costs more than the arithmetic. The same operations in the same order.
+static inline void PSVECAdd(const Vec* a, const Vec* b, Vec* ab) {
+    f32 x = a->x + b->x, y = a->y + b->y, z = a->z + b->z;
+    ab->x = x; ab->y = y; ab->z = z;
+}
+static inline void PSVECSubtract(const Vec* a, const Vec* b, Vec* a_b) {
+    f32 x = a->x - b->x, y = a->y - b->y, z = a->z - b->z;
+    a_b->x = x; a_b->y = y; a_b->z = z;
+}
+static inline void PSVECScale(const Vec* src, Vec* dst, f32 scale) {
+    f32 x = src->x * scale, y = src->y * scale, z = src->z * scale;
+    dst->x = x; dst->y = y; dst->z = z;
+}
+static inline f32 PSVECDotProduct(const Vec* a, const Vec* b) { return a->x * b->x + a->y * b->y + a->z * b->z; }
+static inline void PSVECCrossProduct(const Vec* a, const Vec* b, Vec* axb) {
+    f32 x = a->y * b->z - a->z * b->y;
+    f32 y = a->z * b->x - a->x * b->z;
+    f32 z = a->x * b->y - a->y * b->x;
+    axb->x = x; axb->y = y; axb->z = z;
+}
+#else
 void PSVECAdd(const Vec*, const Vec*, Vec*);
 void PSVECSubtract(const Vec*, const Vec*, Vec*);
 void PSVECScale(const Vec*, Vec*, f32);
+f32 PSVECDotProduct(const Vec*, const Vec*);
+void PSVECCrossProduct(const Vec*, const Vec*, Vec*);
+#endif
 void PSVECNormalize(const Vec*, Vec*);
 
 f32 PSVECMag(const Vec*);
-f32 PSVECDotProduct(const Vec*, const Vec*);
-void PSVECCrossProduct(const Vec*, const Vec*, Vec*);
 f32 PSVECDistance(const Vec*, const Vec*);
 
 void C_MTXLightPerspective(Mtx m, f32 fovY, f32 aspect, f32 scaleS, f32 scaleT, f32 transS, f32 transT);

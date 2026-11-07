@@ -1,4 +1,9 @@
 #include "JSystem/JAudio2/JAISeqMgr.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "JSystem/JAudio2/JAISeq.hpp"
 #include "JSystem/JAudio2/JAISoundHandles.hpp"
 #include "JSystem/JAudio2/JAISoundInfo.hpp"
@@ -14,6 +19,7 @@ bool JAISeqMgr::isUsingSeqData(const JAISeqDataRegion& seqDataRegion) {
 }
 
 int JAISeqMgr::releaseSeqData(const JAISeqDataRegion& seqDataRegion) {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the main thread drives JAudio here, never in a window; port/audio_cpu1.h)
     bool bVar1 = false;
     JSULink< JAISeq >* link;
     for (link = mSeqList.getFirst(); link != mSeqList.getEnd(); link = link->getNext()) {
@@ -48,6 +54,7 @@ void JAISeqMgr::freeDeadSeq_() {
 }
 
 bool JAISeqMgr::startSound(JAISoundID id, JAISoundHandle* handle, const JGeometry::TVec3< f32 >* posPtr) {
+    PORT_AUDIO_TOUCH();
     if (handle != nullptr && handle->isSoundAttached()) {
         (*handle)->stop();
     }
@@ -75,6 +82,7 @@ bool JAISeqMgr::startSound(JAISoundID id, JAISoundHandle* handle, const JGeometr
 }
 
 void JAISeqMgr::calc() {
+    PORT_AUDIO_TOUCH();
     mMove.calc();
 
     JSULink< JAISeq >* i;
@@ -85,6 +93,7 @@ void JAISeqMgr::calc() {
 }
 
 void JAISeqMgr::stop() {
+    PORT_AUDIO_TOUCH();
     JSULink< JAISeq >* i;
     for (i = mSeqList.getFirst(); i != mSeqList.getEnd(); i = i->getNext()) {
         i->getObject()->stop();
@@ -92,6 +101,7 @@ void JAISeqMgr::stop() {
 }
 
 void JAISeqMgr::stop(u32 fadeTime) {
+    PORT_AUDIO_TOUCH();
     JSULink< JAISeq >* i;
     for (i = mSeqList.getFirst(); i != mSeqList.getEnd(); i = i->getNext()) {
         i->getObject()->stop(fadeTime);
@@ -99,6 +109,7 @@ void JAISeqMgr::stop(u32 fadeTime) {
 }
 
 void JAISeqMgr::stopSoundID(JAISoundID id) {
+    PORT_AUDIO_TOUCH();
     if (!id.isAnonymous()) {
         JSULink< JAISeq >* i;
         for (i = mSeqList.getFirst(); i != mSeqList.getEnd(); i = i->getNext()) {
@@ -110,6 +121,7 @@ void JAISeqMgr::stopSoundID(JAISoundID id) {
 }
 
 void JAISeqMgr::mixOut() {
+    PORT_AUDIO_TOUCH();
     JSULink< JAISeq >* i;
     for (i = mSeqList.getFirst(); i != mSeqList.getEnd(); i = i->getNext()) {
         i->getObject()->JAISeqMgr_mixOut_(mMove.mParams, mSoundActivity);

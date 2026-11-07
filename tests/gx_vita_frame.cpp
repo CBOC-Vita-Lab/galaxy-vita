@@ -127,6 +127,7 @@ extern "C" void port_vita_input_poll(float,PortPadState*) { std::exit(95); }
 extern "C" void port_input_set(int,const PortPadState*) {}
 extern "C" int64_t port_host_time_ns() { return 1; }
 extern "C" int port_vgx_active() { return 0; }
+extern "C" void port_vgx_marker(unsigned) {}
 void testViFlush();
 void configureTestVi(uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t,void*,uint32_t=1,uint32_t=22,uint32_t=0,uint32_t=0);
 void setTestViPresenter(void (*)(void*,int));

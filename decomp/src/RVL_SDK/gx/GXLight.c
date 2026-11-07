@@ -7,6 +7,74 @@
 #define PI 3.14159265358979323846f
 #define BIG_NUMBER 1.0E+18f
 
+#if defined(TARGET_PC)
+#include <string.h>
+// ============================================================== (1.3 port) GXV_LIGHT_DEDUP (default 0; switch and scope:
+// decomp/src/Game/Map/LightFunction.cpp port_light_scope_enter / _exit, used by DrawBufferGroup::drawOpa / drawXlu)
+// Every shape drawer of a DrawBuffer pass loads the light of its first packet (DrawBufferShapeDrawer::draw -> ActorLightCtrl::loadLight
+// -> LightFunction::loadActorLightInfo: lights 0, 1 and 2), so a model with ten materials loads the same three lights ten times
+// in a row, and the next model of the pass, lit by the same area light, loads them again: ~3 x 69 FIFO bytes that the front end
+// decodes word by word (WriteXFWord) only to find every word unchanged. Inside such a pass (a scope the game opens), a load whose
+// sixteen words equal what this slot was last loaded with is not sent: the light memory already holds them.
+//   Why the shadow is the light memory's content inside the scope: in this game XF light memory (0x600..0x67F) is written only by
+// GXLoadLightObjImm (no GXLoadLightObjIndx exists; the J3D material lists' light objects, J3DColorBlockLightOn::mLight, are never
+// set, so no J3D list writes lights; ShapePacketUserData's lists write texture-coordinate state only). The shadow is dropped when
+// the scope opens and closes, and at every list call once a light load was ever recorded into a display list (gx->inDispList:
+// such a list writes light memory when called; none is made in play). A load made while recording a list is never skipped.
+// GX state other than the FIFO is as before: bpSentNot is set as the load sets it.
+int __PortGXLightScope = 0;     // > 0: inside a pass the game opened (port_light_scope_enter)
+u32 __PortGXLightGen = 1;       // moves whenever light memory may have changed (a load sent, the shadow dropped)
+u32 __PortGXLightSent = 0;      // (counters for the "light-dedup:" line)
+u32 __PortGXLightSkipped = 0;
+static u32 sLightShadow[8][13];  // Color, a[3], k[3], lpos[3], ldir[3] as last sent to each slot (the three leading words are 0)
+static u32 sLightShadowValid = 0;
+static int sLightInList = 0;
+
+void __PortGXLightShadowDrop(void) {
+    sLightShadowValid = 0;
+    ++__PortGXLightGen;
+}
+
+// GXCallDisplayList: a list that may hold a light load (see above).
+void __PortGXLightListCall(void) {
+    if (sLightInList) {
+        __PortGXLightShadowDrop();
+    }
+}
+
+// 1: the load is already in light memory (not sent); 0: send it (the shadow then holds it).
+static int PortGXLightSame(const GXLightObjInt* obj, u32 idx) {
+    u32 w[13];
+    if (gx->inDispList) {
+        sLightInList = 1;  // (into a list: light memory is written when the list is called)
+        __PortGXLightShadowDrop();
+        return 0;
+    }
+    if (__PortGXLightScope <= 0) {
+        if (sLightShadowValid) {
+            __PortGXLightShadowDrop();
+        } else {
+            ++__PortGXLightGen;
+        }
+        return 0;
+    }
+    w[0] = obj->Color;
+    memcpy(&w[1], obj->a, 12);
+    memcpy(&w[4], obj->k, 12);
+    memcpy(&w[7], obj->lpos, 12);
+    memcpy(&w[10], obj->ldir, 12);
+    if ((sLightShadowValid & (1u << idx)) != 0 && memcmp(sLightShadow[idx], w, sizeof(w)) == 0) {
+        ++__PortGXLightSkipped;
+        return 1;
+    }
+    memcpy(sLightShadow[idx], w, sizeof(w));
+    sLightShadowValid |= 1u << idx;
+    ++__PortGXLightGen;
+    ++__PortGXLightSent;
+    return 0;
+}
+#endif
+
 void GXInitLightAttn(GXLightObj* lt_obj, f32 a0, f32 a1, f32 a2, f32 k0, f32 k1, f32 k2) {
     GX_SETUP_LIGHT(obj, lt_obj)
     obj->a[0] = a0;
@@ -222,6 +290,33 @@ void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
     idx = ConvLightID2Num(light);
     idx &= 7;
     addr = (0x600 + idx * 0x10);
+#if defined(TARGET_PC)
+    if (PortGXLightSame(obj, idx)) {
+        gx->bpSentNot = GX_TRUE;  // (GXV_LIGHT_DEDUP: these words are in light memory already; GX state as after the load)
+        return;
+    }
+    {
+        // GXV_FIFO_BATCH (port/gx_fifo.h): the header and the light's sixteen words as one batched command (the same 69 bytes
+        // as WriteLightObjPS's element-wise writes, which run when the batch is off or would reach the FIFO's limit).
+        u8* p;
+        if (__PortGXFifoRoom(&p, 5 + 64)) {
+            int i;
+            p = __PortGXPut_u8(p, CP_OPCODE(0, 2));
+            p = __PortGXPut_u32(p, CP_XF_LOADREGS((addr), 0xF));
+            p = __PortGXPut_u32(p, 0);
+            p = __PortGXPut_u32(p, 0);
+            p = __PortGXPut_u32(p, 0);
+            p = __PortGXPut_u32(p, obj->Color);
+            for (i = 0; i < 3; i++) p = __PortGXPut_f32(p, obj->a[i]);
+            for (i = 0; i < 3; i++) p = __PortGXPut_f32(p, obj->k[i]);
+            for (i = 0; i < 3; i++) p = __PortGXPut_f32(p, obj->lpos[i]);
+            for (i = 0; i < 3; i++) p = __PortGXPut_f32(p, obj->ldir[i]);
+            __PortGXFifoCommit(p);
+            gx->bpSentNot = GX_TRUE;
+            return;
+        }
+    }
+#endif
     GX_WRITE_U8(CP_OPCODE(0, 2));
     GX_WRITE_U32(CP_XF_LOADREGS((addr), 0xF));
     WriteLightObjPS(obj, (void*)0xCC008000);

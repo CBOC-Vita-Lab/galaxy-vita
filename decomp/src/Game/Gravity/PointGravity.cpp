@@ -9,6 +9,13 @@ void PointGravity_FORCE_MATCH_SDATA2() {
 PointGravity::PointGravity() : PlanetGravity(), mOrigPosition(0, 0, 0), mTranslation(0, 0, 0) {
 }
 
+#ifdef TARGET_PC
+f32 PointGravity::calcReach(TVec3f* pCentre) const {
+    *pCentre = mTranslation;
+    return mRange < 0.0f ? -1.0f : mRange + mDistant;
+}
+#endif
+
 bool PointGravity::calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPosition) const {
     TVec3f direction = mTranslation - rPosition;
     f32 distance = direction.length();

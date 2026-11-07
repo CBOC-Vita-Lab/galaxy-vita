@@ -165,6 +165,7 @@ void port_vr_pause_menu(int selecting);
 #define PORT_SKIP_DEMO 4     // an in-engine cutscene
 #define PORT_SKIP_TALK 5     // a dialogue outside a cutscene (most people's talk)
 void port_skip_context(int kind);
+int port_skip_movie_playing(void);  // the last context was a movie (any thread)
 int port_skip_take(int kind);
 // Whether a disc file (a path inside the game's file system, such as "/MovieData/PrologueB.thp") is on the data
 // card: a movie that is not there is skipped (platform/src/dvd/dvd.cpp), the game would wait for it forever.

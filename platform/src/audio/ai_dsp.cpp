@@ -13,7 +13,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <pthread.h>
+
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -102,7 +105,152 @@ static struct {
 static std::atomic<int64_t> sMixNs{0}, sMixMaxNs{0};
 static std::atomic<u32> sMixCalls{0};
 
+// The mixer renders one 80-sample sub-frame into the game's two output buffers.
+struct MixJob {
+    s16* outL;
+    s16* outR;
+    u16 level;
+};
+
+static void mixOne(const MixJob& job) {
+    const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
+    {
+        vgx::workload::Scope observation(vgx::workload::Dsp);
+        port_dsp_mix_frame(1, job.outL, job.outR, job.level);
+    }
+    const int64_t dt = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - t0 : 0;
+    sMixNs.fetch_add(dt, std::memory_order_relaxed);
+    sMixCalls.fetch_add(1, std::memory_order_relaxed);
+    if (dt > sMixMaxNs.load(std::memory_order_relaxed)) sMixMaxNs.store(dt, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// The mixing on a thread of its own (GXV_AUDIO_THREAD=1)
+//
+// On the Wii the sub-frame is rendered by the DSP chip, a processor of its own: the CPU's audio thread releases the voices
+// (the 0x00 packet of the last group of sixteen), goes back to waiting for a message, and the DSP's mail wakes it for the next
+// sub-frame.  Here the mixer is software and ran inside the release, on the guest CPU, i.e. on core 0 in front of the game's
+// own work (about 0.1 ms a sub-frame, 400 a second).  With the switch on, the release hands the sub-frame to a host thread
+// (cores 1-2 on the console, see port_vita_audio_mixer_boost) and returns; the guest's audio thread then blocks in its message
+// queue, the game thread runs on, and when the thread has finished it queues the same reply mail and raises the same DSP
+// interrupt, which the guest takes at its next safe point.  What the game's audio code (JASAudioThread, JASDriver, the
+// sequences, JASPortCmd and its queues) does is untouched: it still runs on the guest CPU, in the same order, and the
+// protocol stays lock-step (one sub-frame in flight; the next release only comes after the reply mail).  Every other command
+// waits for the sub-frame in flight to be finished and its mail queued first, so the DSP's in-order mailbox is kept.
+// Off (the default) the sub-frame is rendered inside the release as before.
+//   GXV_AUDIO_THREAD=0   mix inside the release (default)
+//   GXV_AUDIO_THREAD=1   mix on the mixer thread; if the thread cannot be made, inside the release
+// The sub-frames' PCM and the voice blocks it leaves are the same bytes either way (tests/dsp_async_mix.cpp).
+// ---------------------------------------------------------------------------
+extern "C" void __attribute__((weak)) port_vita_audio_mixer_boost(void);  // vita/runtime/audio.cpp: core and priority
+
+static bool mixThreadWanted() {
+    static const bool on = vgx::EnvInt("GXV_AUDIO_THREAD", 0) == 1;  // read once; default off
+    return on;
+}
+
+// (Never destroyed: the mixer thread is detached and still waits on them when the process exits.)
+static std::mutex& sJobMutex = *new std::mutex;
+static std::condition_variable& sJobCv = *new std::condition_variable;   // the mixer thread waits here for a job
+static std::condition_variable& sDoneCv = *new std::condition_variable;  // the guest waits here for the job in flight
+static MixJob sJob;
+static bool sJobPending = false;           // guarded by sJobMutex
+static std::atomic<bool> sJobBusy{false};  // handed over, and its reply mail is not queued yet
+static std::atomic<int> sMixThreadState{0};  // 0: not started, 1: running, -1: could not be made
+static std::atomic<u32> sMixThreadJobs{0}, sMixDrainWaits{0};
+static std::atomic<int64_t> sMixDrainNs{0};
+
+static void* mixThreadMain(void*) {
+    PORT_QEMU_THREAD("dsp-mixer");
+    if (port_vita_audio_mixer_boost) {
+        port_vita_audio_mixer_boost();
+    }
+    for (;;) {
+        MixJob job;
+        {
+            std::unique_lock<std::mutex> lk(sJobMutex);
+            sJobCv.wait(lk, [] { return sJobPending; });
+            job = sJob;
+            sJobPending = false;
+        }
+        mixOne(job);
+        sMixThreadJobs.fetch_add(1, std::memory_order_relaxed);
+        // The mail first, then the "free" flag: whoever sees the flag clear queues its own mail behind this one.
+        queueMail(0xDCD10004, 0xF355FF00);
+        {
+            std::lock_guard<std::mutex> lk(sJobMutex);
+            sJobBusy.store(false, std::memory_order_release);
+        }
+        sDoneCv.notify_all();
+        port_irq_raise(PORT_IRQ_DSP);
+    }
+    return nullptr;
+}
+
+// Guest side: returns when no sub-frame is in flight (its voice blocks and PCM written, its mail queued).
+static void drainMix() {
+    if (!sJobBusy.load(std::memory_order_acquire)) {
+        return;
+    }
+    const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
+    {
+        std::unique_lock<std::mutex> lk(sJobMutex);
+        sDoneCv.wait(lk, [] { return !sJobBusy.load(std::memory_order_acquire); });
+    }
+    sMixDrainWaits.fetch_add(1, std::memory_order_relaxed);
+    if (PORT_RUNTIME_DIAGNOSTICS) sMixDrainNs.fetch_add(port_host_time_ns() - t0, std::memory_order_relaxed);
+}
+
+static bool startMixThread() {
+    const int state = sMixThreadState.load(std::memory_order_acquire);
+    if (state != 0) {
+        return state > 0;
+    }
+    PortHostAllocScope host;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 128u << 10);
+    pthread_t thread;
+    const int rc = pthread_create(&thread, &attr, mixThreadMain, nullptr);
+    pthread_attr_destroy(&attr);
+    if (rc == 0) {
+        pthread_detach(thread);
+    }
+    port_log("audio: DSP mixer %s (GXV_AUDIO_THREAD=1)", rc == 0 ? "on a thread of its own" : "thread could not be made; mixing in the release");
+    sMixThreadState.store(rc == 0 ? 1 : -1, std::memory_order_release);
+    return rc == 0;
+}
+
+// Hands one sub-frame to the mixer thread; false: the caller mixes it itself.
+static bool submitMix(const MixJob& job) {
+    if (!startMixThread()) {
+        return false;
+    }
+    drainMix();  // (lock-step: nothing is in flight here unless the game broke the protocol)
+    {
+        std::lock_guard<std::mutex> lk(sJobMutex);
+        sJob = job;
+        sJobPending = true;
+        sJobBusy.store(true, std::memory_order_release);
+    }
+    sJobCv.notify_one();
+    return true;
+}
+
+// (tests/dsp_async_mix.cpp) Sub-frames the mixer thread has rendered so far.
+extern "C" unsigned port_dsp_mixer_thread_jobs(void) { return sMixThreadJobs.load(std::memory_order_relaxed); }
+
+// GXV_AUDIO_HOLD (platform/src/os/os_thread.cpp): while a sync frame has sub-frames left to render, its DSP interrupts continue it
+// and the game thread takes them at once; the mail of the frame's last sub-frame and the AI interrupt may wait for the game thread's
+// next sleep. Weak: the host tests that link this file without the scheduler (tests/dsp_async_mix.cpp) have neither function.
+extern "C" void __attribute__((weak)) port_audio_irq_urgent(int urgent);
+extern "C" int __attribute__((weak)) port_audio_hold_stats(unsigned* elsewhere, unsigned* expired, unsigned* atOnce, unsigned* begun);
+static void noteFrameState() {
+    if (port_audio_irq_urgent) port_audio_irq_urgent(sFrame.done < sFrame.subFrames ? 1 : 0);
+}
+
 static void executePacket() {
+    drainMix();  // (GXV_AUDIO_THREAD) the DSP does its commands in order: a sub-frame in flight is finished, its mail queued, first
     const std::vector<u32>& p = sPacket;
     u32 w0 = p.empty() ? 0 : p[0];
     u32 cmd = w0 >> 24;
@@ -117,17 +265,15 @@ static void executePacket() {
     case 0x00:  // release halt: voices 0 .. 16 * (group + 1) - 1 are ready for the sub-frame
         if (((w0 >> 16) & 0xFF) == 3 && sFrame.done < sFrame.subFrames) {
             if (sFrame.outL && sFrame.outR) {
-                const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() : 0;
-                {
-                    vgx::workload::Scope observation(vgx::workload::Dsp);
-                    port_dsp_mix_frame(1, sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel);
+                const MixJob job{sFrame.outL + sFrame.done * 80, sFrame.outR + sFrame.done * 80, sMixerLevel};
+                sFrame.done++;
+                if (mixThreadWanted() && submitMix(job)) {
+                    break;  // (the mixer thread queues the reply mail and raises the interrupt when it is done)
                 }
-                const int64_t dt = PORT_RUNTIME_DIAGNOSTICS ? port_host_time_ns() - t0 : 0;
-                sMixNs.fetch_add(dt, std::memory_order_relaxed);
-                sMixCalls.fetch_add(1, std::memory_order_relaxed);
-                if (dt > sMixMaxNs.load(std::memory_order_relaxed)) sMixMaxNs.store(dt, std::memory_order_relaxed);
+                mixOne(job);
+            } else {
+                sFrame.done++;
             }
-            sFrame.done++;
             queueMail(0xDCD10004, 0xF355FF00);
         }
         break;
@@ -145,6 +291,7 @@ static void executePacket() {
         // Other control words need no reply.
         break;
     }
+    noteFrameState();  // (GXV_AUDIO_HOLD; before the guest CPU can go back to the game thread)
     port_irq_raise(PORT_IRQ_DSP);
 }
 
@@ -249,8 +396,62 @@ extern "C" int __attribute__((weak)) port_audio_take_speaker_stats(unsigned* und
 
 // Blocks JAudio had to fill with a held sample because the DSP frame for them was not finished (JASDriver::readDspBuffer):
 // a dropout the "replayed" count does not see, since the game did answer the AI interrupt in time.
-static std::atomic<u32> sDspHolds{0};
-extern "C" void port_audio_note_dsp_hold(void) { sDspHolds.fetch_add(1, std::memory_order_relaxed); }
+static std::atomic<u32> sDspHolds{0}, sDspHolds5{0};
+extern "C" void port_audio_note_dsp_hold(void) {
+    sDspHolds.fetch_add(1, std::memory_order_relaxed);
+    sDspHolds5.fetch_add(1, std::memory_order_relaxed);  // (the 5 s line)
+}
+
+// GXV_AUDIO_CPU1 set (0 or 1), or GXV_AUDIO_STATS=1 (platform/src/os/os_thread.cpp counts): every 5 s, where the game's audio thread ran
+// and what it cost the game thread on core 0, with the sound's health over the same 5 s.  Weak: the host tests that link this file without
+// the scheduler have no counts.
+extern "C" int __attribute__((weak)) port_audio_cpu_stats(int64_t ns[7], unsigned n[8]);
+// The basic log (ux0:data/smg/log.txt): port_log reaches it only in builds with runtime diagnostics. Weak for the host tests.
+extern "C" void __attribute__((weak)) port_log_summary(const char* fmt, ...);
+// (the AI clock thread, after each block; `blocks5`/`late5` are its counts since the last line, cleared here)
+static void audioCpuLine(u32& blocks5, u32& late5) {
+    static int64_t last = 0;
+    static int lastUnderruns = 0;
+    static bool off = false;
+    if (off || !port_audio_cpu_stats) return;
+    const int64_t now = port_host_time_ns();
+    if (last == 0) {  // (the first block: the counts start here)
+        int64_t ns[7];
+        unsigned n[8];
+        if (port_audio_cpu_stats(ns, n) < 0) {
+            off = true;  // (not counting: the switches are unset)
+            return;
+        }
+        last = now;
+        lastUnderruns = port_audio_underruns();
+        sDspHolds5.store(0, std::memory_order_relaxed);
+        blocks5 = late5 = 0;
+        return;
+    }
+    if (now - last < 5000000000ll) return;
+    const double secs = (now - last) / 1e9;
+    last = now;
+    int64_t ns[7] = {};
+    unsigned n[8] = {};
+    const int mode = port_audio_cpu_stats(ns, n);
+    const int underruns = port_audio_underruns();
+    const u32 dspLate = sDspHolds5.exchange(0, std::memory_order_relaxed);
+    if (mode < 0 || !port_log_summary) return;
+    const double turns = secs * 60.0;  // (per 1/60 s: the game's turns at full speed)
+    // "taken from the game thread": the audio thread on core 0 while the game thread was ready to run, plus the game thread's waits for a
+    // run on the second CPU; that is what the switch is for.
+    // (mode 2: on, but the audio thread never started; windows 0 with the switch on: GameSystem::calcAnim/draw never opened one)
+    port_log_summary("audio cpu: %.1f s, GXV_AUDIO_CPU1=%d%s: taken from the game thread %.2f ms per turn (core 0: audio thread %.1f ms in %u runs "
+             "while the game thread was ready, %.1f ms while it slept; waits for core 1 %.1f ms, %u, %u at a window's end); core 1: audio "
+             "thread %.1f ms in %u runs (%u interrupt batches); other guest threads %.1f ms, idle %.1f ms; %u windows (%u closed by JAudio, "
+             "%u gate closes); sound: %u blocks, %u late (played as silence), %u DSP late, %d device underruns",
+             secs, mode == 2 ? 1 : mode,
+             mode == 2 ? " (NOT IN EFFECT: the game's audio thread has not marked itself)" : mode == 1 && n[5] == 0 ? " (NOT IN EFFECT: no window opened)" : "",
+             (ns[1] + ns[6]) / 1e6 / turns, ns[1] / 1e6, n[0], ns[4] / 1e6, ns[6] / 1e6, n[3], n[4], ns[5] / 1e6, n[1], n[2],
+             ns[2] / 1e6, ns[3] / 1e6, n[5], n[6], n[7], blocks5, late5, dspLate, underruns - lastUnderruns);
+    lastUnderruns = underruns;
+    blocks5 = late5 = 0;
+}
 
 static void aiIrq() {
     if (sDmaCallback) {
@@ -296,6 +497,7 @@ static void aiClock() {
     int64_t next = port_host_time_ns();  // start of the next block (timer pacing)
     u32 answered = sDmaLatched.load();
     u32 blocks = 0, late = 0, lateRun = 0, lateRunMax = 0;
+    u32 blocks5 = 0, late5 = 0;  // (the 5 s audio cpu line)
     int64_t reportAt = next + 10000000000ll, minQueued = INT64_MAX, maxQueued = -1;
     static const bool logAlways = getenv("PETARI_AUDIOLOG") != nullptr;
     // How long this thread goes between two passes of its loop (it sleeps 4 ms at most): a long gap is the scheduler keeping
@@ -346,6 +548,7 @@ static void aiClock() {
                 continue;
             }
             late++;
+            late5++;
             lateBlock = true;
             if (++lateRun > lateRunMax) lateRunMax = lateRun;
         } else {
@@ -387,6 +590,8 @@ static void aiClock() {
         }
         port_irq_raise(PORT_IRQ_AI);
         blocks++;
+        blocks5++;
+        audioCpuLine(blocks5, late5);  // (GXV_AUDIO_CPU1 / GXV_AUDIO_STATS: every 5 s)
         if (queued < minQueued) minQueued = queued;
         if (queued > maxQueued) maxQueued = queued;
         next += dur;
@@ -403,6 +608,23 @@ static void aiClock() {
             const u32 mixes = sMixCalls.exchange(0);
             const int64_t mixNs = sMixNs.exchange(0), mixMax = sMixMaxNs.exchange(0);
             const u32 dspHolds = sDspHolds.exchange(0, std::memory_order_relaxed);
+            char mt[112] = "";
+            if (sMixThreadState.load(std::memory_order_acquire) > 0) {
+                snprintf(mt, sizeof(mt), "; mixer thread %u sub-frames, the game's audio waited for it %u times (%.2f ms)",
+                         sMixThreadJobs.exchange(0, std::memory_order_relaxed), sMixDrainWaits.exchange(0, std::memory_order_relaxed),
+                         sMixDrainNs.exchange(0, std::memory_order_relaxed) / 1e6);
+            }
+            // (GXV_AUDIO_HOLD) how the audio interrupts were taken: "in the game's waits" is what the switch is for (taken while the game
+            // thread slept, or by another guest thread), "at the limit" by the running game thread after the whole limit, "at once" by the
+            // running game thread without a hold (a frame's sub-frames, a yield); "held" counts the holds begun.
+            char hold[160] = "";
+            unsigned hElse = 0, hExp = 0, hNow = 0, hBegun = 0;
+            if (port_audio_hold_stats) {
+                if (const int holdMs = port_audio_hold_stats(&hElse, &hExp, &hNow, &hBegun)) {
+                    snprintf(hold, sizeof(hold), "; audio interrupts (GXV_AUDIO_HOLD=%d): %u in the game's waits, %u at the limit, %u at once, %u held",
+                             holdMs, hElse, hExp, hNow, hBegun);
+                }
+            }
             unsigned spkUnder = 0, spkDropped = 0;
             const bool spkOn = port_audio_take_speaker_stats(&spkUnder, &spkDropped) != 0;
             if (late || dspHolds || underruns != lastUnderruns || logEvery) {
@@ -412,9 +634,9 @@ static void aiClock() {
                 } else {
                     snprintf(spk, sizeof(spk), "; remote speaker off");
                 }
-                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held)%s",
+                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held)%s%s%s",
                          blocks, late, underruns - lastUnderruns, minQueued / 1e6, maxQueued / 1e6, peak, mixes, mixes ? mixNs / 1e6 / mixes : 0.0, mixMax / 1e6,
-                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, spk);
+                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, spk, mt, hold);
             }
             lastUnderruns = underruns;
             gapMax = 0;

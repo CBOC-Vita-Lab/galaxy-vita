@@ -55,6 +55,8 @@ every switch keeps the older path reachable for comparison. The ones a player mi
 | `PETARI_SETTINGS_SE` | 1 | Its sounds. `0` silences them |
 | `PETARI_REAR_ACCUM` | 1 | Rear touch aiming adds up slow slides. `0`: only faster slides move the pointer |
 | `GXV_CHARAA` | 0 | Edge smoothing of the characters and key items only (FXAA in small boxes inside the final upscale, the HUD left alone). `1` on, `2` shows its coverage tinted red |
+| `GXV_EDGE_AA` | 0 | Edge smoothing of the whole picture in the present (FXAA 3.11 console, in place of the blit or sharpened upscale; the HUD drawn again unfiltered; off on the multisampled rungs). `1` on, `2` shows the pixels it changes tinted red, `3` on for the left half of the screen only (A/B screenshots) |
+| `GXV_PRESENT_FAST` | 0 | One-pass present (upscale + unsharp mask + edge smoothing) with non-dependent reads, half maths and no branch, in place of the sharpened upscale and of `GXV_EDGE_AA`'s FXAA program. `1`: 3 reads without edge smoothing (Strikers' FAST mask), `2`: 5 reads (today's mask exactly); with `GXV_EDGE_AA` both use a 5-read kernel that blends along horizontal / vertical edges (diagonals only at 960x544 1:1); the HUD drawn again plainly. `GXV_PRESENT_FAST_EDGE` / `_RAMP` (per mille, 100 / 150): where smoothing starts / is full |
 
 Developer switches (`GXV_*` in `platform/vgx/src/` and `platform/vgx/vita/vgx_host_galaxy_vita.cpp`,
 `PETARI_*` in `platform/src/`) are documented where they are read. Many have a verify mode
@@ -80,8 +82,11 @@ not console timings.
   recognised by a kept copy instead of a hash (`GXV_SLBYTES`). `GXV_STATELIST=2` verified
   0 mismatches in 458,752 replays (Comet Observatory) and in emulator runs.
 - **Resolution cache** (`GXV_RSCACHE`): a hash of exactly the registers the shader keys read,
-  kept up to date by the register writers, maps to the shader ids through a 1,024-entry memo;
-  render state, texture bindings and uniform blocks are rebuilt only from what they depend on.
+  kept up to date by the register writers, maps to the shader ids through a memo (4-way, 2,048
+  sets; `GXV_KEYMEMO_WAYS`, 1 = direct-mapped; the first version had 1,024 direct-mapped entries and
+  missed 7.4% of its lookups in the Comet Observatory, 4.3% in Good Egg, now 0.01% and 0.03% over a
+  whole desktop run); render state, texture bindings and uniform blocks are rebuilt only from what
+  they depend on.
 - **Register no-op shadows** (`GXV_REGSHADOW`) for TEV colours and CP vertex formats, and a
   **texture binding memo** (`GXV_TEXMEMO`).
 - **Bigger front caches:** shader registry 64 -> 1,024 slots, texture cache 128 -> 1,024, program
@@ -114,9 +119,22 @@ not console timings.
   A per-frame depth plan (`GXV_DEPTHPLAN`), swapping the EFB colour buffer instead of copying it
   (`GXV_EFBSWAP`), late direct passes (`GXV_PASSDIRECT2`) and a hoisted corner copy
   (`GXV_PASSHOIST`, only on whole render pixels) cut the number of scenes. The desktop build's
-  in-process verifier (`GXV_PASSVERIFY`) checks each change frame by frame.
+  in-process verifier (`GXV_PASSVERIFY`) checks each change frame by frame. `GXV_EFBSWAP2` extends
+  the swap to the two whole-screen captures every game picture makes with a format conversion (the
+  shadow-volume / silhouette alpha capture, A8, and the indirect-effect capture, RGB565) when the
+  frame's shaders read only channels the conversion leaves unchanged; a later frame that reads
+  another channel gets the buffer converted first. Two scenes fewer per picture
+  (`tools/test_vgx_efbswap2_gl.sh`).
 - Reduced-size additive effects (`GXV_FXHALF`) and half-size blur passes (`GXV_PASSHALF`) are in
   the source but **off** by default.
+- Half precision (fp16) fragment shaders (`GXV_FS_HALF`, **off** by default). `1`: only the shaders
+  `FsHalfAnalyse` proves to differ from the float shader by at most one 8-bit level (a forward error
+  analysis of the TEV stages: unit-range inputs, a half rounding after every operation; no indirect
+  stages, fog, compare-mode stages, wrapped final values or registers outside 0..255); their colour
+  variables and the `u_tev` array are `half`, texture coordinates and the alpha test stay float.
+  `3`: the same with a bound of half a level. `2`: every shader through vitaGL patch 0012 (A/B only).
+  Host test: `tools/test_vgx_fshalf.sh`. Turning it on changes the text of the eligible shaders, so the
+  shipped shader seed has to be regenerated.
 - **Video memory:** render targets are owned and bounded explicitly; idle pooled framebuffers are
   deleted after 60 presents (`GXV_POOL_IDLE`); textures are detached from pooled framebuffers
   before deletion (`GXV_DETACH_DELETE`), so vitaGL really frees them; no new EFB buffer or effect

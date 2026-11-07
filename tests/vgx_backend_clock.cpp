@@ -1,6 +1,7 @@
 // Exercise the actual renderer clock and warm scheduler against controlled OS clocks.
 #include <psp2/kernel/processmgr.h>
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
+#include "vgx_vita_vgl_stubs.h"
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #include <array>
 #include <cstdio>

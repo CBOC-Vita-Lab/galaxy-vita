@@ -288,7 +288,7 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
     return true;
 }
 
-void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
+bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
 
 // ux0:data/mscharged/shadercache/<8 hex digits>: the folder vitaGL keeps compiled shaders in.
 // A package whose key differs starts with an empty folder (the old one is left behind; it is
@@ -748,7 +748,7 @@ bool StartGl() {
 // first (its projection flips Y), so the picture's top row is the
 // framebuffer's y. The back end binds the EFB again and re-applies its render
 // state after this returns.
-void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
+bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     ++g_presented;
     const uint64_t now = NowUs();
     const vgx::backend::Stats stats = vgx::backend::GetStats();
@@ -785,8 +785,8 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // so vitaGL's per-frame bookkeeping goes on; DisplayCallback then puts the
     // console's picture over it.)
     // A fatal-error screen has taken the display back: leave it alone.
-    if (VitaConsole::OwnsDisplay()) return;
-    if (efb == 0 || w <= 0 || h <= 0) return;
+    if (VitaConsole::OwnsDisplay()) return false;
+    if (efb == 0 || w <= 0 || h <= 0) return false;
     const auto display = vgxvita::GetDisplayRect(g_stretch.load(std::memory_order_relaxed));
     const int dx0 = display.x, dx1 = display.x + display.width;
     // Source rows are given bottom-up so the picture comes out upright.
@@ -801,6 +801,7 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // Back to what the back end had: it clears the EFB next.
     glBindFramebuffer(GL_FRAMEBUFFER, efb);
     if (g_scissorOn) { UnparkScissor(); glEnable(GL_SCISSOR_TEST); }
+    return true;
 }
 
 // GXV_BACKEND_THREAD=1 (env.txt): the renderer's player gets a thread of its own and the

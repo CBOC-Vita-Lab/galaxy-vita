@@ -7,6 +7,13 @@
 #include <JSystem/J3DGraphBase/J3DSys.hpp>
 #include <algorithm>
 
+#ifdef TARGET_PC
+// GXV_LIGHT_DEDUP (decomp/src/Game/Map/LightFunction.cpp): a pass of the draw buffers is a scope in which a light load already in
+// light memory is not sent again (each shape drawer loads its first packet's light; most of a pass shares one area light).
+extern "C" int port_light_scope_enter(int level);
+extern "C" void port_light_scope_exit(int opened);
+#endif
+
 DrawBufferGroup::DrawBufferGroup() : mExecutors(), mActiveExecutors(), mDrawCameraType(0), mLightType(-1), mLightLoadType(-1) {
 }
 
@@ -80,21 +87,33 @@ void DrawBufferGroup::entry() {
 
 void DrawBufferGroup::drawOpa() const {
     if (mActiveExecutors.size() != 0) {
+#ifdef TARGET_PC
+        const int lightScope = port_light_scope_enter(1);
+#endif
         j3dSys.mDrawMode = 3;
         if (mLightLoadType != -1) {
             MR::loadLight(mLightLoadType);
         }
         std::for_each(mActiveExecutors.begin(), mActiveExecutors.end(), std::mem_func(&DrawBufferExecuter::drawOpa));
+#ifdef TARGET_PC
+        port_light_scope_exit(lightScope);
+#endif
     }
 }
 
 void DrawBufferGroup::drawXlu() const {
     if (mActiveExecutors.size() != 0) {
+#ifdef TARGET_PC
+        const int lightScope = port_light_scope_enter(1);
+#endif
         j3dSys.mDrawMode = 4;
         if (mLightLoadType != -1) {
             MR::loadLight(mLightLoadType);
         }
         std::for_each(mActiveExecutors.begin(), mActiveExecutors.end(), std::mem_func(&DrawBufferExecuter::drawXlu));
+#ifdef TARGET_PC
+        port_light_scope_exit(lightScope);
+#endif
     }
 }
 

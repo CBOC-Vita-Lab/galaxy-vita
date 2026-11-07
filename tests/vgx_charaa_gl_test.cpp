@@ -11,6 +11,12 @@
 //   - a display copy without rectangles draws nothing (counters unchanged, the two pictures identical);
 //   - with the EFB multisampled (rungs 7 / 8, where the platform has them) nothing is drawn.
 //   tools/test_vgx_charaa_gl.sh [output-dir]  (also writes before/after crops as PPM there)
+// With GXV_CHARAA_AUTO=1 and GXV_CHARAA unset (the second run of the runner) only the gate is checked: at the EFB's own size (rung 2) the
+// rectangle draws nothing and the two pictures are identical; below it (rung 1, 544x388 upscaled) the rectangle is drawn, the pictures
+// are identical outside it and differ inside it (the same edge smoothing as GXV_CHARAA=1).
+// With GXV_CHARAA_AUTO=2 (the third run): the rectangle is drawn at every rung whose picture is shown larger than it was drawn and is not
+// multisampled, so at the EFB's own size (rung 2) and at 720x480 / 800x504 too; at 960x544 (rung 6, shown 1:1) nothing is drawn; at the
+// multisampled rungs (7 / 8, where the platform has them) nothing is drawn and the skip is counted.
 #include "vgx_autoq.h"
 #include "vgx_cmd.h"
 
@@ -109,6 +115,72 @@ int main(int argc, char** argv) {
     // the rectangle on the screen (960x544 from 640x456), with 2 px of slack
     const int bx0 = 200 * 960 / 640 - 2, bx1 = 400 * 960 / 640 + 2, by0 = 100 * 544 / 456 - 2, by1 = (300 * 544 + 455) / 456 + 2;
 
+    if (std::getenv("GXV_CHARAA_AUTO") && std::atoi(std::getenv("GXV_CHARAA_AUTO")) >= 2) {
+        const int sx0 = 200 * 960 / 640 - 2, sx1 = 400 * 960 / 640 + 2, sy0 = 100 * 544 / 456 - 2, sy1 = (300 * 544 + 455) / 456 + 2;
+        std::vector<int> rungs = {2, 1, 3, 4, 6, 2, 0};
+        if (backend::QualityTopRung() >= 7) rungs.push_back(7);
+        else std::printf("multisampled EFB: not available on this GL (QualityTopRung %d), not checked\n", backend::QualityTopRung());
+        for (int rung : rungs) {
+            backend::ForceQualityRung(rung);
+            const Shot r = Frame(500 + rung, &box);
+            int rw = 0, rh = 0, rs = 0;
+            backend::QualityRungSize(rw, rh, rs);
+            if (r.w != 960 || r.h != 1088) { std::printf("  [FAIL] capture is %dx%d\n", r.w, r.h); return 1; }
+            const int Wd = r.w, Hd = r.h / 2;
+            uint64_t outside = 0, inside = 0;
+            for (int y = 0; y < Hd; ++y)
+                for (int x = 0; x < Wd; ++x) {
+                    const bool diff = std::memcmp(&r.px[(static_cast<size_t>(y) * Wd + x) * 4], &r.px[(static_cast<size_t>(Hd + y) * Wd + x) * 4], 3) != 0;
+                    if (x >= sx0 && x < sx1 && y >= sy0 && y < sy1) inside += diff; else outside += diff;
+                }
+            char text[320];
+            const bool shown1to1 = rw >= 960 && rh >= 544;
+            if (rs > 1) {
+                std::snprintf(text, sizeof text, "GXV_CHARAA_AUTO=2, rung %d (%dx%d, %d samples): %llu presents drawn, %llu skipped, %llu pixels differ (expected 0, 1, 0)", rung, rw, rh, rs,
+                              static_cast<unsigned long long>(r.presents), static_cast<unsigned long long>(r.skips), static_cast<unsigned long long>(inside + outside));
+                Check(r.presents == 0 && r.skips == 1 && inside + outside == 0, text);
+            } else if (shown1to1) {
+                std::snprintf(text, sizeof text, "GXV_CHARAA_AUTO=2, rung %d (%dx%d, shown 1:1): %llu presents drawn, %llu pixels differ (expected 0, 0)", rung, rw, rh,
+                              static_cast<unsigned long long>(r.presents), static_cast<unsigned long long>(inside + outside));
+                Check(r.presents == 0 && inside + outside == 0, text);
+            } else {
+                std::snprintf(text, sizeof text, "GXV_CHARAA_AUTO=2, rung %d (%dx%d, upscaled): %llu present drawn, %llu pixels differ outside the rectangle, %llu inside (expected 1, 0, >200)", rung, rw, rh,
+                              static_cast<unsigned long long>(r.presents), static_cast<unsigned long long>(outside), static_cast<unsigned long long>(inside));
+                Check(r.presents == 1 && outside == 0 && inside > 200, text);
+            }
+        }
+        std::printf("%s (%d failed)\n", g_fail ? "SOME CHECKS FAILED" : "all checks passed", g_fail);
+        return g_fail ? 1 : 0;
+    }
+    if (std::getenv("GXV_CHARAA_AUTO") && std::atoi(std::getenv("GXV_CHARAA_AUTO")) != 0) {
+        const int sx0 = 200 * 960 / 640 - 2, sx1 = 400 * 960 / 640 + 2, sy0 = 100 * 544 / 456 - 2, sy1 = (300 * 544 + 455) / 456 + 2;
+        for (int rung : {2, 1, 2, 0}) {
+            backend::ForceQualityRung(rung);
+            const Shot r = Frame(400 + rung, &box);
+            int rw = 0, rh = 0, rs = 0;
+            backend::QualityRungSize(rw, rh, rs);
+            if (r.w != 960 || r.h != 1088) { std::printf("  [FAIL] capture is %dx%d\n", r.w, r.h); return 1; }
+            const int Wd = r.w, Hd = r.h / 2;
+            uint64_t outside = 0, inside = 0;
+            for (int y = 0; y < Hd; ++y)
+                for (int x = 0; x < Wd; ++x) {
+                    const bool diff = std::memcmp(&r.px[(static_cast<size_t>(y) * Wd + x) * 4], &r.px[(static_cast<size_t>(Hd + y) * Wd + x) * 4], 3) != 0;
+                    if (x >= sx0 && x < sx1 && y >= sy0 && y < sy1) inside += diff; else outside += diff;
+                }
+            char text[300];
+            if (rw >= 640 && rh >= 456) {
+                std::snprintf(text, sizeof text, "GXV_CHARAA_AUTO, rung %d (%dx%d, the EFB's own size): %llu presents drawn, %llu pixels differ (expected 0, 0)", rung, rw, rh,
+                              static_cast<unsigned long long>(r.presents), static_cast<unsigned long long>(inside + outside));
+                Check(r.presents == 0 && inside + outside == 0, text);
+            } else {
+                std::snprintf(text, sizeof text, "GXV_CHARAA_AUTO, rung %d (%dx%d, upscaled): %llu present drawn, %llu pixels differ outside the rectangle, %llu inside (expected 1, 0, >200)", rung, rw, rh,
+                              static_cast<unsigned long long>(r.presents), static_cast<unsigned long long>(outside), static_cast<unsigned long long>(inside));
+                Check(r.presents == 1 && outside == 0 && inside > 200, text);
+            }
+        }
+        std::printf("%s (%d failed)\n", g_fail ? "SOME CHECKS FAILED" : "all checks passed", g_fail);
+        return g_fail ? 1 : 0;
+    }
     std::printf("one character rectangle, rung 2 (640x456 presented at 960x544):\n");
     const Shot a = Frame(100, &box);
     const Shot n = Frame(200, nullptr);

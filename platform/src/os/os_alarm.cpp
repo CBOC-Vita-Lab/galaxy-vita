@@ -443,7 +443,11 @@ static void logWritePending() {
 }
 
 static void* logFlusherMain(void*) {
+    // GXV_CORE0_ALONE=1 (default 0): the writer keeps off the game's core. It starts before env.txt is read, so it asks again at each
+    // pass for the first five seconds until the switch has an answer (port.h).
+    int placed = 0, tries = 0;
     for (;;) {
+        if (!placed && tries < 50) { placed = port_thread_helper(); ++tries; }
         for (int i = 0; i < 10 && !sLogUrgent.load(); ++i) {  // (100 ms in ten steps, so an urgent request is seen within 10 ms)
             struct timespec ts = {0, 10 * 1000 * 1000};
             nanosleep(&ts, nullptr);

@@ -8,6 +8,12 @@ endif()
 
 get_filename_component(GALAXY_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(DECOMP "${GALAXY_ROOT}/decomp")
+option(GXV_SHARED_CLIP_PREP "Reuse common clipping planes on supported Vita ARM32 builds" ON)
+set_property(SOURCE "${DECOMP}/src/Game/LiveActor/ClippingJudge.cpp" APPEND PROPERTY
+  COMPILE_DEFINITIONS "GXV_SHARED_CLIP_PREP=$<BOOL:${GXV_SHARED_CLIP_PREP}>")
+option(GXV_PROJMAP_RUN_REUSE "Reuse consecutive equal projection initializers within each update" ON)
+set_property(SOURCE "${DECOMP}/src/Game/LiveActor/MaterialCtrl.cpp" APPEND PROPERTY
+  COMPILE_DEFINITIONS "GXV_PROJMAP_RUN_REUSE=$<BOOL:${GXV_PROJMAP_RUN_REUSE}>")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
@@ -67,9 +73,12 @@ target_include_directories(vita_source_options INTERFACE
   "${DECOMP}/libs/RVLFaceLib/include")
 target_compile_definitions(vita_source_options INTERFACE TARGET_PC=1 NDEBUG=1 VERSION=0)
 # Keep upstream behavior flags, not Strikers' translated-code optimizations.
+# -fno-builtin-wcslen (from Producdevity's fork): newer Clang (22, not the 18 we build with) turns 16-bit string-length loops into
+# calls to wcslen, and newlib's wcslen counts 32-bit characters (the pause menu's settings labels drawn as dotted lines).
+# -fno-math-errno: sqrt / sqrtf compile to the bare vsqrt.f32 (no compare and call that would set errno; nothing reads errno after a math call).
 target_compile_options(vita_source_options INTERFACE
-  -O2 -fshort-wchar -fsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=on
-  -fno-fast-math -fms-extensions -ferror-limit=0
+  -O2 -fshort-wchar -fno-builtin-wcslen -fsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=on
+  -fno-fast-math -fno-math-errno -fms-extensions -ferror-limit=0
   "-ffile-prefix-map=${GALAXY_ROOT}/=" "-ffile-prefix-map=${GALAXY_ROOT}=."
   "-ffile-prefix-map=${VITASDK}=vitasdk"
   "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/include/vita_source_prelude.h"
@@ -86,6 +95,16 @@ target_compile_options(vita_source_options INTERFACE
   -Wno-microsoft-cast -Wno-microsoft-anon-tag -Wno-microsoft-include
   -Wno-language-extension-token
   "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
+
+# Optional profile-guided optimisation of the game units (tools/pgo/README.md): a merged clang IR profile.  Empty (the
+# default): the plain build.  tools/vgx_build/build.py --pgo-profile sets it.
+set(VITA_PGO_PROFILE "" CACHE FILEPATH "Merged .profdata the game units are compiled with; empty for none")
+if(VITA_PGO_PROFILE)
+  if(NOT EXISTS "${VITA_PGO_PROFILE}")
+    message(FATAL_ERROR "VITA_PGO_PROFILE: no such file ${VITA_PGO_PROFILE}")
+  endif()
+  target_compile_options(vita_source_options INTERFACE "-fprofile-use=${VITA_PGO_PROFILE}")
+endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(CMAKE_C_COMPILER_LAUNCHER "${Python3_EXECUTABLE};${CMAKE_CURRENT_SOURCE_DIR}/record_compile.py")

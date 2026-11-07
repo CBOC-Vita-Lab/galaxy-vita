@@ -507,6 +507,9 @@ void JPABaseEmitter::init(JPAEmitterManager* pManager, JPAResource* pResource) {
     mWaitTime = 0;
     mRateStepTimer = 0;
     mTexAnmIdx = 0;
+#ifdef TARGET_PC
+    mPortLookStale = 0;  // (GXV_JPA_LOOK, JPAResource.cpp)
+#endif
 }
 
 void JPADrawDirection(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {

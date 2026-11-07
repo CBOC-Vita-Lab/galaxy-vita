@@ -1,4 +1,7 @@
 #include "revolution/gd/GDBase.h"
+#ifdef TARGET_PC
+#include <string.h>
+#endif
 
 GDLObj* __GDCurrentDL = NULL;
 static GDOverflowCallback overflowcb = NULL;
@@ -17,9 +20,17 @@ void GDFlushCurrToMem() {
 void GDPadCurr32() {
     u32 n = ((u32)__GDCurrentDL->ptr & 31);
     if (n) {
+#ifdef TARGET_PC
+        // (Producdevity's fork) One memset and one cursor store: byte by byte, -fno-strict-aliasing makes every store reload
+        // __GDCurrentDL and its ptr. Same bytes; __GDWrite has no overflow check either.
+        GDLObj* const dl = __GDCurrentDL;
+        memset(dl->ptr, 0, 32 - n);
+        dl->ptr += 32 - n;
+#else
         for (; n < 32; n++) {
             __GDWrite(0);
         }
+#endif
     }
 }
 

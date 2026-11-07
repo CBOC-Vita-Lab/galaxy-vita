@@ -5,6 +5,7 @@
 #include "port/port.h"
 #include "port/settings_lifecycle.h"
 #include "port/settings_launch.h"
+#include "port/settings_backdrop.h"
 #include "vgx_common.h"
 
 #include <psp2/appmgr.h>
@@ -32,6 +33,7 @@ extern "C" int port_vgx_vita_fixed_cap_supported(void);
 extern "C" void port_input_settings_rearm(void);
 extern "C" void port_log_summary(const char*, ...);
 extern "C" const char* port_dvd_root(void);
+namespace GameSystemFunction { bool isPrepareResetSaveDataHandleSequence(); }
 
 namespace {
 using namespace port::settings;
@@ -178,6 +180,43 @@ FontBundle LoadMenuFonts(const FontAllocator& allocator = {}) {
     return fonts;
 }
 
+// The title-screen picture for the menu backdrop, read in bounded chunks and averaged 2x2 into one 480x272 buffer.
+// Any problem (no file, wrong size, short or failed read, no memory) gives an empty buffer: the menu keeps its plain
+// background and shows no error. Allocation is non-throwing like the fonts', never the fatal operator new path.
+FontBuffer<uint32_t> LoadBackdrop(const FontAllocator& allocator = {}) {
+    FontBuffer<uint32_t> backdrop;
+    FileInfo info{};
+    if (Stat(nullptr, kBackdropPath, info) < 0 || !info.regular || info.size != kBackdropSourceBytes) return backdrop;
+    FontBuffer<uint8_t> chunk;
+    constexpr size_t chunkBytes = size_t(kBackdropChunkRows) * kBackdropSourceWidth * 4;
+    if (!chunk.Allocate(chunkBytes, allocator) || !backdrop.Allocate(kBackdropPixels, allocator)) return {};
+    const int64_t handle = OpenRead(nullptr, kBackdropPath);
+    if (handle < 0) return {};
+    bool valid = true;
+    for (unsigned row = 0; valid && row < kBackdropSourceHeight; row += kBackdropChunkRows) {
+        size_t offset = 0;
+        while (offset < chunkBytes) {
+            const int64_t count = Read(nullptr, handle, chunk.begin() + offset, chunkBytes - offset);
+            if (count <= 0 || static_cast<uint64_t>(count) > chunkBytes - offset) { valid = false; break; }
+            offset += static_cast<size_t>(count);
+        }
+        if (valid) DownsampleBackdropRows(chunk.begin(), row, kBackdropChunkRows, backdrop.begin());
+    }
+    const int closed = Close(nullptr, handle);
+    if (!valid || closed < 0) return {};
+    CleanBackdropPrompt(backdrop.begin());
+    return backdrop;
+}
+
+// The HD texture pack (GXV_HDTEX_PATH, default ux0:data/smg/hdtex.pack, as vgx_hdtex.cpp reads it): one stat, so the HD textures row can say
+// when there is nothing to turn on.
+bool HdPackInstalled() {
+    const char* path = std::getenv("GXV_HDTEX_PATH");
+    if (!path || !*path) path = "ux0:data/smg/hdtex.pack";
+    FileInfo info{};
+    return Stat(nullptr, path, info) >= 0 && info.regular && info.size > 0;
+}
+
 struct Screen {
     SceUID memory = -1;
     void* base = nullptr;
@@ -267,6 +306,8 @@ RunResult Menu(Screen& screen, OpenMode mode) {
     const auto& api = port::controls::GetControlApi();
     const auto loaded = LoadDocument(kPath, api, kFiles, sDocument);
     UiInput initial{}; Poll(&screen, initial);
+    // The same choice the game made at start-up, so the menu shows the profile that is in use (and is not "changed" by it).
+    port::settings::ApplyPadDefaults(sDocument.config, initial.caps.connected && initial.detectedProfile == port::controls::ProfileId::PlayStation);
     SettingsSession session{mode, sDocument, sActiveConfig, ReadLanguages(), sOverrides, initial.caps,
         {port_vgx_vita_fixed_cap_supported() != 0, port::controls::RemapEnabled()},
         {screen.pixels, 960, 544, 960}, {&screen, Poll, Present, HostNow, Wait}, kPath, &kFiles, &api};
@@ -274,6 +315,14 @@ RunResult Menu(Screen& screen, OpenMode mode) {
     session.detectedProfile = initial.detectedProfile;
     const auto fonts = LoadMenuFonts();
     session.fonts = fonts.view();
+    // Freed when the menu closes (end of this function), in both LiveArea and in-game modes.
+    const auto backdrop = LoadBackdrop();
+    if (backdrop.size() == kBackdropPixels) { session.backdrop = backdrop.begin(); session.backdropW = kBackdropWidth; session.backdropH = kBackdropHeight; }
+    // The menu's unchanging picture (backdrop, header band, heading) is built once into one scratch picture and copied each frame; with no
+    // memory for it the menu simply draws it every frame. Freed with the backdrop when the menu closes.
+    FontBuffer<uint32_t> layer;
+    if (layer.Allocate(kPixels, FontAllocator{})) session.layer = layer.begin();
+    session.hdtexPack = HdPackInstalled();
     if (mode == OpenMode::Running && port::controls::RemapEnabled() && !port_vita_input_mapping_available())
         session.overrides.push_back({"Controller", "", "Active mapping needs a different controller"});
     sStatus.clear();
@@ -365,7 +414,19 @@ extern "C" int port_settings_startup(int argc, char** argv) {
     const auto& api = port::controls::GetControlApi();
     LoadDocument(kPath, api, kFiles, sDocument);
     sActiveConfig = sDocument.config;
+    // A pad on a PS TV, with the profile never chosen by hand, plays with the PlayStation profile (R2 shoots, right stick aims).
+    port::settings::ApplyPadDefaults(sActiveConfig, port_vita_input_external_pad() != 0);
     sOverrides = ApplyStartup(sActiveConfig, true);
+    {
+        // The Picture mode and what it set (the basic log: a console run shows which mode it is and what env.txt changed of it).
+        auto env = [](const char* k) { const char* v = std::getenv(k); return v ? v : "-"; };
+        const bool locked = sActiveConfig.fpsLimit == 30 || sActiveConfig.fpsLimit == kSteady30;
+        port_log_summary("settings: picture mode %s: GXV_FPS_LIMIT=%s GXV_AUTOQ_TARGET=%s GXV_AUTOQ_MAX=%s GXV_AUTOQ_MSAA=%s GXV_AUTOQ_EDGESTEP=%s "
+                         "GXV_AUTOQ_LOCKED30_FLOOR=%s GXV_AUTOQ_LOCKED30_START=%s GXV_STEADY30=%s; %u env.txt override(s)",
+                         locked ? "Locked 30" : sActiveConfig.performance60 ? "Performance" : "Quality", env("GXV_FPS_LIMIT"), env("GXV_AUTOQ_TARGET"),
+                         env("GXV_AUTOQ_MAX"), env("GXV_AUTOQ_MSAA"), env("GXV_AUTOQ_EDGESTEP"), env("GXV_AUTOQ_LOCKED30_FLOOR"), env("GXV_AUTOQ_LOCKED30_START"),
+                         env("GXV_STEADY30"), static_cast<unsigned>(sOverrides.size()));
+    }
     std::string error;
     const unsigned profile = sActiveConfig.profile == port::controls::ProfileId::Handheld ? 0 : 1;
     if (!port::controls::SetActiveMapping(sActiveConfig.profiles[profile], sActiveConfig.profile, port::controls::NominalCaps(sActiveConfig.profile), error))
@@ -392,13 +453,18 @@ extern "C" int port_settings_input_service(void) {
     }
     static uint64_t pollAfter = 0;
     if (Now() >= pollAfter) {
-        pollAfter = Now() + 250000;
+        pollAfter = Now() + 1000000;  // once a second: the LiveArea request is a tap, and each check is a system call on the input core
         if (TakeLaunch() == LaunchRequest::Settings) port_settings_request();
     }
     return 0;
 }
 extern "C" void port_settings_game_boundary(int safe) {
     if (!Enabled() || !safe || !sRequested.load(std::memory_order_acquire) || !port_boot_title_is_visible() || port_vgx_vita_splash_active() || Now() < sRetryAfter) return;
+    // GXV_SETTINGS_SAVE_GUARD=1 defers entry during saves; default off for A/B.
+    static const bool saveGuard = vgx::EnvInt("GXV_SETTINGS_SAVE_GUARD", 0) != 0;
+    // Keep the request pending while guest turns finish an active save. Waiting
+    // after the lease freezes interrupts would prevent that sequence finishing.
+    if (saveGuard && !GameSystemFunction::isPrepareResetSaveDataHandleSequence()) return;
     PortHostAllocScope allocations;
     RuntimeLease context;
     Hooks hooks{&context, RuntimeLease::Acquire, RuntimeLease::Release};

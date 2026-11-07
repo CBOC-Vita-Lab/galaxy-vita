@@ -1,0 +1,65 @@
+# armhf/qemu variant of opening.txt (scripts/arm-run.sh): the Bowser-attack movie (starts ~195 s) is skipped by holding A inside it,
+# so the post-attack plaza is reached at ~197 s instead of ~300 s.  Times are GAME seconds (59.94 frames each).
+#   boot -> strap warnings -> title -> create file 1 (icon Mario) -> Play This File -> prologue storybook
+#   -> Peach's letter -> Peach's Castle approach ("Gateway" path: walk down the festival path, spin, jump)
+#   -> Bowser's airship attack (THP movie PrologueA.thp, ~97 s) -> the plaza after the attack (walk, spin, jump).
+# Times are wall-clock seconds since process start (the game runs 60 fps = real time on this host, so also ~game seconds).
+# Pointer coordinates -1..1 (right/down positive).  Needs a fresh save directory (run-desktop.sh makes one).
+#
+# The walk from the top of the path to the lake lookout is the one step that does not replay reliably (the stick is
+# camera-relative and the camera settles differently from run to run: many runs ended on the wrong fork, the pier).
+# So the upstream debug hook PETARI_WARP puts Mario at the lookout (3393.9,1244.7,6328.0) at t=180 s; everything else is
+# played with the stick.  Delete the next line to play the whole path by hand-tuned stick input instead.
+#!env PETARI_FRAMESKIP=0
+#!env PETARI_WARP=180:3393.9,1244.7,6328.0
+#
+# --- title: "Press both A and B"
+27-27.4:A|B
+# --- file select: point at planet "1", click; "Create a game file on this planet?" -> Yes
+31-36.8:PX=-0.25|PY=0.30
+34-34.2:A
+37-44.5:PX=0.29|PY=0.61
+40-40.2:A
+# --- "Select an icon": Mario head, then "Do you want to use this icon?" -> Yes
+45-51.5:PX=-0.56|PY=-0.40
+48-48.2:A
+52-61.8:PX=0.29|PY=0.60
+55-55.2:A
+# --- file info screen: "Play This File"
+62-66:PX=0.52|PY=0.78
+65-65.2:A
+# --- prologue storybook (one A tap per page, 7 pages) and Peach's letter; gameplay (HUD, control) starts ~120 s
+70-70.2:A
+74-74.2:A
+78-78.2:A
+82-82.2:A
+86-86.2:A
+90-90.2:A
+94-94.2:A
+98-98.2:A
+102-102.2:A
+106-106.2:A
+110-110.2:A
+114-114.2:A
+118-118.2:A
+# --- run down the stone path (5.8 s), spin
+142.2-148:SY=1
+150-150.6:SPIN
+# --- t=180: warp to the lookout.  A Toad's speech box blocks Mario there until A is pressed; keep walking toward the plaza
+183-240:SY=1
+186-186.2:A
+190-190.2:A
+194-194.2:A
+198-198.2:A
+# (cutscene trigger in the plaza ~25 s after the warp; then the Bowser attack movie, ~97 s, ends ~300 s)
+# --- movie starts at ~195.3 s: hold A for 2 s inside it (cutscene_skip.cpp skips after a 1 s hold)
+# (no hold here: the movies play out; A taps every 4 s reach the speech boxes after them)
+# --- post-attack plaza: walk, spin, jump (windows are measured around 204-212 s)
+203-216:SY=1
+206-206.6:SPIN
+210-210.2:A
+214-214.6:SPIN
+
+# --- after the movies
+230-231:A
+236-237:A

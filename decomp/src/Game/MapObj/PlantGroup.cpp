@@ -374,6 +374,15 @@ void PlantMember::init(const JMapInfoIter&) {
     mTouchType = 3;
     _9C = false;
     mHasItem = false;
+#ifdef TARGET_PC
+    // GXV_ANIM_LOD_FREE (cpuhive, 6 Nov; LiveActor.cpp AnimLodDefers): nothing but the picture reads a plant's joints or base matrix.
+    // Its logic (PlantGroup::control, tryPush / tryShake, the nerves) reads its position, gravity, nerve and BCK clock (_20, kept
+    // running by GXV_ANIM_LOD_XLATCH); it has no sensors, effects, shadows, collision or star-pointer target of its own (the group
+    // has them, at the group's position), and no other actor follows its joints. So its joints are computed once per picture, by the
+    // drawn turn's flush (port_anim_flush_stale), from the same state, at any distance: the picture and the game state are those of
+    // computing it every turn.
+    mLogicFreeJoints = 1;
+#endif
     MR::onCalcAnim(this);
     initNerve(GET_NERVE(PlantMember, HostTypeNrvWait));
     appear();

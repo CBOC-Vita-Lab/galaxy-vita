@@ -2,6 +2,9 @@
 #include "Game/System/GalaxyStatusAccessor.hpp"
 #include "Game/System/ScenarioDataParser.hpp"
 #include "Game/Util/HashUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/Util/JMapInfo.hpp"
+#endif
 #include "Game/Util/MathUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
 #include <JSystem/JSupport/JSUMemoryInputStream.hpp>
@@ -198,14 +201,29 @@ s32 SpinDriverPathStorageScenario::calcMaxZoneId() const {
 SpinDriverPathStorageGalaxy::SpinDriverPathStorageGalaxy(const GalaxyStatusAccessor& rAccessor)
     : mScenarioStorage(nullptr), mNumScenarios(0), mGalaxyName(nullptr) {
     s32 numScenarios = rAccessor.getScenarioNum();
+#ifdef TARGET_PC
+    // getScenarioStorage indexes by scenario number, but getScenarioNum leaves out the hidden stars, which come last: a hidden star's
+    // launch stars (Good Egg's sixth scenario) wrote past the array, into the heap block after it. The array covers every entry;
+    // saves keep the counted scenarios only (their layout does not change). Fix from Producdevity's fork, 9b28241.
+    mNumEntries = rAccessor.mScenarioData->mScenarioData->getNumEntries();
+    if (mNumEntries < numScenarios) {
+        mNumEntries = numScenarios;
+    }
+    mScenarioStorage = new SpinDriverPathStorageScenario[mNumEntries];
+#else
     mScenarioStorage = new SpinDriverPathStorageScenario[rAccessor.getScenarioNum()];
+#endif
     mNumScenarios = numScenarios;
     mGalaxyName = rAccessor.getName();
     resetAllData();
 }
 
 void SpinDriverPathStorageGalaxy::resetAllData() {
+#ifdef TARGET_PC
+    for (s32 idx = 0; idx < mNumEntries; idx++) {
+#else
     for (s32 idx = 0; idx < mNumScenarios; idx++) {
+#endif
         mScenarioStorage[idx].resetAllData();
     }
 }

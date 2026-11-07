@@ -1,4 +1,6 @@
 #include "input.h"
+#include "port/pointer_aim.h"
+#include "port/tilt_gain.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -10,6 +12,10 @@
 
 extern "C" int port_rear_aim_enabled(void);  // platform/src/port/perf.cpp: the option, kept in settings.ini
 extern "C" int port_rear_aim_toggle(void);
+extern "C" int port_stick_pointer_enabled(void);  // the same file: the right stick moves the pointer, not the camera (pause menu: Square)
+extern "C" int port_stick_pointer_toggle(void);
+extern "C" int port_star_bit_reach_next(void);  // the same file: Star Bit reach (pause menu: Select steps it)
+extern "C" int port_skip_context_kind(void) __attribute__((weak));  // platform/src/port/cutscene_skip.cpp: 4 cutscene, 5 dialogue, 0 none
 
 namespace {
 struct Vec { float x, y, z; };
@@ -18,25 +24,54 @@ bool calibrated, motionStarted, touchStarted, rearStarted, pointerValid;
 float pointerX, pointerY;
 SceTouchPanelInfo panel, rearPanel;
 // Controls (env.txt):
-//   PETARI_RSTICK=pointer   the right stick moves the pointer (default: it is the camera, the
-//                           Wii remote's D-pad: left / right turn, up first person, down back)
+//   PETARI_RSTICK=pointer   the right stick moves the pointer, whatever the pause menu's setting says (forkB, from Producdevity's
+//                           fork: Square in the pause menu switches the stick between Camera and Pointer, saved in settings.ini as
+//                           stick_pointer; its default: it is the camera, the Wii remote's D-pad: left / right turn, up first
+//                           person, down back; the D-pad stays the camera either way)
+//                           With an external pad (PS TV: DS3 / DS4) on the PlayStation profile the right stick is the pointer
+//                           by default (R2 shoots, the D-pad is the camera, see platform/src/input/control_bindings.cpp);
+//                           PETARI_RSTICK=camera keeps the stick the camera there too, and over the pause menu's setting.
+//   GXV_MOUSE_AIM=1         (Settings > Controls > Mouse-style aiming) the stick moves the pointer like a mouse: speed on a curve
+//                           with acceleration while held (platform/include/port/pointer_aim.h); default off = the 1.0 linear speed
+//   GXV_TILT_GAIN=50..200   (Settings > Controls > Tilt sensitivity) percent of the lean that steers Star Ball and ray surfing, in steps
+//                           of 25; 100 (default) is the game's own steering, untouched (platform/include/port/tilt_gain.h)
+//   GXV_TILT_STICK=1        (Settings > Controls > Tilt with) the left stick tilts those levels even where the motion sensor exists
 //   PETARI_TOUCH_A=0        a touch only moves the pointer (default: a short tap also presses A
 //                           where it lands, a finger held still holds A, a drag does neither)
 //   GXV_VITA_WIDE=0         (renderer) the picture unstretched between side bars; the pointer follows
 // Always: on the game's 2D menus the left stick and the D-pad move the pointer; in tilt-steered
 // levels "level" is the grip when the level starts steering, Select sets it again.
 bool rstickPointer, touchA = true, wide = true;
+bool rstickCamera;       // PETARI_RSTICK=camera: the stick stays the camera on a pad too
+bool mouseAim;           // GXV_MOUSE_AIM
+float mouseHeld;         // port::aim::State::held
 // The touch in progress.
 bool touching, touchMoved;
 float touchTime, touchX0, touchY0;
 float tapA; // seconds of A still to give after a tap
+// GXV_TAP_CLEAN=1 (read once, default off): during a dialogue or a cutscene a touch is only ever a press of A, never a held
+// A.  The game finishes a page of text when A is held for 11 updates (TalkStateEvent::talk) and the port skips the whole
+// dialogue when A is held for a second (platform/src/port/cutscene_skip.cpp), and a finger resting on the screen held A for
+// as long as it stayed.  With the switch a finger held still gives one 0.1 s press at the 0.2 s mark (the same edge a
+// longer touch gave), and a new touch ends a press still running so two taps are two edges.  Pull Stars and the rest of
+// play (no dialogue, no cutscene) keep the held A.
+bool holdPulsed;
+bool tapCleanOn() {
+    static const bool on = [] { const char* e = getenv("GXV_TAP_CLEAN"); return e && strcmp(e, "1") == 0; }();
+    return on;
+}
+bool talkOrDemoOnScreen() {
+    if (!port_skip_context_kind) return false;
+    const int kind = port_skip_context_kind();
+    return kind == 4 /* PORT_SKIP_DEMO */ || kind == 5 /* PORT_SKIP_TALK */;
+}
 // The pointer is on screen while a finger is, for a few seconds after, and while Circle (B:
 // shoot a Star Bit at the pointer) is held, when the right stick aims it. With no pointer the
 // game's menus ask to "touch the screen" (the "point at the screen" text, platform/src/port/handheld_ui.cpp).
 bool menuPointer; // the left stick is moving the pointer (a 2D menu is up)
 std::atomic<bool> pendingReset{false}, mappingAvailable{true};
 bool tiltWasActive;
-bool zoomArmed, rearToggleArmed;
+bool zoomArmed, rearToggleArmed, stickToggleArmed, reachToggleArmed;
 int zoomHeldDir;
 float zoomRepeat;
 unsigned blockedButtons;
@@ -98,18 +133,20 @@ bool selectRaw(SceCtrlData& data, PortVitaRawInput& out) {
 // version followed report[0] wherever it was, so the pointer jumped between resting fingers and squiggled across the screen.
 // Here a contact only takes the pointer once it has slid kRearArm panel units from where it landed (resting fingers do not slide),
 // the pointer then follows that contact by its id alone until it lifts, the movement is smoothed over a few samples and a
-// movement below the pad's noise is ignored. Not on the game's 2D menus (the left stick and Cross work there) and never while a
-// finger is on the front screen.
+// movement below the pad's noise is ignored. A slide that took the pointer within kRearArmQuick of landing moves it from where
+// it landed, so the start of a deliberate slide is not lost. Not on the game's 2D menus (the left stick and Cross work there)
+// and never while a finger is on the front screen. (The quick slide and the reset below: fixes from Producdevity's fork, 82e2219.)
 float clamp(float x, float lo, float hi) { return fminf(hi, fmaxf(lo, x)); }
 float pointerLife;
 constexpr float kPointerSeconds = 3.0f;
-struct RearContact { int id; float x0, y0; bool used; };
+struct RearContact { int id; float x0, y0, age; bool used; };
 RearContact rearSeen[8];
 int rearSeenCount;
 int rearId = -1;          // the contact that moves the pointer, -1 none
 float rearLastX, rearLastY, rearVelX, rearVelY;
 bool rearAccumulate = true;  // PETARI_REAR_ACCUM (default 1): movements below the noise step add up (see rearAim)
 constexpr float kRearArm = 40.0f;     // panel units (the rear pad is about 1920 x 890): about 2 % of its width
+constexpr float kRearArmQuick = 0.25f;  // seconds; slower than kRearArm in this long is a resting finger creeping
 constexpr float kRearNoise = 1.5f;    // panel units per sample
 constexpr float kRearGain = 2.0f / 1100.0f;  // pointer units (-1..1 across the picture) per panel unit: 1100 units = the whole width
 
@@ -117,36 +154,46 @@ void resetTransient() {
     calibrated = pointerValid = touching = touchMoved = menuPointer = tiltWasActive = false;
     neutral = right = forward = {};
     pointerX = pointerY = pointerLife = tapA = touchTime = touchX0 = touchY0 = 0;
+    mouseHeld = 0;
+    holdPulsed = false;
     rearId = -1; rearSeenCount = 0;
     memset(rearSeen, 0, sizeof rearSeen);
     rearLastX = rearLastY = rearVelX = rearVelY = 0;
-    zoomArmed = rearToggleArmed = false;
+    zoomArmed = rearToggleArmed = stickToggleArmed = reachToggleArmed = false;
     zoomHeldDir = 0; zoomRepeat = 0;
     blockedButtons = ~0u;
     blockLeftStick = blockRightStick = blockFront = blockRear = true;
 }
 
-void rearAim(bool frontDown) {
+void rearAim(bool frontDown, float dt) {
     if (!rearStarted) return;
     SceTouchData rear{};
-    const bool contact = ((!frontDown && port_rear_aim_enabled()) || blockRear) &&
-        sceTouchPeek(SCE_TOUCH_PORT_BACK, &rear, 1) > 0 && rear.reportNum > 0;
-    if (blockRear && !contact) blockRear = false;
-    const bool any = !blockRear && !frontDown && port_rear_aim_enabled() && contact;
-    if (!any) {
+    const bool enabled = !frontDown && port_rear_aim_enabled();
+    const bool contact = (enabled || blockRear) && sceTouchPeek(SCE_TOUCH_PORT_BACK, &rear, 1) > 0 && rear.reportNum > 0;
+    const int n = contact ? (rear.reportNum < 8 ? rear.reportNum : 8) : 0;
+    if (blockRear) {
+        // After an input reset (the Settings menu has closed) the contacts already on the pad never take the pointer; one put
+        // down afterwards can. Waiting for an empty pad instead kept rear aiming off while a hand holding the console rested
+        // a finger on it.
+        blockRear = false;
+        rearId = -1;
+        rearSeenCount = 0;
+        for (int i = 0; i < n; i++) rearSeen[rearSeenCount++] = {rear.report[i].id, float(rear.report[i].x), float(rear.report[i].y), 0, true};
+        return;
+    }
+    if (!enabled || !contact) {
         rearId = -1;
         rearSeenCount = 0;
         return;
     }
-    const int n = rear.reportNum < 8 ? rear.reportNum : 8;
     // forget contacts that have lifted, note new ones where they landed
     RearContact kept[8];
     int keptCount = 0;
     for (int i = 0; i < n; i++) {
         const SceTouchReport& r = rear.report[i];
-        RearContact c{r.id, float(r.x), float(r.y), false};
+        RearContact c{r.id, float(r.x), float(r.y), 0, false};
         for (int k = 0; k < rearSeenCount; k++) {
-            if (rearSeen[k].id == r.id) { c = rearSeen[k]; break; }
+            if (rearSeen[k].id == r.id) { c = rearSeen[k]; c.age += dt; break; }
         }
         kept[keptCount++] = c;
     }
@@ -167,8 +214,9 @@ void rearAim(bool frontDown) {
                 c.used = true;
                 aim = &r;
                 rearId = r.id;
-                rearLastX = r.x;
-                rearLastY = r.y;
+                const bool quick = c.age <= kRearArmQuick;
+                rearLastX = quick ? c.x0 : r.x;
+                rearLastY = quick ? c.y0 : r.y;
                 rearVelX = rearVelY = 0;
                 if (pointerLife <= 0) pointerX = pointerY = 0; // (a fresh pointer starts in the middle)
             }
@@ -237,6 +285,7 @@ void motion(PortPadState* pad) {
     pad->downX = dot(gravity, right);
     pad->downY = -dot(gravity, neutral);
     pad->downZ = dot(gravity, forward);
+    port::tilt::Scale(pad->downX, pad->downY, pad->downZ, port::tilt::Percent());
 }
 }
 
@@ -273,21 +322,22 @@ static void zoomButtons(unsigned buttons, float dt) {
     }
 }
 
-// In the pause menu Triangle turns rear touch aiming on or off (a press; held, nothing more happens).
-static void rearToggleButton(unsigned buttons) {
-    bool& armed = rearToggleArmed;
+// In the pause menu Triangle turns rear touch aiming on or off, Square switches the right stick between the camera and the
+// pointer and Select steps the Star Bit reach (a press; held, nothing more happens). The game does not get Select there (the
+// Wii's Minus would close the menu).
+static void toggleButton(unsigned buttons, unsigned button, bool& armed, int (*toggle)(void)) {
     if (!port_zoom_menu_active()) {
         armed = false;
         return;
     }
-    const bool down = (buttons & SCE_CTRL_TRIANGLE) != 0;
+    const bool down = (buttons & button) != 0;
     if (!down) {
         armed = true;
         return;
     }
     if (armed) {
         armed = false;
-        port_rear_aim_toggle();
+        toggle();
     }
 }
 
@@ -296,7 +346,8 @@ extern "C" int port_vita_input_init(void) {
     pointerValid = false;
     pointerX = pointerY = 0;
     pointerLife = 0;
-    if (const char* e = getenv("PETARI_RSTICK")) rstickPointer = strcmp(e, "pointer") == 0;
+    if (const char* e = getenv("PETARI_RSTICK")) { rstickPointer = strcmp(e, "pointer") == 0; rstickCamera = strcmp(e, "camera") == 0; }
+    if (const char* e = getenv("GXV_MOUSE_AIM")) mouseAim = atoi(e) != 0;  // read once; the Settings menu sets it (settings_launch.cpp), default off
     if (const char* e = getenv("PETARI_TOUCH_A")) touchA = atoi(e) != 0;
     if (const char* e = getenv("GXV_VITA_WIDE")) wide = atoi(e) != 0;
     if (const char* e = getenv("PETARI_REAR_ACCUM")) rearAccumulate = atoi(e) != 0;
@@ -349,6 +400,16 @@ extern "C" void port_vita_input_settings_rearm(void) { pendingReset.store(true, 
 
 extern "C" void port_vita_input_recenter(void) { calibrated = false; }
 
+// True when the controller in use is an external pad (a DS3 or DS4 on a PS TV) and no Vita handheld controls are present.
+// Valid before port_vita_input_init: the Settings start-up uses it to choose the profile.
+extern "C" int port_vita_input_external_pad(void) {
+    SceCtrlPortInfo info{};
+    if (sceCtrlGetControllerPortInfo(&info) < 0 || info.port[0] == SCE_CTRL_TYPE_PHY) return 0;
+    for (int i = 1; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) return 1;
+    return 0;
+}
+
 extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     // The UI cannot consume this flag. Reset before even the first resumed SDK read.
     if (pendingReset.exchange(false, std::memory_order_acq_rel)) resetTransient();
@@ -371,6 +432,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     if (blockRightStick) control.rx = control.ry = 128;
     unsigned commandButtons = control.buttons;
     bool mappedSpin = false;
+    bool padPointer = false;  // an external pad on the PlayStation profile: the right stick is the pointer
     if (remap) {
         using namespace port::controls;
         const auto& active = ActiveMapping();
@@ -379,6 +441,8 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         if (normalized & L1) commandButtons |= SCE_CTRL_LTRIGGER;
         if (normalized & R1) commandButtons |= SCE_CTRL_RTRIGGER;
         if (normalized & Triangle) commandButtons |= SCE_CTRL_TRIANGLE;
+        if (normalized & Square) commandButtons |= SCE_CTRL_SQUARE;
+        if (normalized & Select) commandButtons |= SCE_CTRL_SELECT;
         uint64_t required = 0;
         for (auto mask : active.masks) required |= mask;
         const auto& promptCaps = ActiveCapabilities();
@@ -403,7 +467,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
             if (state < 0) { pad->connected = 1; return; }
             mapping = &fallback[static_cast<unsigned>(kind)];
         }
-        // In the pause menu L1/R1/Triangle drive zoom and rear aiming, so the game does not get them,
+        // In the pause menu L1/R1/Triangle/Select drive zoom, rear aiming and Star Bit reach, so the game does not get them,
         // except a button the player bound to confirm, back, pause or menu movement: those always pass,
         // so a custom layout can never trap the player in the menu.
         if (port_zoom_menu_active()) {
@@ -411,8 +475,10 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
             for (Action a : {Action::Jump, Action::StarBits, Action::Pause, Action::CameraUp, Action::CameraDown,
                              Action::CameraLeft, Action::CameraRight})
                 menuKeys |= mapping->masks[static_cast<size_t>(a)];
-            normalized &= ~((L1 | R1 | Triangle) & ~menuKeys);
+            normalized &= ~((L1 | R1 | Triangle | Select) & ~menuKeys);
         }
+        padPointer = port::controls::PadDefaultsEnabled() && !rstickCamera && sampled.controllerType != SCE_CTRL_TYPE_PHY &&
+            mapping->profile == ProfileId::PlayStation;
         const auto translated = Translate(*mapping, normalized);
         mappedSpin = translated.spin;
         control.buttons = 0;
@@ -436,7 +502,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     // (In the pause menu the shoulder buttons set the camera zoom: the game does not get them.)
     const bool zoomMenu = port_zoom_menu_active() != 0;
     for (auto button : buttons) {
-        if (!remap && zoomMenu && (button.vita == SCE_CTRL_LTRIGGER || button.vita == SCE_CTRL_TRIANGLE)) continue;
+        if (!remap && zoomMenu && (button.vita == SCE_CTRL_LTRIGGER || button.vita == SCE_CTRL_TRIANGLE || button.vita == SCE_CTRL_SELECT)) continue;
         if (control.buttons & button.vita) pad->buttons |= button.wii;
     }
     stick(control.lx, control.ly, pad->stickX, pad->stickY);
@@ -445,17 +511,28 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     if (!isfinite(elapsedSeconds)) elapsedSeconds = 0;
     float dt = clamp(elapsedSeconds, 0, 0.05f);
     zoomButtons(commandButtons, dt);
-    rearToggleButton(commandButtons);
+    toggleButton(commandButtons, SCE_CTRL_TRIANGLE, rearToggleArmed, port_rear_aim_toggle);
+    toggleButton(commandButtons, SCE_CTRL_SQUARE, stickToggleArmed, port_stick_pointer_toggle);
+    toggleButton(commandButtons, SCE_CTRL_SELECT, reachToggleArmed, port_star_bit_reach_next);
     const bool aiming = (control.buttons & SCE_CTRL_CIRCLE) != 0;
-    if (rstickPointer || aiming) {
+    const bool stickPointerSetting = !rstickCamera && port_stick_pointer_enabled();  // (the pause menu's Right Stick: Pointer)
+    if (rstickPointer || padPointer || stickPointerSetting || aiming) {
         if (aiming && pointerLife <= 0) pointerX = pointerY = 0; // (a fresh aim starts from the middle)
-        if (rx != 0 || ry != 0) {
+        if (mouseAim) {
+            // Mouse-style: speed on a curve with acceleration while held (the raw stick: the dead zone is in aim::Step).
+            const float aspect = (wide ? 960.0f : 544.0f * 4.0f / 3.0f) / 544.0f;
+            port::aim::State st{pointerX, pointerY, mouseHeld};
+            const bool moved = port::aim::Step(st, (control.rx - 127.5f) / 127.5f, (127.5f - control.ry) / 127.5f, dt, aspect);
+            pointerX = st.x; pointerY = st.y; mouseHeld = st.held;
+            if (moved) pointerLife = kPointerSeconds;
+        } else if (rx != 0 || ry != 0) {
             pointerX = clamp(pointerX + rx * dt * 2.0f, -1, 1);
             pointerY = clamp(pointerY - ry * dt * 2.0f, -1, 1);
             pointerLife = kPointerSeconds;
         }
         if (aiming) pointerLife = kPointerSeconds;
     } else {
+        mouseHeld = 0;
         if (rx < -0.5f) pad->buttons |= 0x0001;
         if (rx > 0.5f) pad->buttons |= 0x0002;
         if (ry < -0.6f) pad->buttons |= 0x0004;
@@ -498,16 +575,24 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
             touchTime = 0;
             touchX0 = pointerX;
             touchY0 = pointerY;
+            holdPulsed = false;
+            if (tapCleanOn()) tapA = 0;  // (a press of the tap before is over: this touch makes its own edge)
         }
         touchTime += dt;
         if (fabsf(pointerX - touchX0) > 0.08f || fabsf(pointerY - touchY0) > 0.08f) touchMoved = true;
-        if (touchA && !touchMoved && touchTime >= 0.20f) pad->buttons |= 0x0800; // a finger held still: A held (pull stars)
+        if (touchA && !touchMoved && touchTime >= 0.20f) {
+            if (tapCleanOn() && talkOrDemoOnScreen()) {
+                if (!holdPulsed) { holdPulsed = true; tapA = 0.10f; }  // one press, not a hold
+            } else {
+                pad->buttons |= 0x0800; // a finger held still: A held (pull stars)
+            }
+        }
     } else if (touching) {
         touching = false;
         if (touchA && !touchMoved && touchTime < 0.20f) tapA = 0.10f; // a tap: A where it landed
     }
     // the rear pad (if chosen): in play only, never with a finger on the front screen
-    rearAim(contact || menuPointer || (remap && !sampled.caps.rearTouch));
+    rearAim(contact || menuPointer || (remap && !sampled.caps.rearTouch), dt);
     if (tapA > 0) {
         pad->buttons |= 0x0800;
         tapA -= dt;
@@ -530,12 +615,14 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         float shake = (control.timeStamp / 16000) & 1 ? 2.5f : -2.5f;
         pad->accX = pad->accY = shake;
     }
-    if (!remap || sampled.caps.motion) motion(pad);
-    else if (sampled.caps.tiltFallback && port_input_tilt_active()) {
+    // Tilt from the motion sensor, or (no sensor, or "Tilt with: Left stick") from the left stick.
+    if (!remap || (sampled.caps.motion && !port::tilt::UseStick())) motion(pad);
+    else if ((sampled.caps.tiltFallback || sampled.caps.motion) && port_input_tilt_active()) {
         // Same gravity interface as motion; WPAD retains the level's neutral pitch.
         const float x = pad->stickX * 0.65f, z = pad->stickY * 0.65f;
         pad->tilted = 1; pad->downX = x; pad->downZ = z;
         pad->downY = -sqrtf(fmaxf(0, 1.0f - x*x - z*z));
+        port::tilt::Scale(pad->downX, pad->downY, pad->downZ, port::tilt::Percent());
         pad->stickX = pad->stickY = 0;
     }
 }

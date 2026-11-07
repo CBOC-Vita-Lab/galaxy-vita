@@ -109,7 +109,15 @@ int main(int argc, char** argv) {
     if (enabled) {
         require(count(repeated, "operation=open") == 3, "256 identical failures log only attempts 1, 8 and 64");
         require(repeated.find("repeat=64") != std::string::npos, "bounded retry count is visible");
-    } else require(repeated.empty(), "disabled switch remains quiet after environment changes");
+    } else {
+        // 1.2 start-up watchdog: the first failed disc operation of the process is named once as a summary line, switch or no
+        // switch (the loading screen's stall message quotes it).  Everything else stays quiet when the switch is off.
+        const std::string summary = "dvd: first failure: open " + sFst[0].hostPath + " (errno " + std::to_string(ENOENT) + ")";
+        require(count(repeated, "dvd: first failure:") == 1 && repeated.find(summary) != std::string::npos,
+                "disabled switch logs only the one-time first-failure summary naming the exact path");
+        require(repeated.find("dvd-error:") == std::string::npos && count(repeated, "\n") == 1,
+                "disabled switch remains quiet after environment changes");
+    }
 
     // Repair and retry use the same real worker; successful padded reads never log an error.
     writeFixture(sFst[0].hostPath);
@@ -136,7 +144,7 @@ int main(int argc, char** argv) {
         require(count(all, "dvd-error:") == 24, "process-wide ceiling bounds unique failures too");
         require(all.find("further errors suppressed") != std::string::npos, "the last record explains the ceiling");
         std::fprintf(stderr, "%s", all.c_str());
-    } else require(all.empty(), "all disabled failures remain absent from the basic log");
+    } else require(all == repeated, "all disabled failures remain absent from the basic log (only the one-time first-failure summary)");
     require(callbacks == 324 && interrupts == callbacks, "all repeated, repaired and distinct reads completed");
     std::printf("PASS: 324 real DVD callbacks; results-and-bytes=%08x; quiet logger; synthetic host fixture\n", resultHash);
 

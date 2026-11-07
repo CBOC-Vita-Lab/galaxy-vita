@@ -1,0 +1,163 @@
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index cc72fa9..d62601e 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -288,6 +288,11 @@ shark_opt compiler_opts = SHARK_OPT_FAST;
+ 
+ GLuint cur_program = 0; // Current in use custom program (0 = No custom program)
+ 
++#define VGL_DIRECT_VPROGS 8
++static const vglDirectLayout *direct_layout = NULL; // vglDrawElementsDirect: the layout of the draw in progress
++static vbo *direct_vbo = NULL;
++static uint32_t direct_base = 0;
++
+ typedef enum {
+ 	UNIFORM_DATA,
+ 	UNIFORM_SAMPLER,
+@@ -369,6 +374,10 @@ typedef struct {
+ 	attr_mapping *glsl_attr_map;
+ 	void *unif_fbuffer;
+ 	void *unif_vbuffer;
++	// vglDrawElementsDirect: vertex programs patched for a caller's layout keys (round robin)
++	uint32_t direct_key[VGL_DIRECT_VPROGS];
++	SceGxmVertexProgram *direct_vprog[VGL_DIRECT_VPROGS];
++	uint8_t direct_next;
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ 	uint32_t vertex_layout_version;
+ #endif
+@@ -1444,6 +1453,78 @@ GLboolean _glDrawArrays_CustomShadersIMPL(GLint first, GLsizei count, GLboolean
+ 	return GL_TRUE;
+ }
+ 
++// vglDrawElementsDirect (Galaxy): every enabled attribute of the draw comes from one interleaved buffer, so one vertex stream
++// carries them all; each disabled attribute reads its constant (glVertexAttrib*, as on the ordinary path) from a stream of stride 0.
++// The patched vertex program is kept per (program, caller's key) instead of being hashed from the whole attribute set per draw.
++static GLboolean direct_vertex_setup(program *p, SceGxmIndexSource index_type) {
++	const vglDirectLayout *L = direct_layout;
++	SceGxmVertexProgram *vp = NULL;
++	for (int k = 0; k < VGL_DIRECT_VPROGS; k++) {
++		if (p->direct_vprog[k] && p->direct_key[k] == L->key) {
++			vp = p->direct_vprog[k];
++			break;
++		}
++	}
++	if (!vp) {
++		SceGxmVertexAttribute attrs[VERTEX_ATTRIBS_NUM];
++		SceGxmVertexStream strs[VERTEX_ATTRIBS_NUM];
++		uint32_t nstreams = 1;
++		strs[0].stride = L->stride;
++		strs[0].indexSource = index_type & 1;
++		for (int i = 0; i < p->attr_num; i++) {
++			uint8_t attr_idx = p->attr_map[i];
++			attrs[i].regIndex = p->attr[attr_idx].regIndex;
++			if (L->enabled & (1u << attr_idx)) {
++				attrs[i].streamIndex = 0;
++				attrs[i].offset = L->offset[attr_idx];
++				attrs[i].componentCount = L->size[attr_idx];
++				attrs[i].format = L->type[attr_idx] == VGL_DIRECT_F32 ? SCE_GXM_ATTRIBUTE_FORMAT_F32 : (L->type[attr_idx] == VGL_DIRECT_U8N ? SCE_GXM_ATTRIBUTE_FORMAT_U8N : SCE_GXM_ATTRIBUTE_FORMAT_U8);
++			} else {
++				attrs[i].streamIndex = nstreams;
++				attrs[i].offset = 0;
++				attrs[i].componentCount = cur_vao->vertex_attrib_size[attr_idx];
++				attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_F32;
++				strs[nstreams].stride = 0;
++				strs[nstreams].indexSource = index_type & 1;
++				nstreams++;
++			}
++		}
++		patch_vertex_program(p->vshader->id, attrs, p->attr_num, strs, nstreams, &vp);
++		if (!vp)
++			return GL_FALSE;
++		p->direct_key[p->direct_next] = L->key;
++		p->direct_vprog[p->direct_next] = vp;
++		p->direct_next = (p->direct_next + 1) % VGL_DIRECT_VPROGS;
++	}
++	p->vprog = vp;
++	sceGxmSetVertexProgram(gxm_context, vp);
++	upload_uniforms();
++	sceGxmSetVertexStream(gxm_context, 0, (uint8_t *)direct_vbo->ptr + direct_base);
++	direct_vbo->last_frame = vgl_framecount;
++	uint32_t s = 1;
++	for (int i = 0; i < p->attr_num; i++) {
++		uint8_t attr_idx = p->attr_map[i];
++		if (!(L->enabled & (1u << attr_idx)))
++			sceGxmSetVertexStream(gxm_context, s++, cur_vao->vertex_attrib_value[attr_idx]);
++	}
++	return GL_TRUE;
++}
++
++GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idx_offset, GLuint vbo_name, uint32_t base, const vglDirectLayout *layout) {
++	if (!cur_program || !vbo_name || !layout || mode != GL_TRIANGLES || count <= 0)
++		return GL_FALSE;
++	vbo *v = (vbo *)vbo_name;
++	if (!v->ptr)
++		return GL_FALSE;
++	direct_layout = layout;
++	direct_vbo = v;
++	direct_base = base;
++	glDrawElements(mode, count, GL_UNSIGNED_SHORT, (const GLvoid *)idx_offset);
++	direct_layout = NULL;
++	direct_vbo = NULL;
++	return GL_TRUE;
++}
++
+ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, uint32_t top_idx, uint32_t base_idx, SceGxmIndexSource index_type) {
+ #ifdef HAVE_PROFILING
+ 	uint32_t draw_start = sceKernelGetProcessTimeLow();
+@@ -1592,6 +1673,9 @@ GLboolean _glDrawElements_CustomShadersIMPL(uint16_t *idx_buf, GLsizei count, ui
+ #endif
+ #endif
+ 
++	if (direct_layout)
++		return direct_vertex_setup(p, index_type);
++
+ 	// Aligning attributes
+ 	SceGxmVertexAttribute *attributes;
+ 	SceGxmVertexStream *streams;
+@@ -2233,6 +2317,9 @@ GLuint glCreateProgram(void) {
+ 			progs[i].vertex_layout_version = ++vertex_program_layout_current_ver;
+ #endif
+ 			progs[i].attr_num = 0;
++			vgl_memset(progs[i].direct_key, 0, sizeof(progs[i].direct_key));
++			vgl_memset(progs[i].direct_vprog, 0, sizeof(progs[i].direct_vprog));
++			progs[i].direct_next = 0;
+ #ifdef ENABLE_LEGACY_PIPELINE
+ 			progs[i].attr_mode = VGL_ATTRIB_REGULAR;
+ #endif
+@@ -2474,6 +2561,9 @@ void glLinkProgram(GLuint progr) {
+ 	program *p = &progs[progr - 1];
+ 	if (p->status != PROG_UNLINKED || !p->vshader || !p->fshader)
+ 		return;
++	vgl_memset(p->direct_key, 0, sizeof(p->direct_key));
++	vgl_memset(p->direct_vprog, 0, sizeof(p->direct_vprog));
++	p->direct_next = 0;
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ 	p->vertex_layout_version = ++vertex_program_layout_current_ver;
+ #endif
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 334e4b1..2e93bb0 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1112,6 +1112,22 @@ void vglVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean nor
+ //Overloads a vertex attrib pointer with a pre-GPU mapped memory block with a copy-less action for legacy vgl* draw pipeline.
+ void vglVertexAttribPointerMapped(GLuint index, const GLvoid *pointer);
+ 
++// Galaxy direct draw: the current program's enabled attributes (bit per attribute index in `enabled`) from one interleaved buffer
++// object `vbo_name` starting `base` bytes in, at the given offsets; the disabled ones read their glVertexAttrib* constants. 16-bit
++// indices from the bound element array buffer at byte offset idx_offset. `key` must identify everything in the layout but `base`
++// (same key, same table). GL_TRIANGLES only; returns GL_FALSE (nothing drawn) for anything else.
++#define VGL_HAS_DIRECT_DRAW 1
++enum { VGL_DIRECT_F32 = 0, VGL_DIRECT_U8N = 1, VGL_DIRECT_U8 = 2 };
++typedef struct {
++	uint32_t key;
++	uint32_t enabled;
++	uint16_t stride;
++	uint8_t size[16];
++	uint8_t type[16];
++	uint16_t offset[16];
++} vglDirectLayout;
++GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idx_offset, GLuint vbo_name, uint32_t base, const vglDirectLayout *layout);
++
+ // Get the compiled shader binary of a given GL shader.
+ void vglGetShaderBinary(GLuint index, GLsizei bufSize, GLsizei *length, void *binary);
+ 

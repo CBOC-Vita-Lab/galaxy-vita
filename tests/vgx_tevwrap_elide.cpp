@@ -68,7 +68,7 @@ void Corpus(const char* path) {
 }
 int main(int argc, char** argv) {
     Require(argc == 3 || argc == 4, "mode and wrap arguments, optional caller-supplied recipe");
-    Require(vgx::kShaderGenVersion == 3, "optional source elision preserves the byte-wrap baseline cache namespace");
+    Require(vgx::kShaderGenVersion == 2, "wrap and elision keep the 1.0 cache namespace");
     enabled = std::strcmp(argv[1], "on") == 0;
     wrapping = std::strcmp(argv[2], "on") == 0;
     const auto first = Chain(0, 0, false);

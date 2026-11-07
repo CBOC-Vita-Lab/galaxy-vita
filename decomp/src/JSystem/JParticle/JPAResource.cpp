@@ -12,6 +12,88 @@
 #include "JSystem/JParticle/JPAParticle.hpp"
 #include "JSystem/JParticle/JPAResourceManager.hpp"
 
+#ifdef TARGET_PC
+// GXV_JPA_LOOK (logic12, 5 Nov; default 1; 0 in env.txt: every calc runs the look functions, as before). A particle's look
+// functions (mpCalcParticleFuncList / mpCalcParticleChildFuncList: JPACalcTexIdx*, JPACalcAlpha*, JPACalcPrm/Env with
+// JPACalcClrIdx*, JPACalcColorCopy, JPACalcScale*, JPACalcChildAlphaOut/ScaleOut) set only what the draw reads (mTexAnmIdx,
+// mPrmColorAlphaAnm, mPrmClr/mEnvClr, mParticleScaleX/Y), each as a function of the particle's age and time, of fields fixed at
+// its birth (mAnmRandom, mScaleOut, mAlphaWaveRandom), of the resource, and (JPACalcColorCopy) of the emitter's colour, which only
+// the emitter's own calc writes. Run at the next draw instead of at every calc, they give the same values for the picture; on the
+// turns that draw nothing (about half of them in the lit Observatory) they are not run at all. Left in place where something
+// else reads those values between two pictures:
+//  - an emitter with a particle callback (it runs before the look functions in calc_p and may read or write them);
+//  - a parent whose resource's children inherit its scale, alpha or colour (init_c reads them when the child is made in calc_p).
+// A particle not yet calculated since its birth (mAge -1, made outside a calc) keeps the values init_p/init_c gave it, as before.
+extern "C" int port_jpa_look_on(void);
+extern "C" void port_logic_count(int what, unsigned n);
+static bool sPortLookSkipP = false;
+static bool sPortLookSkipC = false;
+
+static inline void PortLookRunP(JPAResource* pRes, JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
+    for (int i = pRes->mpCalcParticleFuncListNum - 1; i >= 0; i--) {
+        (*pRes->mpCalcParticleFuncList[i])(work, ptcl);
+    }
+}
+
+static inline void PortLookRunC(JPAResource* pRes, JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
+    for (int i = pRes->mpCalcParticleChildFuncListNum - 1; i >= 0; i--) {
+        (*pRes->mpCalcParticleChildFuncList[i])(work, ptcl);
+    }
+}
+
+// GXV_FXMERGE (default 0; port/gx_fifo.h): an emitter's particle loop gathered into port-private commands for the vgx front end by the
+// GX library (decomp/src/RVL_SDK/gx/GXDisplayList.c), which takes only GXSetTevColor, GXLoadPosMtxImm, GXLoadTexMtxImm and
+// GXCallDisplayList. So it is started only for a loop whose particle functions make no other GX call: the functions below, which
+// make only those (the colour functions, the texture-coordinate matrix, the quad drawers with their projection loaders, the particle
+// callback hook with no callback). JPALoadTexAnm (a texture load), the point and line drawers and a particle callback (anything)
+// keep the loop as it was.
+extern "C" int port_gx_fx_begin(void);
+extern "C" void port_gx_fx_end(void);
+static bool PortFxListOk(JPAResource::ParticleFunc const* list, int n, const JPABaseEmitter* emtr) {
+    typedef JPAResource::ParticleFunc F;
+    if (list == NULL || n <= 0 || emtr->mpPtclCallBack != NULL) {
+        return false;
+    }
+    for (int i = 0; i < n; i++) {
+        const F f = list[i];
+        if (f == static_cast<F>(&JPADrawBillboard) || f == static_cast<F>(&JPADrawRotBillboard) || f == static_cast<F>(&JPADrawYBillboard) ||
+            f == static_cast<F>(&JPADrawRotYBillboard) || f == static_cast<F>(&JPADrawDirection) || f == static_cast<F>(&JPADrawRotDirection) ||
+            f == static_cast<F>(&JPADrawDBillboard) || f == static_cast<F>(&JPADrawRotation) || f == static_cast<F>(&JPADrawParticleCallBack) ||
+            f == static_cast<F>(&JPALoadCalcTexCrdMtxAnm) || f == static_cast<F>(&JPARegistAlpha) || f == static_cast<F>(&JPARegistPrmAlpha) ||
+            f == static_cast<F>(&JPARegistPrmAlphaEnv) || f == static_cast<F>(&JPARegistAlphaEnv) || f == static_cast<F>(&JPARegistEnv)) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+// The start of a draw of this emitter: the look functions its calcs left out, for every particle calculated at least once.
+static void PortLookFlush(JPAResource* pRes, JPAEmitterWorkData* work, JPABaseEmitter* emtr) {
+    emtr->mPortLookStale = 0;
+    unsigned n = 0;
+    if (pRes->mpCalcParticleFuncList != NULL) {
+        for (JPANode< JPABaseParticle >* node = emtr->mAlivePtclBase.getFirst(); node != emtr->mAlivePtclBase.getEnd(); node = node->getNext()) {
+            JPABaseParticle* ptcl = node->getObject();
+            if (ptcl->mAge >= 0) {
+                PortLookRunP(pRes, work, ptcl);
+                n++;
+            }
+        }
+    }
+    if (pRes->mpCalcParticleChildFuncList != NULL) {
+        for (JPANode< JPABaseParticle >* node = emtr->mAlivePtclChld.getFirst(); node != emtr->mAlivePtclChld.getEnd(); node = node->getNext()) {
+            JPABaseParticle* ptcl = node->getObject();
+            if (ptcl->mAge >= 0) {
+                PortLookRunC(pRes, work, ptcl);
+                n++;
+            }
+        }
+    }
+    port_logic_count(1, n);
+}
+#endif
+
 JPAResource::JPAResource() {
     mpDrawEmitterChildFuncList = NULL;
     mpDrawEmitterFuncList = NULL;
@@ -727,6 +809,21 @@ bool JPAResource::calc(JPAEmitterWorkData* work, JPABaseEmitter* emtr) {
             }
         }
 
+#ifdef TARGET_PC
+        // (GXV_JPA_LOOK, above: which look functions this calc leaves to the next draw)
+        sPortLookSkipP = false;
+        sPortLookSkipC = false;
+        if (emtr->mpPtclCallBack == NULL && port_jpa_look_on()) {
+            sPortLookSkipC = mpCalcParticleChildFuncList != NULL;
+            sPortLookSkipP = mpCalcParticleFuncList != NULL &&
+                             (mpChildShape == NULL ||
+                              !(mpChildShape->isScaleInherited() || mpChildShape->isAlphaInherited() || mpChildShape->isColorInherited()));
+        }
+        // (a calc that runs them all leaves every particle as the draw needs it)
+        emtr->mPortLookStale = (sPortLookSkipP || sPortLookSkipC) ? 1 : 0;
+        port_logic_count(0, emtr->mAlivePtclBase.getNum() + emtr->mAlivePtclChld.getNum());
+        port_logic_count(2, 1);
+#endif
         JPANode< JPABaseParticle >* node = emtr->mAlivePtclBase.getFirst();
         JPANode< JPABaseParticle >* next;
         while (node != emtr->mAlivePtclBase.getEnd()) {
@@ -745,6 +842,10 @@ bool JPAResource::calc(JPAEmitterWorkData* work, JPABaseEmitter* emtr) {
             }
             child = childNext;
         }
+#ifdef TARGET_PC
+        sPortLookSkipP = false;
+        sPortLookSkipC = false;
+#endif
 
         emtr->mTick++;
     }
@@ -756,6 +857,11 @@ void JPAResource::draw(JPAEmitterWorkData* work, JPABaseEmitter* emtr) {
     work->mpEmtr = emtr;
     work->mpRes = this;
     work->mDrawCount = 0;
+#ifdef TARGET_PC
+    if (emtr->mPortLookStale) {
+        PortLookFlush(this, work, emtr);  // (GXV_JPA_LOOK)
+    }
+#endif
     calcWorkData_d(work);
     mpBaseShape->setGX(work);
     for (s32 i = 1; i <= emtr->getDrawTimes(); i++) {
@@ -801,6 +907,10 @@ void JPAResource::drawP(JPAEmitterWorkData* work) {
         (*mpDrawEmitterFuncList[i])(work);
     }
 
+#ifdef TARGET_PC
+    // (GXV_FXMERGE: the particles' GX calls gathered, above)
+    const bool portFx = PortFxListOk(mpDrawParticleFuncList, mpDrawParticleFuncListNum, work->mpEmtr) && port_gx_fx_begin();
+#endif
     if (mpBaseShape->isDrawFwdAhead()) {
         JPANode< JPABaseParticle >* node = work->mpEmtr->mAlivePtclBase.getLast();
         for (; node != work->mpEmtr->mAlivePtclBase.getEnd(); node = node->getPrev()) {
@@ -822,6 +932,11 @@ void JPAResource::drawP(JPAEmitterWorkData* work) {
             }
         }
     }
+#ifdef TARGET_PC
+    if (portFx) {
+        port_gx_fx_end();
+    }
+#endif
 
     GXSetMisc(GX_MT_XF_FLUSH, 0);
 
@@ -863,6 +978,10 @@ void JPAResource::drawC(JPAEmitterWorkData* work) {
         (*mpDrawEmitterChildFuncList[i])(work);
     }
 
+#ifdef TARGET_PC
+    // (GXV_FXMERGE, as in drawP)
+    const bool portFx = PortFxListOk(mpDrawParticleChildFuncList, mpDrawParticleChildFuncListNum, work->mpEmtr) && port_gx_fx_begin();
+#endif
     if (mpBaseShape->isDrawFwdAhead()) {
         JPANode< JPABaseParticle >* node = work->mpEmtr->mAlivePtclChld.getLast();
         for (; node != work->mpEmtr->mAlivePtclChld.getEnd(); node = node->getPrev()) {
@@ -884,6 +1003,11 @@ void JPAResource::drawC(JPAEmitterWorkData* work) {
             }
         }
     }
+#ifdef TARGET_PC
+    if (portFx) {
+        port_gx_fx_end();
+    }
+#endif
 
     GXSetMisc(GX_MT_XF_FLUSH, 0);
 
@@ -964,6 +1088,11 @@ void JPAResource::setCTev(JPAEmitterWorkData* work) {
 }
 
 void JPAResource::calc_p(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
+#ifdef TARGET_PC
+    if (sPortLookSkipP) {
+        return;  // (GXV_JPA_LOOK: at the next draw)
+    }
+#endif
     if (mpCalcParticleFuncList != NULL) {
         for (int i = mpCalcParticleFuncListNum - 1; i >= 0; i--) {
             (*mpCalcParticleFuncList[i])(work, ptcl);
@@ -972,6 +1101,11 @@ void JPAResource::calc_p(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
 }
 
 void JPAResource::calc_c(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
+#ifdef TARGET_PC
+    if (sPortLookSkipC) {
+        return;  // (GXV_JPA_LOOK: at the next draw)
+    }
+#endif
     if (mpCalcParticleChildFuncList != NULL) {
         for (int i = mpCalcParticleChildFuncListNum - 1; i >= 0; i--) {
             (*mpCalcParticleChildFuncList[i])(work, ptcl);

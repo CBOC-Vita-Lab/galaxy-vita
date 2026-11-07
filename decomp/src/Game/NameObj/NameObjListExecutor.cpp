@@ -99,6 +99,16 @@ void NameObjListExecutor::entryDrawBuffer3D() {
     mBufferHolder->entry(MR::CameraType_3D);
 }
 
+#ifdef TARGET_PC
+void NameObjListExecutor::entryDrawBufferPlayer() {
+    mBufferHolder->entryPlayer();
+}
+
+void NameObjListExecutor::entryDrawBuffer3DExceptPlayer() {
+    mBufferHolder->entryExceptPlayer(MR::CameraType_3D);
+}
+#endif
+
 void NameObjListExecutor::entryDrawBufferMirror() {
     mBufferHolder->entry(MR::CameraType_Mirror);
 }

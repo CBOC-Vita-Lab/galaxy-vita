@@ -1,8 +1,12 @@
 // Front end: turns the register state into self-contained draw records.
+#include "vgx_workload.h"
 #include "vgx_state.h"
+#include "vgx_arena.h"
 #include "vgx_fesplit.h"
+#include "vgx_fixes.h"
 #include "vgx_recipe_seed.h"
 #include "vgx_variant_set.h"
+#include "vgx_keymemo.h"
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -10,7 +14,9 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -64,7 +70,8 @@ std::unordered_set<uint32_t> g_progSeen;
 VariantSet g_varSeen;
 uint64_t g_lastVariant = ~0ull;         // of the last draw (most draws repeat it)
 inline uint64_t VariantKey(uint32_t vsId, uint32_t fsId, uint32_t layoutMask, uint32_t blendKey) {
-    return (static_cast<uint64_t>((vsId << 16) | fsId) << 32) | ((layoutMask & 0xFFFu) << 12) | (blendKey & 0xFFFu);
+    // Preserve legacy identities; the new blend bit occupies the formerly unused bit 24.
+    return (static_cast<uint64_t>((vsId << 16) | fsId) << 32) | ((layoutMask & 0xFFFu) << 12) | (blendKey & 0xFFFu) | ((blendKey & 0x1000u) << 12);
 }
 void EnsureShaderList();
 bool ListQueue(uint32_t type, const void* p, size_t n);
@@ -308,12 +315,16 @@ void EnsureShaderList() {
                 } else if (type == 3) {
                     uint32_t v[2];
                     if (std::fread(v, sizeof v, 1, f) != 1 || v[0] >= vsIds.size() || v[1] >= fsIds.size()) { rewrite = true; break; }
+                    // (a pair whose shaders disagree on the texture coordinates is never made by a draw, BuildVsKey takes the fragment
+                    // key's count: a damaged list. It ends the read and the list is written anew; from Producdevity's fork, 9624529)
+                    if (g_vsReg.keys[vsIds[v[0]]].numTexGens != g_fsReg.keys[fsIds[v[1]]].numTexGens) { rewrite = true; break; }
                     const uint32_t pk = (static_cast<uint32_t>(vsIds[v[0]]) << 16) | fsIds[v[1]];
                     if (g_progSeen.insert(pk).second) ReplayCmds().push_back(Cmd{CMD_PROGRAM, pk});
                     else rewrite = true;
                 } else if (type == 4) {
                     uint32_t v[4];
-                    if (std::fread(v, sizeof v, 1, f) != 1 || v[0] >= vsIds.size() || v[1] >= fsIds.size() || v[2] > 0xFFFu || v[3] > 0xFFFu) { rewrite = true; break; }
+                    if (std::fread(v, sizeof v, 1, f) != 1 || v[0] >= vsIds.size() || v[1] >= fsIds.size() || v[2] > 0xFFFu || v[3] > 0x1FFFu) { rewrite = true; break; }
+                    if (g_vsReg.keys[vsIds[v[0]]].numTexGens != g_fsReg.keys[fsIds[v[1]]].numTexGens) { rewrite = true; break; }
                     if (g_varSeen.insert(VariantKey(vsIds[v[0]], fsIds[v[1]], v[2], v[3])).second) {
                         g_buf.variants.push_back(VariantCmd{vsIds[v[0]], fsIds[v[1]], static_cast<uint16_t>(v[2]), static_cast<uint16_t>(v[3])});
                         ReplayCmds().push_back(Cmd{CMD_VARIANT, static_cast<uint32_t>(g_buf.variants.size() - 1)});
@@ -360,7 +371,7 @@ void EnsureShaderList() {
             for (uint64_t vk : vars) {
                 if (!written) break;
                 const uint32_t rec[5] = {4u, static_cast<uint32_t>(vk >> 48), static_cast<uint32_t>(vk >> 32) & 0xFFFFu, static_cast<uint32_t>(vk >> 12) & 0xFFFu,
-                                         static_cast<uint32_t>(vk) & 0xFFFu};
+                                         (static_cast<uint32_t>(vk) & 0xFFFu) | (static_cast<uint32_t>(vk >> 12) & 0x1000u)};
                 written = std::fwrite(rec, sizeof rec, 1, f) == 1;
             }
             const bool closed = std::fclose(f) == 0;
@@ -390,7 +401,7 @@ struct Resolved {
     bool foldOk = false, fold = false;
     uint16_t fsIdFold = 0, useFs = 0;
     bool fsIdFoldValid = false;
-    bool shortPalOk = false; // what the vertex key was built with
+    uint8_t palCls = 0; // what the vertex key was built with: 0 the full palette, 1 the short one, 2 the small one (PalClass)
     uint32_t vcdMtxMask = 0;
     uint32_t vcdGen = 0xFFFFFFFFu; // State::vcdGen when ResolveState last ran
     uint32_t stateSerial = 0; // bumped whenever rs, tex or texMask are built again (a record made at this serial has the same ones)
@@ -414,6 +425,38 @@ int g_lastDraw = -1; // index of the draw that may still be merged into
 uint32_t g_lastRecSerial = 0; // Resolved::stateSerial of the state that draw was recorded (or last merged) with
 
 inline bool EfbHasAlpha() { return (g.bp[0x43] & 7) == 1; }
+inline bool DstAlphaZeroEnabled() {
+    // Zero-only blended destination alpha; opt-in, read once, default off.
+    const bool enabled = VGX_KNOB(EnvInt("GXV_DSTALPHA_ZERO", 0) == 1) != 0;
+    return enabled;
+}
+// GXV_FIX_DSTA (default 0): GXSetDstAlpha(TRUE, a) with blending or GX_BM_SUBTRACT writes the constant a to the framebuffer
+// alpha for every constant (GXV_DSTALPHA_ZERO covers only a = 0 and needs a colour write), see vgx_fixes.h PlanDstAlpha. Galaxy's volume
+// lights, search light and dark mask use it as a mask plane. 1 includes what GXV_DSTALPHA_ZERO does.
+inline bool FixDstA() {
+    const bool on = VGX_KNOB(EnvInt("GXV_FIX_DSTA", 0) != 0) != 0;
+    return on;
+}
+// GXV_FIX_LOGICOP (default 0): GX logic-op blend (BP 0x41 bit 1) uses blend factors that reproduce the op on 0/255 channels
+// (vgx_fixes.h LogicOpPlan) instead of the table in LegacyLogicOpFactors, which is right for 7 of the 16 ops.
+inline bool FixLogicOp() {
+    const bool on = VGX_KNOB(EnvInt("GXV_FIX_LOGICOP", 0) != 0) != 0;
+    return on;
+}
+// GXV_FIX_TEXOFF (default 0): a TEV stage that reads the texture colour while its texture is switched off in BP 0x28.. reads white
+// (as GX does) instead of whatever an earlier stage sampled.
+inline bool FixTexOff() {
+    const bool on = VGX_KNOB(EnvInt("GXV_FIX_TEXOFF", 0) != 0) != 0;
+    return on;
+}
+uint8_t MapSrcFactor(uint32_t f, bool hasAlpha);
+uint8_t MapDstFactor(uint32_t f, bool hasAlpha);
+inline fixes::DstAlphaPlan DstAlphaPlanNow() {
+    const uint32_t cm0 = g.bp[0x41];
+    const bool hasAlpha = EfbHasAlpha();
+    return fixes::PlanDstAlpha(bits(g.bp[0x42], 8, 1) != 0, bits(g.bp[0x42], 0, 8), bits(cm0, 4, 1) != 0 && hasAlpha, bits(cm0, 3, 1) != 0,
+                               bits(cm0, 0, 1) != 0, bits(cm0, 11, 1) != 0, MapSrcFactor(bits(cm0, 8, 3), hasAlpha), MapDstFactor(bits(cm0, 5, 3), hasAlpha));
+}
 
 uint8_t SwapTable(int t) {
     const uint32_t rg = g.bp[0xF6 + 2 * t], ba = g.bp[0xF7 + 2 * t];
@@ -463,6 +506,10 @@ void BuildFsKey(FsKey& k) {
             st.texEnable = 1;
             st.texMap = static_cast<uint8_t>(bits(tref, 0, 3));
             st.texSwap = SwapTable(bits(teva, 2, 2));
+            // GXV_FIX_LODBIAS: the unit mip-maps with a non-zero LOD bias (mode0 / mode1 are key registers while the switch is on: vgx_state.cpp)
+            if (FixLodBias() && fixes::LodBiasOf(g.bp[fixes::TexMode0Reg(st.texMap)], g.bp[fixes::TexMode1Reg(st.texMap)]) != 0.0f) st.lodBias = 1;
+        } else if (usesTex && FixTexOff()) {
+            st.texOff = 1;
         }
         if (usesRas) {
             st.rasChan = static_cast<uint8_t>(bits(tref, 7, 3));
@@ -480,14 +527,20 @@ void BuildFsKey(FsKey& k) {
     const uint32_t ac = g.bp[0xF3];
     const uint32_t c0 = bits(ac, 16, 3), c1 = bits(ac, 19, 3), op = bits(ac, 22, 2);
     // Fold the cases that always pass.
-    const bool pass = (op == 0 && c0 == 7 && c1 == 7) || (op == 1 && (c0 == 7 || c1 == 7)) || (op == 3 && c0 == 7 && c1 == 7) ||
+    bool pass = (op == 0 && c0 == 7 && c1 == 7) || (op == 1 && (c0 == 7 || c1 == 7)) || (op == 3 && c0 == 7 && c1 == 7) ||
                       (op == 2 && ((c0 == 7 && c1 == 0) || (c0 == 0 && c1 == 7)));
+    // GXV_NODISCARD: also the tests the references make constant (GEQUAL 0, LEQUAL 255, ...): no alpha test, no `discard`
+    // (the references are in BP 0xF3, a key register, so a change of them builds the key again)
+    if (!pass && NoDiscard()) pass = AlphaTestAlwaysPasses(c0, static_cast<int>(bits(ac, 0, 8)), op, c1, static_cast<int>(bits(ac, 8, 8)));
     if (!pass) {
         k.alphaTestOn = 1;
         k.alphaTest = static_cast<uint8_t>(c0 | (c1 << 3) | (op << 6));
     }
     const uint32_t fsel = bits(g.bp[0xF1], 21, 3);
     if (fsel) k.fog = static_cast<uint8_t>(fsel | (bits(g.bp[0xF1], 20, 1) << 3));
+    // GXV_FOGVTX: linear fog from the vertex shader (not with a Z-texture replacing the depth: the factor is made from the
+    // depth range, which that draw sets to one value)
+    if (k.fog && bits(g.bp[0xF5], 2, 2) != 2 && FogVtxEligible(k.fog)) k.fog |= kFogVtxBit;
     const uint32_t zop = bits(g.bp[0xF5], 2, 2);
     if (zop == 1) {
         stats::Note("z-texture (GXSetZTexture GX_ZT_ADD) requested: NOT implemented");
@@ -496,15 +549,29 @@ void BuildFsKey(FsKey& k) {
         if (bits(g.xfReg[0x40 + i], 1, 1)) k.texProjMask |= static_cast<uint8_t>(1u << i);
     const uint32_t cm0 = g.bp[0x41];
     const bool blending = bits(cm0, 0, 1) || bits(cm0, 11, 1);
-    if (bits(g.bp[0x42], 8, 1) && EfbHasAlpha() && bits(cm0, 4, 1)) {
+    if (FixDstA()) {
+        const fixes::DstAlphaPlan p = DstAlphaPlanNow();
+        k.dstAlpha = p.fsConst ? 1 : 0;
+        if (p.unresolved) stats::Note("GXSetDstAlpha constant with a source-alpha blend factor: constant alpha NOT written (needs a second pass)");
+    } else if (bits(g.bp[0x42], 8, 1) && EfbHasAlpha() && bits(cm0, 4, 1)) {
         if (!blending) k.dstAlpha = 1;
-        else stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
+        else if (!DstAlphaZeroEnabled() || bits(g.bp[0x42], 0, 8) != 0)
+            stats::Note("GXSetDstAlpha together with blending: constant alpha NOT written (needs a second pass)");
     }
+    if (FixLogicOp() && !blending && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3) k.logicSrc = fixes::LogicOpPlan(bits(cm0, 12, 4)).src;
+    if (FixTevIn() && g.tevOor) k.inWrap = 1; // (GXV_FIX_TEVIN: a TEV register outside 0..255; State::tevOor)
+    // GXV_FS_HALF=1 / 3 without GXV_FIX_TEVIN: a register outside 0..255 only matters to a key the half precision analysis would take (it assumes
+    // registers in 0..1); that one is marked (bit 1: no wrap code, not half) so that it gets the float shader. Every other key is unchanged.
+    else if (g.tevOor && TevOorTracked() && FsHalfEligible(k)) k.inWrap = 2;
+    // GXV_FS_TRIM: its range analysis takes the registers as 0..255 in a key without the mark; every key of a state with one outside is marked
+    // (bit 1: no wrap code, the float shader, as above).
+    else if (g.tevOor && FsTrimMode()) k.inWrap = 2;
 }
 
-void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk) {
+void BuildVsKey(VsKey& k, uint8_t numTexGens, uint8_t palCls, uint8_t fsFog) {
     std::memset(&k, 0, sizeof k);
     k.numTexGens = numTexGens;
+    if (fsFog & kFogVtxBit) k.fogVtx = static_cast<uint8_t>((fsFog & 8) ? 3 : 1); // (the fragment key's fog bits: GXV_FOGVTX)
     k.numChans = static_cast<uint8_t>(g.xfReg[0x09] & 3);
     if (k.numChans > 2) k.numChans = 2;
     k.perVtxPos = g.vcd[0] ? 1 : 0;
@@ -548,10 +615,18 @@ void BuildVsKey(VsKey& k, uint8_t numTexGens, bool shortPalOk) {
     }
     // The short palette holds position rows 0..29 and their normal rows: enough when the
     // vertices use no higher row and no texture matrix comes from the palette.
-    if (k.perVtxPos && shortPalOk) {
+    if (k.perVtxPos && palCls) {
         bool texFromPal = false;
         for (int i = 0; i < numTexGens; ++i) texFromPal |= k.tg[i].perVtxMtx != 0;
-        if (!texFromPal) k.perVtxPos = 2;
+        if (!texFromPal) k.perVtxPos = palCls == 2 ? 3 : 2;
+    }
+    // GXV_VS_TRIM: the attenuation facts of the lights this key's lit channels use (State::ltCos1 / ltDist1, part of the key hash); a key
+    // without a lit channel is left as it was.
+    if (VsTrimTracked()) {
+        uint8_t lit = 0;
+        for (int i = 0; i < 4; ++i)
+            if ((i & 1) < k.numChans && k.chan[i].enable) lit |= k.chan[i].lightMask;
+        if (lit) k.setLtTrim(static_cast<uint8_t>(g.ltCos1 & lit), static_cast<uint8_t>(g.ltDist1 & lit));
     }
 }
 
@@ -593,21 +668,31 @@ void BuildRenderState(RenderState& rs) {
         if (rs.blendSrc == BF_ONE && rs.blendDst == BF_ZERO) rs.blend = 0;
     } else if (bits(cm0, 1, 1)) {
         // Logic ops do not exist on the target GPU API; approximate with blending
-        // (same table Dolphin uses for back ends without logic op support).
-        static const uint8_t lo[16][2] = {
-            {BF_ZERO, BF_ZERO}, {BF_DST_COLOR, BF_ZERO}, {BF_ONE, BF_INV_SRC_COLOR}, {BF_ONE, BF_ZERO},
-            {BF_DST_COLOR, BF_ONE}, {BF_ZERO, BF_ONE}, {BF_INV_DST_COLOR, BF_INV_SRC_COLOR}, {BF_INV_DST_COLOR, BF_ONE},
-            {BF_INV_SRC_COLOR, BF_INV_DST_COLOR}, {BF_INV_SRC_COLOR, BF_SRC_COLOR}, {BF_INV_DST_COLOR, BF_INV_DST_COLOR},
-            {BF_ONE, BF_INV_DST_ALPHA}, {BF_INV_SRC_COLOR, BF_INV_SRC_COLOR}, {BF_INV_SRC_COLOR, BF_ONE},
-            {BF_INV_DST_COLOR, BF_INV_SRC_COLOR}, {BF_ONE, BF_ONE}};
+        // (same table Dolphin uses for back ends without logic op support; GXV_FIX_LOGICOP: a table that is exact on 0/255 channels).
         const uint32_t op = bits(cm0, 12, 4);
         if (op != 3) {
-            rs.blend = 1; rs.blendSrc = lo[op][0]; rs.blendDst = lo[op][1];
+            rs.blend = 1;
+            if (FixLogicOp()) {
+                const fixes::LogicPlan lp = fixes::LogicOpPlan(op);
+                rs.blendSrc = lp.sf; rs.blendDst = lp.df;
+            } else {
+                fixes::LegacyLogicOpFactors(op, rs.blendSrc, rs.blendDst);
+            }
             stats::Note("logic-op blend mode used (approximated with blend factors)");
         }
     }
     rs.colorWrite = static_cast<uint8_t>(bits(cm0, 3, 1));
     rs.alphaWrite = static_cast<uint8_t>(bits(cm0, 4, 1) && hasAlpha);
+    if (FixDstA()) {
+        const fixes::DstAlphaPlan p = DstAlphaPlanNow();
+        if (p.dropBlend) { rs.blend = 0; rs.blendSrc = BF_ONE; rs.blendDst = BF_ZERO; rs.blendEq = BE_ADD; }
+        rs.dstAlphaZero = p.rsMode;
+    } else if ((bits(cm0, 0, 1) || bits(cm0, 11, 1)) && rs.alphaWrite && bits(g.bp[0x42], 8, 1) &&
+        bits(g.bp[0x42], 0, 8) == 0 && DstAlphaZeroEnabled()) {
+        rs.dstAlphaZero = 1;
+        // ONE/ZERO is normally unblended, but its alpha still needs the override.
+        rs.blend = 1;
+    }
     if (bits(zm, 0, 1)) {
         rs.depthTest = 1;
         rs.depthFunc = static_cast<uint8_t>(bits(zm, 1, 3));
@@ -643,6 +728,38 @@ void BuildRenderState(RenderState& rs) {
     }
 }
 
+// GXV_RSMEMO (default 1; 0: off): BuildRenderState for the bits of the registers it reads, as the last time they were these. Materials
+// differ in their TEV set-up far more often than in their blend, depth, cull and scissor: most material switches find the render state
+// of the one before. Not kept: a state that comes from a Z texture's contents (GX_ZT_REPLACE) or noted a logic-op blend (stats::Note).
+bool RsMemoDraw() {
+    const bool on = VGX_KNOB(EnvInt("GXV_RSMEMO", 1) != 0) != 0;
+    return on;
+}
+struct RsMemo {
+    bool valid = false;
+    uint32_t in[16] = {};
+    RenderState rs;
+} g_rsMemo;
+void BuildRenderStateMemo(RenderState& rs) {
+    if (!RsMemoDraw()) { BuildRenderState(rs); return; }
+    const uint32_t in[16] = {g.bp[0x41] & 0xFFFFu, g.bp[0x40] & 0x1Fu, g.bp[0x00] & 0xC000u, g.bp[0x43] & 7u, g.bp[0x42] & 0x1FFu, g.bp[0x22] & 0xFFu,
+                             g.bp[0x59] & 0xFFFFFu, g.bp[0x20] & 0x7FF7FFu, g.bp[0x21] & 0x7FF7FFu, g.xfReg[0x1A], g.xfReg[0x1B], g.xfReg[0x1C],
+                             g.xfReg[0x1D], g.xfReg[0x1E], g.xfReg[0x1F], g.bp[0xF5] & 0xCu};
+    RsMemo& m = g_rsMemo;
+    if (m.valid && SameWords(m.in, in, 16)) {
+        rs = m.rs;
+        return;
+    }
+    BuildRenderState(rs);
+    const uint32_t cm0 = in[0];
+    const bool logicOp = !bits(cm0, 11, 1) && !bits(cm0, 0, 1) && bits(cm0, 1, 1) && bits(cm0, 12, 4) != 3;
+    m.valid = bits(in[15], 2, 2) != 2 && !logicOp;
+    if (m.valid) {
+        CopyWords(m.in, in, 16);
+        m.rs = rs;
+    }
+}
+
 // ---- uniform blocks
 // Appends block b (n floats) to the frame's uniform arena unless the block the
 // current draws refer to already holds exactly these values.
@@ -660,6 +777,54 @@ void PushBlock(split::BlockCtx& c, int b, const float* data, uint32_t n) {
     uni.resize(o + n);
     CopyWords(uni.data() + o, data, n);
 }
+
+// ---- GXV_TEXBAKE: the texture matrix of a CPU-transformed draw goes into its texture coordinates
+// The game's particles (JPA) are drawn one quad at a time. Their position matrix is absorbed by the soft transform (GXV_SOFTXFORM)
+// and their TEV colours by register folding (GXV_FOLDREGS), but a particle with a texture animation of its own
+// (JPALoadCalcTexCrdMtxAnm: scroll / scale / rotation by the particle's age) loads TEXMTX0 before every quad, so every quad had a
+// texture-matrix block of its own and was a draw call of its own ("uniform-blocks" in the merge census). With the switch on, a
+// CPU-transformed draw's texture coordinate that comes from a texture coordinate attribute through a 2x4 matrix (texgen type 0,
+// source TEX0..7, no per-vertex matrix index, not projective, and no other texgen of the key reads the same attribute) is
+// transformed here, as the vertex shader does it:
+//     s' = (m0 s + m2) + (m1 t + m3),  t' = (m4 s + m6) + (m5 t + m7)      (srcv = (s, t, 1, 1): the shader's dot products)
+// and the block holds the identity rows for that texgen, so the shader computes dot((1,0,0,0), (s',t',1,1)) = s' (exact: products
+// with 1 and 0, sums with 0). The block no longer depends on the texture matrix, and consecutive particles merge into one draw.
+// What may not be exact: the GPU's own dot product may round differently from the CPU's (fused or not, another order) in the last
+// bit of a coordinate (2^-24 of the texture at coordinates near 1). The host test (tests/vgx_texbake_gl.cpp) draws identical
+// pictures on Mesa, with exactly representable matrices and with arbitrary ones.
+// The post-transform matrix (dual texgen) and its normalisation stay in the shader, after the matrix, as before.
+//   GXV_TEXBAKE=0 off (every block and vertex as before);  =1 on.  Read once.
+bool TexBakeOn() {
+    const bool on = VGX_KNOB(EnvInt("GXV_TEXBAKE", 0) != 0) != 0;
+    return on;
+}
+// The texgens of `vs` whose matrix is baked when a draw with this key is CPU-transformed (a pure function of the key: the
+// matrix block (BuildMtxC, MtxReads, on either thread) and the vertices (EmitDraw) decide the same).
+uint8_t TexBakeMask(const VsKey& vs) {
+    if (!TexBakeOn() || vs.perVtxPos || vs.lpMode()) return 0;
+    uint8_t m = 0;
+    for (int i = 0; i < vs.numTexGens && i < 8; ++i) {
+        const VsKey::TexGen& t = vs.tg[i];
+        if (t.type != 0 || t.src < 5 || t.src > 12 || t.perVtxMtx || t.proj) continue;
+        bool shared = false;
+        for (int j = 0; j < vs.numTexGens && j < 8; ++j)
+            if (j != i && vs.tg[j].type < 2 && vs.tg[j].src == t.src) shared = true;
+        if (!shared) m |= static_cast<uint8_t>(1u << i);
+    }
+    return m;
+}
+// (GXV_FE_SPLIT=1 with GXV_WORKLOAD_PROBE=1: the "uniform-blocks" merge failures by the blocks that differ, for the texbake line
+// FrontPresent writes every 300 pictures; on the thread that finishes the records)
+std::atomic<uint32_t> g_blockMiss[4]; // only the texture-matrix block differs; only the model-view block; only the TEV block; other
+void NoteBlockMiss(const uint32_t* a, const uint32_t* b) {
+    uint32_t m = 0;
+    for (int k = 0; k < UB_COUNT; ++k)
+        if (a[k] != b[k]) m |= 1u << k;
+    const int slot = m == (1u << UB_TEXM) ? 0 : m == (1u << UB_MV) ? 1 : m == (1u << UB_TEV) ? 2 : 3;
+    g_blockMiss[slot].fetch_add(1, std::memory_order_relaxed);
+}
+// The texture-matrix row of texgen i (as BuildMtxC reads it).
+inline uint32_t TexGenRow(const State& s, int i) { return i < 4 ? bits(s.matIdxA, 6 + 6 * i, 6) : bits(s.matIdxB, 6 * (i - 4), 6); }
 } // namespace
 namespace split {
 void BuildProjC(BlockCtx& c, const State& g) {
@@ -713,12 +878,16 @@ uint64_t BuildMtxC(BlockCtx& c, const State& g, const VsKey& vs, bool soft) {
     float tm[192];
     if (!pack) std::memset(tm, 0, sizeof tm);
     else if (anyPost) std::memset(tm + vs.numTexGens * 12, 0, (96 - vs.numTexGens * 12) * sizeof(float));
+    const uint32_t bake = soft ? TexBakeMask(vs) : 0u; // (GXV_TEXBAKE: these texgens' matrices are in the coordinates)
+    static const float kIdentRows[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     for (int i = 0; i < vs.numTexGens; ++i) {
         const uint32_t ti = i < 4 ? bits(g.matIdxA, 6 + 6 * i, 6) : bits(g.matIdxB, 6 * (i - 4), 6);
         const uint32_t po = g.xfReg[0x50 + i] & 0x3F;
-        use(ti);
+        const bool baked = ((bake >> i) & 1u) != 0;
+        if (baked) std::memcpy(&tm[i * 12], kIdentRows, sizeof kIdentRows); // (the matrix rows are not read: not in `rows`)
+        else use(ti);
         for (int r = 0; r < 3; ++r) {
-            std::memcpy(&tm[i * 12 + r * 4], g.xfPos[ti + r < 64 ? ti + r : 63], 16);
+            if (!baked) std::memcpy(&tm[i * 12 + r * 4], g.xfPos[ti + r < 64 ? ti + r : 63], 16);
             if (!pack || anyPost) std::memcpy(&tm[96 + i * 12 + r * 4], g.xfPost[po + r < 64 ? po + r : 63], 16);
         }
     }
@@ -728,13 +897,14 @@ uint64_t BuildMtxC(BlockCtx& c, const State& g, const VsKey& vs, bool soft) {
     for (int i = 0; i < vs.numTexGens; ++i) pal |= vs.tg[i].perVtxMtx != 0;
     if (pal) {
         float pb[384];
-        if (vs.perVtxPos == 2) {
-            // Short palette: position rows 0..29, then normal rows 0..29.
-            std::memcpy(pb, g.xfPos, 30 * 4 * sizeof(float));
-            for (int r = 0; r < 30; ++r) {
-                pb[120 + r * 4] = g.xfNrm[r][0]; pb[121 + r * 4] = g.xfNrm[r][1]; pb[122 + r * 4] = g.xfNrm[r][2]; pb[123 + r * 4] = 0;
+        if (vs.perVtxPos == 2 || vs.perVtxPos == 3) {
+            // Short palette: position rows 0..K-1, then normal rows 0..K-1 (K 30; the small palette, perVtxPos 3: 12).
+            const int K = PalRowsOfKey(vs.perVtxPos);
+            std::memcpy(pb, g.xfPos, static_cast<size_t>(K) * 4 * sizeof(float));
+            for (int r = 0; r < K; ++r) {
+                pb[K * 4 + r * 4] = g.xfNrm[r][0]; pb[K * 4 + 1 + r * 4] = g.xfNrm[r][1]; pb[K * 4 + 2 + r * 4] = g.xfNrm[r][2]; pb[K * 4 + 3 + r * 4] = 0;
             }
-            PushBlock(c, UB_PAL, pb, kPalRowsShort * 4);
+            PushBlock(c, UB_PAL, pb, static_cast<uint32_t>(K) * 8);
         } else {
             std::memcpy(pb, g.xfPos, 256 * 4);
             for (int r = 0; r < 32; ++r) {
@@ -762,19 +932,23 @@ void MtxReads(const State& g, const VsKey& vs, bool soft, uint64_t& pos, uint32_
     const bool pack = UniformPacking();
     bool anyPost = false;
     for (int i = 0; i < vs.numTexGens; ++i) anyPost |= vs.tg[i].type < 2 && vs.tg[i].post != 0;
+    const uint32_t bake = soft ? TexBakeMask(vs) : 0u; // (GXV_TEXBAKE: as BuildMtxC, those rows are not read)
     for (int i = 0; i < vs.numTexGens; ++i) {
         const uint32_t ti = i < 4 ? bits(g.matIdxA, 6 + 6 * i, 6) : bits(g.matIdxB, 6 * (i - 4), 6);
         const uint32_t po = g.xfReg[0x50 + i] & 0x3F;
-        used |= three(ti);
-        pos |= three(ti);
+        if (!((bake >> i) & 1u)) {
+            used |= three(ti);
+            pos |= three(ti);
+        }
         if (!pack || anyPost) post |= three(po);
     }
     bool pal = vs.perVtxPos != 0;
     for (int i = 0; i < vs.numTexGens; ++i) pal |= vs.tg[i].perVtxMtx != 0;
     if (pal) {
-        if (vs.perVtxPos == 2) {
-            pos |= (1ull << 30) - 1;
-            nrm |= (1u << 30) - 1;
+        if (vs.perVtxPos == 2 || vs.perVtxPos == 3) {
+            const int K = PalRowsOfKey(vs.perVtxPos);
+            pos |= (1ull << K) - 1;
+            nrm |= (1u << K) - 1;
         } else {
             pos = ~0ull;
             nrm = ~0u;
@@ -806,7 +980,7 @@ inline void Rgba8ToFloat(uint32_t c, float* o) {
 // lights outside every channel's mask do not read it. The block is built per vertex key
 // (see ResolveState), so the decision may use the key.
 bool LightNorm() {
-    static const bool on = EnvInt("GXV_LIGHTNORM", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_LIGHTNORM", 1) != 0) != 0;
     return on;
 }
 // GXV_LIGHTNORM=2: census, one line every 600 frames and at frame 1 (counts since start).
@@ -908,6 +1082,21 @@ void split::BuildTevC(BlockCtx& bc, const State& g, const FsKey& fs, const uint1
         if (fs.fog & 8) { tb[TEV_FOG + 0] = a; tb[TEV_FOG + 1] = 0; }
         else { tb[TEV_FOG + 0] = a * sh; tb[TEV_FOG + 1] = bm * sh / 16777216.0f; }
         tb[TEV_FOG + 2] = FogFloat(g.bp[0xF1]);
+        if (fs.fog & kFogVtxBit) {
+            // GXV_FOGVTX: the fragment shader gets c1 (x) and c0 (w) of clamp(c1 * v_fog + c0): FogVtxCoeffs. The depth range is
+            // the one BuildRenderState gives glDepthRange; the projection's parameters travel with the projection block (split:
+            // OP_PROJ), the viewport's z scale and offset with this one (split: OP_TEV).
+            const float sz = u2f(g.xfReg[0x1C]), oz = u2f(g.xfReg[0x1F]);
+            float zf = oz / 16777215.0f, zn = (oz - sz) / 16777215.0f;
+            if (zn < 0) zn = 0;
+            if (zf > 1) zf = 1;
+            const FogVtxCoef c = FogVtxCoeffs(tb[TEV_FOG + 0], tb[TEV_FOG + 1], tb[TEV_FOG + 2], u2f(g.xfReg[0x24]), u2f(g.xfReg[0x25]), zn, zf,
+                                              (fs.fog & 8) != 0);
+            tb[TEV_FOG + 0] = c.c1;
+            tb[TEV_FOG + 1] = 0.0f;
+            tb[TEV_FOG + 2] = 0.0f;
+            tb[TEV_FOG + 3] = c.c0;
+        }
         tb[TEV_FOGCOL + 0] = static_cast<float>(bits(g.bp[0xF2], 16, 8)) / 255.0f;
         tb[TEV_FOGCOL + 1] = static_cast<float>(bits(g.bp[0xF2], 8, 8)) / 255.0f;
         tb[TEV_FOGCOL + 2] = static_cast<float>(bits(g.bp[0xF2], 0, 8)) / 255.0f;
@@ -935,6 +1124,12 @@ void split::BuildTevC(BlockCtx& bc, const State& g, const FsKey& fs, const uint1
             tb[TEV_TEXSIZE + m * 2 + 1] = texH[m] ? static_cast<float>(texH[m]) : 1.0f;
         }
     }
+    // GXV_FIX_LODBIAS: the bias of each texmap a stage samples with one (the shader reads u_tev[V_LODBIAS ..], FsTevCount gives such a shader 28 vec4)
+    for (int s = 0; s < fs.numStages; ++s)
+        if (fs.stage[s].lodBias) {
+            const unsigned m = fs.stage[s].texMap & 7u;
+            tb[TEV_LODBIAS + m] = fixes::LodBiasOf(g.bp[fixes::TexMode0Reg(m)], g.bp[fixes::TexMode1Reg(m)]);
+        }
     PushBlock(bc, UB_TEV, tb, tevLen);
 }
 
@@ -943,7 +1138,7 @@ void split::BuildTevC(BlockCtx& bc, const State& g, const FsKey& fs, const uint1
 // sprites, particles: hundreds per frame in this game) share one uniform set
 // and merge into a single draw call. GXV_SOFTXFORM=<max verts>, 0 = off.
 uint32_t SoftXformLimit() {
-    static const uint32_t n = static_cast<uint32_t>(EnvInt("GXV_SOFTXFORM", 128));
+    const uint32_t n = static_cast<uint32_t>(VGX_KNOB(static_cast<uint32_t>(EnvInt("GXV_SOFTXFORM", 128))));
     return n;
 }
 namespace {
@@ -989,7 +1184,7 @@ void split::SoftTransformWith(uint8_t* v, uint32_t count, const VtxLayout& L, co
     // once per call. (Multiply-accumulate on this core rounds the product first, like the scalar code.)
     // GXV_SOFTNEON=0 runs the scalar loop below instead (to compare instruction counts and frame hashes).
     // GXV_SOFTNEON=2 also runs the scalar loop on a copy and compares the results bit for bit (logged).
-    static const int neonMode = EnvInt("GXV_SOFTNEON", 1);
+    const int neonMode = static_cast<int>(VGX_KNOB(EnvInt("GXV_SOFTNEON", 1)));
     if (neonMode != 0) {
         uint8_t* const v0 = v;
         static std::vector<uint8_t> ref;
@@ -1057,7 +1252,7 @@ inline void SoftTransform(uint8_t* v, uint32_t count, const VtxLayout& L) { spli
 // FsKey::regFromVtx starts its registers from the interpolated colours (constant across the
 // primitive, since all its vertices carry the same value). GXV_FOLDREGS=0 turns it off.
 bool FoldRegsEnabled() {
-    static const bool on = EnvInt("GXV_FOLDREGS", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_FOLDREGS", 1) != 0) != 0;
     return on;
 }
 bool FoldKeysOk(const FsKey& fs, const VsKey& vs) {
@@ -1076,6 +1271,45 @@ bool FoldKeysOk(const FsKey& fs, const VsKey& vs) {
         }
     }
     return reads;
+}
+// The shader keys of a draw as a pair (vgx_shadergen.h), right after BuildFsKey / BuildVsKey. Both are pure functions of the two keys
+// (so the key memo of GXV_RSCACHE, which holds ids made from them, stays right); with the switches off nothing is changed.
+//   GXV_TEXVEC2 (TexVec2Pair): the non-projective texture coordinate varyings become vec2 in both keys.
+//   GXV_VSOUT (VsOutPrune): the vertex key marks what its fragment shader never reads. The register-folding variant of the fragment
+//   shader (regFromVtx = 3, chosen per draw by values, the same vertex shader) reads both colours whole: a pair that can fold keeps them.
+//   GXV_IND_VS (IndVsPair): a texgen that feeds only indirect lookups is written scaled by the vertex shader, and the lookups read it
+//   as it is (BP 0x25 / 0x26 are key registers: vgx_state.cpp IsKeyBP, so the memo's hash covers them).
+inline void PairKeys(FsKey& fs, VsKey& vs) {
+    TexVec2Pair(fs, vs);
+    if (IndVsMode()) IndVsPair(fs, vs, g.bp[0x25], g.bp[0x26]);
+    if (VsOutMode()) VsOutPrune(vs, fs, FoldRegsEnabled() && FoldKeysOk(fs, vs));
+}
+// GXV_DISCARD_BLEND (DiscardBlend, vgx_shadergen.h): the fragment shader a draw is recorded with, for its render state. A draw whose
+// alpha test can fail is drawn with the key's rejectZero variant (failing fragments output vec4(0), no `discard`) when that output
+// leaves every value the draw could write as it was:
+//   - no depth write (the test is on and the mask set: as the back end applies them);
+//   - colour: not written, or blended with an equation that adds or reverse-subtracts the source term (BE_ADD, BE_REVSUB), whose
+//     destination factor is 1 for a zero source (ONE, ONE_MINUS_SRC_ALPHA, ONE_MINUS_SRC_COLOR): dst * 1 +/- 0 * sf = dst;
+//   - alpha: not written, or blended with the colour's factors (dstAlphaZero 0): the same argument with the source alpha 0.
+// That is the result of a killed fragment, exactly (x * 1 = x and 0 * f = 0 for every finite factor; the factors are in 0..1):
+// RejectIsNoop (vgx_cmd.h). The key is a different key (its own id, text and pack entry); the variant ids are memoised per
+// fragment shader id.
+std::vector<uint16_t> g_rejectZeroVar; // per fragment shader id: its rejectZero variant's id + 1 (0: not made yet)
+uint64_t g_rejectZeroDraws = 0;        // (resolutions that took a variant: census for tests)
+uint16_t RejectZeroFs(uint16_t id, const RenderState& rs) {
+    if (!DiscardBlend() || id >= g_fsReg.keys.size()) return id;
+    {
+        const FsKey& k = g_fsReg.keys[id];
+        if (!k.alphaTestOn || k.rejectZero() || !RejectIsNoop(rs)) return id;
+    }
+    ++g_rejectZeroDraws;
+    if (id < g_rejectZeroVar.size() && g_rejectZeroVar[id]) return static_cast<uint16_t>(g_rejectZeroVar[id] - 1);
+    FsKey v = g_fsReg.keys[id]; // (a copy: Lookup may grow the registry)
+    v.setRejectZero(1);
+    const uint16_t vid = Lookup(g_fsReg, v, true, GenerateFragmentShader);
+    if (g_rejectZeroVar.size() <= id) g_rejectZeroVar.resize(static_cast<size_t>(id) + 1, 0);
+    g_rejectZeroVar[id] = static_cast<uint16_t>(vid + 1);
+    return vid;
 }
 inline bool FoldValuesOk() {
     uint32_t any = 0;
@@ -1109,18 +1343,35 @@ inline void BlkTev(const FsKey& fs, const uint16_t texW[8], const uint16_t texH[
 [[maybe_unused]] void BuildLight(const VsKey& vs) { split::BlockCtx c = MainBlockCtx(); split::BuildLightC(c, g, vs); }
 [[maybe_unused]] uint64_t BuildMtx(const VsKey& vs, bool soft) { split::BlockCtx c = MainBlockCtx(); return split::BuildMtxC(c, g, vs, soft); }
 
-static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool shortPalOk);
+// Which palette a draw with a per-vertex position matrix can have, from the highest row its vertices name (g_pendingPosMtxMax,
+// 0xFF: not known): 0 the full one, 1 the short one (rows 0..29), 2 the small one (rows 0..11, GXV_PALROWS=1). A key built for a
+// class is exact for every draw of the class: the shader reads rows pi..pi+2 and the same normal rows, and pi never exceeds the maximum.
+// GXV_PALROWS=2 (census) changes nothing and counts the draws by that maximum.
+struct PalCensus {
+    uint64_t draws = 0, byMax[10] = {}, beyond = 0, unknown = 0;
+} g_palCensus;
+inline uint8_t PalClass(uint32_t maxRow, bool packing, bool perVtxPos) {
+    if (perVtxPos && PaletteRowsMode() == 2) {
+        ++g_palCensus.draws;
+        if (maxRow == 0xFF) ++g_palCensus.unknown;
+        else if (maxRow > static_cast<uint32_t>(kPalShortMaxRow)) ++g_palCensus.beyond;
+        else ++g_palCensus.byMax[maxRow / 3];
+    }
+    if (!packing || maxRow > static_cast<uint32_t>(kPalShortMaxRow)) return 0;
+    return (PaletteRowsMode() == 1 && maxRow <= static_cast<uint32_t>(kPalSmallMaxRow)) ? 2 : 1;
+}
+static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t palCls);
 // Most draws follow one that left everything the keys and blocks are built from as it was (only a particle's vertices, position
 // matrix and colours changed): then there is nothing to rebuild, and the only questions are whether the draw is transformed on the
 // CPU and folds the registers as the last one did. GXV_RESOLVEFAST=0 always takes the full path, 2 takes both and compares what they left.
 // (GXV_RSCACHE=0: this and ResolveStateFull are the path; otherwise ResolveStateCached below.)
 void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
     // The short matrix palette is enough when the draw's vertices stay within its rows.
-    const bool shortPalOk = UniformPacking() && g_pendingPosMtxMax <= static_cast<uint32_t>(kPalShortMaxRow);
+    const uint8_t palCls = PalClass(g_pendingPosMtxMax, UniformPacking(), (vcdMtxMask & 1u) != 0);
     g_pendingPosMtxMax = 0xFF;
-    static const int fastMode = static_cast<int>(EnvInt("GXV_RESOLVEFAST", 1));
+    const int fastMode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_RESOLVEFAST", 1))));
     if (fastMode != 0 && cur.valid && !g_blocksStale && !g.DirtyAny() && vcdMtxMask == cur.vcdMtxMask &&
-        !((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk) && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
+        !((vcdMtxMask & 1u) && palCls != cur.palCls) && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
         const bool soft = vertexCount <= SoftXformLimit() && SoftEligible(cur.vs);
         if (soft == cur.soft) {
             const bool fold = soft && cur.foldOk && FoldValuesOk();
@@ -1134,7 +1385,7 @@ void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
                     std::memcpy(offs, g_blockOff, sizeof offs);
                     const size_t uni = g_buf.uni.size();
                     const uint32_t gen = g.vcdGen;
-                    ResolveStateFull(vcdMtxMask, vertexCount, shortPalOk);
+                    ResolveStateFull(vcdMtxMask, vertexCount, palCls);
                     // (vcdGen is the one thing the full path updates)
                     cur.vcdGen = reinterpret_cast<const Resolved*>(before.data())->vcdGen;
                     ++checked;
@@ -1153,12 +1404,12 @@ void ResolveStateLegacy(uint32_t vcdMtxMask, uint32_t vertexCount) {
             }
         }
     }
-    ResolveStateFull(vcdMtxMask, vertexCount, shortPalOk);
+    ResolveStateFull(vcdMtxMask, vertexCount, palCls);
 }
-static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool shortPalOk) {
+static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, uint8_t palCls) {
     // (see MarkBP / MarkXFReg in vgx_state.cpp for what sets which flag)
     const bool keysDirty = !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask ||
-                           ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+                           ((vcdMtxMask & 1u) && palCls != cur.palCls);
     const bool texDirty = keysDirty || g.texDirty;
     // (a key that was built again and came out the same leaves the blocks that only depend
     // on the key alone)
@@ -1168,8 +1419,9 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk);
-        cur.shortPalOk = shortPalOk;
+        BuildVsKey(vs, fs.numTexGens, palCls, fs.fog);
+        PairKeys(fs, vs);
+        cur.palCls = palCls;
         fsChanged = !cur.valid || !SameStruct(fs, cur.fs);
         vsChanged = !cur.valid || !SameStruct(vs, cur.vs);
         if (fsChanged) { cur.fs = fs; cur.fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader); cur.fsIdFoldValid = false; }
@@ -1189,7 +1441,7 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
         for (int i = 0; i < cur.fs.numIndStages; ++i) mask |= static_cast<uint8_t>(1u << cur.fs.ind[i].texMap);
         cur.texMask = mask;
         ++cur.stateSerial;
-        static const bool perSlot = EnvInt("GXV_TEXSLOTS", 1) != 0; // 0: look every used texmap up again (the old behaviour)
+        const bool perSlot = VGX_KNOB(EnvInt("GXV_TEXSLOTS", 1) != 0) != 0; // 0: look every used texmap up again (the old behaviour)
         cur.slotResolved &= static_cast<uint8_t>(~g.texSlotDirty);
         if (!perSlot) cur.slotResolved = 0;
         g.texSlotDirty = 0;
@@ -1229,7 +1481,7 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
     if (g_blocksStale || g.bpDirty || (g.tevColDirty & (fold ? 0xF9u : 0xFFu)) != 0 || fsChanged || fold != cur.fold || (texDirty && cur.fs.numIndStages))
         BlkTev(cur.fs, cur.texW, cur.texH, fold);
     cur.fold = fold;
-    cur.useFs = fold ? cur.fsIdFold : cur.fsId;
+    cur.useFs = RejectZeroFs(fold ? cur.fsIdFold : cur.fsId, cur.rs);
     g_blocksStale = false;
     g.bpDirty = g.bpKeyDirty = g.bpRsDirty = g.xfRegDirty = g.xfKeyDirty = g.xfViewDirty = g.xfProjDirty = g.xfColorDirty = g.xfMtxDirty = g.xfLightDirty = g.texDirty = false;
     g.xfPosRowsDirty = 0;
@@ -1246,8 +1498,8 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
 // (XF 0x1008, written by every shape's vertex-format list, sets the catch-all xfRegDirty: all blocks and both keys again).
 // Materials repeat: the keys a picture needs are a few dozen, and the same register contents come round every picture.
 //   * Shader keys: looked up by State::keyHash (vgx_state.cpp: a hash of exactly the registers BuildFsKey / BuildVsKey read,
-//     kept up to date by the register writers) with the vertex-matrix mask and the short-palette flag, in a direct-mapped table
-//     of 1,024 entries that holds the shader ids (the keys themselves are the registry's). A changed key is copied from the
+//     kept up to date by the register writers) with the vertex-matrix mask and the short-palette flag, in a 4-way set-associative
+//     table (2,048 sets, vgx_keymemo.h) that holds the shader ids (the keys themselves are the registry's). A changed key is copied from the
 //     registry; an unchanged hash means unchanged keys, whatever the flags say.
 //   * Everything else is rebuilt on what it is really built from: the render state on the key registers, the viewport and
 //     its own registers; the texture bindings when the fragment key or a binding changed; the blocks on their own flags, not
@@ -1257,15 +1509,11 @@ static void ResolveStateFull(uint32_t vcdMtxMask, uint32_t vertexCount, bool sho
 // offsets and the uniform words appended (logged as "rscache: MISMATCH"). 0: the old path only.
 // (The hash is 64 bits; two different key-register contents with the same hash would draw with the wrong shader. The odds
 // for the few thousand contents a session sees are about 1e-12; the verify mode would show it.)
-struct KeyMemo {
-    uint64_t h = 0;          // State::keyHash
-    uint32_t vcdMtxMask = 0;
-    uint16_t fsId = 0, vsId = 0, fsIdFold = 0;
-    uint8_t spo = 0;         // short palette (only with a per-vertex position matrix)
-    uint8_t valid = 0, fsIdFoldValid = 0;
-};
-constexpr uint32_t kKeyMemoSize = 1024;
-KeyMemo g_keyMemo[kKeyMemoSize];
+//   * (The table is 2,048 sets of GXV_KEYMEMO_WAYS ways (default 4; 1 = direct-mapped). The first version was direct-mapped with 1,024
+//     entries and missed 7.5% of its lookups in the Comet Observatory, 450 draw records a frame, from conflicts alone: see
+//     vgx_keymemo.h. A miss rebuilds the keys and finds them again in the registry, so the ways only change how often that
+//     happens.)
+KeyMemoTable g_keyMemo;
 // The memo key of the keys in cur (valid: cur's keys were set by the cached path, or confirmed by the verify mode).
 struct CurKey {
     uint64_t h = 0;
@@ -1277,14 +1525,17 @@ struct CurKey {
 uint64_t g_keyMemoHits = 0, g_keyMemoMisses = 0;
 uint64_t g_rsChecked = 0, g_rsBad = 0; // (GXV_RSCACHE=2)
 
-inline uint32_t KeyMemoSlot(uint64_t h, uint32_t mask, uint8_t spo) {
-    const uint32_t x = static_cast<uint32_t>(h) ^ static_cast<uint32_t>(h >> 32) ^ (mask * 0x9E3779B1u) ^ (spo ? 0x7F4A7C15u : 0u);
-    return (x ^ (x >> 15)) & (kKeyMemoSize - 1);
+inline uint32_t KeyMemoWays() {
+    const uint32_t ways = static_cast<uint32_t>(VGX_KNOB([] { // read once: 1..4 ways per set (GXV_KEYMEMO_WAYS, default 4)
+        const long v = EnvInt("GXV_KEYMEMO_WAYS", 4);
+        return static_cast<uint32_t>(v < 1 ? 1 : v > static_cast<long>(KeyMemoTable::kMaxWays) ? KeyMemoTable::kMaxWays : v);
+    }()));
+    return ways;
 }
 // The legacy path's notion of "the keys may have changed" (it also decides when it records the short-palette flag, and when
 // it rebuilds a render state whose depth comes from a Z texture: the cached path does those as it does).
-inline bool LegacyKeysDirty(uint32_t vcdMtxMask, bool shortPalOk) {
-    return !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask || ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+inline bool LegacyKeysDirty(uint32_t vcdMtxMask, uint8_t palCls) {
+    return !cur.valid || g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || vcdMtxMask != cur.vcdMtxMask || ((vcdMtxMask & 1u) && palCls != cur.palCls);
 }
 inline bool ZTexReplace() { return bits(g.bp[0xF5], 2, 2) == 2; }
 inline bool SameCurKey(uint32_t vcdMtxMask, uint8_t spo) {
@@ -1292,12 +1543,13 @@ inline bool SameCurKey(uint32_t vcdMtxMask, uint8_t spo) {
 }
 
 // The keys for the current registers into cur; fsChanged / vsChanged as ResolveStateFull has them.
-void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& fsChanged, bool& vsChanged) {
+void ResolveKeysCached(uint32_t vcdMtxMask, uint8_t palCls, uint8_t spo, bool& fsChanged, bool& vsChanged) {
     const uint64_t h = g.keyHash;
-    const uint32_t slot = KeyMemoSlot(h, vcdMtxMask, spo);
-    KeyMemo& m = g_keyMemo[slot];
+    const uint32_t ways = KeyMemoWays();
+    uint32_t slot = 0;
     uint16_t fsId, vsId;
-    if (m.valid && m.h == h && m.vcdMtxMask == vcdMtxMask && m.spo == spo) {
+    if (const KeyMemo* hit = g_keyMemo.Find(h, vcdMtxMask, spo, ways, slot)) {
+        const KeyMemo& m = *hit;
         fsId = m.fsId;
         vsId = m.vsId;
         ++g_keyMemoHits;
@@ -1305,17 +1557,23 @@ void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& 
         FsKey fs;
         BuildFsKey(fs);
         VsKey vs;
-        BuildVsKey(vs, fs.numTexGens, shortPalOk);
+        BuildVsKey(vs, fs.numTexGens, palCls, fs.fog);
+        PairKeys(fs, vs);
         fsId = Lookup(g_fsReg, fs, true, GenerateFragmentShader);
         vsId = Lookup(g_vsReg, vs, false, GenerateVertexShader);
-        m = KeyMemo{};
-        m.h = h; m.vcdMtxMask = vcdMtxMask; m.spo = spo;
+        KeyMemo& m = g_keyMemo.Insert(h, vcdMtxMask, spo, ways, slot);
         m.fsId = fsId; m.vsId = vsId;
         m.valid = 1;
         ++g_keyMemoMisses;
     }
     fsChanged = !cur.valid || fsId != cur.fsId;
     vsChanged = !cur.valid || vsId != cur.vsId;
+    if (FeCutHint()) {
+        // (GXV_FECUT_HINT, vgx_state.h: the registry's keys the copies below read, 13 and 4 lines the game's turn has pushed out of the
+        // caches, hinted all at once instead of fetched one by one as the copy reaches them)
+        if (fsChanged) FePrefetchLines(&g_fsReg.keys[fsId], sizeof(FsKey), 16);
+        if (vsChanged) FePrefetchLines(&g_vsReg.keys[vsId], sizeof(VsKey), 4);
+    }
     // (word copies: a struct assignment of the 412-byte key is a library call)
     static_assert(sizeof(FsKey) % 4 == 0 && sizeof(VsKey) % 4 == 0, "keys are whole words");
     if (fsChanged) { CopyWords(&cur.fs, &g_fsReg.keys[fsId], sizeof(FsKey) / 4); cur.fsId = fsId; cur.fsIdFoldValid = false; }
@@ -1327,7 +1585,7 @@ void ResolveKeysCached(uint32_t vcdMtxMask, bool shortPalOk, uint8_t spo, bool& 
 
 // The register-folding variant of the current fragment shader (memoised with the keys).
 uint16_t FoldShaderCached() {
-    KeyMemo& m = g_keyMemo[g_curKey.slot];
+    KeyMemo& m = g_keyMemo.At(g_curKey.slot);
     const bool mine = g_curKey.valid && m.valid && m.h == g_curKey.h && m.vcdMtxMask == g_curKey.mask && m.spo == g_curKey.spo && m.fsId == cur.fsId;
     if (mine && m.fsIdFoldValid) return m.fsIdFold;
     FsKey fk = cur.fs;
@@ -1351,10 +1609,10 @@ inline bool SoftEligibleCur() {
     return g_softOk;
 }
 void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
-    static const bool packing = UniformPacking();
-    const bool shortPalOk = packing && g_pendingPosMtxMax <= static_cast<uint32_t>(kPalShortMaxRow);
+    const bool packing = VGX_KNOB(UniformPacking()) != 0;
+    const uint8_t palCls = PalClass(g_pendingPosMtxMax, packing, (vcdMtxMask & 1u) != 0);
     g_pendingPosMtxMax = 0xFF;
-    const uint8_t spo = ((vcdMtxMask & 1u) && shortPalOk) ? 1 : 0;
+    const uint8_t spo = (vcdMtxMask & 1u) ? palCls : 0;
     const bool sameKeys = SameCurKey(vcdMtxMask, spo);
     // ---- nothing to rebuild: the keys are the same, and no flag that feeds a block or the render state is up
     // (bpKeyDirty / xfKeyDirty / xfRegDirty alone mean nothing once the key registers hash the same). The flags are
@@ -1370,14 +1628,14 @@ void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
 #endif
     if (sameKeys && !g_blocksStale && !otherFlags && (g.xfPosRowsDirty & cur.mtxRowsUsed) == 0) {
         // (sameKeys: cur.valid and the vertex-matrix mask unchanged, so the old path's "keys may have changed" is this)
-        const bool legacyKeysDirty = g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || ((vcdMtxMask & 1u) && shortPalOk != cur.shortPalOk);
+        const bool legacyKeysDirty = g.bpKeyDirty || g.xfKeyDirty || g.xfRegDirty || ((vcdMtxMask & 1u) && palCls != cur.palCls);
         if (legacyKeysDirty && ZTexReplace()) goto full;
         {
         const bool soft = vertexCount <= SoftXformLimit() && SoftEligibleCur();
         if (soft == cur.soft) {
             const bool fold = soft && cur.foldOk && FoldValuesOk();
             if (fold == cur.fold && (!fold || cur.fsIdFoldValid) && (g.tevColDirty & (fold ? 0xF9u : 0xFFu)) == 0) {
-                if (legacyKeysDirty) cur.shortPalOk = shortPalOk;
+                if (legacyKeysDirty) cur.palCls = palCls;
                 ClearResolveDirty();
                 cur.vcdGen = g.vcdGen;
                 return;
@@ -1387,16 +1645,16 @@ void ResolveStateCached(uint32_t vcdMtxMask, uint32_t vertexCount) {
     }
 full:
     // ---- keys
-    const bool legacyKeysDirty = LegacyKeysDirty(vcdMtxMask, shortPalOk);
+    const bool legacyKeysDirty = LegacyKeysDirty(vcdMtxMask, palCls);
     const bool vcdChanged = !cur.valid || vcdMtxMask != cur.vcdMtxMask;
     bool fsChanged = false, vsChanged = false;
-    if (legacyKeysDirty) cur.shortPalOk = shortPalOk;
+    if (legacyKeysDirty) cur.palCls = palCls;
     const bool keysChanged = !sameKeys;
-    if (keysChanged) ResolveKeysCached(vcdMtxMask, shortPalOk, spo, fsChanged, vsChanged);
+    if (keysChanged) ResolveKeysCached(vcdMtxMask, palCls, spo, fsChanged, vsChanged);
     // ---- render state: key registers (cull, blend, pixel format, Z texture mode), viewport, scissor / depth / line width
     // (a depth taken from a Z texture is read when the state is built: built exactly when the old path built it)
     if (keysChanged || g.xfViewDirty || g.bpRsDirty || (legacyKeysDirty && ZTexReplace())) {
-        BuildRenderState(cur.rs);
+        BuildRenderStateMemo(cur.rs);
         cur.cullAll = cur.rs.cull == CULL_ALL;
         ++cur.stateSerial;
     }
@@ -1411,7 +1669,7 @@ full:
         const uint32_t visit = static_cast<uint32_t>(mask | cur.texMask);
         cur.texMask = mask;
         ++cur.stateSerial;
-        static const bool perSlot = EnvInt("GXV_TEXSLOTS", 1) != 0;
+        const bool perSlot = VGX_KNOB(EnvInt("GXV_TEXSLOTS", 1) != 0) != 0;
         cur.slotResolved &= static_cast<uint8_t>(~g.texSlotDirty);
         if (!perSlot) cur.slotResolved = 0;
         g.texSlotDirty = 0;
@@ -1449,7 +1707,7 @@ full:
     if (g_blocksStale || g.bpDirty || (g.tevColDirty & (fold ? 0xF9u : 0xFFu)) != 0 || fsChanged || fold != cur.fold || (texRebuild && cur.fs.numIndStages))
         BlkTev(cur.fs, cur.texW, cur.texH, fold);
     cur.fold = fold;
-    cur.useFs = fold ? cur.fsIdFold : cur.fsId;
+    cur.useFs = RejectZeroFs(fold ? cur.fsIdFold : cur.fsId, cur.rs);
     g_blocksStale = false;
     ClearResolveDirty();
     cur.vcdGen = g.vcdGen;
@@ -1571,6 +1829,48 @@ void ResolveStateVerifyBody(uint32_t vcdMtxMask, uint32_t vertexCount) {
 // ==================================================================== (end of the resolution cache)
 } // namespace
 void ResolveCacheCounters(uint64_t out[4]) { out[0] = g_rsChecked; out[1] = g_rsBad; out[2] = g_keyMemoHits; out[3] = g_keyMemoMisses; }
+// GXV_FE_PREFETCH (called before each top-level CALL_DL, see "look-ahead" in vgx_state.cpp): what the next draw's resolution will read,
+// for the registers as they are now. Once the key registers hash to something new (a material was replayed), the key memo's set for
+// that hash (with the vertex-matrix mask of the current descriptor and the palette class of the last draw: a guess that is right
+// for most shapes) and the texture memo's slots of the texmaps whose registers changed; at the next call, if nothing changed in
+// between, the keys the set names (the registry's copies ResolveKeysCached takes, ~400 bytes for the fragment key) and the cache
+// entries of the texture memo. Only reads; the memo and the registries are the player's.
+void ResolvePrefetch() {
+    if (RsCacheMode() != 1) return;
+    static struct { uint64_t h = 0; uint32_t mask = ~0u; uint8_t spo = 0, step = 0, tex = 0, texStep = 0; } pf;
+    // ---- texture bindings (the texmaps whose registers changed since the last resolution: the material just replayed)
+    const uint8_t tex = g.texSlotDirty;
+    if (tex != pf.tex) {
+        pf.tex = tex;
+        pf.texStep = tex ? 1 : 0;
+        if (tex) TexMemoPrefetch(tex, 1);
+    } else if (pf.texStep == 1) {
+        pf.texStep = 2;
+        TexMemoPrefetch(tex, 2);
+    }
+    // ---- shader keys
+    const uint64_t h = g.keyHash;
+    uint32_t mask = 0;
+    for (int i = 0; i <= 8; ++i)
+        if (g.vcd[i]) mask |= 1u << i;
+    const uint8_t spo = (mask & 1u) ? cur.palCls : 0;
+    if (g_curKey.valid && cur.valid && g_curKey.h == h && g_curKey.mask == mask && g_curKey.spo == spo) return; // (the keys the draw has)
+    if (h != pf.h || mask != pf.mask || spo != pf.spo) {
+        pf.h = h;
+        pf.mask = mask;
+        pf.spo = spo;
+        pf.step = 1;
+        FePrefetchLines(&g_keyMemo.At(KeyMemoTable::Set(h, mask, spo) * KeyMemoTable::kMaxWays), KeyMemoWays() * sizeof(KeyMemo), 4);
+        return;
+    }
+    if (pf.step != 1) return;
+    pf.step = 2;
+    uint32_t slot = 0;
+    if (const KeyMemo* m = g_keyMemo.Find(h, mask, spo, KeyMemoWays(), slot)) {
+        if (m->fsId < g_fsReg.keys.size() && (!cur.valid || m->fsId != cur.fsId)) FePrefetchLines(&g_fsReg.keys[m->fsId], sizeof(FsKey), 16);
+        if (m->vsId < g_vsReg.keys.size() && (!cur.valid || m->vsId != cur.vsId)) FePrefetchLines(&g_vsReg.keys[m->vsId], sizeof(VsKey), 8);
+    }
+}
 namespace {
 
 inline __attribute__((always_inline)) void ResolveState(uint32_t vcdMtxMask, uint32_t vertexCount) {
@@ -1669,7 +1969,7 @@ uint64_t CurrentFrame() { return g_frame; }
 #error Relative default indices require the strict vitaGL build profile
 #endif
 bool AbsoluteIndices() {
-    static const bool on = EnvInt("GXV_ABSIDX", GXV_ABSIDX_DEFAULT) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_ABSIDX", GXV_ABSIDX_DEFAULT) != 0) != 0;
     return on;
 }
 static size_t g_chunkStart = 0;    // byte offset in g_buf.vtx of the current chunk
@@ -1678,6 +1978,21 @@ static uint32_t g_pendingFirst = 0; // index of the pending vertices' first one,
 // The layout of the mask asked for last (a frame asks for a few masks, tens of thousands of times).
 // (a table: register folding asks for two masks in turn for every particle)
 static uint32_t g_strideInv[4096]; // ceil(2^32 / stride): n / stride == (n * inv) >> 32 for every byte offset in a chunk
+// Which of the matrix-index attributes (PNMTXIDX, TEX0MTXIDX..TEX7MTXIDX) the vertex descriptor has: bit i for vcd[i] != 0 (descriptor
+// types are 0..3). The eight bytes in one load, a bit gathered from each by one multiply.
+static inline uint32_t VcdMtxMask() {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    uint64_t x;
+    std::memcpy(&x, g.vcd, 8);
+    x = (x | (x >> 1)) & 0x0101010101010101ull;
+    return static_cast<uint32_t>((x * 0x0102040810204080ull) >> 56) | (g.vcd[8] ? 0x100u : 0u);
+#else
+    uint32_t m = 0;
+    for (int i = 0; i <= 8; ++i)
+        if (g.vcd[i]) m |= 1u << i;
+    return m;
+#endif
+}
 static inline __attribute__((always_inline)) const VtxLayout& LayoutOf(uint32_t layoutMask) {
     static VtxLayout table[4096];
     static uint32_t madeFor[4096]; // layoutMask + 1 of the entry, 0: none yet
@@ -1705,9 +2020,13 @@ static struct BvSnapshot {
 } g_bvSnap;
 
 // Grows the arena. (Front-end split: the finishing thread transforms vertices in the arena in place, so
-// its memory may only move while that thread has nothing left to do.)
+// its memory may only move while that thread has nothing left to do.) Past its floor it grows in steps of
+// at most 2 MiB, not by doubling (vgx_arena.h: one request of twice the arena is what a cut-up heap cannot meet).
 static inline void ArenaGrow(size_t n) {
-    if (split::g_on && n > g_buf.vtx.capacity()) split::BeforeArenaGrow(g_buf.vtx, n);
+    if (n > g_buf.vtx.capacity()) {
+        if (split::g_on) split::BeforeArenaGrow(g_buf.vtx, n);
+        arena::VtxMakeRoom(g_buf.vtx, n, arena::Get());
+    }
     g_buf.vtx.resize(n);
 }
 
@@ -1882,6 +2201,30 @@ static inline uint8_t PrimKind(uint8_t gxPrim) {
     }
 }
 
+// GXV_VARFRONT (read once, default 1; 0: off): in front of the two seen-sets, the variants this path itself put into both, by a hash of
+// the variant key (direct-mapped, 1,024 slots). A material switch draws with another variant than the last draw (g_lastVariant), and
+// each such draw asked both std::unordered_sets, a software division and a chase through a bucket's nodes each on the console, about
+// 600 times a picture, to learn that the variant was known. A slot holds a key only after both of its inserts, and the sets are never
+// erased, so a key found here is in both and the inserts would do nothing; a miss asks the sets as before.
+static constexpr uint32_t kVarFrontSize = 1024;
+static uint64_t g_varFront[kVarFrontSize];
+static bool g_varFrontInit = false;
+static uint64_t g_varFrontHits = 0, g_varFrontMisses = 0;
+void VarFrontCounters(uint64_t out[2]) { out[0] = g_varFrontHits; out[1] = g_varFrontMisses; }
+static inline bool VarFrontOn() {
+    const bool on = VGX_KNOB(EnvInt("GXV_VARFRONT", 1) != 0) != 0;
+    return on;
+}
+static inline uint64_t& VarFrontSlot(uint64_t vk) {
+    if (!g_varFrontInit) { // (~0: no key; VariantKey's bits 25..31 are always zero, so no key is ~0)
+        for (uint64_t& x : g_varFront) x = ~0ull;
+        g_varFrontInit = true;
+    }
+    uint64_t x = vk ^ (vk >> 29);
+    x *= 0x9E3779B97F4A7C15ull;
+    return g_varFront[static_cast<uint32_t>(x >> 40) & (kVarFrontSize - 1)];
+}
+
 // The shader warm-up list: the program and variant of a new record.
 void split::NoteVariant(const DrawStateRef& st, uint32_t layoutMask) {
     if (g_shaderList) {
@@ -1893,6 +2236,11 @@ void split::NoteVariant(const DrawStateRef& st, uint32_t layoutMask) {
             else {
 #endif
             g_lastVariant = vk;
+            uint64_t* front = VarFrontOn() ? &VarFrontSlot(vk) : nullptr;
+            if (front) {
+                if (*front == vk) { ++g_varFrontHits; return; } // (in both sets already)
+                ++g_varFrontMisses;
+            }
             const uint32_t pk = (static_cast<uint32_t>(st.vsId) << 16) | st.useFs;
             if (g_progSeen.insert(pk).second) {
                 const uint32_t v[2] = {st.vsId, st.useFs};
@@ -1902,6 +2250,7 @@ void split::NoteVariant(const DrawStateRef& st, uint32_t layoutMask) {
                 const uint32_t v[4] = {st.vsId, st.useFs, layoutMask & 0xFFFu, bk};
                 ListAppend(4u, v, sizeof v);
             }
+            if (front) *front = vk;
 #if GXV_RECIPE_SEED_BATCH
             }
 #endif
@@ -1924,6 +2273,7 @@ static DrawRec* NewDrawRec(split::FinishCtx& c, uint8_t prim, uint32_t layoutMas
     CopyWords(rec->tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4));
     *c.lastDraw = static_cast<int>(draws.size()) - 1;
     *c.lastRecSerial = st.serial;
+    if (c.rig) c.rig->rec = -1; // (GXV_RIGIDMERGE: a new record is no palette run yet)
     if (c.cmds) c.cmds->push_back(Cmd{CMD_DRAW, static_cast<uint32_t>(*c.lastDraw)});
     ++*c.records;
     if (c.mainThread) {
@@ -2031,16 +2381,57 @@ static bool SmallDrawBounds(uint8_t gxPrim, const uint8_t* v, uint32_t count, ui
 // 43.3 off, the front end ("player") 0.66 ms a frame dearer (the Observatory is front-end-bound and has up to 190 character
 // draws a frame, the Lumas). The gain on the picture is modest. GXV_CHARAA=1 turns it on.
 constexpr int kCharaDefault = 0;
+//   GXV_CHARAA_AUTO=1|2    (default 0; with GXV_CHARAA off) the same machinery for the player's own draws only (the textures of the
+//                          pack's list from the archives of Mario and Luigi: IsPlayerTexture). =1: the back end draws the filter
+//                          only while the picture is upscaled from a render size below the EFB's (backend::PresentCharaAA): Mario
+//                          stays crisp exactly when the rest of the picture softens. =2: whenever the picture is shown larger than it
+//                          was drawn and the EFB is not multisampled, so at 640x456 too (the 960x544 screen shows it upscaled; the
+//                          area cap GXV_CHARAA_AREA applies as ever). The Observatory's 190 Luma draws are not
+//                          noted, so the 0.66 ms measured for all characters is not paid. HUD markers are written, as for GXV_CHARAA=1.
 int CharaAAMode() {
-    static const int m = [] {
+    const int m = static_cast<int>(VGX_KNOB([] {
         const long v = EnvInt("GXV_CHARAA", kCharaDefault);
-        return v < 0 ? 0 : (v > 2 ? 2 : static_cast<int>(v));
-    }();
+        const int mode = v < 0 ? 0 : (v > 2 ? 2 : static_cast<int>(v));
+        return mode == 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0 ? 1 : mode;
+    }()));
+    return m;
+}
+// GXV_CHARAA_AUTO in force: only the player's draws are noted (the switch itself being off).
+bool CharaAAPlayerOnly() {
+    const bool on = VGX_KNOB(EnvInt("GXV_CHARAA", kCharaDefault) <= 0 && EnvInt("GXV_CHARAA_AUTO", 0) != 0) != 0;
+    return on;
+}
+// ================================================================ whole-picture edge smoothing (GXV_EDGE_AA)
+// The user, 5 Nov 2026, on Locked 30 (GXV_FPS_LIMIT=30, which starts at 960x544): "jagged edges, no AA". At 960x544 the
+// present is a plain 1:1 blit, and the multisampled rungs (7, 8) are never reached in the lit Observatory (the GPU's ~29 ms is
+// over the 70 % of 33 ms a step up must fit). So the present itself smooths the whole picture: one quad with an FXAA 3.11
+// "console" filter in place of the blit (backend::PresentEdgeAA; no render target, no scene, no copy added). The game's HUD is
+// in the EFB by the display copy and must not be filtered, so the front end keeps what CHARAA already finds: every HUD draw
+// (between PORT_GX_MARK_HUD_BEGIN / END) that can change a pixel gives its rectangle, padded by kChaPad for the filter's reach and
+// merged into at most kCharaBoxes; the back end draws those rectangles again, plainly, over the smoothed picture.
+// Front-end cost: the HUD draws' bounds only (a few dozen draws a picture, each a handful of projected points or its list's
+// row spheres). The character noting of GXV_CHARAA is not done for this switch (the 0.66 ms of the 24 Oct A/B); with
+// GXV_CHARAA_AUTO also on (the Vita's default) both run, and a copy smoothed whole does not draw the character pass on top.
+//   GXV_EDGE_AA=0|1|2|3   off (default; the stream, the commands and the present as before) / on / on with the pixels the filter
+//                         changed tinted red (diagnostic) / on for the left half of the screen only (same-picture A/B for screenshots)
+//   GXV_EDGE_AA_HUD=<pct> most of the display copy the HUD rectangles may cover (default 50); above it the copy is presented
+//                         as before (a menu over the picture: filtering, then covering most of it again, would cost for nothing)
+// Back-end switches (vgx_backend_gl.cpp, EdgeParams): GXV_EDGE_AA_THRESHOLD, GXV_EDGE_AA_MIN, GXV_EDGE_AA_SHARPNESS.
+int EdgeAAMode() {
+    const int m = static_cast<int>(VGX_KNOB(static_cast<int>(std::clamp<long>(EnvInt("GXV_EDGE_AA", 0), 0, 3))));
     return m;
 }
 namespace {
 inline bool ChaOn() {
-    static const bool on = CharaAAMode() != 0;
+    const bool on = VGX_KNOB(CharaAAMode() != 0 || EdgeAAMode() != 0) != 0; // (GXV_EDGE_AA: the HUD's rectangles)
+    return on;
+}
+inline bool EdgeOn() {
+    const bool on = VGX_KNOB(EdgeAAMode() != 0) != 0;
+    return on;
+}
+inline bool CharaNoteOn() { // (characters are noted for GXV_CHARAA / GXV_CHARAA_AUTO only, not for GXV_EDGE_AA)
+    const bool on = VGX_KNOB(CharaAAMode() != 0) != 0;
     return on;
 }
 constexpr int kChaHud = 64, kChaPad = 2, kChaWork = 64;
@@ -2054,7 +2445,12 @@ struct ChaFrame {
     bool chara = false;    // the current state samples a character texture
     const RowBox* pend = nullptr; // SetPendingBounds
     uint32_t pendN = 0;
+    EfbRect edgeHud[kChaHud]; // GXV_EDGE_AA: the HUD draws' rectangles of this picture (unpadded)
+    int ne = 0;
 } g_cha;
+// GXV_EDGE_AA totals since the start (EdgeCounters): [0] display copies, [1] of them smoothed whole, [2] HUD rectangles handed to
+// the back end, [3] copies not smoothed because the HUD covered more than GXV_EDGE_AA_HUD, [4] HUD draws measured.
+uint64_t g_edgeCtr[5] = {};
 // Totals since the start (CharaCounters): [0] display copies, [1] of them with rectangles, [2] character draws, [3] of
 // them with no usable bounds (a vertex behind the eye: not smoothed), [4] HUD draws measured, [5] rectangles handed to
 // the back end, [6] their EFB pixels, [7] frames over GXV_CHARAA_AREA, [8] rectangles dropped by clearing copies, [9]
@@ -2209,14 +2605,37 @@ void ChaAddHud(const EfbRect& r) {
     else g_cha.hud[kChaHud - 1] = RUnion(g_cha.hud[kChaHud - 1], r); // (conservative: cuts more)
 }
 // After ResolveState in the emitters (EmitDraw: before its vertices are transformed on the CPU).
+// Whether the current state's textures make a character's draw (g_cha.chara), worked out again when the state changed.
+void ChaClassify() {
+    if (cur.stateSerial != g_cha.serial) {
+        g_cha.serial = cur.stateSerial;
+        bool c = false;
+        const bool playerOnly = VGX_KNOB(CharaAAPlayerOnly()) != 0;
+        for (uint32_t m = cur.texMask; m && !c; m &= m - 1) {
+            const uint32_t id = cur.tex[__builtin_ctz(m)].texId;
+            c = playerOnly ? IsPlayerTexture(id) : IsCharaTexture(id);
+        }
+        g_cha.chara = c;
+    }
+}
+// (GXV_SPLIT_COPY) Whether CharaNote may read the draw's vertices (conservative: true when unsure), so that EmitDraw copies a
+// display-list cache segment on the player first. A HUD draw may; a character's draw does unless its list gave bounds.
+bool CharaNoteReads() {
+    if (g_cha.hudDepth > 0) return true;
+    if (!CharaNoteOn()) return false;
+    ChaClassify();
+    return g_cha.chara && cur.rs.colorWrite && !(g_cha.pend && g_cha.pendN);
+}
 void CharaNote(const uint8_t* v, uint32_t count, uint32_t stride, uint32_t layoutMask) {
     const RowBox* pb = g_cha.pend;
     const uint32_t pn = g_cha.pendN;
     g_cha.pend = nullptr;
     g_cha.pendN = 0;
     if (g_cha.hudDepth > 0) {
-        if (g_cha.n == 0 || !cur.rs.colorWrite) return; // (no rectangle to cut / the picture's colour is not written)
-        ++g_chaCtr[4];
+        const bool edge = EdgeOn(); // (GXV_EDGE_AA: every HUD draw counts, the whole picture being smoothed)
+        if ((g_cha.n == 0 && !edge) || !cur.rs.colorWrite) return; // (no rectangle to cut / the picture's colour is not written)
+        if (g_cha.n) ++g_chaCtr[4];
+        if (edge) ++g_edgeCtr[4];
         // A HUD draw that cannot change a pixel does not cut: the game draws some layout panes every frame with their alpha
         // at 0 (blended by source alpha, the pane's alpha in the vertex colours, as nw4r's layouts carry it). The Gateway
         // tutorial on the desktop build: 92 HUD draws a frame, among them full-picture and 222x280 panes of alpha 0.
@@ -2232,14 +2651,18 @@ void CharaNote(const uint8_t* v, uint32_t count, uint32_t stride, uint32_t layou
         // One colour over a rectangle that holds every character rectangle (no texture, no vertex colours: a fade, which the
         // game draws over the whole picture every frame, mostly at alpha 0): the same blend of one colour over every pixel the
         // filter reads, which the filter commutes with (but for its edge threshold), so it does not cut either.
+        bool charaCut = g_cha.n != 0, edgeCut = edge;
         if (cur.texMask == 0 && !(layoutMask & (VL_COL0 | VL_COL1)) && v) {
+            // (GXV_EDGE_AA: the same rule against the display copy's own rectangle, unpadded: the fade quad is cut to the scissor)
+            if (edge && RInside(g.dispCopySrc, r)) edgeCut = false;
             bool all = true;
             for (int i = 0; i < g_cha.n && all; ++i) {
                 const EfbRect& b = g_cha.box[i];
                 all = RInside(EfbRect{static_cast<int16_t>(b.x - kChaPad - 2), static_cast<int16_t>(b.y - kChaPad - 2), static_cast<int16_t>(b.w + 2 * kChaPad + 4),
                                       static_cast<int16_t>(b.h + 2 * kChaPad + 4)}, r);
             }
-            if (all) return;
+            if (all) charaCut = false;
+            if (!charaCut && !edgeCut) return;
         }
         static long hudLog = EnvInt("GXV_CHARAA_LOG", 0) * 4;
         if (hudLog > 0 && r.w * r.h > 20000) {
@@ -2254,15 +2677,15 @@ void CharaNote(const uint8_t* v, uint32_t count, uint32_t stride, uint32_t layou
                          cur.rs.vpW, cur.rs.vpH, cur.texMask ? cur.tex[__builtin_ctz(cur.texMask)].texId : 0u, cur.rs.blend, cur.rs.blendSrc, cur.rs.blendDst,
                          cur.rs.colorWrite, cur.rs.alphaWrite, amin, amax);
         }
-        ChaAddHud(r);
+        if (charaCut) ChaAddHud(r);
+        if (edgeCut && r.w > 0 && r.h > 0) {
+            if (g_cha.ne < kChaHud) g_cha.edgeHud[g_cha.ne++] = r;
+            else g_cha.edgeHud[kChaHud - 1] = RUnion(g_cha.edgeHud[kChaHud - 1], r); // (conservative: restores more)
+        }
         return;
     }
-    if (cur.stateSerial != g_cha.serial) {
-        g_cha.serial = cur.stateSerial;
-        bool c = false;
-        for (uint32_t m = cur.texMask; m && !c; m &= m - 1) c = IsCharaTexture(cur.tex[__builtin_ctz(m)].texId);
-        g_cha.chara = c;
-    }
+    if (!CharaNoteOn()) return; // (GXV_EDGE_AA alone: no character is noted)
+    ChaClassify();
     if (!g_cha.chara || !cur.rs.colorWrite) return;
     ++g_chaCtr[2];
     EfbRect r;
@@ -2274,12 +2697,65 @@ void CharaCleared(const EfbRect& src) {
     for (int i = 0; i < g_cha.n;)
         if (RInside(g_cha.box[i], src)) { g_cha.box[i] = g_cha.box[--g_cha.n]; ++g_chaCtr[8]; }
         else ++i;
+    for (int i = 0; i < g_cha.ne;) // (GXV_EDGE_AA: a HUD drawn into an offscreen picture is not on the display copy)
+        if (RInside(g_cha.edgeHud[i], src)) g_cha.edgeHud[i] = g_cha.edgeHud[--g_cha.ne];
+        else ++i;
+}
+// GXV_EDGE_AA at the display copy: the HUD rectangles, padded by kChaPad (the filter reads its neighbours; a scene pixel next to the
+// HUD comes out plain too), cut to the copy, merged where they meet (8 px of slack: a line of text is one rectangle) and then, while
+// there are more than the command holds, the two whose union grows least. Merging only ever restores more pixels plainly.
+void EdgeFinish(CopyDispCmd& c) {
+    const int64_t maxPct = static_cast<int64_t>(VGX_KNOB(std::clamp<long>(EnvInt("GXV_EDGE_AA_HUD", 50), 1, 100)));
+    c.edge = false;
+    c.hudN = 0;
+    ++g_edgeCtr[0];
+    EfbRect w[kChaHud];
+    int n = 0;
+    for (int i = 0; i < g_cha.ne; ++i) {
+        const EfbRect& b = g_cha.edgeHud[i];
+        const int x0 = std::max<int>(b.x - kChaPad, c.src.x), y0 = std::max<int>(b.y - kChaPad, c.src.y);
+        const int x1 = std::min<int>(b.x + b.w + kChaPad, c.src.x + c.src.w), y1 = std::min<int>(b.y + b.h + kChaPad, c.src.y + c.src.h);
+        if (x1 > x0 && y1 > y0) w[n++] = EfbRect{static_cast<int16_t>(x0), static_cast<int16_t>(y0), static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+    }
+    g_cha.ne = 0;
+    for (bool again = n > 1; again;) {
+        again = false;
+        for (int i = 0; i < n && !again; ++i)
+            for (int j = i + 1; j < n && !again; ++j) {
+                const EfbRect &a = w[i], &b = w[j];
+                if (a.x <= b.x + b.w + 8 && b.x <= a.x + a.w + 8 && a.y <= b.y + b.h + 8 && b.y <= a.y + a.h + 8) {
+                    w[i] = RUnion(a, b);
+                    w[j] = w[--n];
+                    again = true;
+                }
+            }
+    }
+    while (n > kCharaBoxes) {
+        int bi = 0, bj = 1;
+        int64_t grow = INT64_MAX;
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j) {
+                const int64_t d = RArea(RUnion(w[i], w[j])) - RArea(w[i]) - RArea(w[j]);
+                if (d < grow) { grow = d; bi = i; bj = j; }
+            }
+        w[bi] = RUnion(w[bi], w[bj]);
+        w[bj] = w[--n];
+    }
+    int64_t area = 0;
+    for (int i = 0; i < n; ++i) area += RArea(w[i]);
+    if (area * 100 > RArea(c.src) * maxPct) { ++g_edgeCtr[3]; return; }
+    for (int i = 0; i < n; ++i) c.hud[i] = w[i];
+    c.hudN = static_cast<uint8_t>(n);
+    c.edge = true;
+    ++g_edgeCtr[1];
+    g_edgeCtr[2] += static_cast<uint64_t>(n);
 }
 void CharaFinish(CopyDispCmd& c) {
-    static const int64_t maxPct = std::clamp<long>(EnvInt("GXV_CHARAA_AREA", 30), 1, 100);
+    const int64_t maxPct = static_cast<int64_t>(VGX_KNOB(std::clamp<long>(EnvInt("GXV_CHARAA_AREA", 30), 1, 100)));
     ++g_chaCtr[0];
     g_cha.hudDepth = 0;
     c.charaN = 0;
+    if (EdgeOn()) EdgeFinish(c);
     if (g_cha.n == 0) { g_cha.nh = 0; return; }
     ++g_chaCtr[1];
     EfbRect work[kChaWork], next[kChaWork];
@@ -2287,7 +2763,7 @@ void CharaFinish(CopyDispCmd& c) {
     // GXV_CHARAA_MIN=<px> (default 32): a rectangle less tall than this many EFB pixels is not smoothed. A character that
     // small (a far Luma, a Star Bit-sized item) is all texture detail and few stair steps, and the filter would only soften
     // it (desktop captures, 23 Oct: a small Mario's face and overalls came out blurred with FXAA's looser thresholds).
-    static const int minH = static_cast<int>(std::clamp<long>(EnvInt("GXV_CHARAA_MIN", 32), 0, 456));
+    const int minH = static_cast<int>(VGX_KNOB(static_cast<int>(std::clamp<long>(EnvInt("GXV_CHARAA_MIN", 32), 0, 456))));
     for (int i = 0; i < g_cha.n; ++i) {
         const EfbRect& b = g_cha.box[i];
         if (b.h < minH) { ++g_chaCtr[10]; continue; }
@@ -2373,7 +2849,11 @@ void CharaMarker(uint32_t kind) {
 void PresentationMarker(uint32_t kind) {
     g_buf.presentAllowed = kind != kPresentSuppressedMarker;
 }
+void PresentationStamp(uint32_t vblank16) {
+    g_buf.presentStamp = 0x80000000u | (vblank16 & 0xFFFFu);
+}
 void CharaCounters(uint64_t out[11]) { std::memcpy(out, g_chaCtr, sizeof g_chaCtr); }
+void EdgeCounters(uint64_t out[5]) { std::memcpy(out, g_edgeCtr, sizeof g_edgeCtr); }
 
 // Register folding on a run of particles: every one of them used to lay its vertices out again with two colour
 // slots (FoldRegs), hundreds of instructions for a quad. FoldGuess says, before the vertices are decoded, whether
@@ -2382,7 +2862,7 @@ void CharaCounters(uint64_t out[11]) { std::memcpy(out, g_chaCtr, sizeof g_chaCt
 // and the two TEV registers' values. A draw that follows such a draw is decoded into the folded layout at once.
 // (If it does not fold after all, EmitDraw gives the reservation back and the caller decodes again.)
 uint32_t FoldGuess(uint32_t layoutMask, uint32_t count) {
-    static const bool on = EnvInt("GXV_FOLDAHEAD", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_FOLDAHEAD", 1) != 0) != 0;
     const uint32_t slots = VL_COL0 | VL_COL1;
     if (!on || (layoutMask & slots) == slots) return layoutMask; // (the slots are there)
     // (ResolveState rebuilds the keys when any of these is set: no prediction then)
@@ -2393,11 +2873,145 @@ uint32_t FoldGuess(uint32_t layoutMask, uint32_t count) {
     return layoutMask | slots;
 }
 
+// ================================================================ rigid draws in one record (GXV_RIGIDMERGE)
+// Nine in ten of the game's shapes are rigid: one position matrix for the whole shape. Each is its own draw call when its model-view
+// block differs from its neighbour's (the u_mv uniform), even if everything else (shaders, textures, render state, every other block)
+// is the same. A run of such draws is made one record with the matrix palette shader the skinned meshes use: every draw of the run
+// takes a slot of the palette (three position rows and the three normal rows of its u_mv block) and writes the slot's row number into
+// the w of its vertices (where a skinned vertex has its PNMTXIDX), so that the vertex shader reads its own matrix.
+//   GXV_RIGIDMERGE=0   (default) off, every key, record and block as before
+//   GXV_RIGIDMERGE=1   runs of up to 10 draws (the short palette, 60 vec4: the vertex key with perVtxPos 2)
+//   GXV_RIGIDMERGE=2   runs of up to 4 draws (the small palette, 24 vec4: perVtxPos 3)
+// Why the picture is the same, bit for bit: the palette vertex shader and the u_mv one are generated from the same lines
+// (vgx_shadergen.cpp): eye = (dot(row0, p), dot(row1, p), dot(row2, p)) with p = (x, y, z, 1) in both, the normal from the three normal
+// rows in the same order, then the same normalisation; the palette index is the whole number the front end stored (RowIndex), not clamped
+// (3 * slot <= 27, or 9). Everything else the shader reads (projection, texture matrices, lights, TEV) comes from blocks that a run shares
+// by construction: a draw joins only when all of them are the record's (same offsets in the deduplicating arena). Only the draw that
+// follows a record joins it: the order of the triangles, and so of the depth and blend operations, is that of the draws. A draw alone
+// keeps its u_mv key and block (the record is converted when the second draw joins it).
+// The vertices of a draw are in the frame's arena (static display lists are not touched: their vertices are in a buffer of their own).
+namespace {
+long RigidMode() {
+    const long m = static_cast<long>(VGX_KNOB(EnvInt("GXV_RIGIDMERGE", 0))); // read once, default 0 (off)
+    return (m == 1 || m == 2) && UniformPacking() ? m : 0;
+}
+constexpr uint32_t kRigidMaxSlotsOf[3] = {0, 10, 4};
+std::vector<uint16_t> g_rigTwin; // per vertex shader id: the id of its palette twin, 0xFFFF none yet, 0xFFFE not possible
+split::RigidRun g_rig;
+uint64_t g_rigJoins = 0, g_rigRuns = 0; // draws that joined a palette run, runs made (written by the thread that finishes records)
+// The vertex shader a rigid draw of the current key joins a palette run with (the same key with the palette instead of u_mv).
+uint16_t RigidTwin() {
+    const long mode = RigidMode();
+    if (!mode || cur.vs.perVtxPos != 0) return 0xFFFF;
+    for (int i = 0; i < cur.vs.numTexGens; ++i)
+        if (cur.vs.tg[i].perVtxMtx) return 0xFFFF; // (those read the palette for texture matrices already)
+    if (g_rigTwin.size() <= cur.vsId) g_rigTwin.resize(static_cast<size_t>(cur.vsId) + 64, 0xFFFF);
+    uint16_t& t = g_rigTwin[cur.vsId];
+    if (t == 0xFFFF) {
+        VsKey k = cur.vs;
+        k.perVtxPos = mode == 1 ? 2 : 3;
+        t = Lookup(g_vsReg, k, false, GenerateVertexShader);
+    }
+    return t;
+}
+// Whether the draw `j` (state st) can join the record `p` (the last one, index `last`), and if it can, does it. The tests are those of an
+// ordinary merge except the vertex shader and the matrix block; `common` is the rest of them.
+// dry: only whether it would (GXV_RIGIDMERGE_DLLEARN: a static job, asked as if its list were a copy in the arena; nothing is changed).
+template <bool dry, class Common>
+bool RigidJoin(split::FinishCtx& c, DrawRec& p, int last, const split::DrawJob& j, const split::DrawStateRef& st, Common common) {
+    if (!c.uni || !c.rig || j.vsTwin == 0xFFFF || (!dry && j.kind != split::JOB_DYNAMIC)) return false;
+    const long mode = RigidMode();
+    if (!mode) return false;
+    const bool conv = c.rig->rec == last;
+    if (conv ? p.vsId != j.vsTwin : p.vsId != st.vsId) return false;
+    if (c.blockOff[UB_MV] == kNoBlock || p.ublock[UB_MV] == kNoBlock) return false;
+    for (int b = 0; b < UB_COUNT; ++b) {
+        if (b == UB_MV || (b == UB_PAL && conv)) continue; // (the record's own palette replaces them)
+        if (p.ublock[b] != c.blockOff[b]) return false;
+    }
+    UniArena& uni = *c.uni;
+    const size_t xo = c.blockOff[UB_MV];
+    if (xo + 24 > uni.size() || (!conv && static_cast<size_t>(p.ublock[UB_MV]) + 24 > uni.size())) return false;
+    const uint32_t K = mode == 1 ? 30u : 12u, maxSlots = kRigidMaxSlotsOf[mode];
+    if (!common()) return false;
+    if (dry) {
+        if (!conv) return maxSlots >= 2;
+        const float* const pl = uni.data() + c.rig->pal;
+        const uint32_t nw = c.rig->slots - 1;
+        const float* const xx = uni.data() + xo;
+        return c.rig->slots < maxSlots || (std::memcmp(pl + nw * 12, xx, 12 * sizeof(float)) == 0 && std::memcmp(pl + K * 4 + nw * 12, xx + 12, 12 * sizeof(float)) == 0);
+    }
+    // ---- it joins
+    uint32_t slot;
+    if (!conv) {
+        if (maxSlots < 2) return false;
+        const size_t o = uni.size();
+        uni.resize(o + static_cast<size_t>(K) * 8);
+        float* pal = uni.data() + o;
+        std::memset(pal, 0, static_cast<size_t>(K) * 8 * sizeof(float));
+        const float* const l = uni.data() + p.ublock[UB_MV];
+        std::memcpy(pal, l, 12 * sizeof(float));
+        std::memcpy(pal + K * 4, l + 12, 12 * sizeof(float));
+        p.vsId = j.vsTwin;
+        p.ublock[UB_PAL] = static_cast<uint32_t>(o);
+        c.rig->rec = last;
+        c.rig->slots = 1;
+        c.rig->pal = static_cast<uint32_t>(o);
+        if (!c.vtxLog) ++g_rigRuns;
+    }
+    const float* const x = uni.data() + xo; // its u_mv block: position rows 0..2 (4 floats each), normal rows 0..2 (4 floats each)
+    float* const pal = uni.data() + c.rig->pal;
+    const uint32_t newest = c.rig->slots - 1;
+    // (the same matrix as the newest slot's, whole words: no new slot)
+    if (std::memcmp(pal + newest * 12, x, 12 * sizeof(float)) == 0 && std::memcmp(pal + K * 4 + newest * 12, x + 12, 12 * sizeof(float)) == 0) {
+        slot = newest;
+    } else if (c.rig->slots < maxSlots) {
+        slot = c.rig->slots++;
+        std::memcpy(pal + slot * 12, x, 12 * sizeof(float));
+        std::memcpy(pal + K * 4 + slot * 12, x + 12, 12 * sizeof(float));
+    } else {
+        return false; // full: only possible for the join that opened the run (conv false) when maxSlots < 2, handled above; a full run starts a new record
+    }
+    const float w = static_cast<float>(3 * slot);
+    if (c.vtxLog) {
+        c.vtxLog->push_back(split::VtxWrite{j.vtxStart, j.count, j.stride, w});
+    } else {
+        uint8_t* v = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(j.vtxPtrLo | (static_cast<uint64_t>(j.vtxPtrHi) << 32)));
+        for (uint32_t i = 0; i < j.count; ++i, v += j.stride) std::memcpy(v + 12, &w, 4);
+    }
+    if (!c.vtxLog) ++g_rigJoins;
+    return true;
+}
+} // namespace
+void RigidMergeCounters(uint64_t out[2]) { out[0] = g_rigRuns; out[1] = g_rigJoins; }
+// GXV_RIGIDMERGE_DLMAX (read once, default 0, only with GXV_RIGIDMERGE on): a display list without matrix indices of up to this many vertices is not
+// made a static buffer (vgx_dlcache.cpp): its vertices are copied into the frame's arena at each use, where its draw can join a palette run.
+// (A static list's vertices are in a buffer of their own, and cannot be in a record with another list's.)
+uint32_t RigidMergeListMax() {
+    const uint32_t n = static_cast<uint32_t>(VGX_KNOB(RigidMode() ? static_cast<uint32_t>(EnvInt("GXV_RIGIDMERGE_DLMAX", 0)) : 0u));
+    return n;
+}
+// GXV_RIGIDMERGE_DLMAX=learn, or GXV_RIGIDMERGE_DLLEARN=1 (read once, default off, only with GXV_RIGIDMERGE on): the cached lists of more than GXV_SOFTXFORM
+// and up to N vertices (GXV_RIGIDMERGE_DLLEARN_MAX, default 512; GXV_RIGIDMERGE_DLLEARN=<n> with n >= 16 sets it too) are copied into the arena only where
+// that has bought a palette run (vgx_dlcache.cpp). 0: off.
+uint32_t RigidMergeLearnMax() {
+    const uint32_t n = static_cast<uint32_t>(VGX_KNOB([] () -> uint32_t {
+        if (!RigidMode()) return 0u;
+        const char* dm = std::getenv("GXV_RIGIDMERGE_DLMAX");
+        const long on = EnvInt("GXV_RIGIDMERGE_DLLEARN", 0);
+        if (!(dm && std::strcmp(dm, "learn") == 0) && on == 0) return 0u;
+        long cap = on >= 16 ? on : EnvInt("GXV_RIGIDMERGE_DLLEARN_MAX", 512);
+        if (cap > 0xFFFF) cap = 0xFFFF;
+        return cap > static_cast<long>(SoftXformLimit()) ? static_cast<uint32_t>(cap) : 0u;
+    }()));
+    return n;
+}
+
 // The record part of a draw: merged into the previous record when nothing but the geometry differs, else a new
 // record; then the indices. (The front-end split runs this on its finishing thread: vgx_fesplit.h.)
 uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& st) {
     // (GXV_NOMERGE=1 turns merging off: one record per primitive, for comparing runs.)
-    static const bool noMerge = EnvInt("GXV_NOMERGE", 0) != 0;
+    const bool noMerge = VGX_KNOB(EnvInt("GXV_NOMERGE", 0) != 0) != 0;
     std::vector<DrawRec>& draws = *c.draws;
     std::vector<uint16_t, NoInitAlloc<uint16_t>>& idx = *c.idx;
     DrawRec* rec = nullptr;
@@ -2414,7 +3028,7 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
                                     : (p.vtxOffset + static_cast<size_t>(p.vtxCount) * j.stride == j.vtxStart);
         // (the render state, textures and texture mask are the record's when they have not been built again since it was made:
         // GXV_MERGEFAST=0 compares them always, 2 compares them as well and logs a disagreement)
-        static const int mergeMode = static_cast<int>(EnvInt("GXV_MERGEFAST", 1));
+        const int mergeMode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_MERGEFAST", 1))));
         const bool sameSerial = mergeMode != 0 && *c.lastRecSerial == st.serial;
         const auto sameState = [&] {
             return p.texMask == st.texMask && SameStruct(p.rs, *st.rs) && SameWords(p.tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4));
@@ -2431,7 +3045,39 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
             rec = &p;
             *c.lastRecSerial = st.serial;
             if (!abs) base = p.vtxCount;
+        } else if (j.vsTwin != 0xFFFF && RigidJoin<false>(c, p, last, j, st, [&] {
+                       return p.vbuf == 0 && p.prim == j.prim && p.layoutMask == j.layoutMask && p.fsId == st.useFs && p.vtxCount + j.count <= 0xFFFF &&
+                              contiguous && p.idxOffset + p.idxCount == idx.size() && (sameSerial || sameState());
+                   })) {
+            // (GXV_RIGIDMERGE: the draw differs from the record in its matrix only; it has a slot of the record's palette now)
+            rec = &p;
+            *c.lastRecSerial = st.serial;
+            if (!abs) base = p.vtxCount;
         }
+    }
+    if (c.joinLog) c.joinLog->push_back(rec ? 1 : 0); // (GXV_RIGIDMERGE_DLLEARN)
+    if (c.rig) c.rig->prevOk = j.vsTwin != 0xFFFF;
+    if (workload::FeSplitOn()) {
+        // (GXV_FE_SPLIT: why a draw did not join the record before it, the first test that failed)
+        unsigned why = workload::MergeJoined;
+        if (!rec) {
+            why = workload::MergeOther;
+            if (noMerge) why = workload::MergeOther;
+            else if (!(last >= 0 && last == static_cast<int>(draws.size()) - 1 && prevIsDraw)) why = workload::MergeNoPrev;
+            else {
+                const DrawRec& p = draws[last];
+                const bool contiguous = abs ? (p.vchunk == chunk && p.vtxFirst + p.vtxCount == j.first)
+                                            : (p.vtxOffset + static_cast<size_t>(p.vtxCount) * j.stride == j.vtxStart);
+                if (p.vbuf != 0) why = workload::MergeStatic;
+                else if (p.prim != j.prim || p.layoutMask != j.layoutMask) why = workload::MergeLayout;
+                else if (p.vsId != st.vsId || p.fsId != st.useFs) why = workload::MergeShader;
+                else if (!contiguous || p.idxOffset + p.idxCount != idx.size()) why = workload::MergeVerts;
+                else if (!SameWords(p.ublock, c.blockOff, UB_COUNT)) { why = workload::MergeBlocks; NoteBlockMiss(p.ublock, c.blockOff); }
+                else if (!(p.texMask == st.texMask && SameWords(p.tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4)))) why = workload::MergeTex;
+                else if (!SameStruct(p.rs, *st.rs)) why = workload::MergeRs;
+            }
+        }
+        workload::MergeCount[why].fetch_add(1, std::memory_order_relaxed);
     }
     if (!rec) {
         rec = NewDrawRec(c, j.prim, j.layoutMask, st);
@@ -2446,10 +3092,29 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
         rec->idxOffset = static_cast<uint32_t>(idx.size());
         rec->exX = j.exX; rec->exY = j.exY; rec->exW = j.exW; rec->exH = j.exH;
         rec->cover = j.cover;
-    } else if (j.exX != rec->exX || j.exY != rec->exY || j.exW != rec->exW || j.exH != rec->exH) {
+        rec->ab = j.ab;
+        rec->abX = j.abX; rec->abY = j.abY; rec->abW = j.abW; rec->abH = j.abH;
+    } else if (rec->ab) {
+        // (GXV_SHADOWFILL_BOUNDS: a merged record's pixels are the union of its draws'; one draw not known, the record not known)
+        if (!j.ab) rec->ab = 0;
+        else if (j.abW > 0 && j.abH > 0) {
+            if (rec->abW <= 0 || rec->abH <= 0) { rec->abX = j.abX; rec->abY = j.abY; rec->abW = j.abW; rec->abH = j.abH; }
+            else {
+                const int ax = std::min<int>(j.abX, rec->abX), ay = std::min<int>(j.abY, rec->abY);
+                const int bx = std::max<int>(j.abX + j.abW, rec->abX + rec->abW), by = std::max<int>(j.abY + j.abH, rec->abY + rec->abH);
+                rec->abX = static_cast<int16_t>(ax); rec->abY = static_cast<int16_t>(ay);
+                rec->abW = static_cast<int16_t>(bx - ax); rec->abH = static_cast<int16_t>(by - ay);
+            }
+        }
+    }
+    if (made == ~0u && (j.exX != rec->exX || j.exY != rec->exY || j.exW != rec->exW || j.exH != rec->exH)) {
         // (merged: the record's bound is the union)
         const int ax = std::min<int>(j.exX, rec->exX), ay = std::min<int>(j.exY, rec->exY);
         const int bx = std::max<int>(j.exX + j.exW, rec->exX + rec->exW), by = std::max<int>(j.exY + j.exH, rec->exY + rec->exH);
+        // (DrawRec::cover says the record's first primitive writes every pixel of its extent: true no longer when the extent grows;
+        // two half-screen quads merged would otherwise claim the whole screen, and the depth plan's colour liveness - GXV_EFBSWAP's
+        // drawing back - would take pixels the first quad never wrote as overwritten)
+        if (ax != rec->exX || ay != rec->exY || bx - ax != rec->exW || by - ay != rec->exH) rec->cover = 0;
         rec->exX = static_cast<int16_t>(ax); rec->exY = static_cast<int16_t>(ay);
         rec->exW = static_cast<int16_t>(bx - ax); rec->exH = static_cast<int16_t>(by - ay);
     }
@@ -2462,6 +3127,25 @@ uint32_t split::FinishDraw(FinishCtx& c, const DrawJob& j, const DrawStateRef& s
 }
 
 uint32_t split::FinishStatic(FinishCtx& c, const DrawJob& j, const DrawStateRef& st) {
+    if (c.joinLog) {
+        // GXV_RIGIDMERGE_DLLEARN: would the draw join the previous record if its list were copied into the arena (and the previous draw's too, if it is
+        // a static one)? The tests are FinishDraw's, but for the vertices' places.
+        bool would = false;
+        const int last = *c.lastDraw;
+        const bool prevIsDraw = c.cmds ? (!c.cmds->empty() && c.cmds->back().type == CMD_DRAW) : j.prevIsDraw != 0;
+        std::vector<DrawRec>& draws = *c.draws;
+        if (j.copyable && j.vsTwin != 0xFFFF && c.rig && c.rig->prevOk && last >= 0 && last == static_cast<int>(draws.size()) - 1 && prevIsDraw) {
+            DrawRec& p = draws[last];
+            const int mergeMode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_MERGEFAST", 1))));
+            const bool sameSerial = mergeMode != 0 && *c.lastRecSerial == st.serial;
+            would = RigidJoin<true>(c, p, last, j, st, [&] {
+                return p.prim == j.prim && p.layoutMask == j.layoutMask && p.fsId == st.useFs && p.vtxCount + j.count <= 0xFFFF &&
+                       (sameSerial || (p.texMask == st.texMask && SameStruct(p.rs, *st.rs) && SameWords(p.tex, st.tex, static_cast<uint32_t>(sizeof cur.tex / 4))));
+            });
+        }
+        c.joinLog->push_back(would ? 1 : 0);
+        if (c.rig) c.rig->prevOk = j.copyable && j.vsTwin != 0xFFFF;
+    }
     DrawRec* rec = NewDrawRec(c, j.prim, j.layoutMask, st);
     rec->vbuf = j.vbuf;
     rec->vtxOffset = j.vtxOffset;
@@ -2469,16 +3153,51 @@ uint32_t split::FinishStatic(FinishCtx& c, const DrawJob& j, const DrawStateRef&
     rec->idxOffset = j.idxOffset;
     rec->vtxCount = j.count;
     rec->idxCount = j.idxCount;
+    rec->ab = j.ab; // (GXV_SHADOWFILL_BOUNDS: the list's bounds through the draw's matrices)
+    rec->abX = j.abX; rec->abY = j.abY; rec->abW = j.abW; rec->abH = j.abH;
     return static_cast<uint32_t>(c.draws->size() - 1);
 }
 
+static std::vector<uint8_t> g_joinLogMain; // GXV_RIGIDMERGE_DLLEARN: the single-thread path's join log of the frame
+static uint32_t g_jobSeq = 0, g_lastJobKey = 0; // jobs of this frame so far; the shader and state key of the last one (GXV_RIGIDMERGE_DLLEARN)
+static uint32_t g_hashedSerial = ~0u, g_stateHash = 0;
+uint32_t DlJobSeq() { return g_jobSeq; }
+uint32_t DlLastJobKey() { return g_lastJobKey; }
+static bool g_pendingCopyable = false;
+void SetPendingStaticCopyable(bool on) { g_pendingCopyable = on; }
 static inline split::FinishCtx MainFinishCtx() {
-    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true};
+    return split::FinishCtx{&g_buf.draws, &g_buf.idx, &g_buf.cmds, g_blockOff, &g_lastDraw, &g_lastRecSerial, &stats::Cur().drawCalls, true, &g_buf.uni, &g_rig, nullptr,
+                              RigidMergeLearnMax() ? &g_joinLogMain : nullptr};
 }
 static inline split::DrawStateRef CurStateRef() { return split::DrawStateRef{cur.vsId, cur.useFs, cur.texMask, cur.stateSerial, &cur.rs, cur.tex}; }
 // The record part of a draw: here, or (front-end split) a placeholder command and a job for the finishing thread.
-static inline void FinishOrSend(const split::DrawJob& j) {
-    const split::DrawStateRef st = CurStateRef();
+static inline void FinishOrSend(const split::DrawJob& j, const split::DrawStateRef* over = nullptr) {
+    const split::DrawStateRef st = over ? *over : CurStateRef();
+    ++g_jobSeq;
+    if (RigidMergeLearnMax()) {
+        // (GXV_RIGIDMERGE_DLLEARN: what a learned list's use is told apart by: the shaders and the render state, textures and texture mask of the draw before it.
+        // The state's serial says when to hash it again.)
+        if (st.serial != g_hashedSerial || over) {
+            g_hashedSerial = over ? ~0u : st.serial;
+            uint64_t h = XXH3_64bits(st.rs, sizeof(RenderState));
+            h = XXH3_64bits_withSeed(st.tex, sizeof cur.tex, h);
+            g_stateHash = static_cast<uint32_t>(h ^ (h >> 32)) + st.texMask;
+        }
+        g_lastJobKey = (g_stateHash * 0x9E3779B1u) ^ ((static_cast<uint32_t>(st.vsId) << 16) | st.useFs);
+    }
+    if (j.vsTwin != 0xFFFF && j.kind == split::JOB_DYNAMIC) {
+        // (GXV_RIGIDMERGE: the palette twin of the key may be what a record is drawn with: its variant goes on the warm-up list too)
+        static struct { uint32_t ids = ~0u, layout = 0, serial = 0; } lastTwin;
+        const uint32_t ids = (static_cast<uint32_t>(j.vsTwin) << 16) | st.useFs;
+        if (ids != lastTwin.ids || j.layoutMask != lastTwin.layout || st.serial != lastTwin.serial) {
+            lastTwin.ids = ids;
+            lastTwin.layout = j.layoutMask;
+            lastTwin.serial = st.serial;
+            split::DrawStateRef t = st;
+            t.vsId = j.vsTwin;
+            split::NoteVariant(t, j.layoutMask);
+        }
+    }
     if (split::g_on) {
         // (the warm-up list's variant of a draw depends on these only (the blend key on the render state, whose serial
         // this is): most draws repeat the last one's)
@@ -2501,14 +3220,312 @@ static inline void FinishOrSend(const split::DrawJob& j) {
     else split::FinishDraw(c, j, st);
 }
 
-bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t foldedFrom) {
+// ================================================================ GX lines and points as quads (GXV_FIX_LINES)
+// GX rasterises a line as a parallelogram widened by width/6 EFB pixels along the minor axis of its screen-space direction, and a point as a square of
+// size/6 pixels (vgx_fixes.h). vitaGL ignores glLineWidth for custom shaders and the generated vertex shader writes no point size, so with GXV_FIX_LINES=1
+// an immediate line or point primitive is widened into quads here and in the vertex shader (VsKey::lpMode, vgx_shadergen.cpp): every segment becomes four
+// vertices (each end point twice, its own attributes), which carry in three free texture-coordinate slots the other end point's position and the corner's
+// NDC offset (+-width / viewport size), or for a point in one slot the corner. The draw is then an ordinary quad list, drawn without culling (GX does not
+// cull lines). Lines and points of a display list the cache keeps as a static buffer (EmitStaticDraw / EmitStaticRun) are not touched.
+static bool LinesFix() {
+    const bool on = VGX_KNOB(EnvInt("GXV_FIX_LINES", 0) != 0) != 0; // read once; default 0 (off): lines are 1 pixel, points of an undefined size, as before
+    return on;
+}
+struct LpResult {
+    uint16_t vsId = 0;
+    uint32_t mask = 0, count = 0;
+};
+// 0: not expanded (the pending vertices are as they were), 1: expanded (the pending vertices are the quads, `r` says how), 2: the arena refused the vertices
+// (the draw is lost).
+static int ExpandLinePoints(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, LpResult& r) {
+    const uint32_t kind = gxPrim & 0xF8u;
+    const bool pts = kind == 0xB8u;
+    const uint32_t nSeg = pts ? count : (kind == 0xA8u ? count / 2 : (count >= 2 ? count - 1 : 0));
+    if (nSeg == 0 || nSeg * 4u > 0xFFFFu) return 0;
+    const RenderState& rs = cur.rs;
+    if (!(rs.vpW > 0.0f && rs.vpH > 0.0f)) return 0;
+    const uint32_t lps = g.bp[0x22];
+    const uint32_t w6 = fixes::LinePointSize6(lps, pts);
+    if (w6 == 0) return 0;
+    uint32_t used = (layoutMask >> 3) & 0xFFu; // (the tex slots the layout has, then the ones a texgen of the key reads)
+    for (int i = 0; i < cur.vs.numTexGens; ++i) {
+        const VsKey::TexGen& t = cur.vs.tg[i];
+        if (t.type < 2 && t.src >= 5 && t.src <= 12) used |= 1u << (t.src - 5);
+    }
+    const int need = pts ? 1 : 3;
+    const int base = fixes::LinePointFreeSlots(used, need);
+    if (base < 0) return 0;
+    uint32_t code = fixes::LinePointTexCode(lps, pts), texMask = 0;
+    if (code)
+        for (int i = 0; i < cur.vs.numTexGens; ++i)
+            if (fixes::LinePointTexEnabled(g.bp[0x30 + 2 * i], pts)) texMask |= 1u << i;
+    if (!texMask) code = 0;
+    VsKey k = cur.vs;
+    k.setLp(pts ? 2 : 1, static_cast<uint8_t>(base), static_cast<uint8_t>(code), static_cast<uint8_t>(texMask));
+    r.vsId = Lookup(g_vsReg, k, false, GenerateVertexShader);
+    r.mask = layoutMask | (((1u << need) - 1u) << (3 + base));
+    r.count = nSeg * 4u;
+
+    const VtxLayout oL = LayoutOf(layoutMask);
+    const VtxLayout nL = LayoutOf(r.mask);
+    static std::vector<uint8_t> tmp; // (the player thread only)
+    tmp.assign(g_buf.vtx.data() + g_pendingVtxStart, g_buf.vtx.data() + g_pendingVtxStart + static_cast<size_t>(count) * oL.stride);
+    RestoreBvSnapshot();
+    uint8_t* out = BeginVertices(r.mask, r.count);
+    if (!out) {
+        out = BeginVertices(layoutMask, count);
+        if (!out) return 2;
+        std::memcpy(out, tmp.data(), tmp.size());
+        return 0;
+    }
+    const float px = static_cast<float>(w6) / 6.0f;
+    const float ox = px / rs.vpW, oy = px / rs.vpH;
+    const uint32_t nS = oL.stride, nT = nL.stride;
+    const uint8_t* sv = tmp.data();
+    const auto copyVtx = [&](uint8_t* d, const uint8_t* v) {
+        std::memcpy(d, v, 16);
+        if (layoutMask & VL_NRM) std::memcpy(d + nL.offNrm, v + oL.offNrm, 12);
+        if (layoutMask & VL_COL0) std::memcpy(d + nL.offCol0, v + oL.offCol0, 4);
+        if (layoutMask & VL_COL1) std::memcpy(d + nL.offCol1, v + oL.offCol1, 4);
+        for (int t = 0; t < 8; ++t)
+            if (layoutMask & (VL_TEX0 << t)) std::memcpy(d + nL.offTex[t], v + oL.offTex[t], 8);
+        if (layoutMask & VL_TMI) std::memcpy(d + nL.offTmi, v + oL.offTmi, 8);
+    };
+    static const int8_t kPt[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}}; // (left/right, top/bottom: GL y is down the picture, see BuildProjC)
+    for (uint32_t s = 0; s < nSeg; ++s) {
+        const uint32_t a = pts ? s : (kind == 0xA8u ? 2 * s : s), b = pts ? s : a + 1;
+        for (int c = 0; c < 4; ++c) {
+            uint8_t* d = out + static_cast<size_t>(4 * s + c) * nT;
+            const uint32_t own = c < 2 ? a : b, other = c < 2 ? b : a;
+            copyVtx(d, sv + static_cast<size_t>(own) * nS);
+            float lc[2];
+            if (pts) {
+                lc[0] = kPt[c][0] * ox;
+                lc[1] = kPt[c][1] * oy;
+                std::memcpy(d + nL.offTex[base], lc, 8);
+            } else {
+                const float side = (c == 0 || c == 3) ? -1.0f : 1.0f;
+                lc[0] = side * ox;
+                lc[1] = side * oy;
+                std::memcpy(d + nL.offTex[base], sv + static_cast<size_t>(other) * nS, 16);
+                std::memcpy(d + nL.offTex[base + 2], lc, 8);
+            }
+        }
+    }
+    VGX_LOG_N(12, "lines: %s widened to quads: %u segment(s), size %u/6 px, tex offset code %u, mask %03X\n", pts ? "points" : (kind == 0xA8u ? "GX_LINES" : "GX_LINESTRIP"), nSeg, w6, code, r.mask);
+    return 1;
+}
+
+// GXV_TEXBAKE (see TexBakeMask): the matrices of the texgens in `mask` into the texture coordinates of the pending vertices, from
+// the registers as they are now (the block of the draw holds identity rows for them). False, with nothing changed, when the
+// layout lacks an attribute a baked texgen reads (the caller then draws the primitive with the vertex shader's transform).
+uint64_t g_texBakeDraws = 0, g_texBakeNew = 0, g_texBakeIdent = 0, g_texBakeUnsoft = 0; // (census: GXV_TEXBAKE=1 logs it now and then)
+float g_texBakeLast[8][8];                                                              // (the rows the draw before baked, per texgen)
+static bool BakeTexCoords(uint8_t* v0, uint32_t count, const VtxLayout& L, uint32_t mask) {
+    for (uint32_t m = mask; m; m &= m - 1)
+        if (!(L.mask & (VL_TEX0 << (cur.vs.tg[__builtin_ctz(m)].src - 5)))) return false;
+    bool changed = false, ident = true;
+    for (uint32_t m = mask; m; m &= m - 1) {
+        const int i = __builtin_ctz(m);
+        const uint32_t ti = TexGenRow(g, i);
+        const float* r0 = g.xfPos[ti < 64 ? ti : 63];
+        const float* r1 = g.xfPos[ti + 1 < 64 ? ti + 1 : 63];
+        if (!SameWords(g_texBakeLast[i], r0, 4) || !SameWords(g_texBakeLast[i] + 4, r1, 4)) {
+            changed = true;
+            CopyWords(g_texBakeLast[i], r0, 4);
+            CopyWords(g_texBakeLast[i] + 4, r1, 4);
+        }
+        // (the identity rows: the shader's dot product gives s and t as they are; nothing to do)
+        static const float kId[8] = {1, 0, 0, 0, 0, 1, 0, 0};
+        if (SameWords(r0, kId, 4) && SameWords(r1, kId, 4)) continue;
+        ident = false;
+        const float a0 = r0[0], a1 = r0[1], a2 = r0[2], a3 = r0[3], b0 = r1[0], b1 = r1[1], b2 = r1[2], b3 = r1[3];
+        uint8_t* p = v0 + L.offTex[cur.vs.tg[i].src - 5];
+        for (uint32_t k = 0; k < count; ++k, p += L.stride) {
+            float st[2];
+            std::memcpy(st, p, 8);
+            // dot(row, vec4(s, t, 1, 1)) as the vertex shader has it: summed in pairs, (x0 y0 + x2 y2) + (x1 y1 + x3 y3), the order
+            // Mesa's llvmpipe uses (host test: bit for bit with arbitrary matrices; left to right differed in 1 pixel of 12,288 by 1).
+            // The console's GPU may sum otherwise: then a coordinate differs in its last bit at most.
+            const float s = (a0 * st[0] + a2) + (a1 * st[1] + a3);
+            const float t = (b0 * st[0] + b2) + (b1 * st[1] + b3);
+            st[0] = s;
+            st[1] = t;
+            std::memcpy(p, st, 8);
+        }
+    }
+    ++g_texBakeDraws;
+    g_texBakeNew += changed;
+    g_texBakeIdent += ident;
+    if (diag::kEnabled && (g_texBakeDraws & 0x3FFFu) == 0)
+        VGX_LOG_N(400, "texbake: %llu CPU-transformed draws had their texture matrix baked into the coordinates; %llu of them with matrix rows "
+                       "other than the draw before (a block and a draw call of their own without GXV_TEXBAKE), %llu identity; %llu drawn with the "
+                       "vertex shader's transform instead (an attribute missing)\n",
+                  static_cast<unsigned long long>(g_texBakeDraws), static_cast<unsigned long long>(g_texBakeNew),
+                  static_cast<unsigned long long>(g_texBakeIdent), static_cast<unsigned long long>(g_texBakeUnsoft));
+    return true;
+}
+void TexBakeCounters(uint64_t out[4]) { out[0] = g_texBakeDraws; out[1] = g_texBakeNew; out[2] = g_texBakeIdent; out[3] = g_texBakeUnsoft; }
+
+// ================================================================ shadow fill bounds (GXV_SHADOWFILL_BOUNDS), part 1: where alpha is written
+// Every game picture copies the EFB's alpha to a texture (ScreenAlphaCapture, GX_CTF_A8) and draws a screen quad that reads it
+// (MR::fillSilhouetteColor): a whole-EFB copy (the EFB stored, a copy scene, the EFB loaded again) and a full-screen alpha-tested
+// blended pass, whether or not any shadow volume or silhouette put alpha anywhere. Part 2 (ShadowFillPass, at the frame's end)
+// follows which EFB pixels may hold an alpha other than 0. For that it needs, for every draw that writes alpha other than the
+// constant 0, the pixels it can write: worked out here, when the draw is made, from its vertices (or its display list's bounds)
+// through the matrices and the projection of the moment (the very numbers BuildMtxC / BuildProjC put into u_mv, u_pal and u_proj),
+// kept in DrawJob / DrawRec::ab. Only for those draws (shadow volumes, the player's silhouette, a few others), so the cost is small.
+// Conservative: a vertex not safely in front of the eye (clip w not above 8 times its rounding bound), a value out of range, a
+// line or point, a matrix row the shader would read elsewhere: not known (the scissor is all that is known).
+bool ShadowFillOn() {
+    const bool on = VGX_KNOB(EnvInt("GXV_SHADOWFILL_BOUNDS", 1) != 0) != 0;
+    return on;
+}
+namespace {
+// The draw may write an alpha other than the constant 0 (the post pass classifies again from the record, ShadowFillAlphaKind;
+// this test only decides whether bounds are worked out, so it may say yes more often).
+inline bool SfAlphaOther() {
+    const RenderState& rs = cur.rs;
+    if (!rs.alphaWrite) return false;
+    if (rs.blend && rs.dstAlphaZero == 1) return false;
+    if (!rs.blend && rs.dstAlphaZero == 0 && cur.fs.dstAlpha && bits(g.bp[0x42], 0, 8) == 0) return false;
+    return true;
+}
+// Points (model space) through 3 x 4 rows, the projection registers and the current viewport, into an EFB rectangle; each point
+// widened by a bound on the single-precision rounding of the GPU's own sums (1e-5 of the magnitudes summed, about 170 units in
+// the last place) and the whole rectangle by kSfPad pixels (pixel centres, sub-pixel snapping, the viewport's rounding to render
+// pixels and vitaGL's odd-size viewport). In doubles.
+constexpr int kSfPad = 3;
+struct SfProj {
+    double p[4];
+    bool ortho;
+    double vx, vy, vw, vh;
+    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+    bool bad = false;
+    SfProj() {
+        for (int i = 0; i < 4; ++i) p[i] = u2f(g.xfReg[0x20 + i]);
+        ortho = (g.xfReg[0x26] & 1) != 0;
+        vx = cur.rs.vpX; vy = cur.rs.vpY; vw = cur.rs.vpW; vh = cur.rs.vpH;
+    }
+    void Point(const float* m, double x, double y, double z) {
+        if (bad) return;
+        double e[3], a[3];
+        for (int r = 0; r < 3; ++r) {
+            const double m0 = m[r * 4], m1 = m[r * 4 + 1], m2 = m[r * 4 + 2], m3 = m[r * 4 + 3];
+            e[r] = m0 * x + m1 * y + m2 * z + m3;
+            a[r] = std::fabs(m0 * x) + std::fabs(m1 * y) + std::fabs(m2 * z) + std::fabs(m3);
+        }
+        // (BuildProjC: x = p0 ex + p1 ez, y = -(p2 ey + p3 ez), w = -ez; orthographic: x = p0 ex + p1, y = -(p2 ey + p3), w = 1;
+        // the EFB row is vy + (1 - y_gx / w) vh / 2 with y_gx = p2 ey + p3 (ez), as SmallDrawBounds maps it)
+        double cx, cy, cw, ax, ay, aw;
+        if (ortho) {
+            cx = p[0] * e[0] + p[1]; ax = std::fabs(p[0]) * a[0] + std::fabs(p[1]);
+            cy = p[2] * e[1] + p[3]; ay = std::fabs(p[2]) * a[1] + std::fabs(p[3]);
+            cw = 1.0; aw = 0.0;
+        } else {
+            cx = p[0] * e[0] + p[1] * e[2]; ax = std::fabs(p[0]) * a[0] + std::fabs(p[1]) * a[2];
+            cy = p[2] * e[1] + p[3] * e[2]; ay = std::fabs(p[2]) * a[1] + std::fabs(p[3]) * a[2];
+            cw = -e[2]; aw = a[2];
+        }
+        constexpr double kG = 1e-5;
+        const double dx = kG * ax + 1e-7, dy = kG * ay + 1e-7, dw = kG * aw + 1e-7;
+        if (!(cw > 8.0 * dw) || !std::isfinite(cx) || !std::isfinite(cy)) { bad = true; return; } // (behind the eye, or too near it)
+        const double nx = cx / cw, ny = cy / cw;
+        const double ex = (dx + std::fabs(nx) * dw) / (cw - dw), ey = (dy + std::fabs(ny) * dw) / (cw - dw);
+        const double sx = vx + (nx + 1.0) * 0.5 * vw, sy = vy + (1.0 - ny) * 0.5 * vh;
+        const double rx = ex * 0.5 * std::fabs(vw), ry = ey * 0.5 * std::fabs(vh);
+        if (!(std::fabs(sx) + rx < 16384.0 && std::fabs(sy) + ry < 16384.0)) { bad = true; return; }
+        x0 = std::min(x0, sx - rx); x1 = std::max(x1, sx + rx);
+        y0 = std::min(y0, sy - ry); y1 = std::max(y1, sy + ry);
+    }
+    void Box(const float* m, const RowBox& b) {
+        for (int k = 0; k < 8 && !bad; ++k) Point(m, (k & 1) ? b.mx[0] : b.mn[0], (k & 2) ? b.mx[1] : b.mn[1], (k & 4) ? b.mx[2] : b.mn[2]);
+    }
+    // The rectangle, cut to the draw's scissor (an empty one has w or h 0).
+    bool Rect(EfbRect& r) const {
+        if (bad || !(x0 <= x1 && y0 <= y1)) return false;
+        const RenderState& rs = cur.rs;
+        const int bx0 = static_cast<int>(std::floor(x0)) - kSfPad, by0 = static_cast<int>(std::floor(y0)) - kSfPad;
+        const int bx1 = static_cast<int>(std::ceil(x1)) + kSfPad, by1 = static_cast<int>(std::ceil(y1)) + kSfPad;
+        const int ax = std::max<int>(bx0, rs.scX), ay = std::max<int>(by0, rs.scY);
+        const int cx1 = std::min<int>(bx1, rs.scX + rs.scW), cy1 = std::min<int>(by1, rs.scY + rs.scH);
+        r = EfbRect{static_cast<int16_t>(ax), static_cast<int16_t>(ay), static_cast<int16_t>(cx1 > ax ? cx1 - ax : 0), static_cast<int16_t>(cy1 > ay ? cy1 - ay : 0)};
+        return true;
+    }
+};
+// The 3 x 4 position rows the vertex shader uses for matrix row `row` of a per-vertex palette, or null (the shader would clamp it).
+inline const float* SfPalRows(uint32_t row) {
+    const uint8_t pv = cur.vs.perVtxPos;
+    const uint32_t maxRow = pv == 3 ? static_cast<uint32_t>(kPalSmallMaxRow) : (pv == 2 ? static_cast<uint32_t>(kPalShortMaxRow) : 61u);
+    return row <= maxRow ? g.xfPos[row] : nullptr;
+}
+// The current matrix's rows, as BuildMtxC (rows pi..pi+2) or SoftTransform (SoftPosRows) read them, or null where the two differ.
+inline const float* SfMtxRows() {
+    const uint32_t pi = g.matIdxA & 0x3F;
+    return pi <= 61 ? g.xfPos[pi] : nullptr;
+}
+// Bounds of a dynamic draw from its decoded vertices (model space, positions with the matrix row in w).
+void SfDynamicBounds(split::DrawJob& j, const uint8_t* v, uint32_t count, uint32_t stride) {
+    if (!ShadowFillOn() || !SfAlphaOther() || j.prim != PRIM_TRIANGLES) return;
+    SfProj P;
+    const bool perVtx = cur.vs.perVtxPos != 0;
+    if (perVtx && cur.soft) return;
+    const float* m = SfMtxRows();
+    if (!perVtx && !m) return;
+    for (uint32_t i = 0; i < count && !P.bad; ++i, v += stride) {
+        float q[4];
+        std::memcpy(q, v, sizeof q);
+        if (perVtx) {
+            if (!(q[3] >= 0.0f && q[3] < 64.0f)) return;
+            m = SfPalRows(static_cast<uint32_t>(q[3] + 0.5f));
+            if (!m) return;
+        }
+        P.Point(m, q[0], q[1], q[2]);
+    }
+    EfbRect r;
+    if (!P.Rect(r)) return;
+    j.ab = 1;
+    j.abX = r.x; j.abY = r.y; j.abW = r.w; j.abH = r.h;
+}
+// Bounds of a static run from its list's bounds (SetPendingBounds: box 0 holds every vertex, boxes 1.. one matrix row each).
+void SfStaticBounds(split::DrawJob& j, const RowBox* pb, uint32_t pn) {
+    if (!ShadowFillOn() || !pb || !pn || !SfAlphaOther() || j.prim != PRIM_TRIANGLES) return;
+    SfProj P;
+    if (cur.vs.perVtxPos == 0) {
+        const float* m = SfMtxRows();
+        if (!m) return;
+        P.Box(m, pb[0]);
+    } else {
+        if (pn < 2) return;
+        for (uint32_t i = 1; i < pn && !P.bad; ++i) {
+            const float* m = SfPalRows(pb[i].row);
+            if (!m) return;
+            P.Box(m, pb[i]);
+        }
+    }
+    EfbRect r;
+    if (!P.Rect(r)) return;
+    j.ab = 1;
+    j.abX = r.x; j.abY = r.y; j.abW = r.w; j.abH = r.h;
+}
+} // namespace
+
+bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t foldedFrom, const uint8_t* copyFrom) {
     VtxLayout L = LayoutOf(layoutMask);
     g_buf.vtx.resize(g_pendingVtxStart + static_cast<size_t>(count) * L.stride);
     auto drop = [&] { g_buf.vtx.resize(g_pendingVtxStart); };
     if (count == 0) return true;
+    // (GXV_SPLIT_COPY, from Producdevity's fork: the vertices are a copy of `copyFrom` the finishing thread makes, split::Copy below; the
+    // player makes it itself, here, before anything of its own reads them: place())
+    const uint32_t copyBytes = count * L.stride;
+    auto place = [&] {
+        if (copyFrom) std::memcpy(g_buf.vtx.data() + g_pendingVtxStart, copyFrom, copyBytes);
+        copyFrom = nullptr;
+    };
+    if (!split::g_on) place();
 
-    const uint8_t prim = PrimKind(gxPrim);
-    const uint32_t idxCount = PrimIndexCount(gxPrim, count);
+    uint8_t prim = PrimKind(gxPrim);
+    uint32_t idxCount = PrimIndexCount(gxPrim, count);
     if (idxCount == 0) { drop(); return true; }
 
     uint32_t vcdMtxMask = 0;
@@ -2518,7 +3535,9 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
         for (int i = 0; i <= 8; ++i)
             if (g.vcd[i]) vcdMtxMask |= 1u << i;
     }
-    ResolveState(vcdMtxMask, count);
+    // (GXV_FIX_LINES: a line or point is widened by the vertex shader, which transforms its vertices: not on the CPU)
+    const bool lpWant = prim != PRIM_TRIANGLES && LinesFix();
+    { workload::FeScope feR(workload::FeResolve); ResolveState(vcdMtxMask, lpWant ? 0xFFFFFFFFu : count); }
     if (foldedFrom != 0xFFFFFFFFu && !cur.fold) {
         // (laid out for folding, and it does not fold: undo the reservation, the caller decodes again)
         RestoreBvSnapshot();
@@ -2526,7 +3545,59 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
         return false;
     }
     if (cur.cullAll && prim == PRIM_TRIANGLES) { drop(); return true; }
-    if (ChaOn()) CharaNote(g_buf.vtx.data() + g_pendingVtxStart, count, L.stride, L.mask); // (GXV_CHARAA: model-space vertices still)
+    split::DrawJob sfb; // (GXV_SHADOWFILL_BOUNDS: the pixels of a draw that writes alpha, from the model-space vertices)
+    if (!lpWant && prim == PRIM_TRIANGLES) {
+        if (copyFrom && ShadowFillOn() && SfAlphaOther()) place(); // (SfDynamicBounds reads them)
+        sfb.prim = prim;
+        SfDynamicBounds(sfb, g_buf.vtx.data() + g_pendingVtxStart, count, L.stride);
+    }
+    if (ChaOn()) {
+        if (copyFrom && CharaNoteReads()) place();
+        CharaNote(copyFrom ? nullptr : g_buf.vtx.data() + g_pendingVtxStart, count, L.stride, L.mask); // (GXV_CHARAA: model-space vertices still)
+    }
+    RenderState lpRs;
+    split::DrawStateRef lpState{};
+    bool lpDraw = false;
+    if (lpWant) {
+        place(); // (GXV_SPLIT_COPY: the lines' vertices are read and widened here)
+        LpResult lp;
+        const int e = ExpandLinePoints(gxPrim, layoutMask, count, lp);
+        if (e == 2) return true; // (the arena refused the vertices; nothing is pending)
+        if (e == 1) {
+            // (quads: GX does not cull lines, so no face is culled)
+            lpRs = cur.rs;
+            lpRs.cull = CULL_NONE;
+            lpState = split::DrawStateRef{lp.vsId, cur.useFs, cur.texMask, cur.stateSerial, &lpRs, cur.tex};
+            lpDraw = true;
+            layoutMask = lp.mask;
+            count = lp.count;
+            L = LayoutOf(layoutMask);
+            gxPrim = 0x80;
+            prim = PRIM_TRIANGLES;
+            idxCount = PrimIndexCount(gxPrim, count);
+        }
+    }
+    // GXV_TEXBAKE: the texture matrices of a CPU-transformed draw into its coordinates (its block holds identity rows for them)
+    if (cur.soft && TexBakeOn()) {
+        static uint16_t bakeVs = 0xFFFF;
+        static uint8_t bakeMask = 0;
+        if (bakeVs != cur.vsId) { bakeMask = TexBakeMask(cur.vs); bakeVs = cur.vsId; }
+        if (bakeMask) place(); // (GXV_SPLIT_COPY: BakeTexCoords rewrites them in place)
+        if (bakeMask && !BakeTexCoords(g_buf.vtx.data() + g_pendingVtxStart, count, L, bakeMask)) {
+            // (a texgen reads an attribute the vertices do not have, so the coordinate cannot carry the matrix: this primitive is
+            // drawn as a large one is, transformed by the vertex shader with the real matrices; not folded either, since folding
+            // needs the CPU transform. The next draw's resolution sees soft != cur.soft and builds its blocks again.)
+            ++g_texBakeUnsoft;
+            VGX_LOG_N(8, "texbake: vertex shader %u reads a texture coordinate the layout %03X lacks: drawn without the CPU transform\n", cur.vsId, layoutMask);
+            cur.soft = false;
+            cur.mtxRowsUsed = BlkMtx(cur.vs, false);
+            if (cur.fold) {
+                cur.fold = false;
+                cur.useFs = RejectZeroFs(cur.fsId, cur.rs);
+                BlkTev(cur.fs, cur.texW, cur.texH, false);
+            }
+        }
+    }
     // (front-end split: the finishing thread transforms the vertices, once they are where they stay, below)
     const bool split = split::g_on;
     if (cur.soft && !split) SoftTransform(g_buf.vtx.data() + g_pendingVtxStart, count, L);
@@ -2535,6 +3606,7 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     EfbRect ext{cur.rs.scX, cur.rs.scY, cur.rs.scW, cur.rs.scH};
     uint8_t cover = 0;
     if (cur.soft && prim == PRIM_TRIANGLES && count <= 16 && (!cur.rs.depthTest || cur.rs.depthFunc == CMP_ALWAYS)) {
+        place(); // (GXV_SPLIT_COPY: the bounds are worked out from them here)
         EfbRect box;
         bool rect = false;
         const uint8_t* bv = g_buf.vtx.data() + g_pendingVtxStart;
@@ -2551,11 +3623,12 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
         }
     }
     if (cur.fold) {
+        place(); // (GXV_SPLIT_COPY: FoldRegs reads the colours)
         const uint32_t m = FoldRegs(layoutMask, count);
         if (m == 0xFFFFFFFFu) {
             // (cannot happen with the callers there are: draw it unfolded, with the registers in the block)
             cur.fold = false;
-            cur.useFs = cur.fsId;
+            cur.useFs = RejectZeroFs(cur.fsId, cur.rs);
             BlkTev(cur.fs, cur.texW, cur.texH, false);
         } else if (m != layoutMask) {
             layoutMask = m;
@@ -2565,6 +3638,7 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     g_bvSnap.pendingStart = ~static_cast<size_t>(0);
     // (a record holds at most 65,535 vertices: such a primitive cannot be merged either)
     if (count > 0xFFFF) { drop(); return true; }
+    if (copyFrom) split::Copy(g_pendingVtxStart, copyFrom, copyBytes); // (GXV_SPLIT_COPY: before the transform and the job that read them)
     if (cur.soft && split) split::Xform(g_pendingVtxStart, count, layoutMask);
 
     split::DrawJob j;
@@ -2581,7 +3655,15 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     j.vtxStart = static_cast<uint32_t>(g_pendingVtxStart);
     j.stride = L.stride;
     j.exX = ext.x; j.exY = ext.y; j.exW = ext.w; j.exH = ext.h;
-    FinishOrSend(j);
+    if (sfb.ab && !lpDraw) { j.ab = 1; j.abX = sfb.abX; j.abY = sfb.abY; j.abW = sfb.abW; j.abH = sfb.abH; }
+    if (prim == PRIM_TRIANGLES && !lpDraw) {
+        // (a CPU-transformed draw too: its block is the identity, which is a palette slot like any other matrix)
+        j.vsTwin = RigidTwin(); // (GXV_RIGIDMERGE; 0xFFFF: off or not a rigid key)
+        const uintptr_t vp = reinterpret_cast<uintptr_t>(g_buf.vtx.data() + g_pendingVtxStart);
+        j.vtxPtrLo = static_cast<uint32_t>(vp);
+        j.vtxPtrHi = static_cast<uint32_t>(static_cast<uint64_t>(vp) >> 32);
+    }
+    { workload::FeScope feS(workload::FeSend); FinishOrSend(j, lpDraw ? &lpState : nullptr); }
     ++g_frameDraws;
     {
         stats::Frame& fr = stats::Cur();
@@ -2595,19 +3677,150 @@ bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t fold
     return true;
 }
 
+// ================================================================ static runs outside the view (GXV_STATICCULL)
+// The map's models (the Comet Observatory's base, the planets, the domes) are each one joint and a shape per material
+// (AstroBaseA: 20 shapes, 20 materials, one joint; AstroBaseCenterA: 5, 5, 1): every shape is a cached display list drawn
+// from its static buffer, about 265 of them a picture, and each one costs the player its resolution (keys, render state,
+// textures, the blocks), the job for the finishing thread, a record and a GL draw, whether or not the shape is in view.
+// The game culls whole actors by a bounding sphere only, and a base or a planet is always inside it. Here a static run
+// whose vertices all lie outside one plane of the clip volume (left, right, bottom, top, or behind the eye) is not drawn
+// at all: no resolution, no job, no record. A triangle whose three vertices are outside the same plane of the clip volume
+// is clipped away whole, so the picture is the same, bit for bit (GL clips every primitive to the volume).
+//   * The bounds are the list's own: the model-space box of its decoded vertices (RowBoxesOf, worked out once per list when
+//     it is built, from the vertices its static buffer holds), through the position rows of the current matrix index and
+//     the projection registers (XF 0x20..0x26): the very numbers BuildMtxC / BuildProjC put into u_mv and u_proj, which the
+//     vertex shader multiplies the same vertices by (gl_Position = u_proj * (u_mv * (x, y, z, 1))). The transform is
+//     affine, so every vertex is inside the convex hull of the box's eight corners, in clip space as well.
+//   * Only triangles, only without per-vertex matrices (no PNMTXIDX: one matrix for every vertex), only static runs (never
+//     CPU-transformed). A corner counts as outside a plane only by a margin of 1e-4 of the magnitudes summed to compute it
+//     (some 800 single-precision rounding steps): the GPU's own rounding moves a vertex by far less. A non-finite number
+//     anywhere fails every test (nothing is culled).
+//   * The four side planes are moved out by 8 EFB pixels and used only where the scissor lies within 4 pixels of the viewport
+//     (the game's 3D passes): so the result holds on a GPU that clips to the scissor only, not to the viewport (GXM's region
+//     clip, vitaGL), and with vitaGL's viewport one pixel narrower at odd sizes. "Behind the eye" needs neither (the near plane).
+//   * The first use of a list (after it is built) is always drawn, so that the programs a stage needs are linked when it is
+//     entered, as before, and not when a shape first comes into view.
+//   * The state commands before the draw are applied as before; only the draw's resolution is left out, and ResolveState
+//     is lazy (dirty flags and memos): the next draw resolves what this one would have left, with the same result. What
+//     the resolution would have consumed (the pending palette class, the pending bounds) is consumed here.
+//   GXV_STATICCULL=1 (default) on; 0 off, exactly as before (the lists' bounds are then not even computed, unless
+//   GXV_CHARAA). Read once. The counter: the "perf: static cull" line (StaticCullCounters).
+bool StaticCullEnabled() {
+    const bool on = VGX_KNOB(EnvInt("GXV_STATICCULL", 1) != 0) != 0;
+    return on;
+}
+namespace {
+uint64_t g_scRuns = 0, g_scCulled = 0, g_scCulledVerts = 0; // static runs tested, culled, and their vertices (the player's thread)
+// Whether every point of the model-space box b, through the current position matrix and projection, is outside one plane
+// of the clip volume (see above).
+bool StaticBoxOutside(const RowBox& b) {
+    const uint32_t pi = g.matIdxA & 0x3F;
+    const float* m[3];
+    for (uint32_t r = 0; r < 3; ++r) m[r] = g.xfPos[pi + r < 64 ? pi + r : 63]; // (BuildMtxC's rows)
+    float p[6];
+    for (int i = 0; i < 6; ++i) p[i] = u2f(g.xfReg[0x20 + i]);
+    const bool ortho = (g.xfReg[0x26] & 1) != 0;
+    {
+        // The box's centre first: inside the clip volume, the box is not outside it (most drawn runs stop here). An early
+        // "not outside" is always safe; the eight corners below decide the rest.
+        const float x = 0.5f * (b.mn[0] + b.mx[0]), y = 0.5f * (b.mn[1] + b.mx[1]), z = 0.5f * (b.mn[2] + b.mx[2]);
+        const float ex = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
+        const float ey = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
+        const float ez = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
+        const float cx = ortho ? p[0] * ex + p[1] : p[0] * ex + p[1] * ez, cy = ortho ? p[2] * ey + p[3] : p[2] * ey + p[3] * ez;
+        const float cw = ortho ? 1.0f : -ez;
+        if (std::fabs(cx) <= cw && std::fabs(cy) <= cw) return false;
+    }
+    // The eye-space error bound: the magnitudes a row sums, for the largest coordinates of the box.
+    const float ax = std::max(std::fabs(b.mn[0]), std::fabs(b.mx[0])), ay = std::max(std::fabs(b.mn[1]), std::fabs(b.mx[1])),
+                az = std::max(std::fabs(b.mn[2]), std::fabs(b.mx[2]));
+    float erow = 0.0f;
+    for (int r = 0; r < 3; ++r)
+        erow = std::max(erow, std::fabs(m[r][0]) * ax + std::fabs(m[r][1]) * ay + std::fabs(m[r][2]) * az + std::fabs(m[r][3]));
+    const float eEye = 1e-4f * erow + 1e-6f;
+    const float pSum = std::fabs(p[0]) + std::fabs(p[1]) + std::fabs(p[2]) + std::fabs(p[3]) + 1.0f;
+    float cx[8], cy[8], cw[8], mag = 0.0f;
+    for (int k = 0; k < 8; ++k) {
+        const float x = (k & 1) ? b.mx[0] : b.mn[0], y = (k & 2) ? b.mx[1] : b.mn[1], z = (k & 4) ? b.mx[2] : b.mn[2];
+        const float ex = m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3];
+        const float ey = m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3];
+        const float ez = m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3];
+        // (BuildProjC: x = p0 ex + p1 ez, y = -(p2 ey + p3 ez), w = -ez; orthographic: x = p0 ex + p1, y = -(p2 ey + p3), w = 1.
+        // The sign of y does not matter: both of its planes are tested.)
+        float a;
+        if (ortho) {
+            cx[k] = p[0] * ex + p[1]; cy[k] = p[2] * ey + p[3]; cw[k] = 1.0f;
+            a = std::fabs(p[0] * ex) + std::fabs(p[1]) + std::fabs(p[2] * ey) + std::fabs(p[3]) + 1.0f;
+        } else {
+            cx[k] = p[0] * ex + p[1] * ez; cy[k] = p[2] * ey + p[3] * ez; cw[k] = -ez;
+            a = std::fabs(p[0] * ex) + std::fabs(p[1] * ez) + std::fabs(p[2] * ey) + std::fabs(p[3] * ez) + std::fabs(ez);
+        }
+        mag = std::max(mag, a);
+    }
+    const float margin = 2.0f * (eEye * pSum + 1e-4f * mag) + 1e-6f;
+    if (!(margin < 1e30f)) return false; // (infinite or NaN: nothing is known)
+    // The side planes, only where the scissor (within the EFB) lies inside the viewport, give or take kGuard EFB pixels, and then
+    // with the planes moved out by twice that: what is culled is more than kGuard pixels beyond the scissor. A GPU that clipped
+    // only against the near plane and the scissor (the GXM's region clip; vitaGL does not clip to the viewport) would draw none
+    // of it either, nor would the 1-pixel narrower viewport vitaGL makes of an odd width. (The game's 3D passes: the viewport is
+    // the scissor.) Behind the eye is behind the near plane, which every GPU clips.
+    constexpr float kGuard = 4.0f;
+    const int xoff = static_cast<int>(bits(g.bp[0x59], 0, 10)) * 2, yoff = static_cast<int>(bits(g.bp[0x59], 10, 10)) * 2;
+    const float sx0 = std::max(0.0f, static_cast<float>(static_cast<int>(bits(g.bp[0x20], 12, 11)) - xoff));
+    const float sy0 = std::max(0.0f, static_cast<float>(static_cast<int>(bits(g.bp[0x20], 0, 11)) - yoff));
+    const float sx1 = std::min(static_cast<float>(g.efbW), static_cast<float>(static_cast<int>(bits(g.bp[0x21], 12, 11)) - xoff + 1));
+    const float sy1 = std::min(static_cast<float>(g.efbH), static_cast<float>(static_cast<int>(bits(g.bp[0x21], 0, 11)) - yoff + 1));
+    const float vsx = u2f(g.xfReg[0x1A]), vsy = u2f(g.xfReg[0x1B]), vox = u2f(g.xfReg[0x1D]), voy = u2f(g.xfReg[0x1E]);
+    const float vpW = 2.0f * vsx, vpH = -2.0f * vsy, vpX = vox - vsx - static_cast<float>(xoff), vpY = voy + vsy - static_cast<float>(yoff);
+    const bool sides = vpW >= 16.0f && vpH >= 16.0f && vpW < 1e5f && vpH < 1e5f && sx0 >= vpX - kGuard && sx1 <= vpX + vpW + kGuard &&
+                       sy0 >= vpY - kGuard && sy1 <= vpY + vpH + kGuard;
+    const float kx = 1.0f + 4.0f * kGuard / (sides ? vpW : 1.0f), ky = 1.0f + 4.0f * kGuard / (sides ? vpH : 1.0f); // (2 kGuard pixels in NDC)
+    // ("outside by more than the margin" at all eight corners; a NaN corner fails the test)
+    bool right = sides, left = sides, top = sides, bottom = sides, behind = !ortho;
+    for (int k = 0; k < 8; ++k) {
+        right = right && cx[k] - kx * cw[k] > margin;
+        left = left && -cx[k] - kx * cw[k] > margin;
+        top = top && cy[k] - ky * cw[k] > margin;
+        bottom = bottom && -cy[k] - ky * cw[k] > margin;
+        behind = behind && -cw[k] > margin;
+    }
+    return right || left || top || bottom || behind;
+}
+// EmitStaticRun's first test: true when the run is not drawn.
+inline bool StaticRunCulled(uint8_t prim, uint32_t vtxCount) {
+    if (!StaticCullEnabled() || prim != PRIM_TRIANGLES || !g_cha.pend || !g_cha.pendN || g.vcd[0]) return false;
+    // (the first use of a list after it was built is drawn whatever its place: its shaders are linked and its variant goes on the
+    // warm-up list when the list first appears, at the area's entry as before, not when it first comes into view. The boxes are
+    // the entry's own, Entry::rowBoxes: the flag is cleared when the list is built again.)
+    RowBox& all = const_cast<RowBox&>(g_cha.pend[0]);
+    if (!all.drawn) { all.drawn = 1; return false; }
+    ++g_scRuns;
+    if (!StaticBoxOutside(g_cha.pend[0])) return false;
+    ++g_scCulled;
+    g_scCulledVerts += vtxCount;
+    // (what the draw's ResolveState and CharaNote would have consumed)
+    g_pendingPosMtxMax = 0xFF;
+    g_cha.pend = nullptr;
+    g_cha.pendN = 0;
+    return true;
+}
+} // namespace
+void StaticCullCounters(uint64_t out[3]) { out[0] = g_scRuns; out[1] = g_scCulled; out[2] = g_scCulledVerts; }
+
 void EmitStaticDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t bufId, uint32_t vtxByteOffset, uint32_t idxOffset,
                     uint32_t vtxFirst) {
+    workload::FeScope feStatic(workload::FeStatic);
     const uint8_t prim = PrimKind(gxPrim);
     const uint32_t idxCount = PrimIndexCount(gxPrim, count);
     if (count == 0 || idxCount == 0 || count > 0xFFFF) return;
-    uint32_t vcdMtxMask = 0;
-    for (int i = 0; i <= 8; ++i)
-        if (g.vcd[i]) vcdMtxMask |= 1u << i;
+    const uint32_t vcdMtxMask = VcdMtxMask();
     // Larger than the CPU-transform limit by construction (see vgx_dlcache.cpp), so never "soft".
-    ResolveState(vcdMtxMask, 0xFFFFFFFFu);
+    { workload::FeScope feR(workload::FeResolve); ResolveState(vcdMtxMask, 0xFFFFFFFFu); }
     if (cur.cullAll && prim == PRIM_TRIANGLES) return;
-    if (ChaOn()) CharaNote(nullptr, 0, 0, 0); // (GXV_CHARAA: the list's bounds, SetPendingBounds)
     split::DrawJob j;
+    j.prim = prim;
+    SfStaticBounds(j, g_cha.pend, g_cha.pendN); // (GXV_SHADOWFILL_BOUNDS: before CharaNote takes the list's bounds)
+    if (ChaOn()) CharaNote(nullptr, 0, 0, 0); // (GXV_CHARAA: the list's bounds, SetPendingBounds)
     j.kind = split::JOB_STATIC;
     j.gxPrim = gxPrim;
     j.prim = prim;
@@ -2618,7 +3831,8 @@ void EmitStaticDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_
     j.vtxOffset = vtxByteOffset;
     j.vtxFirst = vtxFirst;
     j.idxOffset = idxOffset;
-    FinishOrSend(j);
+    if (g_pendingCopyable && prim == PRIM_TRIANGLES) { j.copyable = 1; j.vsTwin = RigidTwin(); } // (GXV_RIGIDMERGE_DLLEARN)
+    { workload::FeScope feS(workload::FeSend); FinishOrSend(j); }
     ++g_frameDraws;
     {
         stats::Frame& fr = stats::Cur();
@@ -2633,14 +3847,16 @@ void EmitStaticDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_
 
 void EmitStaticRun(uint8_t prim, uint32_t layoutMask, uint32_t vtxCount, uint32_t idxCount, uint32_t prims, uint32_t bufId, uint32_t vtxByteOffset,
                    uint32_t idxOffset, uint32_t vtxFirst) {
+    workload::FeScope feStatic(workload::FeStatic);
     if (vtxCount == 0 || idxCount == 0 || vtxCount > 0xFFFF) return;
-    uint32_t vcdMtxMask = 0;
-    for (int i = 0; i <= 8; ++i)
-        if (g.vcd[i]) vcdMtxMask |= 1u << i;
-    ResolveState(vcdMtxMask, 0xFFFFFFFFu); // (static geometry is transformed by the vertex shader)
+    if (StaticRunCulled(prim, vtxCount)) return; // (GXV_STATICCULL: outside the clip volume, not drawn)
+    const uint32_t vcdMtxMask = VcdMtxMask();
+    { workload::FeScope feR(workload::FeResolve); ResolveState(vcdMtxMask, 0xFFFFFFFFu); } // (static geometry is transformed by the vertex shader)
     if (cur.cullAll && prim == PRIM_TRIANGLES) return;
-    if (ChaOn()) CharaNote(nullptr, 0, 0, 0); // (GXV_CHARAA: the list's bounds, SetPendingBounds)
     split::DrawJob j;
+    j.prim = prim;
+    SfStaticBounds(j, g_cha.pend, g_cha.pendN); // (GXV_SHADOWFILL_BOUNDS: before CharaNote takes the list's bounds)
+    if (ChaOn()) CharaNote(nullptr, 0, 0, 0); // (GXV_CHARAA: the list's bounds, SetPendingBounds)
     j.kind = split::JOB_STATIC;
     j.prim = prim;
     j.layoutMask = layoutMask;
@@ -2650,7 +3866,8 @@ void EmitStaticRun(uint8_t prim, uint32_t layoutMask, uint32_t vtxCount, uint32_
     j.vtxOffset = vtxByteOffset;
     j.vtxFirst = vtxFirst;
     j.idxOffset = idxOffset;
-    FinishOrSend(j);
+    if (g_pendingCopyable && prim == PRIM_TRIANGLES) { j.copyable = 1; j.vsTwin = RigidTwin(); } // (GXV_RIGIDMERGE_DLLEARN)
+    { workload::FeScope feS(workload::FeSend); FinishOrSend(j); }
     g_frameDraws += prims;
     {
         stats::Frame& fr = stats::Cur();
@@ -2751,6 +3968,7 @@ static uint64_t HashBuf(const CmdBuf& b, uint64_t h, bool content) {
                              c.clear.z};
         mix(v, sizeof v);
         if (c.charaN) mix(c.chara, sizeof(EfbRect) * c.charaN); // (GXV_CHARAA; frames without boxes hash as before)
+        if (c.edge) { const uint32_t e = 0xED6Eu + c.hudN; mix(&e, 4); if (c.hudN) mix(c.hud, sizeof(EfbRect) * c.hudN); } // (GXV_EDGE_AA; likewise)
     }
     for (const SetTargetCmd& t : b.targets) { const uint32_t v[2] = {t.efbW, t.efbH}; mix(v, sizeof v); }
     if (!content) {
@@ -2864,7 +4082,7 @@ void QueueCopyDisp(bool clear) {
 // skipped. (A copy that is still unused at the end of the frame is kept: the
 // next frame may sample it.) GXV_DEADCOPY=0 turns this off.
 static void MarkDeadCopies() {
-    static const bool on = EnvInt("GXV_DEADCOPY", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_DEADCOPY", 1) != 0) != 0;
     if (!on || g_buf.copyTex.size() < 2) return;
     struct Live { uint32_t texId, copyIndex; };
     Live live[64];
@@ -2904,6 +4122,97 @@ static void MarkDeadCopies() {
                 g_buf.copyTex[live[i].copyIndex].skip = true;
                 ++stats::Cur().deadCopies;
                 drop(i);
+            }
+        }
+    }
+}
+
+// ---- GXV_EFBSWAP2: full-size copies whose samplers do not see the conversion
+// GXV_EFBSWAP (the back end) makes a whole-EFB copy without a copy scene by handing the EFB's colour buffer to the texture, but
+// only for a copy with no conversion at all. Every picture of a game scene has two whole-EFB copies with one:
+//  - the silhouette / shadow-volume alpha capture (SceneFunction::executeDrawSilhouetteAndFillShadow -> MR::fillSilhouetteColor,
+//    ScreenAlphaCapture: GX_CTF_A8, every channel = the EFB's alpha), read at once by one screen quad whose TEV uses TEXA only;
+//  - the indirect capture (CaptureScreenDirector "Indirect", every picture while no other timing is asked for: GX_TF_RGB565,
+//    colour as it is, alpha 1), read by the indirect models and particles (IndDummy) of the same picture, usually as TEXC only,
+//    or by nothing at all.
+// Each costs two scenes on the console (the EFB stored, a copy scene, the EFB loaded again). When every draw that samples the copy
+// in this frame, before the texture is written again, reads only channels whose conversion row is that channel unchanged (and
+// adds nothing), the EFB's buffer gives them exactly what the converted copy would: the copy is marked swapOk and the back end
+// swaps it (one scene less, and no copy target). Channels are the shader's (ShaderSource::texChan, FsTexChannels); an atlas copy
+// out of the texture counts as reading all four. What a LATER frame reads is not known here: the back end converts the buffer
+// it handed over into an ordinary copy at the start of the first frame with a draw that needs another channel (RawConvert).
+//   GXV_EFBSWAP2=0 off; 1 (default) on. Read once. Needs GXV_EFBSWAP=1.
+bool EfbSwap2Enabled() {
+    const bool on = VGX_KNOB(EnvInt("GXV_EFBSWAP2", 0)  /* off by default: r32 froze at the AstroGalaxy load with it on (console, 4 Nov 15:30) */ != 0 && EnvInt("GXV_EFBSWAP", 1) != 0) != 0;
+    return on;
+}
+static void MarkSwapCopies() {
+    if (!EfbSwap2Enabled() || g_buf.copyTex.empty()) return;
+    const size_t n = g_buf.cmds.size();
+    for (size_t i = 0; i < n; ++i) {
+        if (g_buf.cmds[i].type != CMD_COPY_TEX) continue;
+        CopyTexCmd& c = g_buf.copyTex[g_buf.cmds[i].arg];
+        c.swapOk = false;
+        c.swapPredictedNo = false;
+        // (the shape the back end's EfbSwap takes: the whole EFB 1:1 into a texture of its own, from the EFB's colour)
+        if (c.skip || c.fromPass || c.passMore || c.depth || c.fill || c.srcTex || c.dstTexW || c.texId == 0) continue;
+        if (c.src.x != 0 || c.src.y != 0 || c.dstW != c.src.w || c.dstH != c.src.h || c.src.w < 64 || c.src.h < 64) continue;
+        uint32_t valid = 0; // channels the conversion leaves unchanged
+        for (int r = 0; r < 4; ++r) {
+            bool same = c.add[r] == 0.0f;
+            for (int col = 0; col < 4 && same; ++col) same = c.mat[r][col] == (r == col ? 1.0f : 0.0f);
+            if (same) valid |= 1u << r;
+        }
+        if (valid == 0xFu) continue; // (no conversion: GXV_EFBSWAP's own case)
+        uint32_t need = 0;
+        for (size_t j = i + 1; j < n && (need & ~valid) == 0; ++j) {
+            const Cmd& x = g_buf.cmds[j];
+            if (x.type == CMD_DRAW) {
+                const DrawRec& d = g_buf.draws[x.arg];
+                for (int m = 0; m < 8; ++m) {
+                    if (!(d.texMask & (1u << m)) || d.tex[m].texId != c.texId) continue;
+                    const uint32_t chan = d.fsId < g_fsReg.sources.size() && g_fsReg.sources[d.fsId] ? g_fsReg.sources[d.fsId]->texChan : 0xFFFFFFFFu;
+                    need |= (chan >> (4 * m)) & 0xFu;
+                }
+            } else if (x.type == CMD_COPY_TEX) {
+                const CopyTexCmd& y = g_buf.copyTex[x.arg];
+                if (y.srcTex == c.texId) need |= 0xFu;
+                else if (y.texId == c.texId) break; // (written again: what follows does not see this copy)
+            } else if (x.type == CMD_TEX_FREE && x.arg == c.texId) {
+                break;
+            } else if (x.type == CMD_TEX_UPLOAD && g_buf.uploads[x.arg].texId == c.texId) {
+                break;
+            }
+        }
+        c.swapOk = (need & ~valid) == 0;
+        // GXV_EFBSWAP2_PREDICT=1 (default; only with GXV_EFBSWAP2): the readers of the texture's PREVIOUS picture earlier in this
+        // frame (from the frame's start, or the last write into it, up to this copy) are what the next frame will most likely do
+        // with this copy's picture. If they read a channel the conversion changes, a swap now would be undone next frame by
+        // RawConvert (a copy scene at the frame's start, plus the renderer CPU of a target and a buffer change): the ordinary copy
+        // is made instead. A guess about speed only; either way the picture is exact (RawPrescan still converts any reader).
+        static const bool predict = EnvInt("GXV_EFBSWAP2_PREDICT", 1) != 0;
+        if (c.swapOk && predict) {
+            uint32_t before = 0;
+            for (size_t j = i; j-- > 0 && (before & ~valid) == 0;) {
+                const Cmd& x = g_buf.cmds[j];
+                if (x.type == CMD_DRAW) {
+                    const DrawRec& d = g_buf.draws[x.arg];
+                    for (int m = 0; m < 8; ++m) {
+                        if (!(d.texMask & (1u << m)) || d.tex[m].texId != c.texId) continue;
+                        const uint32_t chan = d.fsId < g_fsReg.sources.size() && g_fsReg.sources[d.fsId] ? g_fsReg.sources[d.fsId]->texChan : 0xFFFFFFFFu;
+                        before |= (chan >> (4 * m)) & 0xFu;
+                    }
+                } else if (x.type == CMD_COPY_TEX) {
+                    const CopyTexCmd& y = g_buf.copyTex[x.arg];
+                    if (y.srcTex == c.texId) before |= 0xFu;
+                    else if (y.texId == c.texId && !y.skip) break; // (written earlier in this frame: what comes before it read older pictures)
+                } else if ((x.type == CMD_TEX_FREE && x.arg == c.texId) || (x.type == CMD_TEX_UPLOAD && g_buf.uploads[x.arg].texId == c.texId)) {
+                    break;
+                }
+            }
+            if (before & ~valid) {
+                c.swapOk = false;
+                c.swapPredictedNo = true;
             }
         }
     }
@@ -3017,6 +4326,10 @@ struct ConstTex {
     uint16_t w, h;
 };
 std::unordered_map<uint32_t, ConstTex> g_constTex;
+// GXV_SHADOWFILL_BOUNDS (ShadowFillPass, before this pass): per copy of the frame, 1 when the copy reads only the EFB's alpha and that
+// alpha is known to be 0 over its whole source (what pass isolation's history cannot know: draws that write the constant 0).
+std::vector<uint8_t> g_sfZeroCopy;
+void SfNoteFill(bool kept);
 
 inline bool Inside(const EfbRect& a, const EfbRect& b) { // a inside b
     return a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
@@ -3033,7 +4346,7 @@ inline uint8_t ClearMask(const ClearSpec& c) {
 }
 // Planes a draw changes, and planes whose previous contents its result depends on.
 inline uint8_t DrawWrites(const RenderState& rs) {
-    return static_cast<uint8_t>((rs.colorWrite ? CH_C : 0) | ((rs.alphaWrite || rs.dstAlphaPass) ? CH_A : 0) | ((rs.depthTest && rs.depthWrite) ? CH_Z : 0));
+    return static_cast<uint8_t>((rs.colorWrite ? CH_C : 0) | ((rs.alphaWrite || rs.dstAlphaZero) ? CH_A : 0) | ((rs.depthTest && rs.depthWrite) ? CH_Z : 0));
 }
 inline uint8_t DrawReads(const RenderState& rs) {
     uint8_t m = 0;
@@ -3043,7 +4356,7 @@ inline uint8_t DrawReads(const RenderState& rs) {
         // alpha plane also when it is one of the blend factors.
         const bool dstAlphaFactor = rs.blendSrc == BF_DST_ALPHA || rs.blendSrc == BF_INV_DST_ALPHA || rs.blendDst == BF_DST_ALPHA || rs.blendDst == BF_INV_DST_ALPHA;
         if (rs.colorWrite) m |= CH_C;
-        if (rs.alphaWrite || rs.dstAlphaPass || dstAlphaFactor) m |= CH_A;
+        if (rs.alphaWrite || rs.dstAlphaZero || dstAlphaFactor) m |= CH_A;
     }
     return m;
 }
@@ -3121,7 +4434,7 @@ bool HistKnown(uint8_t planes, const EfbRect& r, float v[5]) {
 // one that is executed is a scene of its own on the EFB's render target.)
 //   GXV_NOOPCLEAR=0   execute them all the same
 bool ClearIsNoOp(const EfbRect& r, const ClearSpec& c) {
-    static const bool on = EnvInt("GXV_NOOPCLEAR", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_NOOPCLEAR", 1) != 0) != 0;
     if (!on || !c.enable) return false;
     const uint8_t m = ClearMask(c);
     float v[5];
@@ -3167,7 +4480,7 @@ bool LeftoversUnseen(size_t from, const EfbRect& r, uint8_t written) {
 }
 
 void IsolatePasses() {
-    static const bool on = EnvInt("GXV_PASSISO", 1) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_PASSISO", 1) != 0) != 0;
     if (!on) return;
     stats::Frame& fr = stats::Cur();
     std::vector<Cmd>& cmds = g_buf.cmds;
@@ -3295,7 +4608,14 @@ void IsolatePasses() {
                 }
             } else {
                 runToEfb();
-                if (!t.skip && !t.depth && HistKnown(copyReads, t.src, v)) {
+                bool known0 = !t.skip && !t.depth && HistKnown(copyReads, t.src, v);
+                const bool sfZero = !known0 && !t.skip && !t.depth && copyReads == CH_A && c.arg < g_sfZeroCopy.size() && g_sfZeroCopy[c.arg];
+                if (sfZero) { // (GXV_SHADOWFILL_BOUNDS: the alpha it reads is 0 everywhere; it reads nothing else)
+                    v[0] = v[1] = v[2] = v[3] = 0.0f;
+                    v[4] = 1.0f;
+                    known0 = true;
+                }
+                if (known0) {
                     t.fill = true;
                     std::memcpy(t.fillRgba, v, sizeof t.fillRgba);
                     ++fr.fills;
@@ -3316,6 +4636,7 @@ void IsolatePasses() {
                     } else {
                         g_constTex[t.texId] = ct;
                     }
+                    if (sfZero) SfNoteFill(t.skip);
                 } else if (!t.skip) {
                     ++fr.efbReads;
                     g_constTex.erase(t.texId);
@@ -3362,6 +4683,435 @@ void IsolatePasses() {
     for (size_t k = begins.size(); k-- > 0;) cmds.insert(cmds.begin() + static_cast<std::ptrdiff_t>(begins[k].first), Cmd{CMD_PASS_BEGIN, begins[k].second});
 }
 } // namespace
+
+// ================================================================ shadow fill bounds (GXV_SHADOWFILL_BOUNDS), part 2: the frame pass
+// SceneFunction::executeDrawSilhouetteAndFillShadow -> MR::fillSilhouetteColor, every game picture: ScreenAlphaCapture copies the
+// whole EFB's alpha into a texture (GX_CTF_A8: every channel = the EFB's alpha), and a screen quad samples it with one TEV stage
+// (alpha = TEXA > konst ? A0 : 0) and the alpha test GREATER 0, blended 50 % black: where the texture is 0 the quad is discarded.
+// The EFB's alpha is 0 almost everywhere: the display copy clears it to 0 (MainLoopFramework, (0,0,0,0)), the frame's clear writes
+// GXSetDstAlpha(TRUE, 0), the opaque scene writes the constant 0 (GameScene::draw3D: GXSetDstAlpha(TRUE, 0)), and only the shadow
+// volumes (ShadowVolumeDrawer: ONE / ONE and SUBTRACT into alpha) and the player's silhouette (DrawType 0x28) put anything else
+// there. This pass follows, over the finished frame and from frame to frame, a set of EFB rectangles outside which the alpha is
+// known to be 0 (N):
+//  (a) a draw that writes alpha as the constant 0 (RenderState::dstAlphaZero 1 under blending; or not blended with the fragment
+//      shader writing the destination-alpha constant, FsKey::dstAlpha, which its own TEV block holds as 0) or does not write alpha
+//      leaves N as it is; one that also covers its extent whole (DrawRec::cover) takes the extent out of N; any other draw that
+//      writes alpha adds the pixels it can write (DrawRec::ab, part 1; the extent when those are not known);
+//  (b) a clear (of a copy, or of the display copy) takes its rectangle out of N when it clears alpha to 0, and adds it otherwise;
+//  (c) N carries over from one frame to the next (the display copy's clear empties it); a change of target makes it everything.
+// At the capture (a colour copy that reads only the EFB's alpha, converting it with nothing added: every texel is 0 where the
+// alpha is 0), N cut to the copy's source gives the texels that may not be 0. At the next draw that samples that texture:
+//  (d) when the draw cannot change a pixel wherever the texels it samples are all 0 - one TEV stage whose alpha is an A8 compare
+//      "TEXA > b" (b a non-negative input) added to ZERO, and an alpha test that fails for alpha 0 with the references of its own
+//      TEV block - then:
+//       - nothing may be other than 0: the draw is left out (it would discard every fragment), and the copy is marked for pass
+//         isolation (IsolatePasses) as a copy of a known constant: a fill of 0, and none at all while the texture still holds that
+//         (g_constTex), so the copy's EFB store, copy scene and EFB reload go too;
+//       - else, when the draw's screen-to-texture mapping is affine (its vertices through its own blocks: equal clip w, texture
+//         coordinates from an attribute through a matrix, no projection) and the texture clamps: its scissor is cut to the
+//         pixels whose samples can reach a texel within kSfReach-derived EFB pixels of N (the copy's own filtering, the sample's
+//         bilinear footprint at the smallest render scale, the scissor's rounding to render pixels), where alone it can change
+//         anything (only when that is at most kSfMaxArea of its pixels: a scissor change costs vitaGL mask passes);
+//       - else nothing changes.
+// The picture is the same, bit for bit: a draw is cut only where every fragment it would draw is discarded, and a copy is only
+// made a fill of the value every texel of the real copy has. Anything not proven leaves the frame as it was (the full path).
+//   GXV_SHADOWFILL_BOUNDS=1 (default) on; 0 off (no bounds are worked out either). Read once. Basic log about once a minute:
+//   "shadowfill: ..." (pictures with the fill left out / scissored / full, and the scissored area).
+namespace {
+struct SfSet {
+    static constexpr int kMax = 16;
+    EfbRect r[kMax];
+    int n = 0;
+    void All() { n = 1; r[0] = EfbRect{-8192, -8192, 16383, 16383}; }
+    void Add(const EfbRect& a) {
+        if (a.w <= 0 || a.h <= 0) return;
+        for (int i = 0; i < n; ++i)
+            if (Inside(a, r[i])) return;
+        int k = 0;
+        for (int i = 0; i < n; ++i)
+            if (!Inside(r[i], a)) r[k++] = r[i];
+        n = k;
+        if (n < kMax) { r[n++] = a; return; }
+        // (full: into the rectangle whose union with it grows least; only ever more pixels)
+        int best = 0;
+        int64_t grow = INT64_MAX;
+        for (int i = 0; i < n; ++i) {
+            const int64_t gi = RArea(Union(r[i], a)) - RArea(r[i]);
+            if (gi < grow) { grow = gi; best = i; }
+        }
+        r[best] = Union(r[best], a);
+    }
+    void Sub(const EfbRect& c) {
+        if (c.w <= 0 || c.h <= 0) return;
+        EfbRect keep[kMax * 4];
+        int m = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!Overlap(r[i], c)) { keep[m++] = r[i]; continue; }
+            if (Inside(r[i], c)) continue;
+            EfbRect piece[4];
+            const int k = RSubtract(r[i], c, piece);
+            for (int q = 0; q < k; ++q) keep[m++] = piece[q];
+        }
+        n = 0;
+        for (int i = 0; i < m; ++i) Add(keep[i]);
+    }
+    // The bounding box of N inside `src`; false: N has no pixel there.
+    bool Bound(const EfbRect& src, EfbRect& b) const {
+        int x0 = INT32_MAX, y0 = INT32_MAX, x1 = INT32_MIN, y1 = INT32_MIN;
+        for (int i = 0; i < n; ++i) {
+            const int ax = std::max<int>(r[i].x, src.x), ay = std::max<int>(r[i].y, src.y);
+            const int bx = std::min<int>(r[i].x + r[i].w, src.x + src.w), by = std::min<int>(r[i].y + r[i].h, src.y + src.h);
+            if (bx <= ax || by <= ay) continue;
+            x0 = std::min(x0, ax); y0 = std::min(y0, ay); x1 = std::max(x1, bx); y1 = std::max(y1, by);
+        }
+        if (x1 <= x0 || y1 <= y0) return false;
+        b = EfbRect{static_cast<int16_t>(x0), static_cast<int16_t>(y0), static_cast<int16_t>(x1 - x0), static_cast<int16_t>(y1 - y0)};
+        return true;
+    }
+} g_sfN;
+bool g_sfInit = false;
+// The capture copies of this frame whose texture no draw has read yet changed since (texture -> what may not be 0 in it).
+struct SfCap {
+    uint32_t texId;
+    bool zero;   // no texel may be other than 0
+    EfbRect b;   // else: N cut to the source, EFB pixels
+    EfbRect src;
+    uint16_t dstW, dstH;
+};
+std::vector<SfCap> g_sfCaps;
+// The log's window (about a minute): pictures, fills left out, scissored (and their area, screens), left whole, captures made fills
+// (and of those, fills not needed: the texture held 0 already).
+struct SfCount { uint64_t pictures = 0, skipped = 0, scissored = 0, full = 0, fills = 0, fillsKept = 0; double area = 0; } g_sfCtr, g_sfTotal;
+void SfNoteFill(bool kept) {
+    ++g_sfCtr.fills;
+    if (kept) ++g_sfCtr.fillsKept;
+}
+// How the record writes alpha: 0 not at all, 1 the constant 0 only, 2 anything else (see (a) above).
+int SfAlphaKind(const DrawRec& d) {
+    const RenderState& rs = d.rs;
+    if (!rs.alphaWrite) return 0; // (the back end's colour mask: SetColorMask(colorWrite, alphaWrite))
+    if (rs.blend && rs.dstAlphaZero == 1) return 1; // (alpha factors ZERO / ZERO: SetBlend's mode 1)
+    if (!rs.blend && rs.dstAlphaZero == 0 && d.fsId < g_fsReg.keys.size() && g_fsReg.keys[d.fsId].dstAlpha) {
+        const uint32_t tb = d.ublock[UB_TEV];
+        if (tb != kNoBlock && static_cast<size_t>(tb) + TEV_MISC + 3 <= g_buf.uni.size() && g_buf.uni[tb + TEV_MISC + 2] == 0.0f) return 1;
+    }
+    return 2;
+}
+// GX alpha test of the alpha 0 with references r0, r1 (FsKey::alphaTest; the generator's CompareExpr with ai = 0, and its trimmed
+// form, give the same for whole references).
+bool SfCmpAt0(uint32_t c, float ref) {
+    switch (c) {
+    case 0: return false;
+    case 1: return 0.0f < ref - 0.5f;
+    case 2: return std::fabs(ref) < 0.5f;
+    case 3: return 0.0f < ref + 0.5f;
+    case 4: return 0.0f > ref + 0.5f;
+    case 5: return std::fabs(ref) > 0.5f;
+    case 6: return 0.0f > ref - 0.5f;
+    default: return true;
+    }
+}
+bool SfAlphaTestPassesAt0(uint8_t t, float r0, float r1) {
+    const bool a = SfCmpAt0(t & 7u, r0), b = SfCmpAt0((t >> 3) & 7u, r1);
+    switch ((t >> 6) & 3u) {
+    case 0: return a && b;
+    case 1: return a || b;
+    case 2: return a != b;
+    default: return a == b;
+    }
+}
+// (d): the draw changes no pixel wherever every texel of its one texture is 0. Its texmap and texture coordinate.
+bool SfFillShape(const DrawRec& d, int& map, int& coord) {
+    if (d.fsId >= g_fsReg.keys.size()) return false;
+    const FsKey& k = g_fsReg.keys[d.fsId];
+    if (k.numStages != 1 || k.numIndStages != 0 || !k.alphaTestOn) return false;
+    const FsKey::Stage& st = k.stage[0];
+    if (!st.texEnable || st.texOff || !(d.texMask & (1u << st.texMap))) return false;
+    // (alpha: d + ((a > b) ? c : 0), compare mode (bias 3), "greater" (op 0), A8 (scale 3), a = TEXA, d = ZERO, b TEXA / KONST / ZERO)
+    const uint32_t a = st.alpha;
+    const uint32_t sd = bits(a, 4, 3), sb = bits(a, 10, 3), sa = bits(a, 13, 3);
+    if (bits(a, 16, 2) != 3 || bits(a, 18, 1) != 0 || bits(a, 20, 2) != 3 || sa != 4 || sd != 7) return false;
+    if (sb != 4 && sb != 6 && sb != 7) return false;
+    const uint32_t tb = d.ublock[UB_TEV];
+    if (tb == kNoBlock || static_cast<size_t>(tb) + TEV_MISC + 2 > g_buf.uni.size()) return false;
+    if (SfAlphaTestPassesAt0(k.alphaTest, g_buf.uni[tb + TEV_MISC], g_buf.uni[tb + TEV_MISC + 1])) return false;
+    map = st.texMap;
+    coord = st.texCoord;
+    return true;
+}
+// The pixels (EFB, before the draw's scissor) whose texture coordinate can lie in [s0, s1] x [t0, t1] (infinite: no limit), from the
+// draw's own vertices through its blocks; false when the mapping is not known to be affine.
+bool SfFillWindow(const DrawRec& d, int coord, double s0, double s1, double t0, double t1, bool& none, EfbRect& out) {
+    none = false;
+    if (d.vbuf || d.prim != PRIM_TRIANGLES || d.vtxCount < 3 || d.vtxCount > 64 || d.idxCount < 3) return false;
+    if (d.vsId >= g_vsReg.keys.size() || d.fsId >= g_fsReg.keys.size()) return false;
+    const VsKey& vs = g_vsReg.keys[d.vsId];
+    const FsKey& fs = g_fsReg.keys[d.fsId];
+    if (vs.perVtxPos || vs.lpMode() || coord >= vs.numTexGens || (fs.texProjMask & (1u << coord))) return false;
+    const VsKey::TexGen& tg = vs.tg[coord];
+    if (tg.type != 0 || tg.src < 5 || tg.src > 12 || tg.post || tg.perVtxMtx || tg.proj) return false;
+    const int k = tg.src - 5;
+    if (!(d.layoutMask & (VL_TEX0 << k))) return false;
+    const uint32_t pb = d.ublock[UB_PROJ], mb = d.ublock[UB_MV], tb = d.ublock[UB_TEXM];
+    const size_t un = g_buf.uni.size();
+    if (pb == kNoBlock || mb == kNoBlock || tb == kNoBlock || static_cast<size_t>(pb) + 16 > un || static_cast<size_t>(mb) + 12 > un ||
+        static_cast<size_t>(tb) + static_cast<size_t>(coord) * 12 + 8 > un)
+        return false;
+    const float* P = g_buf.uni.data() + pb; // (column-major)
+    const float* M = g_buf.uni.data() + mb; // (rows)
+    const float* T = g_buf.uni.data() + tb + coord * 12;
+    const RenderState& rs = d.rs;
+    if (!(rs.vpW > 0.0f) || !(rs.vpH > 0.0f)) return false;
+    const VtxLayout L = MakeLayout(d.layoutMask);
+    size_t base = d.vtxOffset + static_cast<size_t>(d.vtxFirst) * L.stride;
+    if (!g_buf.vtxChunks.empty()) {
+        if (d.vchunk >= g_buf.vtxChunks.size()) return false;
+        base += g_buf.vtxChunks[d.vchunk];
+    }
+    if (base + static_cast<size_t>(d.vtxCount) * L.stride > g_buf.vtx.size()) return false;
+    double X[64], Y[64], S[64], Tt[64], w0 = 0;
+    for (uint32_t i = 0; i < d.vtxCount; ++i) {
+        const uint8_t* v = g_buf.vtx.data() + base + static_cast<size_t>(i) * L.stride;
+        float p[3], uv[2];
+        std::memcpy(p, v, 12);
+        std::memcpy(uv, v + L.offTex[k], 8);
+        double e[3];
+        for (int r = 0; r < 3; ++r) e[r] = static_cast<double>(M[r * 4]) * p[0] + static_cast<double>(M[r * 4 + 1]) * p[1] + static_cast<double>(M[r * 4 + 2]) * p[2] + M[r * 4 + 3];
+        const double cx = P[0] * e[0] + P[4] * e[1] + P[8] * e[2] + P[12];
+        const double cy = P[1] * e[0] + P[5] * e[1] + P[9] * e[2] + P[13];
+        const double cw = P[3] * e[0] + P[7] * e[1] + P[11] * e[2] + P[15];
+        if (!(cw > 0.0) || !std::isfinite(cx) || !std::isfinite(cy)) return false;
+        if (i == 0) w0 = cw;
+        else if (std::fabs(cw - w0) > 1e-6 * w0) return false; // (equal w: the coordinates are interpolated affinely on the screen)
+        // (u_proj has Y flipped: EFB row = vpY + (y / w + 1) vpH / 2, the back end's glViewport)
+        X[i] = rs.vpX + (cx / cw + 1.0) * 0.5 * rs.vpW;
+        Y[i] = rs.vpY + (cy / cw + 1.0) * 0.5 * rs.vpH;
+        S[i] = T[0] * static_cast<double>(uv[0]) + T[1] * static_cast<double>(uv[1]) + T[2] + T[3];
+        Tt[i] = T[4] * static_cast<double>(uv[0]) + T[5] * static_cast<double>(uv[1]) + T[6] + T[7];
+        if (!std::isfinite(X[i]) || !std::isfinite(Y[i]) || !std::isfinite(S[i]) || !std::isfinite(Tt[i]) || std::fabs(X[i]) > 16384.0 || std::fabs(Y[i]) > 16384.0)
+            return false;
+    }
+    // s and t as affine functions of (X, Y): from the vertex triple of the largest area, checked at every vertex.
+    int ia = 0, ib = 1, ic = 2;
+    double best = 0;
+    for (uint32_t a = 0; a < d.vtxCount; ++a)
+        for (uint32_t b = a + 1; b < d.vtxCount; ++b)
+            for (uint32_t c = b + 1; c < d.vtxCount; ++c) {
+                const double ar = std::fabs((X[b] - X[a]) * (Y[c] - Y[a]) - (X[c] - X[a]) * (Y[b] - Y[a]));
+                if (ar > best) { best = ar; ia = static_cast<int>(a); ib = static_cast<int>(b); ic = static_cast<int>(c); }
+            }
+    if (!(best > 1e-3)) return false;
+    double fs3[3], ft3[3]; // (value = f[0] X + f[1] Y + f[2])
+    auto solve = [&](const double* V, double* f) {
+        const double det = (X[ib] - X[ia]) * (Y[ic] - Y[ia]) - (X[ic] - X[ia]) * (Y[ib] - Y[ia]);
+        f[0] = ((V[ib] - V[ia]) * (Y[ic] - Y[ia]) - (V[ic] - V[ia]) * (Y[ib] - Y[ia])) / det;
+        f[1] = ((X[ib] - X[ia]) * (V[ic] - V[ia]) - (X[ic] - X[ia]) * (V[ib] - V[ia])) / det;
+        f[2] = V[ia] - f[0] * X[ia] - f[1] * Y[ia];
+    };
+    solve(S, fs3);
+    solve(Tt, ft3);
+    double bx0 = 1e30, by0 = 1e30, bx1 = -1e30, by1 = -1e30;
+    for (uint32_t i = 0; i < d.vtxCount; ++i) {
+        if (std::fabs(fs3[0] * X[i] + fs3[1] * Y[i] + fs3[2] - S[i]) > 1e-5 * (1.0 + std::fabs(S[i]))) return false;
+        if (std::fabs(ft3[0] * X[i] + ft3[1] * Y[i] + ft3[2] - Tt[i]) > 1e-5 * (1.0 + std::fabs(Tt[i]))) return false;
+        bx0 = std::min(bx0, X[i]); bx1 = std::max(bx1, X[i]); by0 = std::min(by0, Y[i]); by1 = std::max(by1, Y[i]);
+    }
+    // The draw's screen box clipped by the four half-planes s >= s0, s <= s1, t >= t0, t <= t1 (Sutherland-Hodgman, convex).
+    double px[16] = {bx0 - 1, bx1 + 1, bx1 + 1, bx0 - 1}, py[16] = {by0 - 1, by0 - 1, by1 + 1, by1 + 1};
+    int n = 4;
+    auto clip = [&](const double* f, double lim, double sign) { // keep sign * (f(X, Y) - lim) >= 0
+        double qx[16], qy[16];
+        int m = 0;
+        for (int i = 0; i < n; ++i) {
+            const int j = (i + 1) % n;
+            const double di = sign * (f[0] * px[i] + f[1] * py[i] + f[2] - lim), dj = sign * (f[0] * px[j] + f[1] * py[j] + f[2] - lim);
+            if (di >= 0) { qx[m] = px[i]; qy[m] = py[i]; ++m; }
+            if ((di >= 0) != (dj >= 0)) {
+                const double u = di / (di - dj);
+                qx[m] = px[i] + u * (px[j] - px[i]); qy[m] = py[i] + u * (py[j] - py[i]); ++m;
+            }
+        }
+        n = m;
+        for (int i = 0; i < m; ++i) { px[i] = qx[i]; py[i] = qy[i]; }
+    };
+    if (std::isfinite(s0)) clip(fs3, s0, 1.0);
+    if (n && std::isfinite(s1)) clip(fs3, s1, -1.0);
+    if (n && std::isfinite(t0)) clip(ft3, t0, 1.0);
+    if (n && std::isfinite(t1)) clip(ft3, t1, -1.0);
+    if (n == 0) { none = true; return true; }
+    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+    for (int i = 0; i < n; ++i) { x0 = std::min(x0, px[i]); x1 = std::max(x1, px[i]); y0 = std::min(y0, py[i]); y1 = std::max(y1, py[i]); }
+    // (a pixel's sample is at its centre: whole pixels around the window, one more on each side for the scissor's rounding)
+    const int ix0 = static_cast<int>(std::floor(x0)) - 1, iy0 = static_cast<int>(std::floor(y0)) - 1;
+    const int ix1 = static_cast<int>(std::ceil(x1)) + 1, iy1 = static_cast<int>(std::ceil(y1)) + 1;
+    out = EfbRect{static_cast<int16_t>(ix0), static_cast<int16_t>(iy0), static_cast<int16_t>(ix1 - ix0), static_cast<int16_t>(iy1 - iy0)};
+    return true;
+}
+void SfLog() {
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(60) || !g_sfCtr.pictures) return;
+    const double secs = std::chrono::duration<double>(now - last).count();
+    last = now;
+    const SfCount& c = g_sfCtr;
+    const uint64_t pairs = c.skipped + c.scissored + c.full;
+    char line[400];
+    std::snprintf(line, sizeof line,
+                  "shadowfill: %.0f s, %llu pictures, %llu with the silhouette fill: left out %llu, scissored %llu (mean %.1f%% of the screen), full %llu; "
+                  "captures made a fill of 0: %llu (%llu needed none: the texture held it)",
+                  secs, static_cast<unsigned long long>(c.pictures), static_cast<unsigned long long>(pairs), static_cast<unsigned long long>(c.skipped),
+                  static_cast<unsigned long long>(c.scissored), c.scissored ? 100.0 * c.area / static_cast<double>(c.scissored) : 0.0,
+                  static_cast<unsigned long long>(c.full), static_cast<unsigned long long>(c.fills), static_cast<unsigned long long>(c.fillsKept));
+    if (port_log_summary) port_log_summary("%s", line);
+    else std::fprintf(stderr, "[vgx] %s\n", line);
+    g_sfTotal.pictures += c.pictures; g_sfTotal.skipped += c.skipped; g_sfTotal.scissored += c.scissored; g_sfTotal.full += c.full;
+    g_sfTotal.fills += c.fills; g_sfTotal.fillsKept += c.fillsKept; g_sfTotal.area += c.area;
+    g_sfCtr = SfCount{};
+}
+// Reach of a capture's non-zero texels on the screen, EFB pixels per unit of the copy's scale (src / dst): the copy's own bilinear
+// read and the fill's bilinear footprint, each a render pixel or a texel, at render scales down to 0.66 of the EFB.
+constexpr double kSfReach = 2.0;
+// A scissored fill must cover at most this share of its own scissor's pixels: vitaGL redraws its scissor mask at every scissor change
+// (tests.c update_scissor_test: about two ISP-only passes over the target, on and off again, ~0.1-0.2 ms each at 960x544), against a fill
+// pass of ~1 ms over the whole screen. Above it the fill is left whole (a cost decision; either is exact).
+constexpr double kSfMaxArea = 0.6;
+void ShadowFillPass() {
+    g_sfZeroCopy.assign(g_buf.copyTex.size(), 0);
+    if (!ShadowFillOn()) return;
+    if (!g_sfInit) { g_sfN.All(); g_sfInit = true; }
+    g_sfCaps.clear();
+    ++g_sfCtr.pictures;
+    std::vector<Cmd>& cmds = g_buf.cmds;
+    size_t out = 0;
+    for (size_t i = 0; i < cmds.size(); ++i) {
+        const Cmd c = cmds[i];
+        bool keep = true;
+        switch (c.type) {
+        case CMD_DRAW: {
+            DrawRec& d = g_buf.draws[c.arg];
+            // (d) the read of a capture
+            if (d.texMask && !g_sfCaps.empty()) {
+                int map = -1, coord = -1;
+                for (size_t q = 0; q < g_sfCaps.size(); ++q) {
+                    const SfCap& cap = g_sfCaps[q];
+                    bool reads = false;
+                    for (int m = 0; m < 8; ++m)
+                        if ((d.texMask & (1u << m)) && d.tex[m].texId == cap.texId) reads = true;
+                    if (!reads) continue;
+                    const SfCap cp = cap;
+                    g_sfCaps.erase(g_sfCaps.begin() + static_cast<std::ptrdiff_t>(q)); // (only its first reader is looked at)
+                    if (!SfFillShape(d, map, coord) || d.tex[map].texId != cp.texId) break;
+                    if (cp.zero) {
+                        keep = false;
+                        ++g_sfCtr.skipped;
+                        break;
+                    }
+                    const TexBind& tbd = d.tex[map];
+                    bool none = false;
+                    EfbRect win{};
+                    bool done = false;
+                    if (tbd.wrapS == WRAP_CLAMP && tbd.wrapT == WRAP_CLAMP && tbd.minFilter <= FILT_LINEAR && tbd.magFilter <= FILT_LINEAR &&
+                        cp.src.w > 0 && cp.src.h > 0 && cp.dstW > 0 && cp.dstH > 0) {
+                        const double rx = kSfReach * (1.0 + static_cast<double>(cp.src.w) / cp.dstW) + 1.0;
+                        const double ry = kSfReach * (1.0 + static_cast<double>(cp.src.h) / cp.dstH) + 1.0;
+                        const double inf = std::numeric_limits<double>::infinity();
+                        // (beyond the source's edge a clamped sample reads the edge texel: no limit on that side)
+                        const double s0 = cp.b.x - rx <= cp.src.x ? -inf : (cp.b.x - rx - cp.src.x) / cp.src.w;
+                        const double s1 = cp.b.x + cp.b.w + rx >= cp.src.x + cp.src.w ? inf : (cp.b.x + cp.b.w + rx - cp.src.x) / cp.src.w;
+                        const double t0 = cp.b.y - ry <= cp.src.y ? -inf : (cp.b.y - ry - cp.src.y) / cp.src.h;
+                        const double t1 = cp.b.y + cp.b.h + ry >= cp.src.y + cp.src.h ? inf : (cp.b.y + cp.b.h + ry - cp.src.y) / cp.src.h;
+                        if (SfFillWindow(d, coord, s0, s1, t0, t1, none, win)) {
+                            RenderState& rs = d.rs;
+                            const int x0 = std::max<int>(rs.scX, win.x), y0 = std::max<int>(rs.scY, win.y);
+                            const int x1 = std::min<int>(rs.scX + rs.scW, win.x + win.w), y1 = std::min<int>(rs.scY + rs.scH, win.y + win.h);
+                            if (none || x1 <= x0 || y1 <= y0) {
+                                keep = false;
+                                ++g_sfCtr.skipped;
+                                done = true;
+                            } else if ((x0 > rs.scX || y0 > rs.scY || x1 < rs.scX + rs.scW || y1 < rs.scY + rs.scH) &&
+                                       static_cast<double>(x1 - x0) * (y1 - y0) <= kSfMaxArea * rs.scW * rs.scH) {
+                                const double before = static_cast<double>(rs.scW) * rs.scH;
+                                rs.scX = static_cast<int16_t>(x0); rs.scY = static_cast<int16_t>(y0);
+                                rs.scW = static_cast<int16_t>(x1 - x0); rs.scH = static_cast<int16_t>(y1 - y0);
+                                const EfbRect sc{rs.scX, rs.scY, rs.scW, rs.scH};
+                                const int ex0 = std::max<int>(d.exX, sc.x), ey0 = std::max<int>(d.exY, sc.y);
+                                const int ex1 = std::min<int>(d.exX + d.exW, sc.x + sc.w), ey1 = std::min<int>(d.exY + d.exH, sc.y + sc.h);
+                                d.exX = static_cast<int16_t>(ex0); d.exY = static_cast<int16_t>(ey0);
+                                d.exW = static_cast<int16_t>(ex1 > ex0 ? ex1 - ex0 : 0); d.exH = static_cast<int16_t>(ey1 > ey0 ? ey1 - ey0 : 0);
+                                d.cover = 0;
+                                ++g_sfCtr.scissored;
+                                g_sfCtr.area += before > 0 ? static_cast<double>(sc.w) * sc.h / before : 0.0;
+                                done = true;
+                            }
+                        }
+                    }
+                    if (!done) ++g_sfCtr.full;
+                    break;
+                }
+            }
+            if (!keep) break;
+            const int kind = SfAlphaKind(d);
+            if (kind == 2) g_sfN.Add(d.ab ? EfbRect{d.abX, d.abY, d.abW, d.abH} : EfbRect{d.exX, d.exY, d.exW, d.exH});
+            else if (kind == 1 && d.cover) g_sfN.Sub(EfbRect{d.exX, d.exY, d.exW, d.exH});
+            break;
+        }
+        case CMD_COPY_TEX: {
+            const CopyTexCmd& t = g_buf.copyTex[c.arg];
+            for (size_t q = 0; q < g_sfCaps.size(); ++q)
+                if (g_sfCaps[q].texId == t.texId) { g_sfCaps.erase(g_sfCaps.begin() + static_cast<std::ptrdiff_t>(q)); break; }
+            if (!t.depth && !t.srcTex && !t.skip && !t.fill && !t.fromPass && t.src.w > 0 && t.src.h > 0 && CopyReads(t) == CH_A) {
+                EfbRect b{};
+                const bool zero = !g_sfN.Bound(t.src, b);
+                if (zero) g_sfZeroCopy[c.arg] = 1; // (IsolatePasses: the source's alpha is known to be 0)
+                if (!t.dstTexW && t.add[0] == 0 && t.add[1] == 0 && t.add[2] == 0 && t.add[3] == 0 && g_sfCaps.size() < 8)
+                    g_sfCaps.push_back(SfCap{t.texId, zero, b, t.src, t.dstW, t.dstH});
+            }
+            if ((t.clear.enable || t.clearElided) && t.clear.alpha) {
+                if (t.clear.rgba[3] == 0.0f) g_sfN.Sub(t.src);
+                else g_sfN.Add(t.src);
+            }
+            break;
+        }
+        case CMD_COPY_DISP: {
+            const CopyDispCmd& dc = g_buf.copyDisp[c.arg];
+            if ((dc.clear.enable || dc.clearElided) && dc.clear.alpha) {
+                if (dc.clear.rgba[3] == 0.0f) g_sfN.Sub(dc.src);
+                else g_sfN.Add(dc.src);
+            }
+            break;
+        }
+        case CMD_SET_TARGET:
+            g_sfN.All();
+            g_sfCaps.clear();
+            break;
+        case CMD_TEX_FREE:
+        case CMD_TEX_UPLOAD: {
+            const uint32_t id = c.type == CMD_TEX_FREE ? c.arg : g_buf.uploads[c.arg].texId;
+            for (size_t q = 0; q < g_sfCaps.size(); ++q)
+                if (g_sfCaps[q].texId == id) { g_sfCaps.erase(g_sfCaps.begin() + static_cast<std::ptrdiff_t>(q)); break; }
+            break;
+        }
+        case CMD_PASS_BEGIN: // (made later, by IsolatePasses: not in the frame yet)
+            g_sfN.All();
+            break;
+        default:
+            break;
+        }
+        if (keep) cmds[out++] = c;
+    }
+    cmds.resize(out);
+    SfLog();
+}
+} // namespace
+// (tests) GXV_SHADOWFILL_BOUNDS totals since the start: silhouette fills left out, scissored, left whole; captures made fills of 0,
+// and of those the ones not even made (the texture held 0).
+void ShadowFillCounters(uint64_t out[5]) {
+    out[0] = g_sfTotal.skipped + g_sfCtr.skipped;
+    out[1] = g_sfTotal.scissored + g_sfCtr.scissored;
+    out[2] = g_sfTotal.full + g_sfCtr.full;
+    out[3] = g_sfTotal.fills + g_sfCtr.fills;
+    out[4] = g_sfTotal.fillsKept + g_sfCtr.fillsKept;
+}
 
 // ------------------------------------------------------------- copy atlas
 // After pass isolation an open-play frame still has 16 offscreen passes that
@@ -3558,7 +5308,7 @@ AtlasLoc AtlasCellFor(std::vector<Cmd>& out, uint32_t texId, uint16_t w, uint16_
     // 330: 25, 462: 49). On the console a scissor change costs a pass over the whole target
     // (vitaGL keeps the scissor as a mask bit per pixel), so smaller pages trade scenes
     // against that; nothing here can tell which is cheaper.
-    static const int smallSide = static_cast<int>(EnvInt("GXV_ATLAS_SIDE", 672));
+    const int smallSide = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_ATLAS_SIDE", 672))));
     pg.Init(w, h, kAtlasGutter, (w <= 64 && h <= 64) ? smallSide : 512);
     pg.owner[0] = texId;
     pg.lastUse[0] = g_frame;
@@ -3687,7 +5437,7 @@ void MeasurePassRepeats() {
 
 void AtlasPasses() {
     MeasurePassRepeats();
-    static const long mode = AbsoluteIndices() ? EnvInt("GXV_ATLAS", 2) : 0;
+    const long mode = static_cast<long>(VGX_KNOB(AbsoluteIndices() ? EnvInt("GXV_ATLAS", 2) : 0));
     if (!mode || (g_buf.passes.empty() && g_atlasOf.empty())) return;
     stats::Frame& fr = stats::Cur();
     std::vector<Cmd>& cmds = g_buf.cmds;
@@ -4009,7 +5759,7 @@ void AtlasPasses() {
         }
     }
     // Draws that follow each other and now differ in nothing but their vertices become one.
-    static const bool noMerge = EnvInt("GXV_NOMERGE", 0) != 0;
+    const bool noMerge = VGX_KNOB(EnvInt("GXV_NOMERGE", 0) != 0) != 0;
     size_t n = 0;
     for (size_t i = 0; i < out.size(); ++i) {
         const Cmd c = out[i];
@@ -4077,6 +5827,16 @@ struct PassCheck {
         if (!Clip(r, x0, y0, x1, y1)) return;
         for (int y = y0; y < y1; ++y) std::memset(&px[plane][static_cast<size_t>(y) * kChkW + x0], id, static_cast<size_t>(x1 - x0));
     }
+    // Pixels of r that do not hold `id` become unknown (a draw that writes `id` to some of them).
+    void Keep(int plane, const EfbRect& r, uint8_t id) {
+        int x0, y0, x1, y1;
+        if (!Clip(r, x0, y0, x1, y1)) return;
+        for (int y = y0; y < y1; ++y) {
+            uint8_t* row = &px[plane][static_cast<size_t>(y) * kChkW];
+            for (int x = x0; x < x1; ++x)
+                if (row[x] != id) row[x] = 0;
+        }
+    }
     bool Holds(int plane, const EfbRect& r, uint8_t id) {
         int x0, y0, x1, y1;
         if (!Clip(r, x0, y0, x1, y1)) return true;
@@ -4132,9 +5892,22 @@ static void VerifyPasses() {
         }
         case CMD_DRAW: {
             if (inPass) break;
-            const RenderState& rs = g_buf.draws[c.arg].rs;
+            const DrawRec& dr = g_buf.draws[c.arg];
+            const RenderState& rs = dr.rs;
             const EfbRect sc{rs.scX, rs.scY, rs.scW, rs.scH};
-            const uint8_t w = DrawWrites(rs);
+            uint8_t w = DrawWrites(rs);
+            if ((w & CH_A) && ShadowFillOn()) {
+                // (GXV_SHADOWFILL_BOUNDS: alpha as ShadowFillPass models it, so that its fills are checked pixel by pixel: not written,
+                // the constant 0 written to some pixels of the scissor, or anything written to its own pixels only)
+                const int kind = SfAlphaKind(dr);
+                if (kind == 1 && dr.cover) g_chk.Set(1, EfbRect{dr.exX, dr.exY, dr.exW, dr.exH}, g_chk.Id(1, 0.0f));
+                else if (kind == 1) g_chk.Keep(1, sc, g_chk.Id(1, 0.0f));
+                else if (kind == 2 && dr.ab) g_chk.Set(1, EfbRect{dr.abX, dr.abY, dr.abW, dr.abH}, 0);
+                if (kind != 2 || dr.ab) {
+                    w = static_cast<uint8_t>(w & ~CH_A);
+                    g_chk.lastDrawValid = false;
+                }
+            }
             if (g_chk.lastDrawValid && std::memcmp(&sc, &g_chk.lastDraw, sizeof sc) == 0 && (w & ~g_chk.lastDrawPlanes) == 0) break;
             for (int p = 0; p < 3; ++p)
                 if (w & (1u << p)) g_chk.Set(p, sc, 0);
@@ -4296,6 +6069,14 @@ void FrontPresent(bool direct, void (*onDecoded)()) {
     // (front-end split: the finishing thread's records, indices and uniforms join the frame here; a no-op when the
     // host did it at the display copy already)
     if (split::g_on) split::FinishFrame(g_buf);
+    if (RigidMergeLearnMax()) {
+        // (GXV_RIGIDMERGE_DLLEARN: what the frame's cached lists did, for the next frame's copies)
+        DlLearnFrameEnd(split::g_on ? split::FinishedJoinLog() : g_joinLogMain, g_frame);
+        g_joinLogMain.clear();
+    }
+    g_jobSeq = 0;
+    g_lastJobKey = 0;
+    g_hashedSerial = ~0u;
     g_buf.cmds.push_back(Cmd{CMD_PRESENT, 0});
     g_buf.frame = g_frame;
     g_buf.crowdActive = StaticCrowdEnabled();
@@ -4304,9 +6085,11 @@ void FrontPresent(bool direct, void (*onDecoded)()) {
         g_buf.crowdTags = g_crowdTagCount;
         g_buf.crowdInvalid = g_crowdInvalid;
     }
+    ShadowFillPass(); // (GXV_SHADOWFILL_BOUNDS: before the dead copies and pass isolation, which use what it finds)
     MarkDeadCopies();
     IsolatePasses();
     AtlasPasses();
+    MarkSwapCopies(); // (GXV_EFBSWAP2: after the passes, which make copies fromPass)
     VerifyPasses();
     CountScenes();
     {
@@ -4328,10 +6111,31 @@ void FrontPresent(bool direct, void (*onDecoded)()) {
         static const long hashMode = diag::Int("GXV_HASH", 0);
         if (hashMode) fr.hash = HashBuf(g_buf, fr.hash, hashMode == 2);
     }
+    if (workload::FeSplitOn() && g_frame % 300 == 0) {
+        // GXV_TEXBAKE census (per picture over the last 300): what the switch removes ("only the texture matrices differ" with it off;
+        // draws baked with a matrix of their own with it on), and the other single-block reasons draws stay apart
+        static uint64_t prevFrame = 0, prevDraws = 0, prevNew = 0;
+        static uint32_t prevMiss[4] = {};
+        const double n = static_cast<double>(g_frame - prevFrame);
+        uint32_t miss[4];
+        for (int k = 0; k < 4; ++k) miss[k] = g_blockMiss[k].load(std::memory_order_relaxed);
+        std::fprintf(stderr, "[vgx] texbake: per picture: uniform-block merge failures: only the texture matrices %.1f, only the model-view %.1f, only the TEV "
+                             "registers %.1f, several or others %.1f; GXV_TEXBAKE=%d: draws baked %.1f, of them with a texture matrix of their own %.1f\n",
+                     (miss[0] - prevMiss[0]) / n, (miss[1] - prevMiss[1]) / n, (miss[2] - prevMiss[2]) / n, (miss[3] - prevMiss[3]) / n, TexBakeOn() ? 1 : 0,
+                     (g_texBakeDraws - prevDraws) / n, (g_texBakeNew - prevNew) / n);
+        prevFrame = g_frame; prevDraws = g_texBakeDraws; prevNew = g_texBakeNew;
+        for (int k = 0; k < 4; ++k) prevMiss[k] = miss[k];
+    }
     if (LightNormCensusOn() && (g_frame == 1 || g_frame % 600 == 0))
         std::fprintf(stderr, "[vgx] light directions up to frame %llu: %llu blocks built; %llu non-zero directions written as zero (%llu of them non-finite, %llu not read by the shader at all); %llu kept (%llu non-finite)\n",
                      (unsigned long long)g_frame, (unsigned long long)g_lnc.blocks, (unsigned long long)g_lnc.zeroed, (unsigned long long)g_lnc.zeroedNonFinite,
                      (unsigned long long)g_lnc.zeroedUnread, (unsigned long long)g_lnc.kept, (unsigned long long)g_lnc.keptNonFinite);
+    if (PaletteRowsMode() == 2 && (g_frame == 1 || g_frame % 600 == 0))
+        std::fprintf(stderr, "[vgx] palette rows up to frame %llu: %llu draws with a per-vertex matrix; highest row 0-2: %llu, 3-5: %llu, 6-8: %llu, 9-11: %llu, 12-14: %llu, 15-17: %llu, 18-20: %llu, 21-23: %llu, 24-26: %llu, 27-29: %llu; above 27: %llu; not known: %llu\n",
+                     (unsigned long long)g_frame, (unsigned long long)g_palCensus.draws, (unsigned long long)g_palCensus.byMax[0], (unsigned long long)g_palCensus.byMax[1],
+                     (unsigned long long)g_palCensus.byMax[2], (unsigned long long)g_palCensus.byMax[3], (unsigned long long)g_palCensus.byMax[4], (unsigned long long)g_palCensus.byMax[5],
+                     (unsigned long long)g_palCensus.byMax[6], (unsigned long long)g_palCensus.byMax[7], (unsigned long long)g_palCensus.byMax[8], (unsigned long long)g_palCensus.byMax[9],
+                     (unsigned long long)g_palCensus.beyond, (unsigned long long)g_palCensus.unknown);
     stats::FrameEnd(g_frame);
     {
         static const long n = diag::Int("GXV_TRACE_DRAWS", 0);

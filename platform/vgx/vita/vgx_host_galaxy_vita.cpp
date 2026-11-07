@@ -22,6 +22,7 @@
 //   GXV_VITA_CDRAM_RESERVE_MIB=<n> video memory left to sceGxm itself (default 18)
 //   GXV_VITA_PATCHER_MIB=<n>      shader-patcher pool (default 8: 8 MiB host, 4 + 4 MiB code)
 //   GXV_VITA_FBO_SCENES=<1..8>    scenes per frame of a framebuffer object (default 8)
+//   GXV_VITA_RTMEM_LOG=1          log what sceGxm asks for one render target's driver memory at 1 and at 8 scenes per frame (default 0)
 //   GXV_VITA_DISPLAY=WxH          display mode (default 960x544; 720x408, 640x368, 480x272)
 //   GXV_VITA_WIDE=0|1             1 (default): the game's 16:9 picture over the whole 960x544 screen
 //   GXV_VITA_PRIME=0              leave out the scissored clear that Vita3K's OpenGL renderer needs
@@ -31,7 +32,9 @@
 //   GXV_NO_SHADERLIST=1           do not use the shader warm-up list
 //   PETARI_SCRIPT_ANCHOR_DRAWS=<n> (test harness) port_vgx_vita_rich_frame() reports the game frame of the first
 //                                 picture with at least n draw calls (the title screen has ~1000, a loading screen < 10)
-//   GXV_VITA_SEED=app0            vitaGL reads a shader cache packed in the VPK in place;  =off: the packed cache is not used
+//   GXV_VITA_SEED=copy            copy the shader cache packed in the VPK to the card once (before 1.2; default: read it in place
+//                                 behind the card's own cache);  =app0: vitaGL uses only the packed cache (nothing it compiles is
+//                                 kept);  =off: the packed cache is not used
 #if defined(__vita__)
 
 #define VGX_VITA_NO_GL_ROUTING
@@ -50,11 +53,14 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include "loading_screen.h"
+#include "vgx_boot_watch.h"
 #include "vgx_common.h"
+#include "vgx_resource_audit.h"
 #include "vgx_display_rect.h"
 #include "vgx_shadergen.h"
 #include "vgx_coldtrace.h"
 #include "port/vgx_coldtrace_control.h"
+#include "port/core_layout.h"
 #include "port/frame_pace.h"
 #include "vgx_state.h"
 #if defined(GXV_SHADER_CACHE_PACK) && GXV_SHADER_CACHE_PACK
@@ -82,14 +88,30 @@ extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __att
 extern "C" GLboolean vglFinishUniformPoolScene(void) __attribute__((weak));
 extern "C" void vglResumeUniformPoolScene(GLboolean resume) __attribute__((weak));
 extern "C" void vglSubmitWithoutSwap(void) __attribute__((weak));
+extern "C" void vglUseVramForUSSE(GLboolean usage) __attribute__((weak)); // (GXV_VITA_USSE_CDRAM; upstream vitaGL, in the reader archive)
 extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak)); // (platform/src/os/os_alarm.cpp: the basic log in ux0:data/smg/log.txt)
 extern "C" unsigned port_vgx_pace_divisor(void);
+extern "C" int port_vgx_present_sync_mode(void);  // vgx_galaxy.cpp: GXV_PRESENT_SYNC, 0 when off or when GXV_PACE owns the display callback
+extern "C" int port_vita_core0_alone(void) __attribute__((weak)); // GXV_CORE0_ALONE (vita/runtime/memory.cpp)
 extern "C" void port_vgx_pace_waited(uint64_t us);
+extern "C" int port_vgx_gate_wait_take(uint64_t* n, uint64_t* totalUs, uint64_t* maxUs);
 extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built with MASK_SKIP: full-target mask quads left out so far
+extern "C" void vglSetMaskKeep(GLboolean on) __attribute__((weak));    // vitaGL with patches/0018 built with MASK_KEEP (GXV_VGL_MASKKEEP)
+extern "C" uint32_t vglGetMaskKeeps(void) __attribute__((weak));      // (the same: full-target mask quads left out by it so far)
+extern "C" GLboolean vglColorLoadFrom(GLuint tex) __attribute__((weak)); // vitaGL with patches/0019 built with COLOR_LOAD_FROM (GXV_VGL_LOADFROM)
+extern "C" uint32_t vglGetColorLoadsFrom(void) __attribute__((weak));   // (the same: scenes that loaded their colour from another buffer)
 #include "vgx_core3_probe_vita.h"
 extern "C" unsigned long long port_game_frames(void); // vgx_galaxy.cpp: frames the game has finished
 extern "C" int port_boot_title_is_visible(void); // perf.cpp: the title screen has appeared (decomp/.../TitleSequenceProduct.cpp)
 extern "C" void vglSetAnisotropicFilter(uint32_t sceFilter) __attribute__((weak)); // vitaGL with ANISO_SWITCH (GXV_ANISO)
+// Start-up watchdog inputs: platform/src/dvd/dvd.cpp
+extern "C" uint64_t port_dvd_bytes_read(void) __attribute__((weak));
+extern "C" unsigned port_dvd_failures(void) __attribute__((weak));
+extern "C" int port_dvd_first_failure(char* out, size_t size) __attribute__((weak));
+extern "C" const char* port_boot_title_audio_problem(void) __attribute__((weak));
+// The shader compiler's loader (vitaShaRK, inside vitaGL) and vitaGL's own flag for its outcome at start-up.
+extern "C" int shark_init(const char* path) __attribute__((weak));
+extern "C" unsigned char is_shark_online __attribute__((weak));
 // The title's data folder (also named in vita/vgx-game/entry.cpp and the notes).
 #ifndef GXV_VITA_DATA_DEVICE
 #define GXV_VITA_DATA_DEVICE "ux0:data/smg"
@@ -116,6 +138,7 @@ int kScreenW = 960, kScreenH = 544;
 bool g_guardAlways = false; // GXV_VITA_MASK_GUARD_ALWAYS (see vgxvita_maskGuard)
 constexpr const char* kShaderCacheDir = GXV_VITA_DATA_DEVICE "/shadercache";
 constexpr const char* kShaderListFile = GXV_VITA_DATA_DEVICE "/shadercache/vgx_shaderlist.bin";
+constexpr const char* kStageWarmFile = GXV_VITA_DATA_DEVICE "/shadercache/vgx_stagewarm.bin";
 constexpr const char* kHostShaderAbi = "tex0-7 on TEXCOORD0-7, col0/1 on TEXCOORD8/9, uv on TEXCOORD0; mode GLOBAL; 1";
 constexpr const char* kSeedDir = "app0:shadercache";
 // "v<SHADER_CACHE_MAGIC>" of the vitaGL linked in: vitaGL keeps its compiled shaders in <cache>/v<magic>. Upstream raised the
@@ -127,7 +150,55 @@ constexpr const char* kSeedDir = "app0:shadercache";
 #define GXV_VGL_CACHE_DIR "v3"
 #endif
 constexpr const char* kVglCacheVersionDir = GXV_VGL_CACHE_DIR;
+} // namespace (an extern "C" variable belongs at global scope: declared inside the anonymous namespace, GCC finds it ambiguous with later global declarations)
 extern "C" char vgl_shader_cache_path[256] __attribute__((weak)); // (vitaGL vgl.c, set in vglInit*)
+namespace {
+// A file name in vitaGL's private shader cache: <root>/{v,f}/<HH>/<hash>.gxp, spelled exactly as vitaGL spells it
+// (source/custom_shaders.c: "%s/%s/%02X/%llX.gxp", the hash in upper-case hex without leading zeros, <HH> its top byte).
+// Returns the length of `root` when `path` is such a name under it (kind 'v' or 'f', bucket = HH), else 0. Nothing is read or
+// written: shared by the write preparation and the read-only seed lookup below.
+int CacheHex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+size_t CacheFileUnder(const char* root, const char* path, char* kind, unsigned* bucketOut) {
+    if (!root || !root[0] || !path) return 0;
+    const size_t rootSize = strnlen(root, 256);
+    const size_t pathSize = strnlen(path, 320);
+    if (rootSize == 256 || pathSize < rootSize + 11 || pathSize > rootSize + 26 || std::strncmp(path, root, rootSize) != 0) return 0;
+    const char* suffix = path + rootSize;
+    if (suffix[0] != '/' || (suffix[1] != 'v' && suffix[1] != 'f') || suffix[2] != '/' || suffix[5] != '/') return 0;
+    const int hi = CacheHex(suffix[3]), lo = CacheHex(suffix[4]);
+    if (hi < 0 || lo < 0) return 0;
+    const unsigned bucket = static_cast<unsigned>((hi << 4) | lo);
+    const size_t digits = pathSize - rootSize - 10;
+    if (std::memcmp(suffix + 6 + digits, ".gxp", 4) != 0) return 0;
+    uint64_t hash = 0;
+    for (size_t i = 0; i < digits; ++i) {
+        const int digit = CacheHex(suffix[6 + i]);
+        if (digit < 0) return 0;
+        hash = (hash << 4) | static_cast<unsigned>(digit);
+    }
+    if (static_cast<unsigned>(hash >> 56) != bucket) return 0;
+    if (kind) *kind = suffix[1];
+    if (bucketOut) *bucketOut = bucket;
+    return rootSize;
+}
+
+// ---- the package's compiled shaders as a read-only second level of vitaGL's cache
+// vitaGL looks a shader up with sceIoOpen(<cache>/{v,f}/<HH>/<hash>.gxp, SCE_O_RDONLY, 0777) when it is compiled or linked (never per
+// draw), and writes a new compile into the same writable <cache> on the card. The game is linked with --wrap=sceIoOpen
+// (vita/vgx-game/coldtrace_wrap.cpp): when such a lookup fails, vgxvita_openShaderCacheFallback_v1 opens the same name under the
+// package's seed (app0:shadercache/<key>/v<n>) instead, read-only. So the card's own compiles win (a program the card compiled again,
+// e.g. because the packaged file was refused, replaces the seed's for good), the seed answers everything else, and nothing has to be
+// copied on the first start (a copy of ~2,100 files into ~470 new folders took ~100 s on a memory card). The cost is one failed open
+// on the card per program that comes from the seed, at its compile/link only.
+// g_seedFallback is set once by SeedShaderCache on the game thread before vitaGL's thread is created; g_seedFallbackOn is cleared
+// (on the GL thread) when the compiler self-test fails with no file of the card's own to blame (RemoveSelfTestCacheFiles).
+char g_seedFallback[200] = "";
+std::atomic<bool> g_seedFallbackOn{false};
+std::atomic<unsigned> g_seedFallbackHits{0}, g_seedFallbackMisses{0};
 // Decoded guest textures the renderer keeps (RGBA8 bytes). Galaxy's castle frame references
 // ~6.5 MiB of distinct images (desktop statistics); a budget of 32 MiB keeps the whole working
 // set of a scene plus its neighbours and is what the Strikers port ran with.
@@ -136,6 +207,13 @@ constexpr uint64_t kTextureBudget = 32ull * 1024 * 1024;
 // render thread is on core 1 and the guest threads keep core 0.
 constexpr int kGcPriority = 0x10000100;
 constexpr int kCoreGame = 0x10000, kCoreRender = 0x20000, kCoreAux = 0x40000; // SCE_KERNEL_CPU_MASK_USER_0/1/2
+// GXV_GC_CORE=1|2 (read once; default 1 in 1.3): vitaGL's collector next to the render thread rather than on core 2, where the
+// front end's player decodes the stream: the player is the stage nearest its limit (~28-34 ms of CPU a picture at the
+// Observatory, the whole of a 30 FPS budget), the render thread has room (~15 ms). 2: as in 1.2.
+int GcCoreMask() {
+    static const int mask = vgx::EnvInt("GXV_GC_CORE", 1) == 2 ? kCoreAux : kCoreRender;
+    return mask;
+}
 
 bool g_scissorOn = false;
 void ParkScissor();
@@ -152,9 +230,52 @@ bool g_presentAllowed = true, g_jobSwapped = false, g_wasSplash = true, g_fixedJ
 GLboolean g_settingsSceneResume = GL_FALSE;
 std::atomic<unsigned long long> g_gameSwaps{0};
 std::atomic<unsigned> g_presentSlotEpoch{0};
+// GXV_PRESENT_SYNC (frame_pace.h PresentSync, SyncDisplay below): the stamp of the job the render thread is executing (vgx_galaxy.cpp
+// ExecuteJob; 0 none, else 1 << 31 | its turn's vblank), and the stamps of the swaps the display queue has not called back for yet,
+// in swap order: every vglSwapBuffers of this file notes one (NoteSwap, the game's pictures their stamp, the loading screen and the
+// progress bar none), and the display callback takes one per call, so each picture meets its own. One producer (the render thread),
+// one consumer (the display queue's thread). The queue holds at most two pictures (three display buffers): eight is never full.
+uint32_t g_presentStamp = 0;
+bool g_syncOn = false;  // (set once, before the first swap, when SyncDisplay is the display callback)
+struct StampRing {
+    static constexpr unsigned kSize = 8;
+    std::atomic<unsigned> w{0}, r{0};
+    uint32_t v[kSize] = {};
+    void Push(uint32_t stamp) {
+        const unsigned wi = w.load(std::memory_order_relaxed);
+        if (wi - r.load(std::memory_order_acquire) >= kSize) return;  // (cannot happen; a lost stamp only costs that picture its slot)
+        v[wi % kSize] = stamp;
+        w.store(wi + 1, std::memory_order_release);
+    }
+    unsigned Size() const { return w.load(std::memory_order_acquire) - r.load(std::memory_order_relaxed); }  // (consumer side)
+    bool Pop(uint32_t& stamp) {
+        const unsigned ri = r.load(std::memory_order_relaxed);
+        if (ri == w.load(std::memory_order_acquire)) return false;
+        stamp = v[ri % kSize];
+        r.store(ri + 1, std::memory_order_release);
+        return true;
+    }
+} g_stampRing;
+inline void NoteSwap(uint32_t stamp) {
+    if (g_syncOn) g_stampRing.Push(stamp);
+}
 
 uint64_t NowUs() { return sceKernelGetProcessTimeWide(); }
 unsigned NowMs() { return static_cast<unsigned>(NowUs() / 1000u); }
+
+// GXV_WAITLOG=1 (default 0): where the render thread blocks, per 5 s window ("waits:" line next to "pace:"): the display swap (the
+// scene end and the wait for a free display buffer) and the hidden frame's GPU finish.
+struct WaitCensus {
+    std::atomic<uint64_t> n{0}, totalUs{0}, maxUs{0};
+    void Add(uint64_t us) {
+        n.fetch_add(1, std::memory_order_relaxed);
+        totalUs.fetch_add(us, std::memory_order_relaxed);
+        uint64_t seen = maxUs.load(std::memory_order_relaxed);
+        while (us > seen && !maxUs.compare_exchange_weak(seen, us, std::memory_order_relaxed)) {}
+    }
+};
+WaitCensus g_swapWait, g_hiddenFinishWait;
+bool WaitLogOn() { static const bool on = vgx::EnvInt("GXV_WAITLOG", 0) != 0; return on; }
 
 bool Exists(const char* path) {
     SceIoStat st;
@@ -189,11 +310,34 @@ void EnvLong(const char* name, long& value, long lo, long hi) {
     if (value > hi) value = hi;
 }
 
+// The basic log (ux0:data/smg/log.txt) in every build; port_log only reaches it in a diagnostic build.
+#define GXV_BASIC_LOG(...) do { if (port_log_summary) port_log_summary(__VA_ARGS__); else port_log(__VA_ARGS__); } while (0)
+
+// A whole number of seconds from the environment, `fallback` when unset; 0 is a value (the limit is off).
+long ReadSeconds(const char* name, long fallback) {
+    long value = fallback;
+    EnvLong(name, value, 0, 86400);
+    return value;
+}
+
+// What a status call and a read-only open say about a file (the shader compiler module is loaded by the system from there).
+vgx::bootwatch::FileProbe ProbeFile(const char* path) {
+    vgx::bootwatch::FileProbe probe;
+    SceIoStat st;
+    std::memset(&st, 0, sizeof(st));
+    probe.stat = sceIoGetstat(path, &st);
+    const SceUID f = sceIoOpen(path, SCE_O_RDONLY, 0);
+    probe.open = f;
+    if (f >= 0) sceIoClose(f);
+    return probe;
+}
+
 // ---- shader-compiler self-test: a trivial GLSL pair through GLSL -> Cg -> libshacccg -> link.
 // If this fails nothing the renderer generates can work, and the reason is in the returned text.
+const char* const kSelfTestVs = "attribute vec4 a_pos;\nvarying vec2 v_uv;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n";
+const char* const kSelfTestFs = "precision mediump float;\nvarying vec2 v_uv;\nuniform vec4 u_add;\nvoid main() { gl_FragColor = vec4(v_uv, 0.0, 1.0) + u_add; }\n";
 bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
-    static const char* vs = "attribute vec4 a_pos;\nvarying vec2 v_uv;\nvoid main() { v_uv = a_pos.xy; gl_Position = a_pos; }\n";
-    static const char* fs = "precision mediump float;\nvarying vec2 v_uv;\nuniform vec4 u_add;\nvoid main() { gl_FragColor = vec4(v_uv, 0.0, 1.0) + u_add; }\n";
+    const char* const sources[2] = {kSelfTestVs, kSelfTestFs};
     const uint64_t t0 = NowUs();
     char log[1024] = "";
     GLuint shaders[2] = {0, 0};
@@ -201,14 +345,17 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
         // (through the host's entry points, like the back end's shaders: they make the cache's
         // bucket folder for this text if it is not there yet, see vgxvita_glShaderSource)
         shaders[i] = vgxvita_glCreateShader(i == 0 ? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER);
-        const char* text = i == 0 ? vs : fs;
+        const char* text = sources[i];
         vgxvita_glShaderSource(shaders[i], 1, &text, nullptr);
         glCompileShader(shaders[i]);
         GLint ok = 0;
         glGetShaderiv(shaders[i], GL_COMPILE_STATUS, &ok);
         if (!ok) {
+            const unsigned glError = static_cast<unsigned>(glGetError());
             glGetShaderInfoLog(shaders[i], sizeof(log), nullptr, log);
-            std::snprintf(error, errorSize, "the %s test shader did not compile:\n%s", i == 0 ? "vertex" : "fragment", log);
+            std::snprintf(error, errorSize, "the %s test shader did not compile (GL error 0x%X, compiler %s):\n%s", i == 0 ? "vertex" : "fragment", glError,
+                          (&is_shark_online != nullptr && is_shark_online) ? "loaded" : "not loaded", log);
+            for (int j = 0; j <= i; ++j) glDeleteShader(shaders[j]);
             return false;
         }
     }
@@ -220,8 +367,12 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
     GLint linked = 0;
     glGetProgramiv(program, GL_LINK_STATUS, &linked);
     if (!linked) {
+        const unsigned glError = static_cast<unsigned>(glGetError());
         glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-        std::snprintf(error, errorSize, "the test program did not link:\n%s", log);
+        std::snprintf(error, errorSize, "the test program did not link (GL error 0x%X):\n%s", glError, log);
+        glDeleteProgram(program);
+        glDeleteShader(shaders[0]);
+        glDeleteShader(shaders[1]);
         return false;
     }
     port_log("[vgx-vita] shader compiler self-test passed in %u ms (u_add at location %d)", static_cast<unsigned>((NowUs() - t0) / 1000u),
@@ -232,8 +383,28 @@ bool ShaderCompilerSelfTest(char* error, size_t errorSize) {
     return true;
 }
 
-void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
+// A cached compiled form of a self-test shader that vitaGL cannot use (a file from another library version, cut short by a full
+// card) fails the test with nothing wrong in the compiler. The two test shaders' cache files are removed so that the retry compiles
+// them afresh; returns how many files were removed. When the card had none of them, the files the test read can only have come from
+// the package's seed (read in place, it cannot be removed): the seed is then not used for the rest of this session.
+unsigned RemoveSelfTestCacheFiles() {
+    if (&vgl_shader_cache_path[0] == nullptr || !vgl_shader_cache_path[0]) return 0;
+    unsigned removed = 0;
+    for (int i = 0; i < 2; ++i) {
+        const char* text = i == 0 ? kSelfTestVs : kSelfTestFs;
+        char path[320];
+        if (!vgx::bootwatch::ShaderCachePath(path, sizeof(path), vgl_shader_cache_path, i == 1, XXH3_64bits(text, std::strlen(text)))) continue;
+        const int r = sceIoRemove(path);
+        GXV_BASIC_LOG("[vgx-vita] self-test shader cache file %s: %s", path, r >= 0 ? "removed" : (static_cast<uint32_t>(r) == 0x80010002u ? "not there" : "could not be removed"));
+        if (r >= 0) ++removed;
+    }
+    if (removed == 0 && g_seedFallbackOn.exchange(false)) GXV_BASIC_LOG("[vgx-vita] the package's compiled shaders (%s) are not used for the rest of this start", g_seedFallback);
+    return removed;
+}
+
+bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h);
 void PaceDisplay(void*);
+void SyncDisplay(void*);
 
 // =============================================================================================
 // The loading screen (loading_screen.h draws it). This part knows what the start-up is doing.
@@ -293,6 +464,7 @@ uint64_t g_freeBlockAtUs = 0;
 uint64_t g_lastPresentUs = 0;              // render thread only
 unsigned g_frames = 0;                     // ticker only, for the closing line
 uint64_t g_renderUsSum = 0, g_renderUsWorst = 0;
+std::atomic<uint64_t> g_contentTick{0};    // what the renderer has been given so far (written by the render thread; moves while the game loads)
 
 inline bool Active() { return g_phase.load(std::memory_order_acquire) == kGl; }
 
@@ -369,8 +541,9 @@ void TaskProgress(const char* label, int done, int total, bool counts = true) {
     g_stagePermille.store(static_cast<int>(static_cast<int64_t>(done) * 1000 / total));
 }
 bool g_heldForShaders = false;
+uint64_t g_holdSinceUs = 0;  // when a GXV_WARM_HOLD hold began
 bool g_warmAfterTitle = false;  // the warm-up's slices have not begun: they wait for the title
-void NoteTitleVisible(const char* how) {
+void NoteTitleVisible(const char* how, bool genuineTitle = false) {
     if (g_phase.load() == kOff || g_failed.load() || g_titleSeen.load()) return;
     // The shader warm-up goes on behind the loading of the game (SetShaderWarmupDeferred); the screen stays up until it is done.
     const unsigned left = vgx::backend::WarmPending(), all = vgx::backend::WarmTotal();
@@ -379,9 +552,24 @@ void NoteTitleVisible(const char* how) {
     // the warm-up goes on behind it at GXV_WARM_TITLE_MS (default 10) ms a frame; GXV_WARM_HOLD=1 holds the screen as before.
     static const bool hold = std::getenv("GXV_WARM_HOLD") && std::getenv("GXV_WARM_HOLD")[0] == '1';
     if (left > 0 && all > 0) {
-        if (hold) {
-            if (!g_heldForShaders) port_log("[vgx-vita] t=%u ms the title is up, but the shader warm-up has %u of %u units left: the loading screen waits for it", NowMs(), left, all);
+        const bool capacityYield = genuineTitle && vgx::backend::WarmCapacityYielded();
+        bool held = hold && !capacityYield;
+        if (hold && capacityYield)
+            GXV_BASIC_LOG("[vgx-vita] title warm hold released for native program capacity with %u of %u units still pending", left, all);
+        if (held) {
+            // GXV_WARM_HOLD_MAX_SEC (default 90, 0 = no limit): a hold ends after that long, whatever the warm-up says, so that a
+            // warm-up that never finishes cannot keep the screen up for good (the hold itself is off unless GXV_WARM_HOLD=1).
+            static const long holdLimit = ReadSeconds("GXV_WARM_HOLD_MAX_SEC", 90);
+            if (!g_heldForShaders) {
+                g_holdSinceUs = NowUs();
+                port_log("[vgx-vita] t=%u ms the title is up, but the shader warm-up has %u of %u units left: the loading screen waits for it", NowMs(), left, all);
+            } else if (vgx::bootwatch::HoldExpired(g_holdSinceUs, NowUs(), static_cast<double>(holdLimit))) {
+                held = false;
+                GXV_BASIC_LOG("loading: the shader warm-up hold ended after %ld s with %u of %u units left (GXV_WARM_HOLD_MAX_SEC)", holdLimit, left, all);
+            }
             g_heldForShaders = true;
+        }
+        if (held) {
             TaskProgress("Preparing shaders", static_cast<int>(all - left), static_cast<int>(all), false);
             return;
         }
@@ -440,13 +628,40 @@ int TickerMain(SceSize, void*) {
     loading::Init();
     const uint64_t t0 = NowUs();
     float progress = 0.0f, progressAtTitle = 0.0f;
-    char caption[128], footer[200];
+    char caption[128], footer[100], footer2[100];
     int loggedStage = -1;
-    bool loggedStall = false, loggedTitle = false;
+    bool loggedStall = false, loggedTitle = false, loggedTitleFallback = false;
+    // Sign of life: GXV_BOOT_STALL_SEC (default 60, 0 = off): this long without any change of the start-up's counters, of what the
+    // renderer has been given and of the bytes read from the card, and the screen says so (it goes away if the start-up goes on).
+    static const long stallLimit = ReadSeconds("GXV_BOOT_STALL_SEC", 60);
+    // GXV_BOOT_TITLE_FALLBACK=<s> (default 0 = off): this long in the last stage with the game thread running pictures, and the
+    // title is taken as seen without its logo (the screen fades out; the game's own picture, whatever it shows, is then visible).
+    static const long titleFallback = ReadSeconds("GXV_BOOT_TITLE_FALLBACK", 0);
+    vgx::bootwatch::StallWatch watch(static_cast<double>(stallLimit));
+    unsigned long long framesSample = 0;
+    uint64_t framesSampleUs = t0;
+    double advancingSeconds = 0.0;
+    char audioProblem[48] = "";  // the title audio file's check, made once per stall (it opens the file)
     for (;;) {
         const uint64_t f0 = NowUs();
         if (g_phase.load() == kDone) break;
-        if (!g_titleSeen.load() && port_boot_title_is_visible()) NoteTitleVisible("title logo");
+        if (!g_titleSeen.load() && port_boot_title_is_visible()) NoteTitleVisible("title logo", true);
+        // The game thread's pictures per second, sampled about once a second: part of the stall text and of the opt-in fallback.
+        if (f0 - framesSampleUs >= 1000000u) {
+            const unsigned long long frames = port_game_frames();
+            const double dt = (f0 - framesSampleUs) / 1e6;
+            advancingSeconds = vgx::bootwatch::FramesAdvancing(framesSample, frames, dt, 20.0) ? advancingSeconds + dt : 0.0;
+            framesSample = frames;
+            framesSampleUs = f0;
+        }
+        if (!g_titleSeen.load() && !g_failed.load() && g_stage.load() == kTitle &&
+            vgx::bootwatch::TitleFallbackDue(static_cast<double>(titleFallback), (f0 - g_stageStartUs.load()) / 1e6, advancingSeconds, false)) {
+            if (!loggedTitleFallback && port_log_summary) {
+                loggedTitleFallback = true;
+                port_log_summary("loading: no title logo after %.0f s of running pictures (GXV_BOOT_TITLE_FALLBACK): the screen is taken down", (f0 - g_stageStartUs.load()) / 1e6);
+            }
+            NoteTitleVisible("fallback after running pictures without the title logo");
+        }
         // The basic log (log.txt) gets the loading milestones, so that a start that never reaches the title can be read.
         if (port_log_summary) {
             const int now = g_stage.load();
@@ -464,8 +679,10 @@ int TickerMain(SceSize, void*) {
         st.tip = static_cast<int>((f0 - t0) / 4500000u);
         if (g_failed.load()) {
             st.caption = "The game could not start";
-            std::snprintf(footer, sizeof(footer), "%.150s", g_failText);
+            // (two lines of about 90 characters: a longer text used to be cut off at the end of the first)
+            vgx::bootwatch::WrapTwoLines(g_failText, footer, sizeof(footer), footer2, sizeof(footer2));
             st.footer = footer;
+            if (footer2[0]) st.footer2 = footer2;
             st.alert = true;
             progress = Progress(f0, progress);
         } else if (g_taskTotal.load() > 0) {
@@ -488,11 +705,48 @@ int TickerMain(SceSize, void*) {
             // A stage that has gone on for far longer than it ever takes: say so, and say what to check.
             const double inStage = (f0 - g_stageStartUs.load()) / 1e6;
             if (!g_titleSeen.load() && inStage > 90.0 && stage != kUnpack) {
-                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game, then see Known Issues on the project page.";
+                st.footer = "Taking longer than usual. Check that the game files are in ux0:data/smg/game.";
+                st.footer2 = "See Known Issues on the project page.";
                 if (!loggedStall && port_log_summary) {
                     loggedStall = true;
                     port_log_summary("loading: still in \"%s\" after %.0f s without reaching the title (see KNOWN-ISSUES.md)", kCaption[stage], inStage);
                 }
+            }
+        }
+        if (!g_failed.load() && !g_titleSeen.load()) {
+            const uint64_t sign[7] = {static_cast<uint64_t>(stage), static_cast<uint64_t>(g_stagePermille.load() + 1), static_cast<uint64_t>(g_unpackDone.load()),
+                                      static_cast<uint64_t>(g_taskDone.load()), static_cast<uint64_t>(vgx::backend::WarmPending()), g_contentTick.load(),
+                                      port_dvd_bytes_read ? port_dvd_bytes_read() : 0u};
+            const vgx::bootwatch::StallWatch::Result quiet = watch.Update(f0, sign, 7);
+            if (quiet.stalled) {
+                char problem[200] = "";
+                const bool diskFailure = port_dvd_first_failure && port_dvd_first_failure(problem, sizeof(problem));
+                if (quiet.becameStalled) std::snprintf(audioProblem, sizeof(audioProblem), "%s", port_boot_title_audio_problem ? port_boot_title_audio_problem() : "");
+                const char* audio = audioProblem;
+                if (quiet.becameStalled && port_log_summary)
+                    port_log_summary("loading: no sign of life for %.0f s in \"%s\": game pictures %llu (%s), disc bytes read %llu, failed disc operations %u, first failure: %s, "
+                                     "title audio file: %s, shader warm-up units left %u; the screen says so and goes on waiting",
+                                     quiet.quietSeconds, kCaption[stage], static_cast<unsigned long long>(port_game_frames()), advancingSeconds >= 5.0 ? "still running" : "not running",
+                                     static_cast<unsigned long long>(port_dvd_bytes_read ? port_dvd_bytes_read() : 0u), port_dvd_failures ? port_dvd_failures() : 0u,
+                                     diskFailure ? problem : "none", audio && *audio ? audio : "no problem found", vgx::backend::WarmPending());
+                if (advancingSeconds >= 5.0)
+                    std::snprintf(footer, sizeof(footer), "The game is running but has not shown its title for %.0f s.", quiet.quietSeconds);
+                else
+                    std::snprintf(footer, sizeof(footer), "Nothing has loaded for %.0f s.", quiet.quietSeconds);
+                if (diskFailure) {
+                    char tail[100];
+                    vgx::bootwatch::PathTail(tail, sizeof(tail), problem, 84);
+                    std::snprintf(footer2, sizeof(footer2), "File problem: %.84s", tail);
+                } else if (audio && *audio) {
+                    std::snprintf(footer2, sizeof(footer2), "Title audio file (SMG_title_strm.ast): %.40s. Restore the game files.", audio);
+                } else {
+                    std::snprintf(footer2, sizeof(footer2), "Close the game and start it again. If this repeats, send log.txt.");
+                }
+                st.footer = footer;
+                st.footer2 = footer2;
+                st.alert = true;
+            } else if (quiet.resumed && port_log_summary) {
+                port_log_summary("loading: the start-up went on after a pause (\"%s\")", kCaption[stage]);
             }
         }
         if (g_titleSeen.load() && !g_failed.load()) {
@@ -552,6 +806,7 @@ bool PresentFrame(bool force) {
     const uint64_t b = NowUs();
     if (!vgx::backend::DrawPicture()) return false;
     const uint64_t c = NowUs();
+    NoteSwap(0);
     vglSwapBuffers(GL_FALSE);
     const uint64_t d = NowUs();
     g_upUs += b - a;
@@ -588,6 +843,10 @@ void Finish() {
              NowMs(), g_frames, g_frames ? g_renderUsSum / 1000.0 / g_frames : 0.0, g_renderUsWorst / 1000.0, static_cast<unsigned>(g_durUs[kStart] / 1000u),
              static_cast<unsigned>(g_durUs[kUnpack] / 1000u), static_cast<unsigned>(g_durUs[kGraphics] / 1000u), static_cast<unsigned>(g_durUs[kGame] / 1000u),
              static_cast<unsigned>(g_durUs[kShaders] / 1000u), static_cast<unsigned>(g_durUs[kTitle] / 1000u));
+    if (g_seedFallback[0])
+        GXV_BASIC_LOG("[vgx-vita] compiled shaders read from the package in place so far: %u (%u looked for there and not found)%s",
+                 g_seedFallbackHits.load(std::memory_order_relaxed), g_seedFallbackMisses.load(std::memory_order_relaxed),
+                 g_seedFallbackOn.load(std::memory_order_relaxed) ? "" : "; switched off after the compiler self-test");
 }
 
 bool HandleDialog() {
@@ -617,6 +876,15 @@ void Service(uint64_t minGapUs = 0) {
     if (HandleDialog()) return;
     if (!Active()) return;
     const uint64_t now = NowUs();
+    // The title appeared but the screen has not faded out and gone (a picture that could not be shown, a swap that never came):
+    // end it after GXV_BOOT_FINISH_SEC (default 5, 0 = never) so that the game underneath is not hidden for good.
+    static const long finishLimit = ReadSeconds("GXV_BOOT_FINISH_SEC", 5);
+    if (!g_failed.load() && g_titleSeen.load() && vgx::bootwatch::ForceFinishDue(g_titleSeenUs.load(), now, static_cast<double>(finishLimit))) {
+        GXV_BASIC_LOG("loading: the screen did not fade out within %ld s of the title (faded %d, pictures shown dark %d): ending it now", finishLimit,
+                      g_faded.load() ? 1 : 0, g_blackPresents);
+        Finish();
+        return;
+    }
     if (minGapUs && now - g_lastPresentUs < minGapUs) return;
     const bool shown = PresentFrame(false);
     if (shown) g_lastPresentUs = now;
@@ -663,24 +931,120 @@ void PrepareShaderPack(const char* folder) {
     port_vgx_shader_cache_reader_driver_v1();
     long enabled = 0;
     EnvLong("GXV_SHADERPACK", enabled, 0, 1);
-    if (!enabled) return;
+    if (!enabled) {
+        port_log_summary("[vgx-vita] shader RAM pack: enabled=0 loaded=0 records=0 bytes=0 fallback=disabled");
+        return;
+    }
     char root[256], pack[256];
     const int r = std::snprintf(root, sizeof root, "%s/%s", folder, kVglCacheVersionDir);
     const int p = std::snprintf(pack, sizeof pack, "%s/stages.pack", folder);
-    if (r < 0 || p < 0 || r >= static_cast<int>(sizeof root) || p >= static_cast<int>(sizeof pack)) return;
+    if (r < 0 || p < 0 || r >= static_cast<int>(sizeof root) || p >= static_cast<int>(sizeof pack)) {
+        port_log_summary("[vgx-vita] shader RAM pack: enabled=1 loaded=0 records=0 bytes=0 fallback=path-too-long");
+        return;
+    }
     const uint64_t start = (PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) ? NowUs() : 0;
     const bool loaded = g_shaderPack.LoadFile(pack, root, ShaderPackAbi());
-    port_log("[vgx-vita] shader RAM pack: %s, %u records, %u bytes, %u ms preload, ABI %016llx (ordinary files remain fallback)",
-        loaded ? "loaded" : "unavailable", static_cast<unsigned>(g_shaderPack.Entries()), static_cast<unsigned>(g_shaderPack.Bytes()),
+    port_log_summary("[vgx-vita] shader RAM pack: enabled=1 loaded=%u records=%u bytes=%u preload_ms=%u ABI=%016llx fallback=%s",
+        static_cast<unsigned>(loaded), static_cast<unsigned>(g_shaderPack.Entries()), static_cast<unsigned>(g_shaderPack.Bytes()),
         static_cast<unsigned>((PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) ? (NowUs() - start) / 1000u : 0),
-        static_cast<unsigned long long>(ShaderPackAbi()));
+        static_cast<unsigned long long>(ShaderPackAbi()), loaded ? "loose-on-miss-or-rejection" : "unavailable-or-invalid");
 }
 #endif
 
 // The back end's progress hook: a bar has been drawn into the display's back buffer in the
 // middle of a frame while shaders compile; show it.
+//
+// In play (the loading screen is gone, or never was) the same screen is shown in the loading screen's look: the player's title
+// picture, the same bar, the caption "Preparing graphics". The background is read once into loading::detail::g_bg (host heap, malloc)
+// and one finished frame is kept in g_playFrame (host heap); an update restores and redraws only the bar's rows, then the whole
+// picture goes through SetPicture/DrawPicture like the loading screen's. All of it runs on the render thread (this hook, and the
+// present hook below), so there is no lock. GXV_PROGRESS_BRANDED=0 gives the back end's plain bar back.
+namespace playprogress {
+uint32_t* g_frame = nullptr;
+bool g_failed = false;         // the buffers could not be made: the plain bar stays
+bool g_lit = false;            // a branded picture is on the display and no game picture has replaced it yet
+uint64_t g_firstUs = 0, g_lastUs = 0;  // first and latest picture of this appearance
+uint32_t g_done = 0, g_total = 0;
+
+bool Enabled() {
+    static const bool on = [] { long v = 1; EnvLong("GXV_PROGRESS_BRANDED", v, 0, 1); return v != 0; }();
+    return on && !g_failed;
+}
+bool Ready() {
+    if (g_frame) return true;
+    if (!loading::Init()) { g_failed = true; return false; }
+    g_frame = static_cast<uint32_t*>(std::malloc(static_cast<size_t>(loading::W) * loading::H * 4));
+    if (!g_frame) { g_failed = true; return false; }
+    loading::Render(g_frame, 0.0, loading::State());  // (a complete first frame; later updates redraw the band only)
+    return true;
+}
+// fade: 0 = full picture, towards 1 = black. A fade needs a full render (it touches every pixel); the rest redraw the band.
+void Draw(uint32_t done, uint32_t total, float fade) {
+    loading::State st;
+    st.progress = total ? static_cast<float>(done < total ? done : total) / static_cast<float>(total) : 0.0f;
+    st.caption = "Preparing graphics";
+    st.titleReady = true;  // (no boot-time clamp at 99%)
+    st.fade = fade;
+    if (fade > 0.0f) loading::Render(g_frame, 0.0, st); else loading::RenderBand(g_frame, st);
+    if (!vgx::backend::SetPicture(g_frame, loading::W, loading::H) || !vgx::backend::DrawPicture()) return;
+    NoteSwap(0);
+    vglSwapBuffers(GL_FALSE);
+    g_lastUs = NowUs();
+    g_lit = true;
+}
+bool Allowed() {
+    const int phase = splash::g_phase.load();
+    return (phase == splash::kOff || phase == splash::kDone) && Enabled();
+}
+void Show(uint32_t done, uint32_t total) {
+    g_done = done;
+    g_total = total;
+    const uint64_t now = NowUs();
+    if (!g_lit) {
+        // First picture of an appearance: fade up from black in three steps (about 100 ms), so it does not snap in.
+        g_firstUs = now;
+        Draw(done, total, 0.75f);
+        sceKernelDelayThread(25000u);
+        Draw(done, total, 0.5f);
+        sceKernelDelayThread(25000u);
+        Draw(done, total, 0.25f);
+        sceKernelDelayThread(25000u);
+        Draw(done, total, 0.0f);
+        port_log("[vgx-vita] in-play shader progress: branded screen up (%u of %u units)", done, total);
+        return;
+    }
+    // (a picture costs the render thread a 2 MiB texture copy; the compiles are its work: not more than 8 a second)
+    if (now - g_lastUs < 120000u) return;
+    Draw(done, total, 0.0f);
+}
+// Called first thing in every game present. If a branded picture is still up, the game's picture is held back until the screen has
+// been readable for a while (at least 900 ms in all, 400 ms at the finished bar), then it fades out in four steps. Without this the
+// screen would be up for the time of the last compile only, which can be a few frames: a flash.
+void Leave() {
+    if (!g_lit) return;
+    const uint64_t now = NowUs();
+    if (g_total) Draw(g_total, g_total, 0.0f);  // (the work is done: show the full bar)
+    const uint64_t until1 = g_firstUs + 900000u, until2 = g_lastUs + 400000u;
+    const uint64_t until = until1 > until2 ? until1 : until2;
+    if (until > now && until - now < 2000000u) sceKernelDelayThread(static_cast<SceUInt>(until - now));
+    for (int i = 1; i <= 4; ++i) {
+        Draw(g_total, g_total, 0.25f * static_cast<float>(i));
+        sceKernelDelayThread(20000u);
+    }
+    g_lit = false;
+}
+}  // namespace playprogress
+
 void ShowProgressBar(uint32_t done, uint32_t total) {
     if (splash::HandleDialog()) return;
+    if (playprogress::Allowed()) {
+        // (the back end skips its own plain bar from the next call on; this call's plain bar is covered by the picture)
+        vgx::backend::SetProgressHostDraws(playprogress::Ready());
+        if (playprogress::Ready()) {
+            playprogress::Show(done, total);
+            return;
+        }
+    }
     static uint32_t shown = 0;
     if (shown++ == 0) port_log("[vgx-vita] shaders are being compiled: progress bar on screen (%u of %u units)", done, total);
     if (splash::Active()) {  // (the loading screen shows the warm-up as one of its stages)
@@ -689,12 +1053,14 @@ void ShowProgressBar(uint32_t done, uint32_t total) {
         splash::Service(80000u);
         return;
     }
+    NoteSwap(0);
     vglSwapBuffers(GL_FALSE);
 }
 
 // ---- a shader cache that came with the package (app0:shadercache/<key>/v<n>/{v,f}/<HH>/<hash>.gxp
-// and vgx_shaderlist.bin), copied once into the writable cache folder. The seed is only found by
-// a package whose <key> (above) is the same.
+// and vgx_shaderlist.bin). The seed is only found by a package whose <key> (above) is the same. By default it is read in place as the
+// second level of vitaGL's cache (g_seedFallback above) and only the warm-up list is copied; GXV_VITA_SEED=copy copies the compiled
+// shaders once into the writable cache folder instead (what every package before 1.2 did: ~100 s on the first start of 1.2).
 constexpr unsigned kSeedMaxFiles = 4096;
 constexpr size_t kSeedMaxListBytes = 4u * 1024u * 1024u;
 constexpr uint32_t kIoNotFound = 0x80010002u;
@@ -824,12 +1190,15 @@ unsigned CountTree(const char* from, int depth) {
     sceIoDclose(dir);
     return n;
 }
-// <cache>/v2/v/00 (and f/00): with the first of them present vitaGL does not create its 512
-// bucket folders at start-up; a missing bucket is made only when vitaGL writes a cache miss.
+// <cache>/v<n>, its stage folders v and f, and for vitaGL's v1/v2 layout also v/00 and f/00: with the first of them present those
+// versions did not create their 512 bucket folders at start-up. vitaGL v3 never does (it makes a bucket when it writes a miss into it,
+// and v, f only together with a new v3), so v/00 and f/00 are left out there: two folder creations fewer on the first start.
 void MakeFirstBuckets(const char* folder, SeedCopyStats& st) {
     static const char* const kParts[] = {"", "/v", "/v/00", "/f", "/f/00"};
+    const bool legacyLayout = std::strcmp(kVglCacheVersionDir, "v1") == 0 || std::strcmp(kVglCacheVersionDir, "v2") == 0;
     const uint64_t t0 = NowUs();
     for (const char* part : kParts) {
+        if (!legacyLayout && std::strstr(part, "/00")) continue;
         char path[320];
         if (std::snprintf(path, sizeof(path), "%s/%s%s", folder, kVglCacheVersionDir, part) >= static_cast<int>(sizeof(path))) return;
         if (sceIoMkdir(path, 0777) >= 0) ++st.folders;
@@ -867,13 +1236,23 @@ bool PackageStamp(char* out, size_t n, uint64_t* listSize = nullptr) {
     if (listSize) *listSize = total;
     return true;
 }
+// The marker <cache>/seeded holds the package list's fingerprint (PackageStamp) once this card has taken what it needs from that
+// package: "<stamp>" after a copy of the compiled shaders (GXV_VITA_SEED=copy), "<stamp> lookup" when they are read in place. A copy
+// marker also satisfies the lookup (the card then has the files itself); a lookup marker does not satisfy the copy, so switching to
+// GXV_VITA_SEED=copy copies once. Either way a changed fingerprint means a new package: its warm-up list replaces the card's.
+constexpr const char* kSeedLookupSuffix = " lookup";
 struct SeedMarker { bool matches = false, readError = false, replaceList = false; };
-SeedMarker CheckSeedMarker(const char* marker, const char* stamp, uint64_t size) {
+SeedMarker CheckSeedMarker(const char* marker, const char* stamp, uint64_t size, bool lookup = false) {
     std::vector<uint8_t> bytes;
     const SeedRead result = ReadSeedBytes(marker, bytes, 80);
     if (result != SeedRead::Ok) return {false, result == SeedRead::Error, false};
-    const std::string text(bytes.begin(), bytes.end());
+    std::string text(bytes.begin(), bytes.end());
     if (text == stamp) return {true, false, false};
+    const size_t suffix = std::strlen(kSeedLookupSuffix);
+    if (text.size() > suffix && text.compare(text.size() - suffix, suffix, kSeedLookupSuffix) == 0) {
+        text.resize(text.size() - suffix);
+        if (text == stamp) return {lookup, false, false};
+    }
     unsigned long long oldSize = 0, digest = 0;
     int used = 0;
     const bool fingerprint = std::sscanf(text.c_str(), "list2 %llu %16llx%n", &oldSize, &digest, &used) == 2 &&
@@ -965,10 +1344,47 @@ void MigrateOldShaderCaches(const char* folder, const char* cur) {
     }
 }
 bool g_seedIsNew = false;
+bool g_seedComplete = false; // the package's compiled shaders are all there for vitaGL (copied, or read in place): SeedShaderList
 char g_seedPendingStamp[80] = {}, g_seedPendingMarker[200] = {};
+// The marker is written now, or (a new package whose warm-up list is to replace the card's) by SeedShaderList once the list is in
+// place: the old fingerprint is kept until then, so that an adoption cut short is done again at the next start.
+void CommitSeedMarker(const char* marker, const char* stamp, const char* suffix, bool replaceList) {
+    char text[sizeof g_seedPendingStamp];
+    const int n = std::snprintf(text, sizeof text, "%s%s", stamp, suffix);
+    if (n < 0 || n >= static_cast<int>(sizeof text)) return;
+    if (replaceList && !std::getenv("GXV_SHADERLIST") && !std::getenv("GXV_NO_SHADERLIST")) {
+        std::snprintf(g_seedPendingStamp, sizeof g_seedPendingStamp, "%s", text);
+        std::snprintf(g_seedPendingMarker, sizeof g_seedPendingMarker, "%s", marker);
+        g_seedIsNew = true;
+    } else {
+        const std::vector<uint8_t> bytes(text, text + n);
+        if (!WriteSeedBytes(marker, bytes)) sceIoRemove(marker);
+    }
+}
+// The package's version folder under app0:shadercache/<key>: the one of the vitaGL linked in (v3), else any v<n> (the files are the
+// same, only vitaGL's folder name changed; CopyTree renames it the same way). One stat at a normal start.
+bool SeedVersionFolder(const char* seed, char* out, size_t size) {
+    if (std::snprintf(out, size, "%s/%s", seed, kVglCacheVersionDir) < static_cast<int>(size) && Exists(out)) return true;
+    out[0] = 0;
+    const SceUID dir = sceIoDopen(seed);
+    if (dir < 0) return false;
+    SceIoDirent entry;
+    bool found = false;
+    for (;;) {
+        std::memset(&entry, 0, sizeof(entry));
+        if (sceIoDread(dir, &entry) <= 0) break;
+        const char* name = entry.d_name;
+        if (SCE_S_ISDIR(entry.d_stat.st_mode) && name[0] == 'v' && name[1] >= '0' && name[1] <= '9' && std::strspn(name + 1, "0123456789") == std::strlen(name + 1) &&
+            std::snprintf(out, size, "%s/%s", seed, name) < static_cast<int>(size)) { found = true; break; }
+    }
+    sceIoDclose(dir);
+    if (!found) out[0] = 0;
+    return found;
+}
 // Returns the folder vitaGL is to use as its cache.
 const char* SeedShaderCache(const char* folder) {
     g_seedIsNew = false;
+    g_seedComplete = false;
     g_seedPendingStamp[0] = g_seedPendingMarker[0] = 0;
     const char* key = std::strrchr(folder, '/');
     static char seed[200];
@@ -988,13 +1404,32 @@ const char* SeedShaderCache(const char* folder) {
     }
     if (const char* e = std::getenv("GXV_VITA_SEED"); e && std::strcmp(e, "app0") == 0) {
         port_log("[vgx-vita] GXV_VITA_SEED=app0: vitaGL reads the package's compiled shaders in place (%s)", seed);
+        g_seedComplete = true;
         return seed;
     }
+    const char* mode = std::getenv("GXV_VITA_SEED");
+    const bool copy = mode && std::strcmp(mode, "copy") == 0;
     char stamp[80];
     uint64_t listSize = 0;
     const bool stamped = PackageStamp(stamp, sizeof(stamp), &listSize);
-    const SeedMarker previous = stamped ? CheckSeedMarker(marker, stamp, listSize) : SeedMarker{};
-    if (previous.matches) return folder;
+    const SeedMarker previous = stamped ? CheckSeedMarker(marker, stamp, listSize, !copy) : SeedMarker{};
+    if (!copy) {
+        // Read in place, behind the card's own cache (g_seedFallback): nothing is copied. What is left to do once per package is the
+        // warm-up list (SeedShaderList) and vitaGL's top folders.
+        const bool found = SeedVersionFolder(seed, g_seedFallback, sizeof g_seedFallback);
+        g_seedFallbackOn.store(found, std::memory_order_release);
+        g_seedComplete = found;
+        if (previous.matches) return folder;
+        MakeFirstBuckets(folder, st);
+        GXV_BASIC_LOG("[vgx-vita] compiled shaders of the package %s: %s (read in place after %s; nothing copied, %u folders made)", seed,
+                 found ? "found" : "NOT FOUND (no v<n> folder), shaders are compiled on this console", folder, st.folders);
+        if (found && stamped && !previous.readError) CommitSeedMarker(marker, stamp, kSeedLookupSuffix, previous.replaceList);
+        return folder;
+    }
+    if (previous.matches) {
+        g_seedComplete = true;
+        return folder;
+    }
     const uint64_t t0 = NowUs();
     st.total = CountTree(seed, 0);
     splash::UnpackBegin(static_cast<int>(st.total));
@@ -1003,28 +1438,49 @@ const char* SeedShaderCache(const char* folder) {
     port_log("[vgx-vita] compiled shaders from the package copied to %s: %u files (%u KiB), %u already there, %u failed; %u folders; %u ms in all", folder,
              st.files - st.kept, st.bytes / 1024u, st.kept, st.failed, st.folders, static_cast<unsigned>((NowUs() - t0) / 1000u));
     if (st.failed == 0 && stamped && !previous.readError) {
-        if (previous.replaceList && !std::getenv("GXV_SHADERLIST") && !std::getenv("GXV_NO_SHADERLIST")) {
-            // Keep the old fingerprint until list adoption succeeds, including across process restarts.
-            std::snprintf(g_seedPendingStamp, sizeof g_seedPendingStamp, "%s", stamp);
-            std::snprintf(g_seedPendingMarker, sizeof g_seedPendingMarker, "%s", marker);
-            g_seedIsNew = true;
-        } else {
-            const std::vector<uint8_t> bytes(stamp, stamp + std::strlen(stamp));
-            if (!WriteSeedBytes(marker, bytes)) sceIoRemove(marker);
-        }
+        g_seedComplete = true;
+        CommitSeedMarker(marker, stamp, "", previous.replaceList);
     }
     return folder;
+}
+// A warm-up list begins with vgx_draw.cpp's ListHeader: magic, key sizes and the shader generator's version.
+constexpr size_t kListHeaderBytes = 24;
+// The bytes of the header read (fewer: a shorter file), or -1 when the file cannot be read.
+int ReadListHeader(const char* path, uint8_t (&out)[kListHeaderBytes]) {
+    const SceUID f = sceIoOpen(path, SCE_O_RDONLY, 0);
+    if (f < 0) return -1;
+    size_t got = 0;
+    bool ok = true;
+    while (got < kListHeaderBytes) {
+        const int n = sceIoRead(f, out + got, static_cast<SceSize>(kListHeaderBytes - got));
+        if (n < 0 || static_cast<size_t>(n) > kListHeaderBytes - got) { ok = false; break; }
+        if (n == 0) break;
+        got += static_cast<size_t>(n);
+    }
+    const bool closed = sceIoClose(f) == 0;
+    return ok && closed ? static_cast<int>(got) : -1;
+}
+// The card's list was written by another shader generator (or with other key sizes) than the package's: the renderer would start
+// it over empty (EnsureShaderList). A header that cannot be read keeps the card's list. (From Producdevity's fork, 9ed7f64.)
+bool ListFromOtherGenerator(const char* packaged) {
+    uint8_t card[kListHeaderBytes], package[kListHeaderBytes];
+    if (ReadListHeader(packaged, package) != static_cast<int>(kListHeaderBytes)) return false;
+    const int got = ReadListHeader(kShaderListFile, card);
+    return got >= 0 && (got < static_cast<int>(kListHeaderBytes) || std::memcmp(card, package, kListHeaderBytes) != 0);
 }
 void SeedShaderList() {
     char seed[200];
     std::snprintf(seed, sizeof(seed), "%s/vgx_shaderlist.bin", kSeedDir);
     if (const char* e = std::getenv("GXV_VITA_SEED"); e && std::strcmp(e, "off") == 0) return;
-    // The card's own list is kept unless the package is new to this card: then the package's
-    // list (made from a tour of the game) replaces it. Shaders only the card's list knew are
-    // still in the compiled-shader cache and are added to the list again when they are met.
+    // The card's own list is kept unless the package is new to this card, or the list is another generator's and the package's
+    // compiled shaders are all there: then the package's list (made from a tour of the game) replaces it. Shaders only the card's
+    // list knew are still in the compiled-shader cache and are added to the list again when they are met. (A new generator also means
+    // a new cache folder, ShaderCacheFolder: no marker there says the package is new, so the card kept a list the renderer then
+    // started over empty, and an updated console had no warm-up.)
     SceIoStat info{};
     const int status = sceIoGetstat(kShaderListFile, &info);
-    if (!g_seedIsNew && (status >= 0 || static_cast<uint32_t>(status) != kIoNotFound)) return;
+    const bool missing = status < 0 && static_cast<uint32_t>(status) == kIoNotFound;
+    if (!g_seedIsNew && !missing && (status < 0 || !g_seedComplete || !ListFromOtherGenerator(seed))) return;
     std::vector<uint8_t> packaged, old;
     bool ok = ReadSeedBytes(seed, packaged, kSeedMaxListBytes) == SeedRead::Ok && !packaged.empty();
     const SeedRead previous = ok ? ReadSeedBytes(kShaderListFile, old, kSeedMaxListBytes) : SeedRead::Error;
@@ -1051,9 +1507,16 @@ void SeedShaderList() {
 // queue next to the render thread, the collector to the auxiliary core (so neither takes time
 // from the game thread's core). Threads can appear late, so this runs again at a few presents.
 // (Vita3K does not implement sceKernelGetThreadmgrUIDClass: there the scan sees nothing.)
+//
+// GXV_CORE0_ALONE=1 (default 0): the game thread has core 0 to itself, so every other thread of the process that is allowed to run
+// there is moved to cores 1-2 as well (port::cores::SweepTarget: not the threads pinned to core 0 alone, those are the game's), and
+// the basic log says which ones and how many threads stay pinned on core 0.
 void PinLibraryThreads(bool log, bool census = false) {
     SceKernelThreadInfo info;
-    int missesInRow = 0, moved = 0, seen = 0;
+    int missesInRow = 0, moved = 0, seen = 0, sweptOff = 0, pinnedCore0 = 0;
+    port::cores::Switches layout;
+    layout.core0Alone = port_vita_core0_alone && port_vita_core0_alone() != 0;
+    static int sweepLines = 0;
     for (SceUID uid = 0x40010001; uid < 0x40020000 && missesInRow < 500; ++uid) {
         if (sceKernelGetThreadmgrUIDClass(uid) != SCE_KERNEL_TMID_Thread) { ++missesInRow; continue; }
         std::memset(&info, 0, sizeof(info));
@@ -1066,15 +1529,26 @@ void PinLibraryThreads(bool log, bool census = false) {
                              static_cast<unsigned>(info.currentPriority), static_cast<unsigned>(info.initPriority), static_cast<unsigned>(info.currentCpuAffinityMask),
                              static_cast<unsigned>(info.initCpuAffinityMask), static_cast<unsigned long long>(info.runClocks));
         int target = 0;
-        if (std::strstr(info.name, "Garbage Collector")) target = kCoreAux;
+        bool swept = false;
+        if (std::strstr(info.name, "Garbage Collector")) target = GcCoreMask();
         else if (!std::strcmp(info.name, "SceGxmDisplayQueue")) target = kCoreRender;
+        else if (layout.core0Alone) swept = (target = port::cores::SweepTarget(layout, static_cast<unsigned>(info.currentCpuAffinityMask))) != 0;
+        if (layout.core0Alone && info.currentCpuAffinityMask == static_cast<SceUInt32>(kCoreGame)) ++pinnedCore0;
         if (target && info.currentCpuAffinityMask != static_cast<SceUInt32>(target)) {
             const int res = sceKernelChangeThreadCpuAffinityMask(uid, target);
             ++moved;
+            if (swept && res >= 0) ++sweptOff;
+            if (swept && sweepLines < 24) {
+                ++sweepLines;
+                GXV_BASIC_LOG("threads: core 0 alone: \"%s\" (priority 0x%X, core mask 0x%X) moved to 0x%X: %s", info.name, static_cast<unsigned>(info.currentPriority),
+                              static_cast<unsigned>(info.currentCpuAffinityMask), static_cast<unsigned>(target), res >= 0 ? "ok" : "refused");
+            }
             port_log("[vgx-vita] thread \"%s\" (priority 0x%X) moved to core mask 0x%X: %s", info.name, static_cast<unsigned>(info.currentPriority),
                      static_cast<unsigned>(target), res >= 0 ? "ok" : "refused");
         }
     }
+    if (layout.core0Alone && (log || sweptOff))
+        GXV_BASIC_LOG("threads: core 0 alone: %d threads seen, %d moved off core 0 now, %d left pinned to core 0 alone (the game's)", seen, sweptOff, pinnedCore0);
     if (log) port_log("[vgx-vita] library threads: %d threads seen, %d moved%s", seen, moved, seen == 0 ? " (none seen: expected in the emulator)" : "");
 }
 
@@ -1164,6 +1638,9 @@ void PrepareFrontEnd() {
         vgx::SetShaderListFile(kShaderListFile);
     }
     if (!std::getenv("GXV_TEXBUDGET")) vgx::SetTextureBudget(kTextureBudget);
+    // The renderer's record of each stage's programs (GXV_STAGEWARM, vgx_backend_gl.cpp): read at its first frame, appended in quiet
+    // moments, used to link a stage's programs while it loads. env.txt may name another file; GXV_STAGEWARM=0 turns it all off.
+    setenv("GXV_STAGEWARM_FILE", kStageWarmFile, 0);
     {
         // The warm-up list's 7 s of compiling and linking used to hold up the game's first frame, and with it everything the game does
         // after it (the loading of the title above all); now they are done in slices behind it (GXV_WARM_DEFER=0: all in the first frame).
@@ -1195,13 +1672,18 @@ void PrepareFrontEnd() {
 bool StartGl(char* error, size_t errorSize) {
     // The shader compiler module is the user's own copy of a system file; all of the renderer's
     // shaders are compiled with it on first use.
-    const bool compilerA = Exists("ur0:data/libshacccg.suprx"), compilerB = Exists("ur0:data/external/libshacccg.suprx");
-    port_log("[vgx-vita] shader compiler module: ur0:data/libshacccg.suprx %s, ur0:data/external/libshacccg.suprx %s", compilerA ? "present" : "absent",
-             compilerB ? "present" : "absent");
-    if (!compilerA && !compilerB) {
-        std::snprintf(error, errorSize, "The shader compiler module (libshacccg.suprx) is missing from ur0:data/.");
+    // Both calls are made and both results logged (the basic log too): a status call that fails is not proof that the file is
+    // missing, and the codes say which of the two was refused and why. Only when neither call reaches either file is it "missing".
+    const vgx::bootwatch::FileProbe compilerA = ProbeFile("ur0:data/libshacccg.suprx"), compilerB = ProbeFile("ur0:data/external/libshacccg.suprx");
+    GXV_BASIC_LOG("[vgx-vita] shader compiler module: ur0:data/libshacccg.suprx stat 0x%08X open 0x%08X, ur0:data/external/libshacccg.suprx stat 0x%08X open 0x%08X",
+                  static_cast<unsigned>(compilerA.stat), static_cast<unsigned>(compilerA.open), static_cast<unsigned>(compilerB.stat),
+                  static_cast<unsigned>(compilerB.open));
+    if (vgx::bootwatch::CompilerMissing(compilerA, compilerB)) {
+        vgx::bootwatch::FormatCompilerMissing(error, errorSize, compilerA, compilerB);
         return false;
     }
+    if ((compilerA.stat >= 0) != (compilerA.open >= 0) || (compilerB.stat >= 0) != (compilerB.open >= 0))
+        GXV_BASIC_LOG("[vgx-vita] the status call and the open disagree about a shader compiler module: going on (the load decides)");
 
     LogMemory("before vitaGL (game arenas allocated)");
     SceKernelFreeMemorySizeInfo free;
@@ -1220,7 +1702,14 @@ bool StartGl(char* error, size_t errorSize) {
     // Video memory: what is free MINUS what sceGxm takes for itself when vitaGL initialises it
     // (16 MiB parameter buffer + 2). On a console the first run of the Strikers port died
     // because the pool request ate the parameter buffer's share. Vita3K does not limit memory.
+    // A larger parameter buffer (GXV_VITA_PARAM_KIB, below: the GPU-time test of 5 Nov for partial renders in the lit Observatory) moves the
+    // reserve with it (buffer + 2 MiB) unless GXV_VITA_CDRAM_RESERVE_MIB says otherwise.
     long cdramReserveMib = 18;
+    {
+        long pbKib = 0;
+        EnvLong("GXV_VITA_PARAM_KIB", pbKib, 0, 65536);
+        if (pbKib > 16 * 1024) cdramReserveMib = (pbKib + 1023) / 1024 + 2;
+    }
     EnvLong("GXV_VITA_CDRAM_RESERVE_MIB", cdramReserveMib, 1, 100);
     int64_t cdram = static_cast<int64_t>(free.size_cdram) - cdramReserveMib * 1024 * 1024;
     cdram &= ~static_cast<int64_t>(256 * 1024 - 1);
@@ -1261,9 +1750,54 @@ bool StartGl(char* error, size_t errorSize) {
     // each of vertex and fragment code (vitaGL's own default is 1 MiB each).
     long patcherMib = 8;
     EnvLong("GXV_VITA_PATCHER_MIB", patcherMib, 1, 16);
+    // GXV_VITA_USSE_CDRAM=1 (default 0, console A/B; from the Strikers port's 1.3 MSC_VITA_USSE_CDRAM): the code of every shader (the
+    // patcher's vertex and fragment code pools and the fragment USSE ring) in video memory, the GPU's own memory, instead of main memory:
+    // the one thing the GPU reads for every vertex and every pixel that vitaGL places in main memory by default. The code pools
+    // ((GXV_VITA_PATCHER_MIB + 1) / 2 MiB each, 4 + 4 at the default) then come out of the video memory textures and render targets
+    // use. The picture is the same. Only before vglInit (vitaGL maps the pools there).
+    {
+        long usseVram = 0;
+        EnvLong("GXV_VITA_USSE_CDRAM", usseVram, 0, 1);
+        if (usseVram && vglUseVramForUSSE) {
+            vglUseVramForUSSE(GL_TRUE);
+            port_log("[vgx-vita] GXV_VITA_USSE_CDRAM=1: shader code pools and the fragment USSE ring in video memory");
+        } else if (usseVram) {
+            port_log("[vgx-vita] GXV_VITA_USSE_CDRAM=1 ignored: this vitaGL has no vglUseVramForUSSE");
+        }
+    }
+    // GXV_VGL_MASKKEEP=1 (default 0, console A/B; vitaGL tools/vitagl/patches/0018 built with MASK_KEEP): a framebuffer-object scene
+    // that does not load its depth (GXV_DEPTH_SKIP / the depth plan) and begins with the scissor test off starts with its scissor mask set
+    // by the depth surface's background value, so vitaGL leaves out the full-target mask quad it draws at the start of such a scene
+    // (every texture / pass / copy scene, the EFB scenes the depth plan begins unloaded). Same picture if the console treats the
+    // background mask as the splash screen relies on; "vitaGL MASK_KEEP" in the log (diagnostic builds) counts the quads left out.
+    {
+        long maskKeep = 0;
+        EnvLong("GXV_VGL_MASKKEEP", maskKeep, 0, 1);
+        if (maskKeep && vglSetMaskKeep) {
+            vglSetMaskKeep(GL_TRUE);
+            port_log("[vgx-vita] GXV_VGL_MASKKEEP=1: unloaded framebuffer-object scenes start with their scissor mask set (no full-target mask quad)");
+        } else if (maskKeep) {
+            port_log("[vgx-vita] GXV_VGL_MASKKEEP=1 ignored: this vitaGL has no vglSetMaskKeep (patches/0018, MASK_KEEP)");
+        }
+    }
+    // GXV_VGL_LOADFROM=1 (default 0, console A/B; vitaGL tools/vitagl/patches/0019 built with COLOR_LOAD_FROM): after GXV_EFBSWAP(2)
+    // hands the EFB's colour buffer to a copy texture, the EFB's next scene loads its colour tiles from that buffer (the colour
+    // surface's background texture) instead of the back end drawing it back with a full-screen quad. Same picture if the console
+    // loads a scene's colour from the background texture as GXM's surface layout says; the back end's "efbswap2:" line and
+    // "vitaGL COLOR_LOAD_FROM" (diagnostic builds) count them.
+    {
+        long loadFrom = 0;
+        EnvLong("GXV_VGL_LOADFROM", loadFrom, 0, 1);
+        if (loadFrom && vglColorLoadFrom) {
+            vgx::backend::SetColorLoadHook([](unsigned tex) { return vglColorLoadFrom(static_cast<GLuint>(tex)) == GL_TRUE; });
+            port_log("[vgx-vita] GXV_VGL_LOADFROM=1: a swapped EFB colour buffer is loaded by the next EFB scene (no drawing-back quad)");
+        } else if (loadFrom) {
+            port_log("[vgx-vita] GXV_VGL_LOADFROM=1 ignored: this vitaGL has no vglColorLoadFrom (patches/0019, COLOR_LOAD_FROM)");
+        }
+    }
     vglSetupShaderPatcher(static_cast<unsigned>(patcherMib) * 1024u * 1024u, static_cast<unsigned>((patcherMib + 1) / 2) * 1024u * 1024u,
                           static_cast<unsigned>((patcherMib + 1) / 2) * 1024u * 1024u);
-    vglSetupGarbageCollector(kGcPriority, kCoreAux);
+    vglSetupGarbageCollector(kGcPriority, GcCoreMask());
     // sceGxm buffers, all at vitaGL's defaults unless env.txt asks: triple buffering lets a frame
     // go on while the last one waits for the display (a frame never stalls on the swap); the
     // parameter and VDM ring buffers bound how much of a dense scene can be in flight (a scene
@@ -1273,17 +1807,27 @@ bool StartGl(char* error, size_t errorSize) {
     EnvLong("GXV_VITA_PARAM_KIB", paramKib, 0, 65536);
     EnvLong("GXV_VITA_VDM_KIB", vdmKib, 0, 65536);
     if (tripleBuffering) vglUseTripleBuffering(GL_TRUE);
-    if (paramKib) vglSetParamBufferSize(static_cast<uint32_t>(paramKib) * 1024u);
+    if (paramKib) {
+        vglSetParamBufferSize(static_cast<uint32_t>(paramKib) * 1024u);
+        GXV_BASIC_LOG("[vgx-vita] GXV_VITA_PARAM_KIB=%ld: sceGxm parameter buffer %ld KiB (vitaGL's default 16384)", paramKib, paramKib);
+    }
     if (vdmKib) vglSetVDMBufferSize(static_cast<uint32_t>(vdmKib) * 1024u);
     // A vitaGL built with HAVE_SCRATCH_MEMORY puts GL_DYNAMIC_DRAW and GL_STREAM_DRAW buffers in the
-    // per-frame circular pool by default. The static geometry is given the DYNAMIC hint (see below) and
+    // per-picture circular pool by default. The static geometry is given the DYNAMIC hint (see below) and
     // must outlive the frame, so only the stream buffers (the frame's vertex chunks and indices) may be
     // scratch. Without that build option the call does nothing.
-    vglSetupScratchMemory(GL_FALSE, GL_TRUE);
-    port_log("[vgx-vita] sceGxm buffers: %s buffering, parameter buffer %ld KiB, VDM ring %ld KiB (0 = vitaGL's default)",
-             tripleBuffering ? "triple" : "double", paramKib, vdmKib);
+    // GXV_VITA_SCRATCH=1 (default 0): the stream buffers come from that pool. Each is given its data again in every back-end
+    // frame before its draws, and the pool of a picture is written again only after the display queue has released the
+    // picture three swaps before (tools/vitagl/README.md); the gain is two heap allocations and two collector frees per frame.
+    long scratchStream = 0;
+    EnvLong("GXV_VITA_SCRATCH", scratchStream, 0, 1);
+    vglSetupScratchMemory(GL_FALSE, scratchStream ? GL_TRUE : GL_FALSE);
+    port_log("[vgx-vita] stream buffers: %s", scratchStream ? "in vitaGL's per-picture pool (library built with HAVE_SCRATCH_MEMORY only)" : "ordinary allocations");
+    // (vitaGL's own default is three display buffers; GXV_VITA_TRIPLE=0 leaves that alone, it does not make two)
+    port_log("[vgx-vita] sceGxm buffers: %s, parameter buffer %ld KiB, VDM ring %ld KiB (0 = vitaGL's default)",
+             tripleBuffering ? "triple buffering asked for" : "vitaGL's default display buffers", paramKib, vdmKib);
     port_log("[vgx-vita] render targets: %ld scene(s) per frame; shader patcher pools %ld / %ld / %ld MiB; collector on core mask 0x%X", fboScenes, patcherMib,
-             (patcherMib + 1) / 2, (patcherMib + 1) / 2, static_cast<unsigned>(kCoreAux));
+             (patcherMib + 1) / 2, (patcherMib + 1) / 2, static_cast<unsigned>(GcCoreMask()));
 
     PrepareFrontEnd();  // (normally done already, on the game's thread, before this one was started)
     vglSetShaderCachePath(g_shaderCachePath);
@@ -1292,6 +1836,12 @@ bool StartGl(char* error, size_t errorSize) {
     // the swap would make the two beat against each other.
     vglWaitVblankStart(GL_FALSE);
     if (port_vgx_pace_divisor()) vglSetDisplayCallback(PaceDisplay);
+    else if (port_vgx_present_sync_mode()) {
+        g_syncOn = true;
+        vglSetDisplayCallback(SyncDisplay);
+        port_log("[vgx-vita] GXV_PRESENT_SYNC=%d: %s", port_vgx_present_sync_mode(),
+                 port_vgx_present_sync_mode() == 2 ? "pictures held to the vblank of their game turn (adaptive latency)" : "picture timing measured only");
+    }
 
     // vglInitWithCustomSizes returns GL_TRUE only when the display could not take the requested
     // size and vitaGL fell back to a smaller one (source/vgl.c: `return res_fallback`): GL_FALSE
@@ -1321,7 +1871,8 @@ bool StartGl(char* error, size_t errorSize) {
     if (fellBack) port_log("[vgx-vita] vitaGL could not set %dx%d and fell back to a smaller display mode", kScreenW, kScreenH);
     // GXV_ANISO=0|2|3 (default 0, off): the Strikers port's experimental anisotropic switch, in a vitaGL built with ANISO_SWITCH
     // (tools/vitagl/build-gpu-timers.sh): trilinear textures get minification filter 2 or 3, believed to be the hardware's
-    // anisotropic modes. Untested on a console (also in Strikers): not part of the automatic quality.
+    // anisotropic modes. Untested on a console (also in Strikers). For good from start-up; the automatic quality's own top step is
+    // GXV_AUTOQ_ANISO (below, it switches the same filter at run time).
     {
         long aniso = 0;
         EnvLong("GXV_ANISO", aniso, 0, 3);
@@ -1333,12 +1884,39 @@ bool StartGl(char* error, size_t errorSize) {
                 port_log("[vgx-vita] GXV_ANISO=%ld ignored: this vitaGL has no anisotropic switch", aniso);
             }
         }
+        // The automatic quality's top step (GXV_AUTOQ_ANISO, vgx_autoq.h) calls the same switch at run time, through the back end's hook.
+        if (vglSetAnisotropicFilter) vgx::backend::SetAnisotropicHook(&vglSetAnisotropicFilter);
     }
     if (vglMemTotal(VGL_MEM_VRAM) == 0 && vglMemTotal(VGL_MEM_RAM) == 0) {
-        std::snprintf(error, errorSize, "vitaGL started without any memory pool (see the [vitaGL] lines in the log).");
+        std::snprintf(error, errorSize, "vitaGL started without any memory pool (vglInit gave none).\nRestart the Vita. If this repeats, send log.txt (the [vitaGL] lines).");
         return false;
     }
     LogMemory("after vitaGL");
+    // GXV_VITA_RTMEM_LOG=1 (default 0, log only): the driver memory sceGxm asks for one render target of a few sizes at 1 and at
+    // 8 scenes per frame (a pure query; vitaGL passes driverMemBlock -1, so sceGxm allocates it itself, outside vitaGL's pools).
+    // The difference times the number of render targets (display + EFB + pooled objects) is what GXV_VITA_FBO_SCENES=8 costs.
+    {
+        long rtMemLog = 0;
+        EnvLong("GXV_VITA_RTMEM_LOG", rtMemLog, 0, 1);
+        if (rtMemLog) {
+            static const int kSizes[][2] = {{kScreenW, kScreenH}, {640, 456}, {320, 228}, {160, 160}};
+            for (const auto& sz : kSizes) {
+                SceGxmRenderTargetParams rtp;
+                std::memset(&rtp, 0, sizeof(rtp));
+                rtp.width = static_cast<uint16_t>(sz[0]);
+                rtp.height = static_cast<uint16_t>(sz[1]);
+                rtp.multisampleMode = msaaMode;
+                rtp.driverMemBlock = -1;
+                unsigned one = 0, eight = 0;
+                rtp.scenesPerFrame = 1;
+                const int r1 = sceGxmGetRenderTargetMemSize(&rtp, &one);
+                rtp.scenesPerFrame = 8;
+                const int r8 = sceGxmGetRenderTargetMemSize(&rtp, &eight);
+                port_log("[vgx-vita] render target %dx%d driver memory: %u bytes at 1 scene per frame (0x%X), %u bytes at 8 (0x%X)", sz[0], sz[1], one,
+                         static_cast<unsigned>(r1), eight, static_cast<unsigned>(r8));
+            }
+        }
+    }
     if (&vgl_shader_cache_path != nullptr && vgl_shader_cache_path[0]) {
         const char* tail = std::strrchr(vgl_shader_cache_path, '/');
         if (!tail || std::strcmp(tail + 1, kVglCacheVersionDir) != 0)
@@ -1356,7 +1934,7 @@ bool StartGl(char* error, size_t errorSize) {
         const bool realBudget = free.size_cdram > 0 && free.size_cdram <= 160u * 1024u * 1024u;
         const int64_t taken = static_cast<int64_t>(free.size_cdram) - static_cast<int64_t>(after.size_cdram);
         if (realBudget && cdram > 0 && taken < cdram / 2) {
-            std::snprintf(error, errorSize, "vitaGL could not allocate its video memory pool (%u KiB asked, %u KiB of video memory still free); raise GXV_VITA_CDRAM_RESERVE_MIB.",
+            std::snprintf(error, errorSize, "vitaGL could not allocate its video memory pool (%u KiB asked, %u KiB free).\nRestart the Vita; close other applications. See GXV_VITA_CDRAM_RESERVE_MIB.",
                           static_cast<unsigned>(cdram / 1024), static_cast<unsigned>(after.size_cdram / 1024));
             return false;
         }
@@ -1379,6 +1957,7 @@ bool StartGl(char* error, size_t errorSize) {
     } else {
         for (int i = 0; i < 3; ++i) {
             glClear(GL_COLOR_BUFFER_BIT);
+            NoteSwap(0);
             vglSwapBuffers(GL_FALSE);
             if (i == 0 && prime) {
                 glEnable(GL_SCISSOR_TEST);
@@ -1397,9 +1976,35 @@ bool StartGl(char* error, size_t errorSize) {
                      : "[vgx-vita] GXV_VITA_MASK_GUARD=1: every draw and clear is preceded by a mask update under depth function NEVER (Vita3K Vulkan only)");
     }
 
+    // vitaGL loads the shader compiler module during its own start-up and says nothing when that fails (a log line at best, and not the
+    // result code): ask again here, name both results, and stop with a message that names the step. A load that works now (the first
+    // had failed) is kept: vitaGL asks vitaShaRK again at its first compile and finds it ready.
+    if (&is_shark_online != nullptr && !is_shark_online && shark_init) {
+        const int viaData = shark_init(nullptr);  // vitaGL's own first path: ur0:/data/libshacccg.suprx
+        const int viaExternal = viaData >= 0 ? 0 : shark_init("ur0:data/external/libshacccg.suprx");
+        GXV_BASIC_LOG("[vgx-vita] shader compiler load (vitaGL's attempt during its start-up had not worked): ur0:/data/libshacccg.suprx 0x%08X, "
+                      "ur0:data/external/libshacccg.suprx 0x%08X (0 = loaded)", static_cast<unsigned>(viaData), static_cast<unsigned>(viaExternal));
+        if (viaData < 0 && viaExternal < 0) {
+            vgx::bootwatch::FormatCompilerLoadFailure(error, errorSize, viaData, viaExternal);
+            return false;
+        }
+    }
     char testError[400] = "";
-    if (!ShaderCompilerSelfTest(testError, sizeof(testError))) {
-        std::snprintf(error, errorSize, "Run-time shader compilation does not work:\n%s", testError);
+    bool testOk = ShaderCompilerSelfTest(testError, sizeof(testError));
+    if (!testOk) {
+        GXV_BASIC_LOG("[vgx-vita] shader compiler self-test failed: %s", testError);
+        // GXV_SELFTEST_RETRY=0 stops at the first failure. Failure path only: a start that passes the test never gets here.
+        if (vgx::EnvInt("GXV_SELFTEST_RETRY", 1) != 0) {
+            const unsigned removed = RemoveSelfTestCacheFiles();
+            testError[0] = 0;
+            testOk = ShaderCompilerSelfTest(testError, sizeof(testError));
+            GXV_BASIC_LOG("[vgx-vita] shader compiler self-test again after removing %u cached file(s): %s", removed, testOk ? "passed" : testError);
+        }
+    }
+    if (!testOk) {
+        char reason[120];
+        vgx::bootwatch::FirstLine(reason, sizeof(reason), testError, 56);
+        std::snprintf(error, errorSize, "Shader compile test failed: %.56s\nDelete ux0:data/smg/shadercache and restart; if it repeats, send log.txt.", reason);
         return false;
     }
     // Static geometry goes to vitaGL's MAIN-memory pool (hint GL_DYNAMIC_DRAW): less video memory.
@@ -1435,15 +2040,19 @@ void PaceDisplay(void*) {
         for (uint64_t& n : held) n = 0;
         slotEpoch = requestedEpoch;
     }
-    uint32_t shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
+    // GXV_PACE_VBLANK_COUNT=1 (default 0): a vblank wait that returned counts as a vblank that passed, even if the counter has not
+    // moved yet (frame_pace.h WaitForSlot); off = the counter is trusted after every wait, as before.
+    static const bool countWaits = vgx::EnvInt("GXV_PACE_VBLANK_COUNT", 0) != 0;
+    struct VitaDisplay {
+        uint32_t Count() const { return static_cast<uint32_t>(sceDisplayGetVcount()); }
+        int WaitVblank() const { return sceDisplayWaitVblankStart(); }
+    } display;
+    uint32_t shown = display.Count() + 1;
     const uint32_t due = slots.Next(shown, interval);
     const uint64_t before = NowUs();
-    unsigned guard = 0;
-    while (static_cast<int32_t>(due - shown) > 0 && guard++ < 8) {
-        if (sceDisplayWaitVblankStart() < 0) break;
-        shown = static_cast<uint32_t>(sceDisplayGetVcount()) + 1;
-    }
-    if (guard) port_vgx_pace_waited(NowUs() - before);
+    const port::pace::SlotWaitResult slot = port::pace::WaitForSlot(display, due, countWaits);
+    shown = slot.shown;
+    if (slot.waits) port_vgx_pace_waited(NowUs() - before);
     slots.Shown(shown);
     if (lastShown) {
         const uint32_t n = shown - lastShown;
@@ -1460,10 +2069,93 @@ void PaceDisplay(void*) {
                              static_cast<unsigned long long>(held[0]), static_cast<unsigned long long>(held[1]),
                              static_cast<unsigned long long>(held[2]), static_cast<unsigned long long>(held[3]),
                              static_cast<unsigned long long>(held[4]));
+        if (WaitLogOn() && port_log_summary) {
+            uint64_t gn, gt, gm;
+            port_vgx_gate_wait_take(&gn, &gt, &gm);
+            const uint64_t sn = g_swapWait.n.exchange(0), st = g_swapWait.totalUs.exchange(0), sm = g_swapWait.maxUs.exchange(0);
+            const uint64_t fn = g_hiddenFinishWait.n.exchange(0), ft = g_hiddenFinishWait.totalUs.exchange(0), fm = g_hiddenFinishWait.maxUs.exchange(0);
+            port_log_summary("waits: game thread gate %llu x avg %.1f max %.1f ms; render swap %llu x avg %.1f max %.1f ms; hidden-frame finish %llu x avg %.1f max %.1f ms",
+                             static_cast<unsigned long long>(gn), gn ? gt / 1000.0 / gn : 0.0, gm / 1000.0,
+                             static_cast<unsigned long long>(sn), sn ? st / 1000.0 / sn : 0.0, sm / 1000.0,
+                             static_cast<unsigned long long>(fn), fn ? ft / 1000.0 / fn : 0.0, fm / 1000.0);
+        }
         windowAt = now;
         pictures = 0;
         for (uint64_t& n : held) n = 0;
     }
+}
+
+// GXV_PRESENT_SYNC (frame_pace.h PresentSync): the display queue's callback, after the GPU finished the picture and just before
+// vitaGL's SetFrameBuf(NEXTFRAME). =2 holds the picture until the vblank `latency` after its turn began (never more than the
+// largest latency + 1 vblanks, never two pictures in one vblank); =1 only measures. Every 5 s a "present:" line in the basic log.
+void SyncDisplay(void*) {
+    static port::pace::PresentSync sync = [] {
+        port::pace::PresentSync p;
+        long lo = 1, hi = 5, init = 3, raise = 4;
+        EnvLong("GXV_PRESENT_SYNC_MIN", lo, 1, 8);   // the smallest latency it may take (vblanks after the turn began)
+        EnvLong("GXV_PRESENT_SYNC_MAX", hi, 1, 8);   // the largest: a picture later than this is shown when ready
+        EnvLong("GXV_PRESENT_SYNC_LAT", init, 1, 8); // where it starts
+        EnvLong("GXV_PRESENT_SYNC_RAISE", raise, 1, 32);  // late pictures of the last 32 that raise it (more: lower latency, more judder)
+        p.Configure(port_vgx_present_sync_mode() == 2, static_cast<unsigned>(lo), static_cast<unsigned>(hi), static_cast<unsigned>(init),
+                    static_cast<unsigned>(raise));
+        return p;
+    }();
+    static uint64_t windowAt = 0, waitUs = 0, resyncs = 0;
+    uint32_t stamp = 0;
+    bool have = g_stampRing.Pop(stamp);
+    // (a swap that put nothing in the display queue left its stamp behind: the queue holds at most two pictures after this one)
+    while (have && g_stampRing.Size() > 2) {
+        g_stampRing.Pop(stamp);
+        ++resyncs;
+    }
+    if (splash::Active()) {
+        sync.Reset();
+        return;
+    }
+    struct VitaDisplay {
+        uint32_t Count() const { return static_cast<uint32_t>(sceDisplayGetVcount()); }
+        int WaitVblank() const { return sceDisplayWaitVblankStart(); }
+    } display;
+    const uint32_t earliest = display.Count() + 1;
+    const uint32_t target = sync.Target(earliest, have && (stamp & 0x80000000u) != 0, static_cast<uint16_t>(stamp & 0xFFFFu));
+    uint32_t shown = earliest;
+    bool waited = false;
+    if (target != earliest) {
+        const uint64_t before = NowUs();
+        const port::pace::SlotWaitResult slot = port::pace::WaitForSlot(display, target, true, 10);
+        shown = slot.shown;
+        waited = slot.waits != 0;
+        waitUs += NowUs() - before;
+    }
+    sync.Shown(shown, waited);
+    const uint64_t now = NowUs();
+    if (!windowAt) windowAt = now;
+    if (now - windowAt < 5000000) return;
+    const port::pace::PresentSync::Stats& st = sync.GetStats();
+    if (port_log_summary && st.pictures) {
+        const double pairs = st.pairs ? static_cast<double>(st.pairs) : 1.0, n = st.stamped ? static_cast<double>(st.stamped) : 1.0;
+        const double latMean = st.latSum / n, latSd = std::sqrt(std::fmax(0.0, st.latSq / n - latMean * latMean));
+        port_log_summary("present: %s, %.1f s, %llu pictures (%llu of game turns); latency %u vblanks (+%llu -%llu); ready after 0/1/2/3/4/5/6/7+ vblanks "
+                         "%llu/%llu/%llu/%llu/%llu/%llu/%llu/%llu; late %llu (%llu beyond the largest); held 0/1/2/3/4+ vblanks %llu/%llu/%llu/%llu/%llu; "
+                         "game steps 1/2/3/4+ turns %llu/%llu/%llu/%llu; held-vs-step off by 0/1/2/3+ %llu/%llu/%llu/%llu, judder %.2f vblanks a picture "
+                         "(%.1f ms); shown-minus-turn %.2f +- %.2f vblanks; waits %llu (%.1f ms avg); resyncs %llu",
+                         sync.Aligned() ? "aligned" : "measured", (now - windowAt) / 1e6, static_cast<unsigned long long>(st.pictures),
+                         static_cast<unsigned long long>(st.stamped), sync.Latency(), static_cast<unsigned long long>(st.raises),
+                         static_cast<unsigned long long>(st.lowers), static_cast<unsigned long long>(st.natural[0]), static_cast<unsigned long long>(st.natural[1]),
+                         static_cast<unsigned long long>(st.natural[2]), static_cast<unsigned long long>(st.natural[3]), static_cast<unsigned long long>(st.natural[4]),
+                         static_cast<unsigned long long>(st.natural[5]), static_cast<unsigned long long>(st.natural[6]), static_cast<unsigned long long>(st.natural[7]),
+                         static_cast<unsigned long long>(st.misses), static_cast<unsigned long long>(st.overload), static_cast<unsigned long long>(st.hold[0]),
+                         static_cast<unsigned long long>(st.hold[1]), static_cast<unsigned long long>(st.hold[2]), static_cast<unsigned long long>(st.hold[3]),
+                         static_cast<unsigned long long>(st.hold[4]), static_cast<unsigned long long>(st.step[1]), static_cast<unsigned long long>(st.step[2]),
+                         static_cast<unsigned long long>(st.step[3]), static_cast<unsigned long long>(st.step[4]), static_cast<unsigned long long>(st.err[0]),
+                         static_cast<unsigned long long>(st.err[1]), static_cast<unsigned long long>(st.err[2]), static_cast<unsigned long long>(st.err[3]),
+                         st.errSum / pairs, st.errSum / pairs * 16.683, latMean, latSd, static_cast<unsigned long long>(st.waits),
+                         st.waits ? waitUs / 1000.0 / st.waits : 0.0, static_cast<unsigned long long>(resyncs));
+    }
+    sync.ClearStats();
+    windowAt = now;
+    waitUs = 0;
+    resyncs = 0;
 }
 
 // The back end's present hook: a display copy, on the render thread, with the EFB framebuffer
@@ -1474,7 +2166,8 @@ void PaceDisplay(void*) {
 bool GamePresentAllowed(unsigned efb, int w, int h) {
     return efb != 0 && w > 0 && h > 0 && (g_presentAllowed || (g_fixedJob && g_wasSplash));
 }
-void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
+bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
+    playprogress::Leave();
     ++g_presented;
     const uint64_t now = NowUs();
     const vgx::backend::Stats stats = vgx::backend::GetStats();
@@ -1498,15 +2191,25 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         port_log("[vgx-vita] shader work so far: %u compiles, %u links, %u ms in all, progress bar shown %u times", stats.shaderCompiles, stats.programLinks,
                  static_cast<unsigned>(stats.shaderWorkMs), stats.progressFrames);
         if (vglGetMaskSkips) port_log("[vgx-vita] vitaGL MASK_SKIP: %u full-target scissor-mask quads left out so far", vglGetMaskSkips());
+        if (vglGetMaskKeeps) port_log("[vgx-vita] vitaGL MASK_KEEP: %u full-target scissor-mask quads left out so far (GXV_VGL_MASKKEEP)", vglGetMaskKeeps());
+        if (vglGetColorLoadsFrom) port_log("[vgx-vita] vitaGL COLOR_LOAD_FROM: %u scenes loaded their colour from another buffer (GXV_VGL_LOADFROM)", vglGetColorLoadsFrom());
         unsigned made = 0, ms = 0;
         vgxvita_cacheFolderStats(&made, &ms);
         if (made != 0) port_log("[vgx-vita] shader cache: %u bucket folders made as shaders needed them, %u ms in all", made, ms);
+        if (g_seedFallback[0]) port_log("[vgx-vita] shader cache: %u compiled shaders read from the package in place, %u not there either", g_seedFallbackHits.load(std::memory_order_relaxed),
+                                        g_seedFallbackMisses.load(std::memory_order_relaxed));
         if (g_presented % 600 == 0 || g_presented == 1) {
             LogPools("now");
             LogMemory("now");
         }
     }
     if (g_presented == 5 || g_presented == 30 || g_presented == 120 || g_presented % 600 == 0) PinLibraryThreads(false, g_presented == 120 || g_presented == 9000);
+    if (splash::Active()) {
+        // What the renderer has been given so far moves while the game loads: one of the loading screen's signs of life.
+        splash::g_contentTick.store(static_cast<uint64_t>(stats.textures) * 7u + static_cast<uint64_t>(stats.programs) * 13u +
+                                    static_cast<uint64_t>(stats.shaderCompiles) * 17u + static_cast<uint64_t>(stats.programLinks) * 19u +
+                                    static_cast<uint64_t>(stats.textureBytes / 4096u), std::memory_order_relaxed);
+    }
     g_lastPresentUs = now;
     g_lastStats = stats;
 
@@ -1519,9 +2222,9 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         if (richInARow >= 300) splash::NoteTitleVisible("300 pictures with 150 or more draw calls");
         splash::Service();
         if (g_fixedJob) g_wasSplash = true;
-        return;
+        return false;
     }
-    if (!GamePresentAllowed(efb, w, h)) return;
+    if (!GamePresentAllowed(efb, w, h)) return false;
     if (g_fixedJob && g_wasSplash) {
         // The first real picture is eligible even if its producing turn began
         // while the loading overlay still owned presentation.
@@ -1543,13 +2246,21 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // none at the screen's own size). A shader that does not build leaves the plain blit for good.
     static bool sharpenOk = true;
     const float sharpen = sharpenOk ? vgx::backend::SharpenAmount(w, h, dx1 - dx0, kScreenH) : 0.0f;
-    bool sharpened = false;
-    if (sharpen < 0.05f || !(sharpenOk = sharpened = vgx::backend::PresentSharpened(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpen, true)))
-        glBlitFramebuffer(x, sy0, x + w, sy1, dx0, 0, dx1, kScreenH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-    // GXV_CHARAA (vgx_draw.cpp, "character edge smoothing"): the characters' and key items' edges, over what was just drawn,
-    // in this same scene (nothing is drawn in a frame without them, nor on a multisampled EFB).
-    vgx::backend::PresentCharaAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpened ? sharpen : 0.0f, true);
+    // GXV_EDGE_AA (vgx_draw.cpp, "whole-picture edge smoothing"): the whole picture through the edge filter, the HUD drawn again
+    // plainly, in place of everything below (false: nothing drawn, the present as before).
+    if (!vgx::backend::PresentEdgeAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpen < 0.05f ? 0.0f : sharpen, true)) {
+        bool sharpened = false;
+        if (sharpen < 0.05f || !(sharpenOk = sharpened = vgx::backend::PresentSharpened(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpen, true)))
+            glBlitFramebuffer(x, sy0, x + w, sy1, dx0, 0, dx1, kScreenH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        // GXV_CHARAA (vgx_draw.cpp, "character edge smoothing"): the characters' and key items' edges, over what was just drawn,
+        // in this same scene (nothing is drawn in a frame without them, nor on a multisampled EFB).
+        vgx::backend::PresentCharaAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpened ? sharpen : 0.0f, true);
+    }
+    const uint64_t swapStart = WaitLogOn() ? NowUs() : 0;
+    NoteSwap(g_presentStamp);  // (GXV_PRESENT_SYNC: the display callback holds the picture to its turn's slot)
+    g_presentStamp = 0;        // (a second display copy in the same job is shown when ready)
     vglSwapBuffers(GL_FALSE);
+    if (swapStart) g_swapWait.Add(NowUs() - swapStart);
     if (g_fixedJob) {
         g_wasSplash = false;
         g_jobSwapped = true;
@@ -1559,6 +2270,7 @@ void PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     // Back to what the back end had: it clears the EFB next.
     glBindFramebuffer(GL_FRAMEBUFFER, efb);
     if (g_scissorOn) { UnparkScissor(); glEnable(GL_SCISSOR_TEST); }
+    return true;
 }
 
 } // namespace
@@ -1568,13 +2280,21 @@ extern "C" void port_vgx_vita_reset_present_slots(void) {
     g_presentSlotEpoch.fetch_add(1, std::memory_order_release);
 }
 extern "C" int port_vgx_vita_fixed_cap_supported(void) { return vglSubmitWithoutSwap != nullptr; }
+// GXV_PRESENT_SYNC: the display's vblank counter (game thread, vgx_galaxy.cpp port_vgx_present_turn) and the stamp of the job the
+// render thread executes next (vgx_galaxy.cpp ExecuteJob; PresentDisplayCopy hands it to the display callback with the swap).
+extern "C" uint32_t port_vgx_vita_vcount(void) { return static_cast<uint32_t>(sceDisplayGetVcount()); }
+extern "C" void port_vgx_vita_set_present_stamp(uint32_t stamp) { g_presentStamp = stamp; }
 extern "C" void port_vgx_vita_set_present_allowed(int allowed) {
     g_fixedJob = true;
     g_presentAllowed = allowed != 0;
     g_jobSwapped = false;
 }
 extern "C" void port_vgx_vita_finish_unpresented_frame(void) {
-    if (!g_jobSwapped && vglSubmitWithoutSwap) vglSubmitWithoutSwap();
+    if (!g_jobSwapped && vglSubmitWithoutSwap) {
+        const uint64_t start = WaitLogOn() ? NowUs() : 0;
+        vglSubmitWithoutSwap();
+        if (start) g_hiddenFinishWait.Add(NowUs() - start);
+    }
 }
 extern "C" unsigned long long port_vgx_vita_game_swaps(void) {
     return g_gameSwaps.load(std::memory_order_relaxed);
@@ -1624,6 +2344,12 @@ extern "C" int port_vgx_vita_start(void) {
 
 // ---- the loading screen, as the rest of the program sees it
 extern "C" int port_boot_data_enabled(void) __attribute__((weak));
+// A message put on the loading screen can be seen: the screen is up and something is drawing it.
+static bool CanShowError() {
+    using namespace splash;
+    const int phase = g_phase.load();
+    return !(phase == kOff || phase == kDone || g_thread < 0 || !g_pic[0] || !g_pic[1] || (phase == kDirect && !loading::direct::g_base));
+}
 extern "C" int port_boot_data_error(const char* message) {
     using namespace splash;
     if (!port_boot_data_enabled || !port_boot_data_enabled()) return 0;
@@ -1632,6 +2358,19 @@ extern "C" int port_boot_data_error(const char* message) {
         (phase == kDirect && !loading::direct::g_base)) return 0;
     Fail(message);
     return 1;
+}
+// vgx_galaxy.cpp: a start-up failure that is already on the loading screen stays there (the game's thread parks) instead of aborting.
+extern "C" int port_vgx_vita_error_shown(void) { return splash::g_failed.load() && CanShowError() ? 1 : 0; }
+// vgx_galaxy.cpp: a start-up failure with a text for the screen ("line one\nline two"). 1 when the screen can show it.
+extern "C" int port_vgx_vita_fail(const char* message) {
+    if (!CanShowError()) return 0;
+    splash::Fail(message);
+    return 1;
+}
+// vgx_galaxy.cpp: the renderer's own set-up (its picture buffer, its copy shader) failed after the graphics had started.
+extern "C" void port_vgx_vita_backend_failed(void) {
+    GXV_BASIC_LOG("[vgx-vita] the renderer's set-up failed after the graphics had started (picture buffer or copy shader; see the lines above)");
+    port_vgx_vita_fail("The renderer could not set up its picture buffer or copy shader.\nRestart the Vita and start the game again. If this repeats, send log.txt.");
 }
 
 // vita/vgx-game/entry.cpp, once, first thing after the environment file and the clocks.
@@ -1706,8 +2445,16 @@ extern "C" void port_boot_progress(const char* what, int done, int total) { spla
 // (GXV_VITA_VBLANK_CLOCK=0: the platform layer's free-running 59.94 Hz timer instead, which
 // drifts against the display and drops or repeats a picture every few seconds).
 extern "C" void port_vi_retrace(void);
+extern "C" int port_vita_thread_class(int cls) __attribute__((weak)); // vita/runtime/memory.cpp
+extern "C" int port_vita_thread_helper(void) __attribute__((weak));
 namespace {
 void* VblankMain(void*) {
+    // GXV_VBLANK_PRIO=1: the frame clock runs at the clocks' priority (0x50, cores 1-2) like the timer and retrace threads. Left to the
+    // thread library it starts at the lowest user priority, 0xBF, on any core, and can be held up by the game thread (0x9F) or the
+    // back end when it shares a core with them; it does a few microseconds of work per vertical blank. Default 0: as before.
+    static const bool raise = std::getenv("GXV_VBLANK_PRIO") && std::atoi(std::getenv("GXV_VBLANK_PRIO")) == 1;
+    if (raise && port_vita_thread_class) port_vita_thread_class(1);
+    else if (port_vita_thread_helper) port_vita_thread_helper();  // GXV_CORE0_ALONE=1: off the game's core even when not raised
     for (;;) {
         sceDisplayWaitVblankStart();
         port_vi_retrace();
@@ -1909,32 +2656,85 @@ extern "C" void vgxvita_glVertexAttrib4f(GLuint index, GLfloat v0, GLfloat v1, G
 // runs transfers later on its render thread, that crashed in every session at the first scene
 // with mip-mapped DXT1 textures. Waiting for the transfer unit after each such call closes it on
 // both. GXV_VITA_UPLOAD_SYNC=0 turns the wait off (to measure what it costs).
-static bool UploadSync() {
-    static const bool on = [] {
+//
+// GXV_VITA_UPLOAD_SYNC=2 (default 1 = the wait after every call; tex11): the wait is kept only where something could touch the
+// memory a pending transfer reads or writes, and made there once for all the transfers before it. The calls note that transfers
+// are pending; the back end (vgx_backend_gl.cpp, XferFence) asks for the wait before
+//   - a call that may move a texture's memory (vitaGL's realloc of a compressed chain or of a texture getting generated levels:
+//     the copy is made by the CPU, so the data the transfer writes must be there first) - none when vitaGL reserves the chain at
+//     the first level (vglReserveTextureLevels, vgl patch 0015),
+//   - the deletion or a new upload of a texture whose transfers are pending (vitaGL may free its memory at once),
+//   - the end of a scene (a new render target, the present, a mid-scene flush), the first moment the GPU can sample what was
+//     uploaded, and the end of the frame.
+// A stage arrival's frame (r49 frame 2640: 263 textures, 143 ms) waited for the transfer unit hundreds of times; in play each new
+// texture cost ~1 ms (r49 "in play ... texture uploads 6 (0.0 MiB, 6 ms)"). Waits and their time are counted in every mode
+// (vgxvita_xferStats; the back end's "tex-upload:" line).
+static int UploadSyncMode() {
+    static const int mode = [] {
         const char* e = std::getenv("GXV_VITA_UPLOAD_SYNC");
-        return !(e && *e && std::atoi(e) == 0);
+        const int v = (e && *e) ? std::atoi(e) : 1;
+        return v == 0 ? 0 : v == 2 ? 2 : 1;
     }();
-    return on;
+    return mode;
+}
+static bool g_xferPending = false;        // (render thread only) transfers issued since the last wait
+static uint64_t g_xferWaits = 0, g_xferWaitUs = 0;
+static void XferWait() {
+    const uint64_t t0 = NowUs();
+    sceGxmTransferFinish();
+    g_xferWaitUs += NowUs() - t0;
+    ++g_xferWaits;
+    g_xferPending = false;
+}
+static void XferIssued() {
+    if (UploadSyncMode() == 1) XferWait();
+    else g_xferPending = true; // (mode 0: never waited for; diagnostic only)
+}
+extern "C" int vgxvita_uploadSyncMode(void) { return UploadSyncMode(); }
+extern "C" void vgxvita_xferFence(void) {
+    if (g_xferPending && UploadSyncMode() == 2) XferWait();
+}
+extern "C" void vgxvita_xferStats(uint64_t* waits, uint64_t* us) {
+    *waits = g_xferWaits;
+    *us = g_xferWaitUs;
 }
 extern "C" void vgxvita_glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border,
                                                GLsizei imageSize, const void* data) {
     glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, data);
-    if (UploadSync()) sceGxmTransferFinish();
+    XferIssued();
 }
 extern "C" void vgxvita_glGenerateMipmap(GLenum target) {
     glGenerateMipmap(target);
-    if (UploadSync()) sceGxmTransferFinish();
+    XferIssued();
+}
+
+extern "C" void vgxvita_uploadAuthoredI4Mips(unsigned width, unsigned height, unsigned count, const void* const* levels) {
+    // The backend admits only square POT RGBA8 I4 chains. Asking for the last level
+    // allocates the chain once; ordinary higher-level TexImage discards its pixels.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, levels[0]);
+    const unsigned last = count - 1;
+    glTexImage2D(GL_TEXTURE_2D, last, GL_RGBA, width >> last, height >> last, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    // Mandatory even when the diagnostic upload-sync switch is off: CPU writes
+    // below must not race the temporary downscales issued by the allocation call.
+    XferWait();
+    for (unsigned l = 1; l < count; ++l)
+        glTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, width >> l, height >> l, GL_RGBA, GL_UNSIGNED_BYTE, levels[l]);
 }
 
 // ---- vitaGL's cache folders, made when they are needed
-// vitaGL stores a compiled shader as <cache>/v2/{v,f}/<HH>/<hash>.gxp, hash = XXH3_64bits of the
+// vitaGL stores a compiled shader as <cache>/v3/{v,f}/<HH>/<hash>.gxp, hash = XXH3_64bits of the
 // source text as handed to glShaderSource, <HH> = its top byte. The frozen library expects
 // all 512 folders at startup. Prepare just the bucket in its actual cache-write path instead:
 // cached reads need no mkdir, and normal shader sources need no second hash or joined copy.
 extern "C" { extern char vgl_shader_cache_path[256] __attribute__((weak)); }
 #if defined(GXV_SHADER_CACHE_PACK) && GXV_SHADER_CACHE_PACK
 extern "C" int vgxvita_shaderCacheRead_v1(const char* path, const void** bytes, size_t* size) {
-    return g_shaderPack.Find(path, bytes, size) ? 1 : 0;
+    if (!g_shaderPack.Find(path, bytes, size)) return 0;
+    static std::atomic<bool> noted{false};
+    if (!noted.load(std::memory_order_relaxed) && !noted.exchange(true, std::memory_order_relaxed))
+        port_log_summary("[vgx-vita] shader RAM pack lookup: first=1 bytes=%u ABI=%016llx (lookup only; hardened driver validates before use)",
+                         static_cast<unsigned>(*size), static_cast<unsigned long long>(ShaderPackAbi()));
+    return 1;
 }
 #endif
 namespace {
@@ -1946,33 +2746,14 @@ std::vector<uint8_t> g_shaderKind; // Probe-only shader identities, owned by the
 #endif
 unsigned g_bucketsMade = 0;
 uint64_t g_bucketUs = 0;
-int CacheHex(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
 } // namespace
 extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, SceMode mode) {
     if (flags != (SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC) || mode != 0777 || !path) return;
     if (&vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) return;
-    const size_t rootSize = strnlen(vgl_shader_cache_path, sizeof(vgl_shader_cache_path));
-    const size_t pathSize = strnlen(path, 320);
-    if (rootSize == sizeof(vgl_shader_cache_path) || pathSize < rootSize + 11 || pathSize > rootSize + 26 ||
-        std::strncmp(path, vgl_shader_cache_path, rootSize) != 0) return;
-    const char* suffix = path + rootSize;
-    if (suffix[0] != '/' || (suffix[1] != 'v' && suffix[1] != 'f') || suffix[2] != '/' || suffix[5] != '/') return;
-    const int hi = CacheHex(suffix[3]), lo = CacheHex(suffix[4]);
-    if (hi < 0 || lo < 0) return;
-    const unsigned bucket = static_cast<unsigned>((hi << 4) | lo);
-    const size_t digits = pathSize - rootSize - 10;
-    if (std::memcmp(suffix + 6 + digits, ".gxp", 4) != 0) return;
-    uint64_t hash = 0;
-    for (size_t i = 0; i < digits; ++i) {
-        const int digit = CacheHex(suffix[6 + i]);
-        if (digit < 0) return;
-        hash = (hash << 4) | static_cast<unsigned>(digit);
-    }
-    if (static_cast<unsigned>(hash >> 56) != bucket) return;
+    char kind = 0;
+    unsigned bucket = 0;
+    const size_t rootSize = CacheFileUnder(vgl_shader_cache_path, path, &kind, &bucket);
+    if (!rootSize) return;
 
     // vitaGL changes the root only while its GL owner is quiescent. Serialize our own
     // memoized state in case another SDK caller writes a matching private cache file.
@@ -1981,11 +2762,11 @@ extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, 
         std::memcpy(g_bucketRoot, vgl_shader_cache_path, rootSize + 1);
         std::memset(g_bucketSeen, 0, sizeof(g_bucketSeen));
     }
-    uint8_t& bits = g_bucketSeen[suffix[1] == 'f'][bucket >> 3];
+    uint8_t& bits = g_bucketSeen[kind == 'f'][bucket >> 3];
     const uint8_t bit = static_cast<uint8_t>(1u << (bucket & 7u));
     if (bits & bit) return;
     char bucketPath[320];
-    const int n = std::snprintf(bucketPath, sizeof(bucketPath), "%s/%c/%02X", g_bucketRoot, suffix[1], bucket);
+    const int n = std::snprintf(bucketPath, sizeof(bucketPath), "%s/%c/%02X", g_bucketRoot, kind, bucket);
     if (n < 0 || n >= static_cast<int>(sizeof(bucketPath))) return;
     const uint64_t t0 = (PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) ? NowUs() : 0;
     const int result = sceIoMkdir(bucketPath, 0777);
@@ -1993,6 +2774,22 @@ extern "C" void vgxvita_prepareShaderCacheWrite_v1(const char* path, int flags, 
     // Vita filesystem EEXIST: a transient mkdir failure must not poison future misses.
     if (result >= 0 || result == static_cast<int>(0x80010011u)) bits |= bit;
     if (PORT_LOGGING || PORT_RUNTIME_DIAGNOSTICS) g_bucketUs += NowUs() - t0;
+}
+// The read-only second level of the shader cache (see g_seedFallback). Called by __wrap_sceIoOpen only after an open with vitaGL's
+// cache-lookup shape (SCE_O_RDONLY, mode 0777) has failed with `failed`: when `path` is a cache file name under vitaGL's cache folder,
+// the same name under the package's seed is opened (read-only, mode 0, so this open does not come back here). Returns that handle,
+// or `failed` unchanged.
+extern "C" SceUID vgxvita_openShaderCacheFallback_v1(const char* path, SceUID failed) {
+    if (!g_seedFallbackOn.load(std::memory_order_acquire)) return failed;
+    if (&vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) return failed;
+    const size_t rootSize = CacheFileUnder(vgl_shader_cache_path, path, nullptr, nullptr);
+    if (!rootSize) return failed;
+    char seeded[256];
+    const int n = std::snprintf(seeded, sizeof(seeded), "%s%s", g_seedFallback, path + rootSize);
+    if (n < 0 || n >= static_cast<int>(sizeof(seeded))) return failed;
+    const SceUID fd = sceIoOpen(seeded, SCE_O_RDONLY, 0);
+    (fd >= 0 ? g_seedFallbackHits : g_seedFallbackMisses).fetch_add(1, std::memory_order_relaxed);
+    return fd >= 0 ? fd : failed;
 }
 extern "C" GLuint vgxvita_glCreateShader(GLenum type) {
     const GLuint shader = glCreateShader(type);
@@ -2043,6 +2840,7 @@ extern "C" int msc_vgl_printf(const char* format, ...) {
     va_start(args, format);
     std::vsnprintf(text, sizeof(text), format, args);
     va_end(args);
+    vgx::resourceaudit::DriverMessage(text); // Separate bounded basic-log path before ordinary warning/rate limits.
     if (std::strstr(text, "Shader Compiler: W]")) {
         if (++compilerWarnings > 6) return 0;
         if (compilerWarnings == 6) port_log("[vitaGL] (further shader compiler warnings are not logged)");

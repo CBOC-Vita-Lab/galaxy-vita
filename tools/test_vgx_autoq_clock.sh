@@ -10,10 +10,10 @@ for diagnostics in 0 1; do
     -DPORT_RUNTIME_DIAGNOSTICS="$diagnostics" -I"$root/tests/autoq_clock_stubs" \
     -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$root/tests/vgx_autoq_clock.cpp" -o "$out/autoq-clock-$diagnostics"
-  for target in unset 0 15 30; do
+  for target in unset 0 15 30 60; do
     expected=0
-    if [[ $target == 30 ]]; then expected=30; fi
-    for mode in ${AUTOQ_CLOCK_CASES:-coverage recovery hint hint-play ring trace}; do
+    if [[ $target == 30 || $target == 60 ]]; then expected=$target; fi
+    for mode in ${AUTOQ_CLOCK_CASES:-coverage recovery hint hint-play ring trace timer-guard}; do
       log="$out/$diagnostics-$target-$mode.txt"
       status=0
       if [[ $target == unset ]]; then
@@ -28,7 +28,7 @@ for diagnostics in 0 1; do
         exit "$status"
       fi
       tail -n 1 "$log"
-      if [[ $mode == trace && $target != 30 && -n ${AUTOQ_CLOCK_BASELINE_DIR:-} ]]; then
+      if [[ $mode == trace && $target != 30 && $target != 60 && -n ${AUTOQ_CLOCK_BASELINE_DIR:-} ]]; then
         cmp "$AUTOQ_CLOCK_BASELINE_DIR/$diagnostics-$target-trace.txt" "$log"
         printf 'PASS: identical legacy trace diagnostics=%s target=%s\n' "$diagnostics" "$target"
       fi

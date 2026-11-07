@@ -27,6 +27,8 @@
 #include "dsp_mix_kernels.h"
 #include "dsp_fir_kernel.h"
 #include "dsp_ramp_kernel.h"
+#include "dsp_resample_kernel.h"
+#include "dsp_afc_kernel.h"
 
 extern "C" u32 port_dsp_varam_base(void);
 
@@ -186,7 +188,7 @@ enum Source : u16 {
     SRC_PCM16 = 16,
 };
 
-void decodeAfc(Voice* v, s16* dst, u32 blocks) {
+void decodeAfcScalar(Voice* v, s16* dst, u32 blocks) {
     u32 bytes = v->_100;  // 9 (4-bit) or 5 (2-bit) bytes per 16 samples
     const u8* src = aram(v->_70, blocks * bytes);
     v->_70 += blocks * bytes;
@@ -223,6 +225,45 @@ void decodeAfc(Voice* v, s16* dst, u32 blocks) {
     }
     hist[14] = (s16)yn2;
     hist[15] = (s16)yn1;
+}
+
+void decodeAfcFast(Voice* v, s16* dst, u32 blocks) {
+    const u32 bytes = v->_100;
+    const u8* src = aram(v->_70, blocks * bytes);
+    v->_70 += blocks * bytes;
+    s16* hist = (s16*)v->_B0;
+    s32 yn1 = hist[15], yn2 = hist[14];
+    // Silence still writes the history back: dst can be the voice's own cache, which holds it.
+    if (src) port::dspafc::Decode(src, dst, blocks, bytes == 9, M.afcCoeffs, yn1, yn2);
+    else memset(dst, 0, blocks * 32);
+    hist[14] = (s16)yn2;
+    hist[15] = (s16)yn1;
+}
+
+// Keep the oracle's voice copy and scratch samples out of the other modes' stack frame.
+__attribute__((noinline)) void decodeAfcChecked(Voice* v, s16* dst, u32 blocks) {
+    Voice reference = *v;
+    s16 samples[0x520];
+    // (the loop refill decodes into the voice's own sample cache)
+    s16* referenceDst = dst == (s16*)v->_B0 ? (s16*)reference._B0 : samples;
+    decodeAfcScalar(&reference, referenceDst, blocks);
+    decodeAfcFast(v, dst, blocks);
+    static std::atomic<unsigned> calls{0}, mismatches{0};
+    if (memcmp(referenceDst, dst, blocks * 32) || memcmp(&reference, v, sizeof reference)) {
+        const unsigned errors = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (errors <= 4) port_log_summary("[DSPAFC] mismatch: blocks=%u bytes=%u; restored the original samples", blocks, v->_100);
+        if (referenceDst == samples) memcpy(dst, samples, blocks * 32);
+        *v = reference;
+    }
+    const unsigned count = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((count & 65535u) == 1) port_log_summary("[DSPAFC] verify calls=%u mismatches=%u", count, mismatches.load(std::memory_order_relaxed));
+}
+
+void decodeAfc(Voice* v, s16* dst, u32 blocks) {
+    const int mode = port::dspafc::Mode();
+    if (mode == 1) decodeAfcFast(v, dst, blocks);
+    else if (mode == 2) decodeAfcChecked(v, dst, blocks);
+    else decodeAfcScalar(v, dst, blocks);
 }
 
 // Produces `count` raw AFC samples, handling the cached tail of the last
@@ -340,6 +381,23 @@ void downloadPcm(Voice* v, s16* dst, u32 count) {
     }
 }
 
+__attribute__((noinline)) u32 resampleChecked(const s16* src, s16* dst, u32 pos, u32 ratio) {
+    Buffer reference;
+    const u32 referencePos = port::dspresample::FourTapScalar(M.resCoeffs, src, reference, pos, ratio);
+    const u32 end = port::dspresample::FourTap(M.resCoeffs, src, dst, pos, ratio);
+    static std::atomic<unsigned> calls{0}, mismatches{0};
+    if (end != referencePos || memcmp(reference, dst, sizeof reference)) {
+        const unsigned errors = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (errors <= 4) port_log_summary("[DSPRESAMPLE] mismatch: pos=%u ratio=%u; restored the original samples", pos, ratio);
+        memcpy(dst, reference, sizeof reference);
+    }
+    const unsigned count = calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    if ((count & 65535u) == 1)
+        port_log_summary("[DSPRESAMPLE] verify calls=%u mismatches=%u neon=%d", count, mismatches.load(std::memory_order_relaxed),
+                         int(port::dspresample::kHasNeon));
+    return referencePos;
+}
+
 void resample(Voice* v, const s16* src, s16* dst) {
     u32 ratio = v->mPitch, pos = (u16)v->_60;
     if ((ratio >> 12) >= 4) {
@@ -348,14 +406,10 @@ void resample(Voice* v, const s16* src, s16* dst) {
             dst[i] = src[pos >> 12];
         }
     } else {
-        for (int i = 0; i < N; i++) {
-            const s16* c = &M.resCoeffs[((pos & 0xFFF) >> 6) * 4];
-            const s16* in = &src[pos >> 12];
-            s64 acc = 0;
-            for (int k = 0; k < 4; k++) acc += (s64)2 * c[k] * in[k];
-            dst[i] = clamp16((s32)(acc >> 16));
-            pos += ratio;
-        }
+        const int mode = port::dspresample::Mode();
+        if (mode == 1) pos = port::dspresample::FourTap(M.resCoeffs, src, dst, pos, ratio);
+        else if (mode == 2) pos = resampleChecked(src, dst, pos, ratio);
+        else pos = port::dspresample::FourTapScalar(M.resCoeffs, src, dst, pos, ratio);
     }
     for (int k = 0; k < 4; k++) v->_78[k] = src[(pos >> 12) + k];
     v->_66 = dst[N - 1];

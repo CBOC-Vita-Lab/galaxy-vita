@@ -1,0 +1,127 @@
+diff --git a/source/gxm.c b/source/gxm.c
+index 5a287ed..034a83f 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -73,6 +73,16 @@ GLenum vgl_error = GL_NO_ERROR; // Error returned by glGetError
+ SceGxmShaderPatcher *gxm_shader_patcher; // sceGxmShaderPatcher shader patcher instance
+ GLboolean is_fbo_float = GL_FALSE; // Current framebuffer mode
+ 
++/* GXM_STATE_CACHE begin */
++#ifdef GXM_STATE_CACHE
++const SceGxmFragmentProgram *gxm_sc_fprog; // Fragment program the main context holds (NULL: not known), see shared.h
++const SceGxmVertexProgram *gxm_sc_vprog; // Vertex program the main context holds (NULL: not known)
++const SceGxmTexture *gxm_sc_ftex_src[SCE_GXM_MAX_TEXTURE_UNITS]; // Descriptor address last set on each fragment texture unit
++SceGxmTexture gxm_sc_ftex[SCE_GXM_MAX_TEXTURE_UNITS]; // and the descriptor's words at that time
++uint32_t gxm_sc_ftex_valid; // Bit per fragment texture unit: the two above are what the context holds
++#endif
++/* GXM_STATE_CACHE end */
++
+ #ifndef STORE_DEPTH_STENCIL
+ extern GLboolean skip_scissor_invalidation; // Flag whether to skip mask update bit invalidation pass during scissor test region update
+ #endif
+diff --git a/source/shared.h b/source/shared.h
+index d658fad..be1eb98 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -1404,4 +1404,101 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 		SET_GL_ERROR_WITH_VALUE(GL_INVALID_ENUM, attachment)
+ 	}
+ }
++/* GXM_STATE_CACHE begin */
++#ifdef GXM_STATE_CACHE
++// GXM_STATE_CACHE: the context keeps the fragment program, the vertex program and the fragment textures it was given until it is
++// given others, so setting the same ones again changes nothing. Every call of the three setters below, from any file, goes
++// through these wrappers (the macros that follow), which remember what the main context holds and drop a call that would set what
++// is already set. A program is the same when it is the same object; a texture when it is the same descriptor address and the
++// 16 bytes of the descriptor are the same as when it was set (vitaGL changes filters and addresses in place, so a descriptor is
++// compared by content as well). Everything that can change what the context holds or what an address means forgets all of it
++// first: a scene begin or end, a precomputed state or draw (they bring their own program and textures), unregistering or
++// releasing a program (its object, and its address, may be handed out again). Calls on any other context (the splash screen's)
++// pass through. Nothing else of vitaGL changes: same calls in the same order, minus the repeated ones.
++extern const SceGxmFragmentProgram *gxm_sc_fprog;
++extern const SceGxmVertexProgram *gxm_sc_vprog;
++extern const SceGxmTexture *gxm_sc_ftex_src[SCE_GXM_MAX_TEXTURE_UNITS];
++extern SceGxmTexture gxm_sc_ftex[SCE_GXM_MAX_TEXTURE_UNITS];
++extern uint32_t gxm_sc_ftex_valid;
++static inline void gxm_sc_reset(void) {
++	gxm_sc_fprog = NULL;
++	gxm_sc_vprog = NULL;
++	gxm_sc_ftex_valid = 0;
++}
++static inline void gxm_sc_set_fprog(SceGxmContext *ctx, const SceGxmFragmentProgram *p) {
++	if (ctx == gxm_context) {
++		if (p && p == gxm_sc_fprog)
++			return;
++		gxm_sc_fprog = p;
++	}
++	sceGxmSetFragmentProgram(ctx, p);
++}
++static inline void gxm_sc_set_vprog(SceGxmContext *ctx, const SceGxmVertexProgram *p) {
++	if (ctx == gxm_context) {
++		if (p && p == gxm_sc_vprog)
++			return;
++		gxm_sc_vprog = p;
++	}
++	sceGxmSetVertexProgram(ctx, p);
++}
++static inline int gxm_sc_set_ftex(SceGxmContext *ctx, unsigned int idx, const SceGxmTexture *tex) {
++	if (ctx == gxm_context && tex && idx < SCE_GXM_MAX_TEXTURE_UNITS) {
++		const uint32_t bit = 1u << idx;
++		if ((gxm_sc_ftex_valid & bit) && gxm_sc_ftex_src[idx] == tex && !sceClibMemcmp(&gxm_sc_ftex[idx], tex, sizeof(SceGxmTexture)))
++			return 0;
++		int r = sceGxmSetFragmentTexture(ctx, idx, tex);
++		if (r) {
++			gxm_sc_ftex_valid &= ~bit;
++		} else {
++			gxm_sc_ftex_src[idx] = tex;
++			sceClibMemcpy(&gxm_sc_ftex[idx], tex, sizeof(SceGxmTexture));
++			gxm_sc_ftex_valid |= bit;
++		}
++		return r;
++	}
++	if (ctx == gxm_context && idx < SCE_GXM_MAX_TEXTURE_UNITS)
++		gxm_sc_ftex_valid &= ~(1u << idx);
++	return sceGxmSetFragmentTexture(ctx, idx, tex);
++}
++static inline int gxm_sc_scene_result(int r) {
++	gxm_sc_reset();
++	return r;
++}
++static inline void gxm_sc_set_precomputed_vertex(SceGxmContext *ctx, const SceGxmPrecomputedVertexState *s) {
++	gxm_sc_reset();
++	sceGxmSetPrecomputedVertexState(ctx, s);
++	gxm_sc_reset();
++}
++static inline int gxm_sc_draw_precomputed(SceGxmContext *ctx, const SceGxmPrecomputedDraw *d) {
++	gxm_sc_reset();
++	int r = sceGxmDrawPrecomputed(ctx, d);
++	gxm_sc_reset();
++	return r;
++}
++static inline int gxm_sc_force_unregister(SceGxmShaderPatcher *sp, SceGxmShaderPatcherId id) {
++	gxm_sc_reset();
++	return sceGxmShaderPatcherForceUnregisterProgram(sp, id);
++}
++static inline int gxm_sc_release_fprog(SceGxmShaderPatcher *sp, SceGxmFragmentProgram *p) {
++	gxm_sc_reset();
++	return sceGxmShaderPatcherReleaseFragmentProgram(sp, p);
++}
++static inline int gxm_sc_release_vprog(SceGxmShaderPatcher *sp, SceGxmVertexProgram *p) {
++	gxm_sc_reset();
++	return sceGxmShaderPatcherReleaseVertexProgram(sp, p);
++}
++#define sceGxmSetFragmentProgram(ctx, p) gxm_sc_set_fprog(ctx, p)
++#define sceGxmSetVertexProgram(ctx, p) gxm_sc_set_vprog(ctx, p)
++#define sceGxmSetFragmentTexture(ctx, idx, tex) gxm_sc_set_ftex(ctx, idx, tex)
++// (a macro name inside its own replacement list is the function itself)
++#define sceGxmBeginScene(...) gxm_sc_scene_result(sceGxmBeginScene(__VA_ARGS__))
++#define sceGxmEndScene(...) gxm_sc_scene_result(sceGxmEndScene(__VA_ARGS__))
++#define sceGxmSetPrecomputedVertexState(ctx, s) gxm_sc_set_precomputed_vertex(ctx, s)
++#define sceGxmSetPrecomputedFragmentState(ctx, s) (gxm_sc_reset(), sceGxmSetPrecomputedFragmentState(ctx, s), gxm_sc_reset())
++#define sceGxmDrawPrecomputed(ctx, d) gxm_sc_draw_precomputed(ctx, d)
++#define sceGxmShaderPatcherForceUnregisterProgram(sp, id) gxm_sc_force_unregister(sp, id)
++#define sceGxmShaderPatcherReleaseFragmentProgram(sp, p) gxm_sc_release_fprog(sp, p)
++#define sceGxmShaderPatcherReleaseVertexProgram(sp, p) gxm_sc_release_vprog(sp, p)
++#endif
++/* GXM_STATE_CACHE end */
+ #endif

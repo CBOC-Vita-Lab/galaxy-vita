@@ -1,4 +1,9 @@
 #include "JSystem/JAudio2/JAISound.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "JSystem/JAudio2/JAIAudience.hpp"
 #include "JSystem/JAudio2/JAISoundHandles.hpp"
 #include "JSystem/JAudio2/JASReport.hpp"
@@ -92,6 +97,7 @@ void JAISound::newAudible(const TVec3f& pos, const TVec3f* param_1, u32 param_2,
 }
 
 void JAISound::stop(u32 fadeTime) {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the main thread drives JAudio here, never in a window; port/audio_cpu1.h)
     if (fadeTime == 0) {
         stop();
     } else {
@@ -103,6 +109,7 @@ void JAISound::stop(u32 fadeTime) {
 }
 
 void JAISound::stop() {
+    PORT_AUDIO_TOUCH();
     stop_JAISound_();
     releaseHandle();
 }

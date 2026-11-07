@@ -81,4 +81,13 @@ public:
     /* 0x1C */ J3DModel* mModel;
     /* 0x20 */ ResourceHolder* mModelResourceHolder;
     /* 0x24 */ DisplayListMaker* mDisplayListMaker;
+#ifdef TARGET_PC
+    bool mStaleDL = false;  // (GXV_DL_LAZY) materials not computed since a turn without a picture; listed for the next drawn turn
+    void* mAnimMemo = nullptr;  // (GXV_ANIM_MEMO) the inputs and the result of the last joint computation (ModelManager.cpp)
+    u32 mAnimMemoGen = 0;       // (GXV_ANIM_MEMO) the memo store's generation mAnimMemo belongs to (a scene change starts a new one)
+    void* mViewMemo = nullptr;  // (GXV_VIEW_KEEP) the inputs of the last view pass and where it wrote (ModelManager.cpp)
+    u32 mViewMemoGen = 0;       // (GXV_VIEW_KEEP) the memo store's generation mViewMemo belongs to
+    void* mParAnim = nullptr;   // (GXV_PAR_ANIM) this model's speculation record: its job in the open batch, its misses (ModelManager.cpp)
+    u32 mParAnimGen = 0;        // (GXV_PAR_ANIM) the record store's generation mParAnim belongs to
+#endif
 };

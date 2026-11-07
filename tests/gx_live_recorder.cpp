@@ -50,6 +50,7 @@ extern "C" {
 volatile uint32_t __PortGXPERegs[0x400];
 void port_log(const char*,...) {}
 int port_vgx_active() { return 0; }
+extern "C" void port_vgx_marker(unsigned) {}
 __attribute__((noreturn)) void port_fatal(const char* format,...) {
     std::fputs("expected producer stop: ",stderr);
     va_list args; va_start(args,format); std::vfprintf(stderr,format,args); va_end(args);

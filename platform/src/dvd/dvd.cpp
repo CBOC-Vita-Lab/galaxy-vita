@@ -21,8 +21,10 @@
 #include <unordered_map>
 #endif
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <array>
+#include <chrono>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -34,6 +36,7 @@
 #include "port/diagnostics.h"
 extern "C" void port_gpu_memory_written(void* addr, uint32_t size);
 #include "port/qemu_hooks.h"
+#include "port/resume.h"
 #include "port/vclock.h"
 #include "../../vgx/src/vgx_common.h"
 #include "revolution/dvd.h"
@@ -101,11 +104,35 @@ static void reportDvdError(DvdError operation, u32 entry, int result, int error)
     errno = savedErrno;
 }
 
+// Start-up watchdog inputs (vita/vgx loading screen): bytes the drive worker has read for the game, the number of operations
+// that failed, and the first failing path. Plain counters and one write-once string; no behaviour depends on them here.
+static std::atomic<uint64_t> sDvdBytesRead{0};
+static std::atomic<unsigned> sDvdFailures{0};
+static std::atomic<int> sDvdFirstFailureState{0};  // 0 none, 1 being written, 2 readable
+static char sDvdFirstFailure[200];
+static void noteDvdFailure(const char* operation, const char* path, int error) {
+    sDvdFailures.fetch_add(1, std::memory_order_relaxed);
+    int expected = 0;
+    if (!sDvdFirstFailureState.compare_exchange_strong(expected, 1)) return;
+    snprintf(sDvdFirstFailure, sizeof(sDvdFirstFailure), "%s %s (errno %d)", operation, path ? path : "?", error);
+    sDvdFirstFailureState.store(2, std::memory_order_release);
+    port_log_summary("dvd: first failure: %s", sDvdFirstFailure);
+}
+extern "C" uint64_t port_dvd_bytes_read(void) { return sDvdBytesRead.load(std::memory_order_relaxed); }
+extern "C" unsigned port_dvd_failures(void) { return sDvdFailures.load(std::memory_order_relaxed); }
+// Copies "<operation> <path> (errno n)" of the first failed operation; 0 when nothing has failed.
+extern "C" int port_dvd_first_failure(char* out, size_t size) {
+    if (!out || !size || sDvdFirstFailureState.load(std::memory_order_acquire) != 2) return 0;
+    snprintf(out, size, "%s", sDvdFirstFailure);
+    return 1;
+}
+
 // Opt-in startup guard, not a replacement for the game's audio preparation. The known
 // title basename is shared by the supported data layout; regional sound-table mapping
 // remains a validation prerequisite before enabling this by default.
 static constexpr const char* kBootTitle = "AudioRes/Stream/SMG_title_strm.ast";
 static u32 sBootTitleEntry = ~0u, sBootTitleBytes = 0;
+static std::atomic<bool> sFstReady{false};
 namespace AudParams { extern const int streamBlockSize, numStreamChannels; }
 extern "C" int port_boot_data_error(const char*) __attribute__((weak));
 
@@ -731,11 +758,13 @@ static bool loadFst() {
         presetSizesFromListings(dirPath);
     }
 #endif
+    sFstReady.store(true, std::memory_order_release);  // (host paths are final: the stall report may read them)
     return true;
 }
 
-static const char* validateBootTitle() {
-    if (!port_boot_data_enabled()) return nullptr;
+// `force`: check although GXV_BOOTDATA is off (the loading screen's stall report asks, once, after a minute without progress).
+static const char* validateBootTitleImpl(bool force) {
+    if (!force && !port_boot_data_enabled()) return nullptr;
     if (sBootTitleEntry >= sFst.size()) {
         port_log_summary("boot-data: missing title entry in sys/fst.bin: %s", kBootTitle);
         return "missing from file list";
@@ -767,6 +796,16 @@ static const char* validateBootTitle() {
     if (loopEnd <= 0 || (le16(14) && (loopStart < 0 || loopStart >= loopEnd))) return fail("invalid loop bounds");
     // No payload scan or stride-modulus test: the last AST block may be rounded past EOF.
     return nullptr;
+}
+
+static const char* validateBootTitle() { return validateBootTitleImpl(false); }
+
+// Stall report: "" when the title audio file looks fine or the file table is not loaded yet, else the reason (a static string).
+// Reads 64 bytes of one file; the file table is not changed after loadFst, which sets sFstReady last.
+extern "C" const char* port_boot_title_audio_problem(void) {
+    if (!sFstReady.load(std::memory_order_acquire)) return "";
+    const char* reason = validateBootTitleImpl(true);
+    return reason ? reason : "";
 }
 
 static s64 entrySize(u32 entry) {
@@ -887,6 +926,8 @@ struct OpenFileSlot {
 static std::array<OpenFileSlot, 32> sOpenFiles;
 static u64 sOpenFileUse = 0;
 
+static int sLastOpenErrno;  // errno of the last failed openEntry (the logging in between may change errno)
+
 static int openEntry(u32 entry) {
     OpenFileSlot* slot = &sOpenFiles[0];
     for (auto& candidate : sOpenFiles) {
@@ -902,6 +943,7 @@ static int openEntry(u32 entry) {
         const int fd = slot->fd;
         slot->fd = -1;
         if (close(fd) != 0) {
+            sLastOpenErrno = errno;
             port_log("dvd: close cached entry %u failed: %s (errno=%d)", slot->entry, strerror(errno), errno);
             return -1;
         }
@@ -909,14 +951,129 @@ static int openEntry(u32 entry) {
     const auto& path = sFst[entry].hostPath;
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        reportDvdError(DvdError::Open, entry, fd, errno);
+        sLastOpenErrno = errno;
+        reportDvdError(DvdError::Open, entry, fd, sLastOpenErrno);
+        noteDvdFailure("open", path.c_str(), sLastOpenErrno);
+        errno = sLastOpenErrno;
         port_log("dvd: open %s failed: %s (errno=%d)", path.c_str(), strerror(errno), errno);
+        errno = sLastOpenErrno;
         return -1;
     }
     slot->fd = fd;
     slot->entry = entry;
     slot->used = ++sOpenFileUse;
     return fd;
+}
+
+// Recovery from a file the system took away.  After the console slept (or the player went to the Home menu and back) the
+// memory card can answer an open descriptor with an I/O error, or refuse an open for a moment while it comes back.  JAudio2's
+// stream reader treats ONE failed read as fatal for every stream until the game restarts (JASAramStream: UNK_BOOL_B), which is
+// the music stopping for good.  So a read or open that fails with an error a missing file does not give is retried: the cached
+// descriptor is closed, the file opened again and the read repeated, a few times with short waits.  Only error paths run it;
+// a read that works never gets here.  GXV_DVD_REOPEN=0 turns it off (read once).
+static bool reopenOn() {
+    static const bool on = vgx::EnvInt("GXV_DVD_REOPEN", 1) != 0;
+    return on;
+}
+// GXV_RESUME_RESET=1: also close every cached descriptor and the read-ahead windows when the system reports a resume, before the
+// first read after it (needs the resume watcher of vita/runtime/audio.cpp; default off, read once).
+static bool resumeResetOn() {
+    static const bool on = vgx::EnvInt("GXV_RESUME_RESET", 0) != 0;
+    return on;
+}
+// Waits (ms) before each retry; the first retry is at once.  A test sets them to 0.
+static unsigned sReopenDelayMs[] = {0, 40, 120, 300};
+static unsigned sReopenRecovered, sReopenGaveUp;
+
+// Errors that a retry cannot change: the file is not there, is not a file, may not be read, or the request is wrong.
+static bool retriableErrno(int e) {
+    switch (e) {
+    case ENOENT: case ENOTDIR: case EISDIR: case EACCES: case EINVAL: case ENAMETOOLONG: case EFBIG: case EROFS: case ELOOP:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static void dropOpenFile(u32 entry) {
+    for (auto& slot : sOpenFiles) {
+        if (slot.fd >= 0 && slot.entry == entry) {
+            close(slot.fd);
+            slot.fd = -1;
+        }
+    }
+}
+
+static void dropReadCaches();
+
+static void dropAllOpenFiles() {
+    for (auto& slot : sOpenFiles) {
+        if (slot.fd >= 0) {
+            close(slot.fd);
+            slot.fd = -1;
+        }
+    }
+    dropReadCaches();
+}
+
+static void waitMs(unsigned ms) {
+    if (ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+// openEntry, repeated after a failure that may pass.  (errno is the last failure's when it gives up.)
+static int openEntryRetry(u32 entry) {
+    int fd = openEntry(entry);
+    if (fd >= 0 || !reopenOn() || !retriableErrno(sLastOpenErrno)) return fd;
+    unsigned attempt = 0;
+    for (unsigned ms : sReopenDelayMs) {
+        ++attempt;
+        waitMs(ms);
+        fd = openEntry(entry);
+        if (fd >= 0) {
+            ++sReopenRecovered;
+            port_log("dvd: entry %u opened again after %u tries", entry, attempt);
+            return fd;
+        }
+        if (!retriableErrno(sLastOpenErrno)) break;
+    }
+    ++sReopenGaveUp;
+    errno = sLastOpenErrno;
+    return -1;
+}
+
+// A read failed with errno `error`: close the descriptor, open the file again and repeat the read.  `fd` is the new descriptor.
+static ssize_t rereadAfterFailure(u32 entry, int error, int& fd, void* dst, size_t want, u64 offset) {
+    if (!reopenOn() || !retriableErrno(error)) {
+        errno = error;
+        return -1;
+    }
+    unsigned attempt = 0;
+    int last = error;
+    for (unsigned ms : sReopenDelayMs) {
+        ++attempt;
+        dropOpenFile(entry);
+        fd = -1;
+        waitMs(ms);
+        const int fresh = openEntry(entry);
+        if (fresh < 0) {
+            last = sLastOpenErrno;
+            if (!retriableErrno(last)) break;
+            continue;
+        }
+        fd = fresh;
+        const ssize_t got = pread(fd, dst, want, (off_t)offset);
+        if (got >= 0) {
+            ++sReopenRecovered;
+            port_log("dvd: read of entry %u failed (errno=%d), worked after reopening (try %u)", entry, error, attempt);
+            return got;
+        }
+        last = errno;
+        if (!retriableErrno(last)) break;
+    }
+    ++sReopenGaveUp;
+    port_log("dvd: read of entry %u failed (errno=%d) and again after %u reopen tries (errno=%d)", entry, error, attempt, last);
+    errno = last;
+    return -1;
 }
 
 // What the drive worker spent reading (handhelds log it: a long read stalls the thread that waits for it).
@@ -1053,9 +1210,28 @@ static void movieTopUp(u32 entry, u64 end, int fdHint) {
     }
 }
 
+static void dropReadCaches() {
+    sReadAhead.entry = ~0u;
+    sMovieWin.entry = ~0u;
+    sSeqEntry = ~0u;
+}
+
+// Worker thread, before each request: when the system reported a resume since the last one, forget every descriptor and
+// window so the next read opens its file afresh.
+static unsigned sResumeSeen;
+static void noteResume() {
+    if (!resumeResetOn()) return;
+    const unsigned generation = port::ResumeGeneration();
+    if (generation == sResumeSeen) return;
+    sResumeSeen = generation;
+    dropAllOpenFiles();
+    port_log("dvd: resume %u: cached files closed, read-ahead dropped", generation);
+}
+
 static void workerMain() {
     PORT_QEMU_THREAD("dvd-worker");
     port_thread_class(2);
+    port_thread_io(0, 0);  // GXV_CORE3_IO=1: the read-ahead worker tries the system core (port.h); off by default
     const bool readAheadOn = !getenv("PETARI_READAHEAD") || getenv("PETARI_READAHEAD")[0] != '0';
     const bool movieWindowOn = readAheadOn && (!getenv("PETARI_MOVIEWIN") || getenv("PETARI_MOVIEWIN")[0] != '0');
     for (;;) {
@@ -1069,6 +1245,7 @@ static void workerMain() {
         }
         DVDCommandBlock* b = req.block;
         s32 result;
+        noteResume();
         const int64_t workStart = port_host_time_ns();
         sTraceWaitNs = workStart - req.submitNs;
         const size_t want = b->length;
@@ -1077,7 +1254,7 @@ static void workerMain() {
         const bool fromMovieWin = movie && movieWindowOn && sMovieWin.entry == req.entry && offset >= sMovieWin.start &&
                                   offset + want <= sMovieWin.start + sMovieWin.len;
         const bool fromReadAhead = !movie && readAheadOn && sReadAhead.entry == req.entry && sReadAhead.offset == offset && sReadAhead.len == want;
-        int fd = (fromReadAhead || fromMovieWin) ? -1 : openEntry(req.entry);
+        int fd = (fromReadAhead || fromMovieWin) ? -1 : openEntryRetry(req.entry);
 #if defined(__vita__)
         if (fd >= 0 && sFst[req.entry].cached && !sFst[req.entry].checked) {
             // A size from the sizes cache is compared with the real one at the file's first open (a cheap call on an open file).
@@ -1112,6 +1289,7 @@ static void workerMain() {
                 }
             } else {
                 got = pread(fd, dst, want, (off_t)offset);
+                if (got < 0) got = rereadAfterFailure(req.entry, errno, fd, dst, want, offset);
                 if (movie) {
                     ++sMovieMisses;
                 }
@@ -1122,6 +1300,7 @@ static void workerMain() {
                 readEnd = port_host_time_ns();
                 result = -1;
                 reportDvdError(DvdError::Read, req.entry, result, error);
+                noteDvdFailure("read", sFst[req.entry].hostPath.c_str(), error);
             } else {
                 readEnd = port_host_time_ns();
                 if ((size_t)got < want) {
@@ -1129,6 +1308,7 @@ static void workerMain() {
                 }
                 b->transferredSize = b->length;
                 result = (s32)b->length;
+                sDvdBytesRead.fetch_add((uint64_t)want, std::memory_order_relaxed);
                 const int64_t hookStart = port_host_time_ns();
                 port_gpu_memory_written(dst, (uint32_t)want);  // models, textures, display lists: see vgx_galaxy.h
                 sTraceGpuNs = port_host_time_ns() - hookStart;

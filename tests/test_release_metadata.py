@@ -58,11 +58,12 @@ class ReleaseMetadataTests(unittest.TestCase):
             names = set(vpk.namelist())
             self.assertEqual(sha(vpk.read("eboot.bin")), self.manifest["package"]["runtimeSha256"])
             self.assertIn("sce_sys/param.sfo", names)
-            # The frozen 1.0 package predates the requested loading-art exception.
-            # When present, permit only the exact preserved source resource.
-            if "sce_sys/loading-title.rgba" in names:
-                self.assertEqual(vpk.read("sce_sys/loading-title.rgba"),
-                                 (ROOT / "vita/vgx-game/sce_sys/loading-title.rgba").read_bytes())
+            # The recipe no longer packages a title capture (tests/test_loading_artwork.py): the game makes its own on the player's
+            # console. A package built before that change may still carry the one old resource, exactly; nothing else of the
+            # kind is ever allowed.
+            for name in (n for n in names if n.endswith(".rgba")):
+                self.assertEqual(name, "sce_sys/loading-title.rgba")
+                self.assertEqual(sha(vpk.read(name)), "14529d51dc9e3c4831a20f389b90c162f93ddeafc7567b206fe3b976dd679906")
             self.assertFalse(any(n.endswith(("hdtex.pack", "libshacccg.suprx", ".thp", ".arc")) for n in names))
 
     def test_checksums_cover_the_repository(self):

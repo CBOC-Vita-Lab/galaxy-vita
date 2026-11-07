@@ -94,6 +94,12 @@ public:
     u32 endDL();
     void beginPatch();
     u32 endPatch();
+#ifdef TARGET_PC
+    // (GXV_J3D_DIFFKEEP, J3DPacket.cpp) beginDL / endDL for J3DMaterial::diff: the list is made aside and stored, in the other buffer,
+    // only when its bytes differ from the current one's.
+    void beginDiffDL();
+    u32 endDiffDL();
+#endif
 
     u8* getDisplayList(int idx) {
         return (u8*)mpDisplayList[idx];
@@ -328,3 +334,25 @@ public:
     /* 0x38 */ J3DTexture* mpTexture;
     /* 0x3C */ J3DMaterialAnm* mpMaterialAnm;
 };  // Size: 0x40
+
+#ifdef TARGET_PC
+// (1.3 port) The game-side cuts of the J3D state lists the draw pass sends (J3DPacket.cpp, Game/System/DrawBuffer.cpp; the analysis
+// of a list: J3DPortDL.hpp). Each switch is read once.
+bool J3DPortDiffKeepOn();  // GXV_J3D_DIFFKEEP (default 1)
+bool J3DPortMatMergeOn();  // GXV_J3D_MATMERGE (default 1)
+bool J3DPortDiffSkipOn();  // GXV_J3D_DIFFSKIP (default 1)
+u32 J3DPortPicture();      // the drawn picture's number (port_j3d_picture_begin, GameSystem::frameLoop)
+// Counted on the game thread, logged every 300 pictures ("j3d lists:" line).
+struct J3DPortListStats {
+    u32 drawers;      // DrawBufferShapeDrawer::draw calls
+    u32 matMerged;    // material lists sent merged with the first packet's differed list
+    u32 diffSent;     // differed lists sent
+    u32 diffSkipped;  // differed lists not sent (the same bytes as the last one, GXV_J3D_DIFFSKIP)
+    u32 diffMerged;   // differed lists sent inside a merged list
+    u32 mergeWrites;  // merged lists written (made again)
+    u32 diffMade;     // differed lists made (J3DMaterial::diff)
+    u32 diffKept;     // of them, the same bytes as the current buffer: not stored (GXV_J3D_DIFFKEEP)
+};
+extern J3DPortListStats gJ3DPortListStats;
+extern "C" void port_j3d_picture_begin(void);
+#endif

@@ -126,8 +126,19 @@ void GXSetDrawSync(u16 token) {
     gx->bpSentNot = GX_FALSE;
 }
 
+#ifdef TARGET_PC
+// GXV_DRAWDONE_DEFER (platform/src/port/perf.cpp, decomp/src/Game/System/MainLoopFramework.cpp): a wait for the finish of an earlier
+// command that was put off is made first; the one-bit flag GXWaitDrawDone watches must never have two finishes outstanding.
+extern void port_gx_drawdone_settle(int point) __attribute__((weak));
+#endif
+
 void GXSetDrawDone(void) {
     u32 reg;
+#ifdef TARGET_PC
+    if (port_gx_drawdone_settle) {
+        port_gx_drawdone_settle(0);
+    }
+#endif
     BOOL en = OSDisableInterrupts();
 #if defined(__vita__)
     static unsigned reported = 0;

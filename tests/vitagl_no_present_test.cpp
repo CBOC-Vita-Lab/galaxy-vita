@@ -20,7 +20,7 @@ static void Require(bool ok, const char* why) {
 static void sceGxmEndScene(int c, void*, decltype(query_fence)*) { Require(c == 7, "correct context"); calls.push_back(1); }
 static void sceGxmFinish(int c) { Require(c == 7, "correct context"); calls.push_back(2); }
 static void sceDisplayWaitVblankStartMulti(unsigned) { calls.push_back(9); }
-static void scene_reset() { calls.push_back(8); }
+static GLboolean scene_reset() { calls.push_back(8); return GL_TRUE; } // checked entry (patch 0009): glFinish keeps the result
 #ifdef GPU_TIMERS
 static GLboolean vgl_rt_gpu_on;
 static void vgl_rt_end_scene(int) { calls.push_back(3); }

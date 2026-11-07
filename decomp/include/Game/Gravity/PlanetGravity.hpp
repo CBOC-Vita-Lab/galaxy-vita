@@ -38,6 +38,28 @@ public:
     void setPriority(s32 priority);
     void updateIdentityMtx();
 
+#ifdef TARGET_PC
+    // forkB (6 Nov; ported from Producdevity's fork, 1403ec9): the sphere around mReachCentre that holds every position the field
+    // accepts (calcReach, widened in updateReach). PlanetGravityManager rejects a position outside it before the virtual call
+    // (PETARI_GRAVITY_CULL). Worked out eagerly where the fields calcOwnGravityVector reads are written (registerGravity,
+    // updateIdentityMtx, GraviryFollower::update: the writers port/grav_memo.h lists), never lazily, so readers on other threads
+    // only ever read it.
+    bool isOutOfSphere(const TVec3f& rPosition) const {
+        if (!(mReachSquared >= 0.0f)) {
+            return false;  // (no sphere: a cone or wire field, a field without a range, or not worked out yet)
+        }
+        const f32 x = rPosition.x - mReachCentre.x, y = rPosition.y - mReachCentre.y, z = rPosition.z - mReachCentre.z;
+        const f32 distanceSquared = x * x + y * y + z * z;
+        return distanceSquared > mReachSquared && distanceSquared <= __FLT_MAX__;
+    }
+
+    // The radius of that sphere around *pCentre; negative when the field gives none.
+    virtual f32 calcReach(TVec3f* pCentre) const {
+        return -1.0f;
+    }
+    void updateReach();
+#endif
+
     /* 0x4 */ f32 mRange;
     /* 0x8 */ f32 mDistant;
     /* 0xC */ s32 mPriority;
@@ -50,4 +72,8 @@ public:
     /* 0x22 */ bool mValidFollower;
     /* 0x23 */ bool mIsRegistered;  // is registered by PlanetGravityManager?
     /* 0x24 */ bool mAppeared;      // corresponding GlobalGravityObj has appeared?
+#ifdef TARGET_PC
+    f32 mReachSquared;    // (isOutOfSphere; negative: no sphere)
+    TVec3f mReachCentre;
+#endif
 };

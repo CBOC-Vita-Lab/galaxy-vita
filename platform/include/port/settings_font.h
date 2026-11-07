@@ -81,4 +81,5 @@ bool ParseGameFont(const void*,size_t,GameFont&,const char*& error,const FontAll
 bool ParseGameFontArchive(const void*,size_t,FontBundle&,const char*& error,const FontAllocator& = {});
 // Always consumes at least one byte; invalid UTF-8 maps to U+FFFD.
 uint32_t NextFontCodepoint(const std::string&,size_t& offset);
+uint32_t NextFontCodepoint(const char* text,size_t length,size_t& offset);
 }

@@ -9,6 +9,7 @@ namespace {
 std::uint64_t nowUs = 1000000;
 std::int64_t cpuUs = 100000, gameCpuUs = 200000, backendCpuUs = 100000;
 unsigned cpuReads = 0, timerReads = 0, divisor = 0;
+unsigned guardSets = 0, guardReads = 0, guardDrops = 0;
 std::uint32_t publication = 0;
 VgxRtGpuFrame gpu{};
 bool target30 = false;
@@ -80,6 +81,8 @@ void vglRtSetup(std::uint32_t flags, int priority, int affinity) {
     Require(flags == 8 && priority == 0x60 && affinity == 0x20000,
             "production timer setup retains its watcher configuration");
 }
+void vglRtSetRingGuard(std::uint32_t enabled) { Require(enabled == 1, "guard is enabled explicitly"); ++guardSets; }
+std::uint32_t vglRtRingDrops(void) { ++guardReads; return guardDrops; }
 std::uint32_t vglRtLastGpuFrame(VgxRtGpuFrame* out) {
     ++timerReads;
     *out = gpu;
@@ -102,10 +105,22 @@ int main(int argc, char** argv) {
     using namespace vgx::autoq;
     Require(argc == 3, "supply scenario and expected target mode");
     const std::string mode = argv[1];
-    target30 = std::string(argv[2]) == "30";
-    Require(Target30Enabled() == target30, "only the opt-in target enables new behavior");
+    // (target30: a whole-picture target is on, 30 or 60: the clock's rules are the same for both)
+    const int targetFps = std::atoi(argv[2]);
+    target30 = targetFps == 30 || targetFps == 60;
+    Require(TargetEnabled() == target30 && TargetFps() == targetFps && Target30Enabled() == (targetFps == 30),
+            "only the opt-in target enables new behavior");
     Require(clock::Start(), "real adapter chooses the supplied GPU timers");
-    if (mode == "coverage") {
+    if (mode == "timer-guard") {
+        const bool guarded = std::getenv("GXV_GPU_TIMER_GUARD") && std::atoi(std::getenv("GXV_GPU_TIMER_GUARD")) != 0;
+        Require(guardSets == (guarded ? 1u : 0u), "only opt-in configures the driver guard before startup");
+        Require(Present(1, 4, 4, 5000).busyKnown, "complete GPU sample is usable before overflow");
+        guardDrops = 1;
+        Require(Present(2, 4, 4, 5000).busyKnown == !guarded, "overflow invalidates GPU timing even outside target30 mode");
+        setenv("GXV_GPU_TIMER_GUARD", guarded ? "0" : "1", 1);
+        Require(Present(3, 4, 4, 5000).busyKnown == !guarded, "guard remains read once after environment changes");
+        Require(guardReads == (guarded ? 3u : 0u), "guard off adds no driver counter reads");
+    } else if (mode == "coverage") {
         struct Row { std::uint32_t head; std::uint16_t scenes, timed; bool oldKnown, newKnown; };
         const Row rows[] = {
             {0, 4, 4, false, false}, {1, 4, 4, true, true}, {1, 4, 4, false, false},
@@ -122,7 +137,7 @@ int main(int argc, char** argv) {
             Require(f.gpuBusyUs == (known ? 5000u : 0u), "unknown work is not retained as a measured cheap frame");
         }
         setenv("GXV_AUTOQ_TARGET", target30 ? "0" : "30", 1);
-        Require(Target30Enabled() == target30, "target switch remains read once");
+        Require(TargetEnabled() == target30 && TargetFps() == targetFps, "target switch remains read once");
         divisor = 2;
         const auto f = Present(2, 4, 3, 5000);
         Require(f.busyKnown == !target30, "environment mutation cannot change coverage policy mid-run");
@@ -170,5 +185,5 @@ int main(int argc, char** argv) {
                         port_autoq_picture_work_us(), cpuReads, timerReads);
         }
     } else Require(false, "known scenario");
-    std::printf("PASS: autoq clock %s target=%d\n", mode.c_str(), target30 ? 30 : 0);
+    std::printf("PASS: autoq clock %s target=%d\n", mode.c_str(), targetFps);
 }

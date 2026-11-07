@@ -32,6 +32,10 @@ void port_log(const char*,...) {}
 void vgxvita_prepareShaderCacheWrite_v1(const char*, int, SceMode) {
     Require(false,"paused report export must not enter private shader-cache preparation");
 }
+SceUID vgxvita_openShaderCacheFallback_v1(const char*, SceUID failed) {
+    Require(false,"paused report export must not enter the shader-cache seed lookup");
+    return failed;
+}
 SceUID sceIoOpen(const char* path,int flags,SceMode permissions) {
     FilesystemGate();++opens;
     Require(std::strcmp(path,"ux0:data/smg/coldtrace-v3.json")==0,"only the fixed report path may be opened");

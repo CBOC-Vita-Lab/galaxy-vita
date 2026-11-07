@@ -19,6 +19,41 @@ static u32 sPrevHold[4];
 // (a stage load, a first-time draw: 50-400 ms); a tap that begins and ends inside one would never be seen.  The next read
 // reports such a button as held once, so the game sees the press and, on the read after, the release.
 static u32 sPressedSinceRead[4];
+// The same for a shake (the handhelds' Square and R press: the port sets the remote's acceleration while the button is down).
+// Mario's spin is a swing the game sees as the remote's acceleration changing between two reads; a press that began and
+// ended between two reads left no sample and no spin.  GXV_SHAKE_LATCH=1 (read once, default off): the next read reports the
+// acceleration of a shake that started since the last read once, even if it has stopped.
+static float sShakeSinceRead[4][3];
+static bool sShakeLatched[4];
+static bool shakeLatchOn() {
+    static const bool on = [] { const char* e = getenv("GXV_SHAKE_LATCH"); return e && e[0] == '1'; }();
+    return on;
+}
+// GXV_SHAKE_PULSE=1 (read once, default off): the host's shake (the handhelds' Square and R press, a script's SPIN, the VR gesture:
+// an acceleration that is nonzero while the button is down) is turned into pulses counted in game updates (KPADReads), not in
+// controller time.  The game's swing test (WPadHVSwing::updateSwing) compares the acceleration of this read with the one 20 reads
+// earlier and calls it a swing from 1.0 g; Mario spins on the rising edge of that (MarioActor::updateControllerSwing), but not
+// until 10 updates after the last A or B trigger (the game's cooldown, _F1C).  A press then gives:
+//  - one pulse of 20 reads at full strength: the swing holds for 40 reads (20, and the 20 after, when the read 20 back is the
+//    pulse), with a single rising edge and no echo of one after the pulse (a shorter pulse swung twice, 20 reads apart);
+//  - its start held back until 10 reads after the last A or B (a spin asked for just after a jump or a Star Bit throw was
+//    swallowed by the cooldown and came 20 reads late, from that echo), and until 41 reads after the last pulse started
+//    (the swing is then quiet for a read, so that the edge exists);
+//  - for as long as the button stays down, one more pulse every 84 reads (the spin interval is 79 updates).
+static const int kPulseReads = 20;        // swing: acceleration differs from 20 reads back
+static const int kPulseCooldownAB = 10;   // MarioActor::updateControllerSwing: _F1C = 10 at an A or B trigger
+static const int kPulseQuietAfter = 41;   // a read of rest after the swing's 40 reads, then the next pulse's first read
+static const int kPulseRepeat = 84;       // while held: MarioActor's spin interval (mSpinIntervalTime 45 + 34) plus a few updates
+static const float kPulseMinNorm = 2.0f;  // the swing test needs 1.0 g
+static bool shakePulseOn() {
+    static const bool on = [] { const char* e = getenv("GXV_SHAKE_PULSE"); return e && e[0] == '1'; }();
+    return on;
+}
+static bool sShakeRise[4];          // the host's shake began since the last read
+static float sShakeAmp[4][3];       // its strength (positive), as the host last set it
+static int sPulseAge[4] = {1000, 1000, 1000, 1000};   // reads since the last pulse began
+static int sReadsSinceAB[4] = {1000, 1000, 1000, 1000};
+static bool sPulsePending[4];
 static WPADConnectCallback sConnectCb[4];
 static WPADExtensionCallback sExtCb[4];
 static int sReportedConnected[4];
@@ -52,6 +87,25 @@ extern "C" void port_input_set(int chan, const PortPadState* state) {
     }
     const u32 risen = state->buttons & ~sPad[chan].buttons & 0xFFFF;
     sPressedSinceRead[chan] |= risen;
+    if (shakePulseOn()) {
+        const bool shaking = state->accX != 0.0f || state->accY != 0.0f || state->accZ != 0.0f;
+        const bool wasShaking = sPad[chan].accX != 0.0f || sPad[chan].accY != 0.0f || sPad[chan].accZ != 0.0f;
+        if (shaking) {
+            sShakeAmp[chan][0] = __builtin_fabsf(state->accX);
+            sShakeAmp[chan][1] = __builtin_fabsf(state->accY);
+            sShakeAmp[chan][2] = __builtin_fabsf(state->accZ);
+        }
+        if (shaking && !wasShaking) sShakeRise[chan] = true;
+    } else if (shakeLatchOn()) {
+        const bool shaking = state->accX != 0.0f || state->accY != 0.0f || state->accZ != 0.0f;
+        const bool wasShaking = sPad[chan].accX != 0.0f || sPad[chan].accY != 0.0f || sPad[chan].accZ != 0.0f;
+        if (shaking && !wasShaking) {
+            sShakeSinceRead[chan][0] = state->accX;
+            sShakeSinceRead[chan][1] = state->accY;
+            sShakeSinceRead[chan][2] = state->accZ;
+            sShakeLatched[chan] = true;
+        }
+    }
     if (chan == 0 && (risen & kLatButtons) && sLatFrame.load(std::memory_order_relaxed) == 0 && latLogOn()) {
         sLatPollNs.store(port_host_time_ns(), std::memory_order_relaxed);
     }
@@ -85,6 +139,10 @@ extern "C" void port_input_settings_rearm(void) {
     sPad[0] = {};
     sPad[0].connected = connected;
     sPressedSinceRead[0] = 0;
+    sShakeLatched[0] = false;
+    sShakeRise[0] = false;
+    sPulsePending[0] = false;
+    sPulseAge[0] = sReadsSinceAB[0] = 1000;
     sPrevHold[0] = 0;
     sPauseRequestAt.store(0);
     sLatPollNs.store(0);
@@ -153,7 +211,40 @@ static PortPadState snapshotForRead(int chan, u32* pressedSince) {
     std::lock_guard<std::mutex> lk(sInputMutex);
     *pressedSince = sPressedSinceRead[chan];
     sPressedSinceRead[chan] = 0;
-    return sPad[chan];
+    PortPadState s = sPad[chan];
+    if (sShakeLatched[chan]) {
+        sShakeLatched[chan] = false;
+        if (s.accX == 0.0f && s.accY == 0.0f && s.accZ == 0.0f) {  // (it began and ended between two reads)
+            s.accX = sShakeSinceRead[chan][0];
+            s.accY = sShakeSinceRead[chan][1];
+            s.accZ = sShakeSinceRead[chan][2];
+        }
+    }
+    return s;
+}
+
+// GXV_SHAKE_PULSE: the acceleration this read reports for the host's shake `held` (rise: it began since the last read), given
+// whether the read carries an A or B trigger.  Returns true and fills `acc` (the offset to the resting acceleration) while a
+// pulse's reads go by.
+static bool shakePulseRead(int chan, bool held, bool abTrigger, float acc[3]) {
+    std::lock_guard<std::mutex> lk(sInputMutex);
+    const bool rise = sShakeRise[chan];
+    sShakeRise[chan] = false;
+    sReadsSinceAB[chan] = abTrigger ? 0 : (sReadsSinceAB[chan] < 1000 ? sReadsSinceAB[chan] + 1 : 1000);
+    if (rise) sPulsePending[chan] = true;
+    if (sPulseAge[chan] < 1000) ++sPulseAge[chan];  // (this read's place in the pulse: 0 is its first)
+    const bool want = sPulsePending[chan] || (held && sPulseAge[chan] >= kPulseRepeat);
+    if (want && sReadsSinceAB[chan] >= kPulseCooldownAB && sPulseAge[chan] >= kPulseQuietAfter) {
+        sPulseAge[chan] = 0;
+        sPulsePending[chan] = false;
+    }
+    if (sPulseAge[chan] >= kPulseReads) return false;
+    float norm = __builtin_sqrtf(sShakeAmp[chan][0] * sShakeAmp[chan][0] + sShakeAmp[chan][1] * sShakeAmp[chan][1] + sShakeAmp[chan][2] * sShakeAmp[chan][2]);
+    float scale = 1.0f;
+    if (norm <= 0.0f) { acc[0] = acc[1] = 2.5f; acc[2] = 0.0f; return true; }
+    if (norm < kPulseMinNorm) scale = kPulseMinNorm / norm;
+    for (int i = 0; i < 3; ++i) acc[i] = sShakeAmp[chan][i] * scale;
+    return true;
 }
 
 // Reports connection and Nunchuk changes through the registered callbacks,
@@ -295,6 +386,14 @@ s32 KPADRead(s32 chan, KPADStatus samples[], u32 length) {
     }
     k->release = sPrevHold[chan] & ~hold;
     sPrevHold[chan] = hold;
+    if (shakePulseOn()) {
+        float pulse[3] = {0.0f, 0.0f, 0.0f};
+        const bool held = s.accX != 0.0f || s.accY != 0.0f || s.accZ != 0.0f;
+        const bool on = shakePulseRead(chan, held, (k->trig & 0x0C00) != 0, pulse);  // (A 0x0800, B 0x0400)
+        s.accX = on ? pulse[0] : 0.0f;
+        s.accY = on ? pulse[1] : 0.0f;
+        s.accZ = on ? pulse[2] : 0.0f;
+    }
 
     Vec g = remoteGravity(s);
     k->acc.x = g.x + s.accX;

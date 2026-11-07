@@ -8,6 +8,9 @@
 #include "Game/Util/ObjUtil.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include "port/hot_knob.h"
+#include "port/light_memo.h"
 
 const GXLightID cLightDataIDs[8] = {GX_LIGHT0, GX_LIGHT1, GX_LIGHT2, GX_LIGHT3, GX_LIGHT4, GX_LIGHT5, GX_LIGHT6, GX_LIGHT7};
 
@@ -180,7 +183,7 @@ namespace {
     // Returns the view space position of `rCameraRel` placed relative to the
     // headset (x right, y up, z back, as in view space).
     bool vrCameraLightPos(TVec3f* pViewPos, const TVec3f& rCameraRel) {
-        static const bool sOff = getenv("PETARI_VRLIGHT_OFF") != nullptr;  // debug: the game camera's lights
+        const bool sOff = PORT_HOT_KNOB(bool, getenv("PETARI_VRLIGHT_OFF") != nullptr);  // debug: the game camera's lights (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
         f32 head[12], tanX, tanY;
         if (sOff || !port_vr_cull_view(head, &tanX, &tanY)) {
             return false;
@@ -217,7 +220,98 @@ namespace {
     }
 }  // namespace
 
+#ifdef TARGET_PC
+// GXV_LIGHT_DEDUP (default 0; 1: the draw-buffer passes; 2: all of GameScene::draw): inside a scope (port_light_scope_enter / _exit) a
+// light load whose words are already in light memory is not sent (decomp/src/RVL_SDK/gx/GXLight.c, the reasoning is there), and a
+// loadActorLightInfo with the inputs of the last one, when no light was sent or dropped since, sends nothing but the ambient colour
+// (which it always sets, as before: the material lists between write the ambient register themselves).
+//   Inputs of loadActorLightInfo: the ActorLightInfo's bytes (colours, positions, follow-camera flags, alpha), the camera's view
+// matrix (MR::getCameraViewMtx) and the headset (vrCameraLightPos: never on a handheld, and the memo is not used while it is).
+// Everything it sends is a function of these: lights 0, 1 and 2 and the ambient colour. So when the inputs are the ones the last
+// call had and light memory has not moved since (__PortGXLightGen, which moves at every light word sent and every drop), the three
+// lights hold what this call would send, and only the ambient colour is set again.
+extern "C" int __PortGXLightScope;
+extern "C" u32 __PortGXLightGen;
+extern "C" u32 __PortGXLightSent;
+extern "C" u32 __PortGXLightSkipped;
+extern "C" void __PortGXLightShadowDrop(void);
+extern "C" void port_log_summary(const char* fmt, ...);
+namespace {
+    // 0: off; 1: the draw-buffer passes; 2: also the whole of GameScene::draw (see port_light_scope_enter).
+    int lightDedupMode() {
+        return PORT_HOT_KNOB(int, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
+            const char* e = getenv("GXV_LIGHT_DEDUP");
+            const int v = (e != nullptr && *e != '\0') ? atoi(e) : 0;
+            return v < 0 ? 0 : (v > 2 ? 2 : v);
+        }());
+    }
+    port::LightMemo sActorLightMemo = {0, 0, {}};  // (port/light_memo.h)
+    u32 sActorLightMemoHits = 0, sActorLightLoads = 0, sLightScopes = 0;
+    // false: not memoised (the caller makes the set-up as before); else *pSame says whether it may be left out.
+    bool actorLightMemoKey(const ActorLightInfo* pInfo, bool* pSame) {
+        f32 head[12], tanX, tanY;
+        if (port_vr_cull_view(head, &tanX, &tanY)) {
+            port::LightMemoDrop(sActorLightMemo);
+            return false;  // (the headset moves the camera lights: not memoised)
+        }
+        const Mtx* view = MR::getCameraViewMtx().toCMtx();
+        *pSame = port::LightMemoSame(sActorLightMemo, __PortGXLightGen, pInfo, sizeof(ActorLightInfo), *view, sizeof(Mtx));
+        return true;
+    }
+}  // namespace
+
+// The scopes: DrawBufferGroup::drawOpa / drawXlu (level 1: the passes of DrawBufferExecuter -> DrawBuffer -> DrawBufferShapeDrawer)
+// and GameScene::draw (level 2). Exactness does not depend on what runs inside a scope: every write to light memory in this game is a
+// GXLoadLightObjImm (to the FIFO, which keeps the shadow, or into a display list, after which every list call drops it), and the front
+// end's light registers change only with the words it decodes (vgx_state.cpp WriteXFWord; set once at start-up). The scope only bounds
+// where the shadow is trusted: it is dropped when an outermost scope opens and closes. Returns 0 (no scope), 1 (outermost), 2 (nested).
+extern "C" int port_light_scope_enter(int level) {
+    if (lightDedupMode() < level) {
+        return 0;
+    }
+    if (__PortGXLightScope > 0) {
+        ++__PortGXLightScope;
+        return 2;
+    }
+    __PortGXLightShadowDrop();
+    ++__PortGXLightScope;
+    return 1;
+}
+extern "C" void port_light_scope_exit(int opened) {
+    if (!opened) {
+        return;
+    }
+    --__PortGXLightScope;
+    if (opened != 1) {
+        return;  // (nested: the outermost scope goes on)
+    }
+    __PortGXLightShadowDrop();
+    port::LightMemoDrop(sActorLightMemo);
+    // (a line every 8192 scopes or 30000 set-ups, whichever comes first: about every 1-2 minutes of play at either level)
+    if (++sLightScopes >= 8192 || sActorLightLoads >= 30000) {
+        port_log_summary("light-dedup: last %u scopes: light set-ups %u, %u of them with the inputs of the one before (nothing sent but "
+                         "the ambient colour); light objects sent %u, %u not sent (already in light memory) (GXV_LIGHT_DEDUP=%d)",
+                         sLightScopes, sActorLightLoads, sActorLightMemoHits, __PortGXLightSent, __PortGXLightSkipped, lightDedupMode());
+        sLightScopes = sActorLightLoads = sActorLightMemoHits = 0;
+        __PortGXLightSent = __PortGXLightSkipped = 0;
+    }
+}
+#endif
+
 void LightFunction::loadActorLightInfo(const ActorLightInfo* pInfo) {
+#ifdef TARGET_PC
+    bool memo = false;
+    if (__PortGXLightScope > 0) {
+        bool same = false;
+        memo = actorLightMemoKey(pInfo, &same);
+        ++sActorLightLoads;
+        if (memo && same) {
+            ++sActorLightMemoHits;
+            GXSetChanAmbColor(GX_COLOR0A0, GXColor(pInfo->mColor));  // (lights 0-2 hold this call's; the ambient colour as below)
+            return;
+        }
+    }
+#endif
     ::loadLightInfoDiffuse(pInfo->mInfo0, GX_LIGHT0);
     ::loadLightInfoDiffuse(pInfo->mInfo1, GX_LIGHT1);
 
@@ -229,6 +323,11 @@ void LightFunction::loadActorLightInfo(const ActorLightInfo* pInfo) {
 #endif
     ::loadLightDiffuse(c, rimPos, GX_LIGHT2);
     GXSetChanAmbColor(GX_COLOR0A0, GXColor(pInfo->mColor));
+#ifdef TARGET_PC
+    if (memo) {
+        port::LightMemoDone(sActorLightMemo, __PortGXLightGen);  // (lights 0-2 now hold what these inputs send, sent or already there)
+    }
+#endif
 }
 
 void LightFunction::loadLightInfoCoin(const LightInfoCoin* pInfo) {

@@ -3,13 +3,14 @@
 Thanks for playing! If something here bothers you, or you find something new, open an [issue on GitHub](https://github.com/CBOC-Vita-Lab/galaxy-vita/issues).
 
 ## Performance
-- **The Comet Observatory and the biggest boss fights are the heaviest scenes.** They can run below the rest of the game. The picture steps down a little there on its own.
-- **A galaxy's first visit starts at standard sharpness.** It moves up at your first pause if the Vita has room, and remembers that afterwards.
-- **The first launch is slower** while the graphics are prepared. Later launches are quicker.
+- **Honeyhive and Beach Bowl at the widest camera zoom (1.0×)** are the hardest work for the Vita. Quality holds 30 there, but at 720–848 wide instead of the full 960×544, and Locked 30 (which never lowers the size) runs about 25 in Beach Bowl. The closer default zoom (1.5×) is sharper there.
+- **Performance mode reaches 60 in lighter scenes** (Good Egg, Honeyhive at 1.5–2.0×) and runs 40–50 in the heavy ones. Where 60 is out of reach it shows an even 30.
+- **Without the CapUnlocker plug-in** the game can't use the Vita's fourth CPU core, and the busiest scenes run a few fps slower.
+- **With a manual install, the home-screen bubble is a plain star.** The console doesn't let a game change its own bubble pictures; the CBOC Vita Installer builds the bubble from your own game. The loading screen and Settings background use your own title screen (from your second start on). Delete `ux0:data/smg/art/title.rgba` to capture it again, or add `GXV_TITLEART=0` to `ux0:data/smg/env.txt` to switch it off.
 
 ## Gameplay
 - **Rear touch is off by default**, so fingers holding the Vita never move the pointer by accident. Turn it on in the pause menu with Triangle.
-- **A brief pause the first time some effects appear.** The Vita prepares each new graphics effect once, which can take a fraction of a second. The package comes with the effects of the whole game prepared ahead, and anything new is kept, so it happens at most once.
+- **A rare brief pause the first time an effect appears.** The package comes with the graphics of every galaxy prepared ahead; anything it doesn't have is prepared once (a fraction of a second) and kept.
 
 ## Install
 - The game needs your own `RMGE01` (Wii, USA) disc image. Other regions aren't supported yet.

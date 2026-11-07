@@ -16,7 +16,7 @@ extern "C" {
 char vgl_shader_cache_path[256] = {};
 #endif
 shader* shaders[8] = {};
-bool is_shark_online = true;
+unsigned char is_shark_online = 1;
 vglSemanticMode glsl_sema_mode = VGL_MODE_GLOBAL;
 shark_opt compiler_opts = SHARK_OPT_FAST;
 int32_t compiler_fastmath = 0, compiler_fastprecision = 0, compiler_fastint = 0;

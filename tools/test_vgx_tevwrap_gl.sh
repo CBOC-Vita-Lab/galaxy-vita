@@ -22,6 +22,7 @@ for value in unset 0 1 2 -1 invalid; do
     env -u GXV_TEVWRAP LIBGL_ALWAYS_SOFTWARE=1 "$out/vgx_tevwrap_gl" "$mode"
   else
     [[ $value != 1 ]] || mode=on
+    [[ $value != 2 ]] || mode=alpha
     GXV_TEVWRAP="$value" LIBGL_ALWAYS_SOFTWARE=1 "$out/vgx_tevwrap_gl" "$mode"
   fi
 done

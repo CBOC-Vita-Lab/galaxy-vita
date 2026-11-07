@@ -20,6 +20,10 @@ static int sceGxmDisplayQueueFinish() {++queues;return queueResult;}
 static bool g_presentAllowed=true, g_jobSwapped=false, g_wasSplash=true, g_fixedJob=false;
 static GLboolean g_settingsSceneResume=GL_FALSE;
 static std::atomic<unsigned long long> g_gameSwaps{0};
+// GXV_WAITLOG (the wait census of the hidden-frame finish): off in this fixture.
+static bool WaitLogOn() {return false;}
+static uint64_t NowUs() {return 0;}
+static struct {void Add(uint64_t) {}} g_hiddenFinishWait;
 static std::atomic<unsigned> g_presentSlotEpoch{0};
 #include "settings_host_actual.inc"
 int main() {

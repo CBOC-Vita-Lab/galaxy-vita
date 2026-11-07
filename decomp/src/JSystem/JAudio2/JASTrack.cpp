@@ -1,4 +1,9 @@
 #include "JSystem/JAudio2/JASTrack.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "JSystem/JAudio2/JASAiCtrl.hpp"
 #include "JSystem/JAudio2/JASBankTable.hpp"
 #include "JSystem/JAudio2/JASCriticalSection.hpp"
@@ -192,12 +197,14 @@ void JASTrack::setSeqData(void* data, u32 offset) {
 }
 
 void JASTrack::startSeq() {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the main thread drives JAudio here, never in a window; port/audio_cpu1.h)
     JASCriticalSection lock;
     sTrackList.append(this);
     mStatus = STATUS_RUN;
 }
 
 void JASTrack::stopSeq() {
+    PORT_AUDIO_TOUCH();
     JASCriticalSection lock;
     mIsStopped = true;
 }
@@ -520,6 +527,7 @@ void JASTrack::noteOffAll(u16 a) {
 }
 
 void JASTrack::mute(bool isMute) {
+    PORT_AUDIO_TOUCH();
     mIsMute = isMute;
     if (!isMute) {
         return;
@@ -577,6 +585,7 @@ void JASTrack::writePortSelf(u32 port, u16 value) {
 }
 
 void JASTrack::writePort(u32 port, u16 value) {
+    PORT_AUDIO_TOUCH();
     mTrackPort.writeImport(port, value);
     if (port <= 1) {
         mSeqCtrl.interrupt(port == 0 ? JASSeqCtrl::INTRTYPE_VALUE_2 : JASSeqCtrl::INTRTYPE_VALUE_3);
@@ -604,6 +613,7 @@ void JASTrack::setChannelPauseFlag(bool pauseFlag) {
 }
 
 void JASTrack::pause(bool pauseFlag) {
+    PORT_AUDIO_TOUCH();
     if (mPauseFlag != pauseFlag) {
         mPauseFlag = pauseFlag;
         setChannelPauseFlag(pauseFlag);
@@ -640,6 +650,7 @@ void JASTrack::setTempo(u16 tempo) {
 }
 
 void JASTrack::setTempoRate(f32 rate) {
+    PORT_AUDIO_TOUCH();
     mTempoRate = rate;
     mInvalidateSeq = true;
     updateTempo();

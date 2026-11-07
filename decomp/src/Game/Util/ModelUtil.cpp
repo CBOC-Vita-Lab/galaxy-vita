@@ -22,6 +22,9 @@ namespace {
     }
 };  // namespace
 
+#ifdef TARGET_PC
+bool port_dl_defer(LiveActor*, ModelManager*);
+#endif
 namespace MR {
 
     void FORCE_MATCH_FUNCTION_ORDER1() {
@@ -151,6 +154,14 @@ namespace MR {
     }
 
     void updateModelDiffDL(LiveActor* pActor) {
+#ifdef TARGET_PC
+        // (GXV_DL_LAZY=2: Mario's models and the others that refresh their lists from their own calcAnim are listed like the
+        // rest and made once, just before the next picture; at 30 pictures a second this was a front-end wait every picture
+        // in GXV_DRAWDONE_DEFER=4)
+        if (port_dl_defer(pActor, pActor->mModelManager)) {
+            return;
+        }
+#endif
         pActor->mModelManager->updateDL(true);
     }
 

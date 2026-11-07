@@ -774,10 +774,12 @@ int TargetScenarios() {
 
 int main(int argc, char**) {
     if (argc > 1) {
-        const bool expected = std::getenv("GXV_AUTOQ_TARGET") && std::atoi(std::getenv("GXV_AUTOQ_TARGET")) == 30;
-        Check(Target30Enabled() == expected, "target switch accepts only 30; default/unsupported values stay off");
+        const int asked = std::getenv("GXV_AUTOQ_TARGET") ? std::atoi(std::getenv("GXV_AUTOQ_TARGET")) : 0;
+        const bool expected = asked == 30 || asked == 60; // (Quality mode or Performance mode: the game CPU sampling is on)
+        Check(TargetEnabled() == expected && Target30Enabled() == (asked == 30) && TargetFps() == (expected ? asked : 0),
+              "target switch accepts only 30 and 60; default/unsupported values stay off");
         setenv("GXV_AUTOQ_TARGET", expected ? "0" : "30", 1);
-        Check(Target30Enabled() == expected, "target switch is read once even when the environment later changes");
+        Check(TargetEnabled() == expected && TargetFps() == (expected ? asked : 0), "target switch is read once even when the environment later changes");
         const bool hooks = port_autoq_game_begin && port_autoq_game_work_done && port_autoq_game_cpu_totals && port_autoq_picture_work_us;
         Check(hooks, "game CPU sampling hooks are linked");
         if (hooks) {
@@ -821,6 +823,26 @@ int main(int argc, char**) {
             }
             Check(port_autoq_picture_work_us() == (expected ? 28000u : 0u),
                   "optional pacing hint is off by default and normalizes three paced game turns to two");
+            {
+                // Performance mode decides on one turn a picture, but the hint stays the 30 Hz cost (two turns) the 20/30 pacing reads.
+                Config cfg60 = cfg;
+                cfg60.targetFps = 60;
+                Controller c60(cfg60);
+                for (unsigned i = 0; i < 3; ++i) {
+                    FrameTimes f;
+                    f.presentUs = 1 + i * 50000ull;
+                    f.backendRunUs = 1 + i * 3000ull;
+                    f.gameRunUs = 1 + i * 42000u;
+                    f.gameTurns = 1 + i * 3u;
+                    f.gameFaults = faults;
+                    f.gameKnown = true;
+                    f.timers = f.busyKnown = true;
+                    f.gpuBusyUs = 8000;
+                    c60.Add(f);
+                }
+                Check(port_autoq_picture_work_us() == (expected ? 28000u : 0u) && std::abs(c60.WindowGameMs() - 14.0) < 0.01,
+                      "target 60: one game turn a picture in the decisions (14 ms), the pacing hint still two (28 ms)");
+            }
             if (expected) {
                 for (unsigned scenario = 0; scenario < 9; ++scenario) {
                     Controller hint(cfg);

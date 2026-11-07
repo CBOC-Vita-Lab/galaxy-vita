@@ -18,6 +18,8 @@ static void require(bool valid, const char* message) {
     if (!valid) { std::fprintf(stderr, "memory FAILED: %s\n", message); std::exit(1); }
 }
 
+// os_mem.cpp tells the renderer about CPU writes into GX-visible memory; there is no renderer in this test.
+extern "C" void port_vgx_notify_write(const void*, size_t) {}
 extern "C" void port_log(const char*, ...) {}
 extern "C" void port_fatal(const char* format, ...) {
     va_list args; va_start(args, format); std::vfprintf(stderr, format, args); va_end(args);

@@ -1,5 +1,6 @@
 // Exercise the real render loop with a deterministic GPU boundary and clock.
 #include "../platform/src/gx/vgx_galaxy.cpp"
+#include "vgx_galaxy_host_stubs.h"
 
 namespace {
 struct Finished {};
@@ -51,6 +52,9 @@ void SetSkipDraws(bool skip) { Require(!skip, "ordinary-play queue must not skip
 void RequestCapture(bool cap) { Require(!cap, "no unrequested capture"); }
 unsigned WarmPending() { return 0; }
 void WarmIdle() {}
+unsigned StageWarmPending() { return 0; }
+bool StageWarmIdleWanted() { return false; }
+void StageWarmIdle() {}
 Stats GetStats() { return {}; }
 const std::vector<uint8_t>& LastDisplayCopy(int& width, int& height) {
     static std::vector<uint8_t> empty;

@@ -24,6 +24,9 @@ void J3DMtxBuffer::initialize() {
     mMtxNum = 1;
     mCurrentViewNo = 0;
     mpUserAnmMtx = NULL;
+#ifdef TARGET_PC
+    mPortSerial = 0;
+#endif
 }
 
 enum {
@@ -177,6 +180,70 @@ s32 J3DMtxBuffer::createBumpMtxArray(J3DModelData* i_modelData, u32 mtxNum) {
 
 static f32 J3DUnit01[] = {0.0f, 1.0f};
 
+#if defined(TARGET_PC) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#include <stdlib.h>
+// GXV_J3D_NEON (default 1; =0 in env.txt: the portable loop below). The weight envelopes of skinned models (Mario, the
+// Lumas, every enemy with a skin), every turn: per joint of an envelope, PSMTXConcat (a call into platform/src/sdk/mtx.c)
+// into a stack matrix, then twelve scalar multiply-adds into the accumulator. Here the concat stays in NEON registers and
+// is accumulated with three vector multiply-accumulates, no call and no stack round trip.
+// The arithmetic is that of the loop below, operation for operation: the concat is mtx.c's NEON C_MTXConcat (a multiply,
+// two multiply-adds that are not fused, then a[r][3] added last), and acc + prod * w is VMLA, which rounds the product
+// before the add, as the scalar `acc[r][c] += prod[r][c] * w` does (the Cortex-A9 has no fused multiply-add, VFPv3).
+// The one difference: NEON flushes subnormal floats to zero; the concat was already NEON (mtx.c), and the envelope
+// matrices are read only by the view pass and the draw (J3DMtxBuffer::calcDrawMtx, J3DShapeMtx*), never by the game's logic.
+#include "port/hot_knob.h"
+static bool J3DEnvelopeNeonOn() {
+    return PORT_HOT_KNOB(bool, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
+        const char* e = getenv("GXV_J3D_NEON");
+        return !(e && *e == '0');
+    }());
+}
+
+static void J3DCalcWeightEnvelopeNeon(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pOut, const u8* pScaleFlag, u8* pEnvScaleFlag) {
+    const u16* pIdx = pTree->getWEvlpMixMtxIndex();
+    const f32* pWeight = pTree->getWEvlpMixWeight();
+    const int envNum = pTree->getWEvlpMtxNum();
+    const float32x4_t zero = vdupq_n_f32(0.0f);
+    for (int e = 0; e < envNum; e++) {
+        u8 envScale = 1;
+        float32x4_t acc0 = zero, acc1 = zero, acc2 = zero;
+        const int envMixNum = pTree->getWEvlpMixMtxNum(e);
+        int k = 0;
+        do {
+            const u16 jointIdx = *pIdx++;
+            const f32 w = *pWeight++;
+            const f32(*a)[4] = pAnmMtx[jointIdx];
+            const f32(*b)[4] = pTree->getInvJointMtx(jointIdx);
+            // C_MTXConcat(a, b) (platform/src/sdk/mtx.c, the NEON form), kept in registers.
+            const float32x4_t b0 = vld1q_f32(b[0]), b1 = vld1q_f32(b[1]), b2 = vld1q_f32(b[2]);
+            const float32x4_t a0 = vld1q_f32(a[0]), a1 = vld1q_f32(a[1]), a2 = vld1q_f32(a[2]);
+            float32x4_t r0 = vmulq_lane_f32(b0, vget_low_f32(a0), 0);
+            float32x4_t r1 = vmulq_lane_f32(b0, vget_low_f32(a1), 0);
+            float32x4_t r2 = vmulq_lane_f32(b0, vget_low_f32(a2), 0);
+            r0 = vmlaq_lane_f32(r0, b1, vget_low_f32(a0), 1);
+            r1 = vmlaq_lane_f32(r1, b1, vget_low_f32(a1), 1);
+            r2 = vmlaq_lane_f32(r2, b1, vget_low_f32(a2), 1);
+            r0 = vmlaq_lane_f32(r0, b2, vget_high_f32(a0), 0);
+            r1 = vmlaq_lane_f32(r1, b2, vget_high_f32(a1), 0);
+            r2 = vmlaq_lane_f32(r2, b2, vget_high_f32(a2), 0);
+            r0 = vsetq_lane_f32(vgetq_lane_f32(r0, 3) + vgetq_lane_f32(a0, 3), r0, 3);
+            r1 = vsetq_lane_f32(vgetq_lane_f32(r1, 3) + vgetq_lane_f32(a1, 3), r1, 3);
+            r2 = vsetq_lane_f32(vgetq_lane_f32(r2, 3) + vgetq_lane_f32(a2, 3), r2, 3);
+            // acc[r][c] += prod[r][c] * w
+            acc0 = vmlaq_n_f32(acc0, r0, w);
+            acc1 = vmlaq_n_f32(acc1, r1, w);
+            acc2 = vmlaq_n_f32(acc2, r2, w);
+            envScale &= pScaleFlag[jointIdx];
+        } while (++k < envMixNum);
+        vst1q_f32(pOut[e][0], acc0);
+        vst1q_f32(pOut[e][1], acc1);
+        vst1q_f32(pOut[e][2], acc2);
+        pEnvScaleFlag[e] = envScale;
+    }
+}
+#endif
+
 void J3DMtxBuffer::calcWeightEnvelopeMtx() {
     __REGISTER MtxPtr weightAnmMtx;
     __REGISTER MtxPtr worldMtx;
@@ -216,6 +283,12 @@ void J3DMtxBuffer::calcWeightEnvelopeMtx() {
     __REGISTER f32* var_r7 = J3DUnit01;
 
 #ifndef __MWERKS__
+#if defined(TARGET_PC) && defined(__ARM_NEON)
+    if (J3DEnvelopeNeonOn()) {
+        J3DCalcWeightEnvelopeNeon(mJointTree, mpAnmMtx, mpWeightEvlpMtx, mpScaleFlagArr, mpEvlpScaleFlagArr);
+        return;
+    }
+#endif
     // weightAnmMtx[e] = sum over the envelope's joints of weight * (anmMtx[joint] * invJointMtx[joint]).
     {
         const u16* pIdx = mJointTree->getWEvlpMixMtxIndex();
@@ -337,6 +410,120 @@ void J3DMtxBuffer::calcWeightEnvelopeMtx() {
 #endif
 }
 
+#ifdef TARGET_PC
+// GXV_PAR_VIEW (par13, 5 Nov; decomp/src/Game/LiveActor/ModelManager.cpp, platform/src/port/par_exec.h): the arithmetic of
+// calcDrawMtx, calcNrmMtx and calcBBoardMtx with every input and output named, so that a view pass's matrices can be computed on
+// another thread from what the game thread captured for it (the view matrix by value, the buffer's arrays as they were). These
+// functions read nothing global and write only `draw` and `nrm`. The member functions below call them with their own arrays and
+// j3dSys's view matrix: the serial and the parallel view pass run the same code. The text between the PORT_PAR_CORE markers is
+// compiled by the host test as it stands (tools/test_par_exec_view.sh).
+// PORT_PAR_CORE_BEGIN
+void J3DMtxBuffer::portCalcDrawMtxCore(J3DJointTree* tree, u32 mdlFlag, Vec const& param_1, Mtx const& param_2, MtxPtr view, Mtx* anm,
+                                       Mtx* wevlp, Mtx* draw) {
+    MtxPtr viewMtx;
+    Mtx viewBaseMtx;
+    u16 fullWgtNum;
+
+    switch (mdlFlag) {
+    case 0:
+        viewMtx = view;
+        fullWgtNum = tree->getDrawFullWgtMtxNum();
+        for (u16 i = 0; i < fullWgtNum; i++) {
+            PSMTXConcat(viewMtx, anm[tree->getDrawMtxIndex(i)], draw[i]);
+        }
+        if (tree->getDrawMtxNum() > fullWgtNum) {
+            J3DPSMtxArrayConcat(viewMtx, *wevlp, draw[fullWgtNum], tree->getWEvlpMtxNum());
+        }
+        return;
+    case 1:
+        fullWgtNum = tree->getDrawFullWgtMtxNum();
+        for (u16 i = 0; i < fullWgtNum; i++) {
+            PSMTXCopy(anm[tree->getDrawMtxIndex(i)], draw[i]);
+        }
+        fullWgtNum = tree->getDrawFullWgtMtxNum();
+        for (u16 i = 0; i < fullWgtNum; i++) {
+            PSMTXCopy(wevlp[i], draw[tree->getDrawFullWgtMtxNum() + i]);  // (sic: the count of the original)
+        }
+        break;
+    case 2:
+        J3DCalcViewBaseMtx(view, param_1, param_2, viewBaseMtx);
+        fullWgtNum = tree->getDrawFullWgtMtxNum();
+        for (u16 i = 0; i < fullWgtNum; i++) {
+            PSMTXConcat(viewBaseMtx, anm[tree->getDrawMtxIndex(i)], draw[i]);
+        }
+        if (tree->getDrawMtxNum() > tree->getDrawFullWgtMtxNum()) {
+            J3DPSMtxArrayConcat(viewBaseMtx, *wevlp, draw[tree->getDrawFullWgtMtxNum()], tree->getWEvlpMtxNum());
+        }
+        return;
+    default:
+        break;
+    }
+}
+
+void J3DMtxBuffer::portCalcNrmMtxCore(J3DJointTree* tree, const u8* scaleFlag, const u8* envScaleFlag, Mtx* draw, Mtx33* nrm) {
+    u16 drawMtxNum = tree->getDrawMtxNum();
+    for (u16 i = 0; i < drawMtxNum; i++) {
+        if (tree->getDrawMtxFlag(i) == 0) {
+            if (scaleFlag[tree->getDrawMtxIndex(i)] == 1) {
+                portSetNrmMtx(nrm[i], draw[i]);
+            } else {
+                J3DPSCalcInverseTranspose(draw[i], nrm[i]);
+            }
+        } else {
+            if (envScaleFlag[tree->getDrawMtxIndex(i)] == 1) {
+                portSetNrmMtx(nrm[i], draw[i]);
+            } else {
+                J3DPSCalcInverseTranspose(draw[i], nrm[i]);
+            }
+        }
+    }
+}
+
+void J3DMtxBuffer::portCalcBBoardMtxCore(J3DJointTree* tree, Mtx* draw, Mtx33* nrm) {
+    u16 drawMtxNum = tree->getDrawMtxNum();
+    for (u16 i = 0; i < drawMtxNum; i++) {
+        if (tree->getDrawMtxFlag(i) == 0) {
+            u16 index = tree->getDrawMtxIndex(i);
+            if (tree->getJointNodePointer(index)->getMtxType() == 1) {
+                MtxPtr drawMtx = draw[i];
+                J3DCalcBBoardMtx(drawMtx);
+
+                Mtx33* nrmMtx = &nrm[i];
+                (*nrmMtx)[0][0] = 1.0f / drawMtx[0][0];
+                (*nrmMtx)[0][1] = 0.0f;
+                (*nrmMtx)[0][2] = 0.0f;
+                (*nrmMtx)[1][0] = 0.0f;
+                (*nrmMtx)[1][1] = 1.0f / drawMtx[1][1];
+                (*nrmMtx)[1][2] = 0.0f;
+                (*nrmMtx)[2][0] = 0.0f;
+                (*nrmMtx)[2][1] = 0.0f;
+                (*nrmMtx)[2][2] = 1.0f / drawMtx[2][2];
+            } else if (tree->getJointNodePointer(index)->getMtxType() == 2) {
+                MtxPtr drawMtx = draw[i];
+                J3DCalcYBBoardMtx(drawMtx);
+                Mtx33* nrmMtx = &nrm[i];
+                J3DPSCalcInverseTranspose(drawMtx, *nrmMtx);
+            }
+        }
+    }
+}
+// PORT_PAR_CORE_END
+
+void J3DMtxBuffer::calcDrawMtx(u32 mdlFlag, Vec const& param_1, Mtx const& param_2) {
+    portTouch();  // (GXV_VIEW_KEEP)
+    portCalcDrawMtxCore(mJointTree, mdlFlag, param_1, param_2, j3dSys.getViewMtx(), mpAnmMtx, mpWeightEvlpMtx, mpDrawMtxArr[1][mCurrentViewNo]);
+}
+
+void J3DMtxBuffer::calcNrmMtx() {
+    portTouch();  // (GXV_VIEW_KEEP)
+    portCalcNrmMtxCore(mJointTree, mpScaleFlagArr, mpEvlpScaleFlagArr, mpDrawMtxArr[1][mCurrentViewNo], mpNrmMtxArr[1][mCurrentViewNo]);
+}
+
+void J3DMtxBuffer::calcBBoardMtx() {
+    portTouch();  // (GXV_VIEW_KEEP)
+    portCalcBBoardMtxCore(mJointTree, mpDrawMtxArr[1][mCurrentViewNo], mpNrmMtxArr[1][mCurrentViewNo]);
+}
+#else
 void J3DMtxBuffer::calcDrawMtx(u32 mdlFlag, Vec const& param_1, Mtx const& param_2) {
     Mtx *sp24, *sp20;
     int sp1C = 0;
@@ -430,6 +617,8 @@ void J3DMtxBuffer::calcBBoardMtx() {
         }
     }
 }
+
+#endif
 
 void J3DCalcViewBaseMtx(Mtx view, Vec const& scale, const Mtx& base, Mtx dst) {
     Mtx m;

@@ -9,3 +9,6 @@ extern "C" unsigned long long port_headless_render(const char*, int) { return 0;
 // PowerPC divw does not trap), so the harness takes the Vita's behaviour.  (Needs the static libgcc, see CMakeLists.txt.)
 extern "C" int __aeabi_idiv0(int value) { return value; }
 extern "C" long long __aeabi_ldiv0(long long value) { return value; }
+
+// The in-game settings screen lives in the Vita package (vita/vgx-game/settings_runtime.cpp); the game loop calls this hook.
+extern "C" void port_settings_game_boundary(int) {}

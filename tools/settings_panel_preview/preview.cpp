@@ -1,7 +1,7 @@
 // Host side of tools/settings_panel_preview/render.py: builds the settings panel's plan (platform/src/port/settings_panel_plan.cpp,
 // the same code the Vita runs) for one state and prints it as text. Font metrics come from a file render.py writes from the
 // game's own fonts (local data, never part of the tree).
-//   preview <metrics-file> <zoom tenths> <rear 0/1> <knob> <pulse> <alpha> <compact 0/1> <language prefix, e.g. UsEnglish>
+//   preview <metrics-file> <zoom tenths> <rear 0/1> <knob> <pulse> <alpha> <compact 0/1> <language prefix, e.g. UsEnglish> [stick knob] [Star Bit reach 1..5]
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -46,10 +46,12 @@ int main(int argc, char** argv) {
     st.zoomTenths = atoi(argv[2]);
     st.rearAim = atoi(argv[3]) != 0;
     st.knob = static_cast<float>(atof(argv[4]));
+    st.stickKnob = argc > 9 ? static_cast<float>(atof(argv[9])) : 0.0f;
     st.pulse = static_cast<float>(atof(argv[5]));
     st.alpha = static_cast<float>(atof(argv[6]));
     st.compact = atoi(argv[7]) != 0;
     st.language = settings_panel::LanguageIndex(argv[8]);
+    if (argc > 10) st.starBitReach = atoi(argv[10]);
     static settings_panel::Plan plan;
     settings_panel::Build(st, metrics, &plan);
     printf("P %f %f %f %f %f %f %d %d %s\n", st.width, st.height, plan.x0, plan.y0, plan.x1, plan.y1, plan.vertexCount, plan.overflow ? 1 : 0,

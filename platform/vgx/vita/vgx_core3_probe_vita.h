@@ -3,6 +3,8 @@
 #include "vgx_common.h"
 #include "vgx_core3_probe.h"
 
+extern "C" int port_vita_core3_available(void) __attribute__((weak));  // the one proof of the fourth core (vita/runtime/memory.cpp)
+
 namespace vgx::core3probe {
 template <typename... Args> inline void Log(const char* format, Args... args) {
     if (&port_log_summary) port_log_summary(format, args...);
@@ -60,6 +62,8 @@ inline void Start() {
     static const bool attempted = [] {
         // GXV_CORE3_PROBE=1 enables a quota-controlled system-core availability probe; default 0, never a percent/duty setting.
         if (EnvInt("GXV_CORE3_PROBE", 0) != 1) return false;
+        // (1.3) the long-running share measurement only on a core the start-up probe proved (port/core_layout.h ProveSystemCore)
+        if (port_vita_core3_available && !port_vita_core3_available()) { Log("[vgx-vita] core3 probe skipped: the fourth core is not available (see the clocks/cores line)"); return false; }
         const SceUID uid = sceKernelCreateThread("smg_core3_probe", &Main, 0x10000100, 64 * 1024, 0, kSystemMask, nullptr);
         if (uid < 0) { Log("[vgx-vita] core3 probe stopped: create rc=0x%X; no fallback on a user core", static_cast<unsigned>(uid)); return false; }
         const int result = sceKernelStartThread(uid, 0, nullptr);

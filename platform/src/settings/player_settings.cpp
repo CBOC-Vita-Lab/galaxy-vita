@@ -1,4 +1,5 @@
 #include "port/player_settings.h"
+#include "port/tilt_gain.h"
 #include <algorithm>
 #include <charconv>
 #include <map>
@@ -31,15 +32,21 @@ bool KnownAction(const controls::ControlApi& api,const std::string& s) {
     for(size_t i=0;i<api.actionCount;++i) if(s==api.actions[i].id) return true;
     return false;
 }
+// Keys 1.1 files do not have: absent means the default, and (profile_chosen) marks a file written before the 1.2 pad defaults.
+bool IsOptionalKey(const std::string& key) {
+    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan","gxm_renderer","logic_overlap","material_updates","far_animation","game_speed","motion_gain","motion_level","motion_source","perf_mode"})if(key==k)return true;
+    return false;
+}
 bool Managed(const std::string& key,const controls::ControlApi& api) {
-    if(key=="schema"||key=="fps_limit"||key=="auto_quality"||key=="profile"||key=="language"||key=="reduced_motion") return true;
+    if(key=="schema"||key=="fps_limit"||key=="auto_quality"||key=="profile"||key=="language"||key=="reduced_motion"||IsOptionalKey(key)) return true;
     for(const auto* p:{"bind.handheld.","bind.playstation."})
         if(key.compare(0,std::char_traits<char>::length(p),p)==0&&KnownAction(api,key.substr(std::char_traits<char>::length(p)))) return true;
     return false;
 }
 StoreResult Error(StoreStatus s,const std::string& message) { return {s,message}; }
 bool ValidConfig(const Config& c,const controls::ControlApi& api,std::string& error) {
-    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1) {error="Invalid settings value";return false;}
+    if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1 ||
+       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1 || static_cast<unsigned>(c.farAnimation)>2 || !tilt::ValidLevel(c.tiltLevel) || (c.performance60&&c.fpsLimit!=0)) {error="Invalid settings value";return false;}
     if(c.language.size()>64 || std::any_of(c.language.begin(),c.language.end(),[](unsigned char ch){return ch<32||ch>126||ch=='=';})) {error="Invalid language name";return false;}
     for(unsigned i=0;i<2;++i) if(!api.validate(c.profiles[i],static_cast<controls::ProfileId>(i),controls::NominalCaps(static_cast<controls::ProfileId>(i)),error)) return false;
     return true;
@@ -48,7 +55,12 @@ std::map<std::string,std::string> Values(const Config& c) {
     std::map<std::string,std::string> v{{"schema","1"},{"fps_limit",c.fpsLimit==kSteady30?std::string("steady30"):std::to_string(c.fpsLimit)},
         {"auto_quality",c.autoQuality==AutoQuality::Default?"default":c.autoQuality==AutoQuality::Enabled?"on":"off"},
         {"profile",c.profile==controls::ProfileId::Handheld?"handheld":"playstation"},
-        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"}};
+        {"language",c.language},{"reduced_motion",c.reducedMotion?"1":"0"},{"mouse_aim",c.mouseAim?"1":"0"},{"profile_chosen",c.profileChosen?"1":"0"},
+        {"above_native",c.aboveNative?"1":"0"},{"mario_first",c.prioritizeMario?"1":"0"},{"anti_aliasing",c.antiAliasing==AntiAliasing::Auto?"auto":"off"},
+        {"picture_sharpness",c.sharpness==Sharpness::Auto?"auto":c.sharpness==Sharpness::Off?"off":"strong"},{"hd_textures",c.hdTextures?"1":"0"},
+        {"effects_quality",c.effects==EffectsQuality::Adaptive?"adaptive":"full"},{"depth_of_field",c.depthOfField?"1":"0"},{"core_plan",c.coreHelp?"auto":"off"},
+        {"gxm_renderer",c.gxmDirect?"direct":"standard"},{"logic_overlap",!c.logicOverlap?"0":c.overlapMax?"max":"1"},{"material_updates",c.lazyMaterials?"per_picture":"every_turn"},{"far_animation",c.farAnimation==FarAnimation::Reduced?"reduced":c.farAnimation==FarAnimation::Full?"full":"aggressive"},{"game_speed",c.fullSpeed?"full":"smooth"},
+        {"motion_level",std::to_string(c.tiltLevel)},{"motion_source",c.tiltStick?"stick":"sensor"},{"perf_mode",c.performance60?"1":"0"}};
     for(unsigned i=0;i<2;++i) for(const auto& b:c.profiles[i].bindings)
         v[std::string("bind.")+(i?"playstation.":"handheld.")+b.action]=b.buttons[0]+(b.buttons[1].empty()?"":","+b.buttons[1]);
     return v;
@@ -56,6 +68,31 @@ std::map<std::string,std::string> Values(const Config& c) {
 }
 Config DefaultConfig(const controls::ControlApi& api) {
     Config c; for(unsigned i=0;i<2;++i)c.profiles[i]=api.defaults(static_cast<controls::ProfileId>(i));return c;
+}
+void ApplyPreset(Config& c,Preset preset) {
+    if(preset==Preset::Custom)return;
+    // Performance also selects Performance mode (and so leaves Locked 30, which it cannot be); the other two return to Quality but keep a Locked 30.
+    c.performance60=preset==Preset::Performance;if(c.performance60)c.fpsLimit=0;
+    c.autoQuality=AutoQuality::Default;c.prioritizeMario=true;c.effects=EffectsQuality::Adaptive;
+    c.aboveNative=preset==Preset::BestPicture;
+    c.antiAliasing=preset==Preset::Performance?AntiAliasing::Off:AntiAliasing::Auto;
+    c.sharpness=preset==Preset::Performance?Sharpness::Off:Sharpness::Auto;
+    c.depthOfField=preset!=Preset::Performance;
+}
+Preset PresetOf(const Config& c) {
+    for(const auto preset:{Preset::BestPicture,Preset::Balanced,Preset::Performance}) {
+        Config want=c;ApplyPreset(want,preset);
+        // Dynamic resolution "On" and the default are the same choice on the console, so either reads as a preset's.
+        const bool on=c.autoQuality!=AutoQuality::Disabled;
+        if(on&&c.aboveNative==want.aboveNative&&c.prioritizeMario==want.prioritizeMario&&c.antiAliasing==want.antiAliasing&&c.sharpness==want.sharpness&&
+           c.effects==want.effects&&c.depthOfField==want.depthOfField&&c.performance60==want.performance60&&(!want.performance60||c.fpsLimit==0))return preset;
+    }
+    return Preset::Custom;
+}
+bool ApplyPadDefaults(Config& c,bool externalPad) {
+    if(!controls::PadDefaultsEnabled()||!externalPad||c.profileChosen||c.profile!=controls::ProfileId::Handheld)return false;
+    if(!controls::SameBindings(c.profiles[0],controls::GetControlApi().defaults(controls::ProfileId::Handheld)))return false;
+    c.profile=controls::ProfileId::PlayStation;return true;
 }
 bool Equal(const Config& a,const Config& b) { return Values(a)==Values(b) && a.version==b.version; }
 StoreResult ParseDocument(const std::string& source,const controls::ControlApi& api,Document& result) {
@@ -76,15 +113,43 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     // Schema 1 is always a complete snapshot, not a sparse preferences overlay.
     // This distinguishes interrupted writes (including newline boundaries) from
     // intentional defaults before a primary may displace a valid backup.
-    for(const auto& value:Values(d.config))if(!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
+    for(const auto& value:Values(d.config))if(!IsOptionalKey(value.first)&&!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
+    bool haveLevel=false;int oldGain=0;
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
-        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=v=="30"?30:v=="steady30"?kSteady30:0; }
+        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=(v=="30"||v=="steady30")?30:0; /* 1.1's "Steady 30" is the 1.2 locked 30 */ }
         else if(k=="auto_quality") { if(v!="default"&&v!="on"&&v!="off") return Error(StoreStatus::Malformed,"Invalid dynamic quality");d.config.autoQuality=v=="default"?AutoQuality::Default:v=="on"?AutoQuality::Enabled:AutoQuality::Disabled; }
         else if(k=="profile") { if(v!="handheld"&&v!="playstation")return Error(StoreStatus::Malformed,"Invalid control profile");d.config.profile=v=="handheld"?controls::ProfileId::Handheld:controls::ProfileId::PlayStation; }
         else if(k=="language") d.config.language=v;
         else if(k=="reduced_motion") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid reduced motion");d.config.reducedMotion=v=="1"; }
+        else if(k=="mouse_aim") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid mouse aim");d.config.mouseAim=v=="1"; }
+        else if(k=="above_native") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid Sharper when possible");d.config.aboveNative=v=="1"; }
+        else if(k=="mario_first") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid Prioritize Mario");d.config.prioritizeMario=v=="1"; }
+        else if(k=="anti_aliasing") { if(v!="auto"&&v!="off")return Error(StoreStatus::Malformed,"Invalid anti-aliasing");d.config.antiAliasing=v=="auto"?AntiAliasing::Auto:AntiAliasing::Off; }
+        else if(k=="picture_sharpness") { if(v!="auto"&&v!="off"&&v!="strong")return Error(StoreStatus::Malformed,"Invalid sharpness");d.config.sharpness=v=="auto"?Sharpness::Auto:v=="off"?Sharpness::Off:Sharpness::Strong; }
+        else if(k=="hd_textures") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid HD textures");d.config.hdTextures=v=="1"; }
+        else if(k=="effects_quality") { if(v!="adaptive"&&v!="full")return Error(StoreStatus::Malformed,"Invalid effects quality");d.config.effects=v=="adaptive"?EffectsQuality::Adaptive:EffectsQuality::Full; }
+        else if(k=="depth_of_field") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid depth of field");d.config.depthOfField=v=="1"; }
+        else if(k=="core_plan") { if(v!="auto"&&v!="off")return Error(StoreStatus::Malformed,"Invalid core plan");d.config.coreHelp=v=="auto"; }
+        else if(k=="gxm_renderer") { if(v!="direct"&&v!="standard")return Error(StoreStatus::Malformed,"Invalid renderer");d.config.gxmDirect=v=="direct"; }
+        else if(k=="logic_overlap") { if(v!="0"&&v!="1"&&v!="max")return Error(StoreStatus::Malformed,"Invalid logic overlap");d.config.logicOverlap=v!="0";d.config.overlapMax=v=="max"; }
+        else if(k=="material_updates") { if(v!="per_picture"&&v!="every_turn")return Error(StoreStatus::Malformed,"Invalid material updates");d.config.lazyMaterials=v=="per_picture"; }
+        else if(k=="far_animation") { if(v!="reduced"&&v!="full"&&v!="aggressive")return Error(StoreStatus::Malformed,"Invalid far animation");d.config.farAnimation=v=="reduced"?FarAnimation::Reduced:v=="full"?FarAnimation::Full:FarAnimation::Aggressive; }
+        else if(k=="perf_mode") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid performance mode");d.config.performance60=v=="1"; }
+        else if(k=="game_speed") { if(v!="full"&&v!="smooth")return Error(StoreStatus::Malformed,"Invalid game speed");d.config.fullSpeed=v=="full"; }
+        else if(k=="motion_level") {
+            int level=0;auto parsed=std::from_chars(v.data(),v.data()+v.size(),level);
+            if(v.empty()||parsed.ec!=std::errc{}||parsed.ptr!=v.data()+v.size()||!tilt::ValidLevel(level))return Error(StoreStatus::Malformed,"Invalid tilt sensitivity");
+            d.config.tiltLevel=level;haveLevel=true;
+        }
+        else if(k=="motion_gain") {   // 1.2 beta: a percentage, 50 to 200 in steps of 25. Read, never written again; motion_level wins when both are there.
+            int percent=0;auto parsed=std::from_chars(v.data(),v.data()+v.size(),percent);
+            if(v.empty()||parsed.ec!=std::errc{}||parsed.ptr!=v.data()+v.size()||percent<tilt::kMinPercent||percent>tilt::kMaxPercent||percent%25!=0)return Error(StoreStatus::Malformed,"Invalid tilt sensitivity");
+            oldGain=percent;
+        }
+        else if(k=="motion_source") { if(v!="sensor"&&v!="stick")return Error(StoreStatus::Malformed,"Invalid tilt source");d.config.tiltStick=v=="stick"; }
+        else if(k=="profile_chosen") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid profile choice");d.config.profileChosen=v=="1"; }
         else if(Managed(k,api)&&k.compare(0,5,"bind.")==0) {
             const bool ps=k.compare(5,12,"playstation.")==0;
             const auto action=k.substr(ps?17:14); auto comma=v.find(',');
@@ -95,6 +160,14 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
             }
         }
     }
+    // A file from before the 1.2 pad defaults (no profile_chosen key) whose PlayStation profile is still exactly the 1.1 default was
+    // never customised: it takes the new default. Once 1.2 has written the file the key is there and nothing is migrated, so a
+    // player who sets Star Bits back to Circle keeps it.
+    if(!seen.count("profile_chosen")&&controls::PadDefaultsEnabled()&&controls::SameBindings(d.config.profiles[1],controls::LegacyPlayStationDefaults()))
+        d.config.profiles[1]=api.defaults(controls::ProfileId::PlayStation);
+    if(!haveLevel&&oldGain)d.config.tiltLevel=tilt::LevelOfPercent(oldGain);
+    // Performance mode is a way of running up to 60: a file that also asks for Locked 30 keeps the lock (what every earlier build reads).
+    if(d.config.fpsLimit!=0)d.config.performance60=false;
     std::string error;
     if(!ValidConfig(d.config,api,error))return Error(StoreStatus::Malformed,error);
     result=std::move(d);return {StoreStatus::Ok,""};

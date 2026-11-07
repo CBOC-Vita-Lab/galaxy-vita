@@ -1,0 +1,14 @@
+--- a/source/misc.c	2026-11-06 14:11:22.631423073 -0500
++++ b/source/misc.c	2026-11-06 14:11:22.633562688 -0500
+@@ -327,9 +327,9 @@
+ 	}
+ #endif
+ 
+-	x_scale = width >> 1;
++	x_scale = (float)width * 0.5f; // (exact: an odd width kept its last column; was width >> 1)
+ 	x_port = x + x_scale;
+-	y_scale = -(height >> 1);
++	y_scale = -((float)height * 0.5f); // (exact: was -(height >> 1))
+ 	y_port = (is_rendering_display ? DISPLAY_HEIGHT : in_use_framebuffer->height) - y + y_scale;
+ #ifndef HAVE_UNFLIPPED_FBOS
+ 	if (!is_rendering_display) {

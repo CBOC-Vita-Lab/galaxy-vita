@@ -456,8 +456,19 @@ void J3DGDSetTevKColor(GXTevKColorID reg, GXColor color) {
     regBG = BP_TEV_COLOR_REG_BG(color.b, color.g, 1, 0xE1 + reg * 2);
 
     GDOverflowCheck(0xa);
+#ifdef TARGET_PC
+    // A returning overflow callback may replace the current display list.
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 0x61;
+    __PortGDWriteBE32(p + 1, regRA);
+    p[5] = 0x61;
+    __PortGDWriteBE32(p + 6, regBG);
+    dl->ptr = p + 10;
+#else
     J3DGDWriteBPCmd(regRA);
     J3DGDWriteBPCmd(regBG);
+#endif
 }
 
 void J3DGDSetTevColorS10(GXTevRegID reg, GXColorS10 color) {
@@ -468,10 +479,24 @@ void J3DGDSetTevColorS10(GXTevRegID reg, GXColorS10 color) {
     regBG = BP_TEV_COLOR_REG_BG(color.b & 0x7FF, color.g & 0x7FF, 0, 0xE1 + reg * 2);
 
     GDOverflowCheck(0x14);
+#ifdef TARGET_PC
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 0x61;
+    __PortGDWriteBE32(p + 1, regRA);
+    p[5] = 0x61;
+    __PortGDWriteBE32(p + 6, regBG);
+    p[10] = 0x61;
+    __PortGDWriteBE32(p + 11, regBG);
+    p[15] = 0x61;
+    __PortGDWriteBE32(p + 16, regBG);
+    dl->ptr = p + 20;
+#else
     J3DGDWriteBPCmd(regRA);
     J3DGDWriteBPCmd(regBG);
     J3DGDWriteBPCmd(regBG);
     J3DGDWriteBPCmd(regBG);
+#endif
 }
 
 void J3DGDSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
@@ -537,7 +562,40 @@ void J3DGDSetFogRangeAdj(GXBool enable, u16 center, GXFogAdjTable* table) {
     J3DGDWriteBPCmd(range_c);
 }
 
+#ifdef TARGET_PC
+// GXV_FIFO_BATCH (port/gx_fifo.h): an immediate matrix load as one batched command of `rows` x `cols` words of a 3x4 (or
+// 3x3) matrix, a zero word after each row when `pad` (the texture-matrix forms); the same bytes as the element-wise code
+// below, which runs when the batch is off or the command would reach the FIFO's limit. False: not written.
+static bool J3DFifoBatchMtx(u16 addr, u8 len, const f32* m, u32 rowStride, u32 cols, bool pad) {
+    u8* p;
+    if (!__PortGXFifoRoom(&p, 5 + 4u * len)) {
+        return false;
+    }
+    p = __PortGXPut_u8(p, 0x10);
+    p = __PortGXPut_u16(p, (u16)(len - 1));
+    p = __PortGXPut_u16(p, addr);
+    for (u32 r = 0; r < 3; r++) {
+        const f32* row = m + r * rowStride;
+        for (u32 c = 0; c < cols; c++) {
+            u32 bits;
+            memcpy(&bits, &row[c], 4);
+            p = __PortGXPut_u32(p, bits);
+        }
+        if (pad) {
+            p = __PortGXPut_f32(p, 0.0f);
+        }
+    }
+    __PortGXFifoCommit(p);
+    return true;
+}
+#endif
+
 void J3DFifoLoadPosMtxImm(MtxPtr mtx, u32 id) {
+#ifdef TARGET_PC
+    if (J3DFifoBatchMtx(4 * id, 12, &mtx[0][0], 4, 4, false)) {
+        return;
+    }
+#endif
     J3DFifoWriteXFCmdHdr(4 * id, 12);
     J3DGXCmd1f32ptr(&mtx[0][0]);
     J3DGXCmd1f32ptr(&mtx[0][1]);
@@ -554,6 +612,11 @@ void J3DFifoLoadPosMtxImm(MtxPtr mtx, u32 id) {
 }
 
 void J3DFifoLoadNrmMtxImm(MtxPtr mtx, u32 id) {
+#ifdef TARGET_PC
+    if (J3DFifoBatchMtx(id * 3 + 0x400, 9, &mtx[0][0], 4, 3, false)) {
+        return;
+    }
+#endif
     J3DFifoWriteXFCmdHdr(id * 3 + 0x400, 9);
     J3DGXCmd1f32ptr(&mtx[0][0]);
     J3DGXCmd1f32ptr(&mtx[0][1]);
@@ -567,6 +630,11 @@ void J3DFifoLoadNrmMtxImm(MtxPtr mtx, u32 id) {
 }
 
 void J3DFifoLoadNrmMtxImm3x3(Mtx33 mtx, u32 id) {
+#ifdef TARGET_PC
+    if (J3DFifoBatchMtx(id * 3 + 0x400, 9, &mtx[0][0], 3, 3, false)) {
+        return;
+    }
+#endif
     J3DFifoWriteXFCmdHdr(id * 3 + 0x400, 9);
     J3DGXCmd1f32ptr(&mtx[0][0]);
     J3DGXCmd1f32ptr(&mtx[0][1]);
@@ -580,6 +648,11 @@ void J3DFifoLoadNrmMtxImm3x3(Mtx33 mtx, u32 id) {
 }
 
 void J3DFifoLoadNrmMtxToTexMtx(MtxPtr mtx, u32 id) {
+#ifdef TARGET_PC
+    if (J3DFifoBatchMtx(4 * id, 12, &mtx[0][0], 4, 3, true)) {
+        return;
+    }
+#endif
     J3DFifoWriteXFCmdHdr(4 * id, 12);
     J3DGXCmd1f32ptr(&mtx[0][0]);
     J3DGXCmd1f32ptr(&mtx[0][1]);
@@ -596,6 +669,11 @@ void J3DFifoLoadNrmMtxToTexMtx(MtxPtr mtx, u32 id) {
 }
 
 void J3DFifoLoadNrmMtxToTexMtx3x3(Mtx33 mtx, u32 id) {
+#ifdef TARGET_PC
+    if (J3DFifoBatchMtx(4 * id, 0xc, &mtx[0][0], 3, 3, true)) {
+        return;
+    }
+#endif
     J3DFifoWriteXFCmdHdr(4 * id, 0xc);
     J3DGXCmd1f32ptr(&mtx[0][0]);
     J3DGXCmd1f32ptr(&mtx[0][1]);

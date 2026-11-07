@@ -1,5 +1,8 @@
 #include "Game/Gravity.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "port/grav_memo.h"  // (GXV_MO_GRAVMEMO, mapobjcut: writers of a gravity's fields move port_grav_gen)
+#endif
 
 GlobalGravityObj::GlobalGravityObj(const char* pName) : LiveActor(pName) {
     mGravityCreator = nullptr;
@@ -27,14 +30,22 @@ void GlobalGravityObj::init(const JMapInfoIter& rIter) {
 void GlobalGravityObj::makeActorAppeared() {
     LiveActor::makeActorAppeared();
     PlanetGravity* pGravity = mGravityCreator->getGravity();
+#ifdef TARGET_PC
+    PortGravSet(pGravity->mAppeared, true);
+#else
     pGravity->mAppeared = true;
+#endif
     updateSwitch();
 }
 
 void GlobalGravityObj::makeActorDead() {
     LiveActor::makeActorDead();
     PlanetGravity* pGravity = mGravityCreator->getGravity();
+#ifdef TARGET_PC
+    PortGravSet(pGravity->mAppeared, false);
+#else
     pGravity->mAppeared = false;
+#endif
 }
 
 void GlobalGravityObj::updateSwitch() {
@@ -50,7 +61,11 @@ void GlobalGravityObj::updateSwitch() {
         }
 
         PlanetGravity* pGravity = mGravityCreator->getGravity();
+#ifdef TARGET_PC
+        PortGravSet(pGravity->mActivated, switchA && switchB);
+#else
         pGravity->mActivated = switchA && switchB;
+#endif
     }
 }
 

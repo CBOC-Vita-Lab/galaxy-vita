@@ -9,7 +9,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
       -ffunction-sections -fdata-sections -Wl,--gc-sections \
       -Wl,--wrap=glDrawElements,--wrap=glFinish,--wrap=glGetError,--wrap=glReadPixels,--wrap=getenv,--wrap=glCreateProgram,--wrap=glDeleteProgram \
       -Wl,--wrap=printf,--wrap=vprintf,--wrap=fprintf,--wrap=vfprintf,--wrap=puts,--wrap=putchar,--wrap=fputs,--wrap=fputc,--wrap=putc,--wrap=fwrite \
-      -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party \
+      -Itests/autoq_clock_stubs -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party \
       -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
       tests/vgx_program_eviction.cpp platform/vgx/src/vgx_shadergen.cpp vita/vgx-game/silent_stdio.cpp \
       -o /tmp/program-eviction -lEGL -lGLESv2 -pthread -l:libasan.so.8 -l:libubsan.so.1

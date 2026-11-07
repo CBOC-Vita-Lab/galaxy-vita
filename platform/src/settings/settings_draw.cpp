@@ -1,6 +1,8 @@
+#include "port/settings_backdrop.h"
 #include "port/settings_ui.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace port::settings {
@@ -10,101 +12,205 @@ struct LoadingGlyph {int w,h,xo,yo,adv;unsigned off;};
 // The original font's Bitstream Vera license/provenance remains unchanged.
 #include "../../vgx/vita/loading_font.inc"
 #include "settings_assets.inc"
-#include "settings_vita.inc"
-#include "settings_playstation.inc"
 constexpr uint32_t RGB(unsigned r,unsigned g,unsigned b) {return 0xff000000u|(b<<16)|(g<<8)|r;}
+// Text colours (the preview test checks every glyph pixel of these against the picture behind it) and the menu's panel colours:
+// the deep indigo of Galaxy's own menus and the gold and cyan of its title picture.
 constexpr auto white=RGB(244,249,250),muted=RGB(165,192,199),cyan=RGB(73,220,233),gold=RGB(249,211,91),red=RGB(251,135,148);
+constexpr auto panel=RGB(8,14,48),barColor=RGB(28,48,120),barIdle=RGB(14,22,64),rule=RGB(67,91,130);
+constexpr auto titleTop=RGB(255,253,238),titleBottom=RGB(249,190,34),titleEdge=RGB(20,12,62);
+// Screen layout (960x544; text stays inside 32..928 x 32..512).
+constexpr int kListY=90,kRowPitch=25,kListRows=12;                 // Display page list
+constexpr int kProfileY=92,kActionY=124,kActionPitch=24,kActionRows=8; // Controls page: profile row, then a scrolling action list
+constexpr int kTableX=600,kTableY=112,kTablePitch=18,kTableRows=12;    // Controls page: button reference table
+constexpr int kMoveY=336,kMovePitch=19;
+constexpr int kHelpY=396,kHelpPitch=20,kCommandY=440,kCommandH=26,kLegendY=480;
+// Text sizes are in quarters of the base size (4 = 1x): the menu font is 26 px, the message font 18 px.
+constexpr unsigned kTitleSize=6;
 struct TextGlyph {
-    const GameFont* font=nullptr;const GameGlyph* game=nullptr;const LoadingGlyph* fallback=nullptr;
-    double factor=1;int left=0,width=0,height=0,advance=0;
+    const GameFont* font;const GameGlyph* game;const LoadingGlyph* fallback;
+    double factor;int left,width,height,advance;
 };
-int LineHeight(const FontSet& fonts,bool small,unsigned scale) {
+int LineHeight(const FontSet& fonts,bool small,unsigned size) {
     const bool game=(fonts.menu&&fonts.menu->valid())||(fonts.message&&fonts.message->valid());
-    return (small?(game?18:kSmallHeight):kMedHeight)*static_cast<int>(scale);
+    // (as before: the menu size's line is the built-in medium height even with the game font, whose 26 px glyphs sit inside it)
+    return (small?(game?18:kSmallHeight):kMedHeight)*static_cast<int>(size)/4;
 }
-TextGlyph Resolve(const FontSet& fonts,uint32_t code,bool small,unsigned scale) {
+TextGlyph Resolve(const FontSet& fonts,uint32_t code,bool small,unsigned size) {
     const GameFont* first=small?fonts.message:fonts.menu;const GameFont* second=small?fonts.menu:fonts.message;
-    TextGlyph out;
+    TextGlyph out{};
     for(const auto* font:{first,second})if(font&&font->valid())if(const auto* glyph=font->find(code,false)){out.font=font;out.game=glyph;break;}
     if(!out.game)for(const auto* font:{first,second})if(font&&font->valid()){out.font=font;out.game=font->find(code);break;}
     if(out.game) {
-        out.factor=static_cast<double>((small?18:26)*scale)/std::max(out.font->nominalHeight,out.font->cellHeight);
+        out.factor=static_cast<double>((small?18:26)*size)/4.0/std::max(out.font->nominalHeight,out.font->cellHeight);
         out.left=static_cast<int>(std::floor(out.game->left*out.factor));out.width=static_cast<int>(std::ceil(out.game->width*out.factor));out.height=static_cast<int>(std::ceil(out.font->cellHeight*out.factor));out.advance=static_cast<int>(std::ceil(out.game->advance*out.factor));
     } else {
+        const int scale=std::max(1,static_cast<int>(size)/4);
         out.fallback=&(small?kSmallGlyphs:kMedGlyphs)[(code<32||code>126?'?':code)-32];
-        out.factor=scale;out.left=out.fallback->xo*static_cast<int>(scale);out.width=out.fallback->w*static_cast<int>(scale);out.height=out.fallback->h*static_cast<int>(scale);out.advance=out.fallback->adv*static_cast<int>(scale);
+        out.factor=scale;out.left=out.fallback->xo*scale;out.width=out.fallback->w*scale;out.height=out.fallback->h*scale;out.advance=out.fallback->adv*scale;
     }
     return out;
 }
-TextExtent Extent(const FontSet& fonts,const std::string& text,bool small,unsigned scale) {
-    TextExtent extent;extent.height=LineHeight(fonts,small,scale);
-    for(size_t at=0;at<text.size();) {
-        auto glyph=Resolve(fonts,NextFontCodepoint(text,at),small,scale);
-        extent.minX=std::min(extent.minX,extent.advance+glyph.left);extent.maxX=std::max(extent.maxX,extent.advance+glyph.left+glyph.width);extent.advance+=glyph.advance;
+constexpr int kMaxGlyphs=160;
+// A run of text laid out: its glyphs resolved once (fixed storage: nothing is allocated).
+struct TextRun {
+    TextGlyph g[kMaxGlyphs+3];int n=0;
+    void build(const FontSet& fonts,const char* text,bool small,unsigned size) {
+        n=0;const size_t length=std::strlen(text);
+        for(size_t at=0;at<length&&n<kMaxGlyphs;)g[n++]=Resolve(fonts,NextFontCodepoint(text,length,at),small,size);
     }
-    return extent;
-}
+    TextExtent extent(int count,int height) const {
+        TextExtent e;e.height=height;
+        for(int i=0;i<count;++i) {e.minX=std::min(e.minX,e.advance+g[i].left);e.maxX=std::max(e.maxX,e.advance+g[i].left+g[i].width);e.advance+=g[i].advance;}
+        return e;
+    }
+};
 int Span(const TextExtent& extent) {return std::max(extent.advance,extent.maxX)-std::min(0,extent.minX);}
+// One glyph resampled to its size: coverage and shade planes (alpha-only fonts shade 255).
+struct Tile {int w=0,h=0,x=0,y=0;uint8_t a[64*64];uint8_t shade[64*64];};
+bool MakeTile(const TextGlyph& glyph,bool small,int lineHeight,Tile& t) {
+    if(glyph.game) {
+        const auto& font=*glyph.font;const auto& g=*glyph.game;
+        t.w=glyph.width;t.h=std::min(glyph.height,lineHeight);t.x=glyph.left;t.y=0;
+        if(t.w<=0||t.h<=0||t.w>64||t.h>64||!g.width||!font.cellHeight)return false;
+        const bool shaded=!font.luminance.empty();const double f=glyph.factor;
+        int cx0[64],cx1[64],cf[64];
+        for(int x=0;x<t.w;++x) {
+            const double sx=(x+0.5)/f-0.5;const int x0=static_cast<int>(std::floor(sx));
+            cf[x]=static_cast<int>((sx-x0)*256);cx0[x]=std::clamp(x0,0,static_cast<int>(g.width)-1);cx1[x]=std::clamp(x0+1,0,static_cast<int>(g.width)-1);
+        }
+        const size_t last=font.alpha.size();
+        for(int y=0;y<t.h;++y) {
+            const double sy=(y+0.5)/f-0.5;const int y0=static_cast<int>(std::floor(sy));const int fy=static_cast<int>((sy-y0)*256);
+            const int v0=std::clamp(y0,0,static_cast<int>(font.cellHeight)-1),v1=std::clamp(y0+1,0,static_cast<int>(font.cellHeight)-1);
+            const size_t r0=(static_cast<size_t>(g.sheet)*font.sheetHeight+g.y+static_cast<unsigned>(v0))*font.sheetWidth+g.x,r1=(static_cast<size_t>(g.sheet)*font.sheetHeight+g.y+static_cast<unsigned>(v1))*font.sheetWidth+g.x;
+            uint8_t* a=t.a+y*t.w;uint8_t* sh=t.shade+y*t.w;
+            if(r0+g.width>last||r1+g.width>last||(shaded&&(r0+g.width>font.luminance.size()||r1+g.width>font.luminance.size()))) {std::memset(a,0,static_cast<size_t>(t.w));std::memset(sh,0,static_cast<size_t>(t.w));continue;}
+            const uint8_t* a0=font.alpha.begin()+r0;const uint8_t* a1=font.alpha.begin()+r1;
+            const uint8_t* s0=shaded?font.luminance.begin()+r0:nullptr;const uint8_t* s1=shaded?font.luminance.begin()+r1:nullptr;
+            for(int x=0;x<t.w;++x) {
+                const int fx=cf[x],i0=cx0[x],i1=cx1[x];
+                a[x]=static_cast<uint8_t>((((a0[i0]*(256-fx)+a0[i1]*fx)*(256-fy)+(a1[i0]*(256-fx)+a1[i1]*fx)*fy)+32768)>>16);
+                sh[x]=shaded?static_cast<uint8_t>((((s0[i0]*(256-fx)+s0[i1]*fx)*(256-fy)+(s1[i0]*(256-fx)+s1[i1]*fx)*fy)+32768)>>16):255;
+            }
+        }
+        return true;
+    }
+    const auto& g=*glyph.fallback;const int scale=static_cast<int>(glyph.factor);
+    t.w=g.w*scale;t.h=g.h*scale;t.x=g.xo*scale;t.y=g.yo*scale;
+    if(t.w<=0||t.h<=0||t.w>64||t.h>64)return false;
+    const auto* data=small?kSmallData:kMedData;
+    for(int y=0;y<t.h;++y)for(int x=0;x<t.w;++x) {t.a[y*t.w+x]=data[g.off+static_cast<unsigned>((y/scale)*g.w+x/scale)];t.shade[y*t.w+x]=255;}
+    return true;
+}
+// What a heading is filled with: a vertical gradient and a dark outline, as the game's own menu titles are drawn.
+struct Fill {uint32_t top,bottom,edge;int radius;};
 struct Raster {
-    Surface s;DrawAudit* audit;FontSet fonts;
+    Surface s;DrawAudit* audit;FontSet fonts;bool dry=false;
     void pixel(int x,int y,uint32_t color,unsigned alpha=255) {
         if(x<0||y<0||x>=static_cast<int>(s.width)||y>=static_cast<int>(s.height))return;
         auto& to=s.pixels[static_cast<size_t>(y)*s.stride+static_cast<unsigned>(x)];
         if(alpha==255) {to=color;return;}
-        unsigned r=((color&255)*alpha+(to&255)*(255-alpha))/255;
-        unsigned g=(((color>>8)&255)*alpha+((to>>8)&255)*(255-alpha))/255;
-        unsigned b=(((color>>16)&255)*alpha+((to>>16)&255)*(255-alpha))/255;
+        const unsigned r=((color&255)*alpha+(to&255)*(255-alpha))/255;
+        const unsigned g=(((color>>8)&255)*alpha+((to>>8)&255)*(255-alpha))/255;
+        const unsigned b=(((color>>16)&255)*alpha+((to>>16)&255)*(255-alpha))/255;
         to=RGB(r,g,b);
     }
-    void rect(int x,int y,int w,int h,uint32_t color) {for(int py=std::max(0,y);py<std::min(static_cast<int>(s.height),y+h);++py)for(int px=std::max(0,x);px<std::min(static_cast<int>(s.width),x+w);++px)pixel(px,py,color);}
-    int width(const std::string& text,bool small=false,int scale=1) {
-        return Span(Extent(fonts,text,small,static_cast<unsigned>(scale)));
-    }
-    void text(int x,int y,std::string value,uint32_t color,int maxWidth,bool small=false,int scale=1) {
-        if(maxWidth<=0||x<32||y<32)return;
-        const int height=LineHeight(fonts,small,static_cast<unsigned>(scale));
-        maxWidth=std::min(maxWidth,928-x);
-        bool truncated=false;
-        if(width(value,small,scale)>maxWidth) {
-            truncated=true;while(!value.empty()&&width(value+"...",small,scale)>maxWidth) {size_t end=value.size()-1;while(end&&(static_cast<unsigned char>(value[end])&0xc0)==0x80)--end;value.resize(end);}value+="...";
+    void rect(int x,int y,int w,int h,uint32_t color,unsigned alpha=255) {
+        const int x0=std::max(0,x),x1=std::min(static_cast<int>(s.width),x+w);if(x0>=x1)return;
+        for(int py=std::max(0,y);py<std::min(static_cast<int>(s.height),y+h);++py) {
+            uint32_t* row=s.pixels+static_cast<size_t>(py)*s.stride;
+            if(alpha==255)for(int px=x0;px<x1;++px)row[px]=color;
+            else for(int px=x0;px<x1;++px)pixel(px,py,color,alpha);
         }
+    }
+    // A triangle pointing down (more below) or up (more above), 11 px wide.
+    void arrow(int x,int y,bool down,uint32_t color) {for(int k=0;k<6;++k)rect(x+k,down?y+k:y+5-k,11-2*k,1,color);}
+    int width(const char* text,bool small=false,unsigned size=4) {TextRun run;run.build(fonts,text,small,size);return Span(run.extent(run.n,LineHeight(fonts,small,size)));}
+    // Draws `value` with its top left at (x,y), cut with "..." at maxWidth. A flat colour, or `fill`'s gradient and outline.
+    void text(int x,int y,const char* value,uint32_t color,int maxWidth,bool small=false,unsigned size=4,const Fill* fill=nullptr) {
+        if(maxWidth<=0||x<32||y<32)return;
+        const int height=LineHeight(fonts,small,size);
+        maxWidth=std::min(maxWidth,928-x);
         if(y+height>512)return;
-        const auto extent=Extent(fonts,value,small,static_cast<unsigned>(scale));const int start=x,end=x+maxWidth;
-        if(audit) {++audit->textRuns;audit->truncatedRuns+=truncated;audit->minX=std::min(audit->minX,x);audit->minY=std::min(audit->minY,y);audit->maxX=std::max(audit->maxX,std::min(end,x+Span(extent)));audit->maxY=std::max(audit->maxY,y+height);}
-        x-=std::min(0,extent.minX);
-        const auto* data=small?kSmallData:kMedData;
-        for(size_t at=0;at<value.size();) {
-            auto glyph=Resolve(fonts,NextFontCodepoint(value,at),small,static_cast<unsigned>(scale));
-            if(glyph.game) {
-                for(int gy=0;gy<glyph.height&&gy<height;++gy)for(int gx=0;gx<glyph.width;++gx) {
-                    const int px=x+glyph.left+gx;if(px<start||px>=end)continue;
-                    const double sx=(gx+0.5)/glyph.factor-0.5,sy=(gy+0.5)/glyph.factor-0.5;
-                    const int x0=static_cast<int>(std::floor(sx)),y0=static_cast<int>(std::floor(sy));const double fx=sx-x0,fy=sy-y0;
-                    auto sample=[&](bool shade) {
-                        auto get=[&](int u,int v) {u=std::clamp(u,0,static_cast<int>(glyph.game->width)-1);v=std::clamp(v,0,static_cast<int>(glyph.font->cellHeight)-1);return shade?glyph.font->shade(*glyph.game,static_cast<unsigned>(u),static_cast<unsigned>(v)):glyph.font->sample(*glyph.game,static_cast<unsigned>(u),static_cast<unsigned>(v));};
-                        return static_cast<unsigned>((get(x0,y0)*(1-fx)+get(x0+1,y0)*fx)*(1-fy)+(get(x0,y0+1)*(1-fx)+get(x0+1,y0+1)*fx)*fy+0.5);
-                    };
-                    const unsigned alpha=sample(false);if(!alpha)continue;const unsigned shade=sample(true);
-                    pixel(px,y+gy,RGB((color&255)*shade/255,((color>>8)&255)*shade/255,((color>>16)&255)*shade/255),alpha);
-                }
-            } else {
-                const auto& g=*glyph.fallback;
-                for(int gy=0;gy<g.h;++gy)for(int gx=0;gx<g.w;++gx) {
-                    const auto alpha=data[g.off+static_cast<unsigned>(gy*g.w+gx)];if(!alpha)continue;
-                    for(int sy=0;sy<scale;++sy)for(int sx=0;sx<scale;++sx) {int px=x+(gx+g.xo)*scale+sx;if(px>=start&&px<end)pixel(px,y+(gy+g.yo)*scale+sy,color,alpha);}
-                }
+        TextRun run;run.build(fonts,value,small,size);
+        int count=run.n;bool truncated=false;
+        if(Span(run.extent(count,height))>maxWidth) {
+            truncated=true;const TextGlyph dot=Resolve(fonts,'.',small,size);
+            int keep=count;
+            for(;keep>0;--keep) {
+                for(int i=0;i<3;++i)run.g[keep+i]=dot;
+                if(Span(run.extent(keep+3,height))<=maxWidth)break;
             }
-            x+=glyph.advance;
+            for(int i=0;i<3;++i)run.g[keep+i]=dot;
+            count=keep+3;
+        }
+        const auto extent=run.extent(count,height);const int start=x,end=x+maxWidth;
+        if(audit) {++audit->textRuns;audit->truncatedRuns+=truncated;audit->minX=std::min(audit->minX,x);audit->minY=std::min(audit->minY,y);audit->maxX=std::max(audit->maxX,std::min(end,x+Span(extent)));audit->maxY=std::max(audit->maxY,y+height);}
+        if(dry)return;
+        x-=std::min(0,extent.minX);
+        const bool small_=small;
+        Tile tile;
+        int pen=x;
+        if(fill)for(int pass=0;pass<2;++pass) {
+            pen=x;
+            for(int i=0;i<count;++i) {
+                const auto& glyph=run.g[i];
+                if(MakeTile(glyph,small_,height,tile)) {
+                    if(pass==0) {for(int dy=-fill->radius;dy<=fill->radius;++dy)for(int dx=-fill->radius;dx<=fill->radius;++dx)if(std::abs(dx)+std::abs(dy)<=fill->radius+fill->radius/2)blit(tile,pen+dx,y+dy,start,end,fill->edge,nullptr,height,glyph.game!=nullptr,true);}
+                    else blit(tile,pen,y,start,end,0,fill,height,glyph.game!=nullptr,false);
+                }
+                pen+=glyph.advance;
+            }
+        }
+        else for(int i=0;i<count;++i) {
+            const auto& glyph=run.g[i];
+            if(MakeTile(glyph,small_,height,tile))blit(tile,pen,y,start,end,color,nullptr,height,glyph.game!=nullptr,false);
+            pen+=glyph.advance;
+        }
+    }
+    void blit(const Tile& t,int x,int y,int start,int end,uint32_t color,const Fill* fill,int lineHeight,bool game,bool flatShade) {
+        (void)game;
+        for(int gy=0;gy<t.h;++gy) {
+            const int py=y+t.y+gy;if(py<0||py>=static_cast<int>(s.height))continue;
+            uint32_t base=color;
+            if(fill) {
+                const unsigned f=static_cast<unsigned>(std::clamp((t.y+gy)*256/std::max(1,lineHeight),0,256));
+                base=RGB((fill->top&255)*(256-f)/256+(fill->bottom&255)*f/256,((fill->top>>8)&255)*(256-f)/256+((fill->bottom>>8)&255)*f/256,((fill->top>>16)&255)*(256-f)/256+((fill->bottom>>16)&255)*f/256);
+            }
+            const uint8_t* a=t.a+gy*t.w;const uint8_t* sh=t.shade+gy*t.w;
+            uint32_t* row=s.pixels+static_cast<size_t>(py)*s.stride;
+            for(int gx=0;gx<t.w;++gx) {
+                const int px=x+t.x+gx;if(px<start||px>=end||px<0||px>=static_cast<int>(s.width))continue;
+                const unsigned alpha=a[gx];if(!alpha)continue;
+                const unsigned shade=flatShade?255u:sh[gx];
+                const uint32_t c=shade==255?base:RGB((base&255)*shade/255,((base>>8)&255)*shade/255,((base>>16)&255)*shade/255);
+                if(alpha==255) {row[px]=c;continue;}
+                const uint32_t to=row[px];
+                row[px]=RGB(((c&255)*alpha+(to&255)*(255-alpha))/255,(((c>>8)&255)*alpha+((to>>8)&255)*(255-alpha))/255,(((c>>16)&255)*alpha+((to>>16)&255)*(255-alpha))/255);
+            }
         }
     }
     template<size_t N>void asset(int x,int y,unsigned width,const AssetRun (&runs)[N]) {
         unsigned at=0;for(const auto& run:runs)for(unsigned i=0;i<run.count;++i,++at)if(run.color)pixel(x+static_cast<int>(at%width),y+static_cast<int>(at/width),kAssetPalette[run.color]);
     }
-    template<size_t N>void illustration(int x,int y,unsigned width,const RgbaRun (&runs)[N]) {
-        unsigned at=0;for(const auto& run:runs)for(unsigned i=0;i<run.count;++i,++at)if(run.pixel>>24)pixel(x+static_cast<int>(at%width),y+static_cast<int>(at/width),run.pixel,run.pixel>>24);
-    }
 };
+enum class Icon : uint8_t {Cross,Circle,Triangle,Start,Select};
+void DrawIcon(Raster& r,int x,int y,Icon icon) {
+    switch(icon) {
+        case Icon::Cross:r.asset(x,y,28,kButtonCross);break;
+        case Icon::Circle:r.asset(x,y,28,kButtonCircle);break;
+        case Icon::Triangle:r.asset(x,y,28,kButtonTriangle);break;
+        case Icon::Start:r.asset(x,y,28,kButtonStart);break;
+        case Icon::Select:r.asset(x,y,28,kButtonSelect);break;
+    }
+}
 std::string Button(const SettingsSession& session,controls::ProfileId profile,const std::string& id) {
+    if(id.empty())return "+";
+    if(profile==controls::ProfileId::PlayStation&&(id=="l1"||id=="r1"))return id=="l1"?"L1":"R1";
+    for(size_t i=0;i<session.controls->buttonCount;++i)if(id==session.controls->buttons[i].id)return session.controls->buttons[i].label;
+    return "Unavailable";
+}
+const char* Label(const SettingsSession& session,controls::ProfileId profile,const std::string& id) {
     if(id.empty())return "+";
     if(profile==controls::ProfileId::PlayStation&&(id=="l1"||id=="r1"))return id=="l1"?"L1":"R1";
     for(size_t i=0;i<session.controls->buttonCount;++i)if(id==session.controls->buttons[i].id)return session.controls->buttons[i].label;
@@ -118,40 +224,198 @@ const controls::Binding* Binding(const UiState& state,const char* id) {
     for(const auto& binding:state.working.profiles[static_cast<unsigned>(state.working.profile)].bindings)if(binding.action==id)return &binding;
     return nullptr;
 }
-void Focus(Raster& r,int y,int w,uint64_t elapsed,bool reduced,int height=36) {
-    r.rect(40,y,w,height,RGB(23,58,63));
-    unsigned light=reduced?255:150+static_cast<unsigned>(std::min<uint64_t>(elapsed,150000)*105/150000);
-    r.rect(40,y,4,height,RGB(73*light/255,220*light/255,233*light/255));
+void Focus(Raster& r,int x,int y,int w,uint64_t elapsed,bool reduced,int height) {
+    r.rect(x,y,w,height,barColor);
+    const unsigned light=reduced?255:150+static_cast<unsigned>(std::min<uint64_t>(elapsed,150000)*105/150000);
+    r.rect(x,y,4,height,RGB(249*light/255,211*light/255,91*light/255));
 }
-void Command(Raster& r,const UiState& state,unsigned index,int y,const char* label,uint64_t now) {
-    if(state.row==index)Focus(r,y-4,880,now>=state.changedAt?now-state.changedAt:0,state.working.reducedMotion);
-    r.text(60,y,label,state.row==index?white:muted,830);
+// The first row of a scrolling list of `total` rows shown `window` at a time that keeps `focus` in view (centred when it can be).
+unsigned FirstRow(unsigned total,unsigned window,unsigned focus) {
+    if(total<=window)return 0;
+    const unsigned half=window/2;return std::min(focus>half?focus-half:0u,total-window);
 }
-void Controller(Raster& r,const UiState& state,const SettingsSession& session) {
-    const bool ps=state.working.profile==controls::ProfileId::PlayStation;
-    if(ps)r.illustration(637,223,250,kPlayStationIllustration);else r.illustration(612,232,300,kVitaIllustration);
-    if(state.row>0&&state.row<=session.controls->actionCount) {
-        const auto* binding=Binding(state,session.controls->actions[state.row-1].id);if(!binding)return;
-        const auto& b=*binding;
-        const auto id=b.buttons[state.bindingSlot];
-        struct Marker {const char* id;int hx,hy,px,py;};
-        constexpr Marker markers[]={{"cross",268,58,205,68},{"circle",281,47,223,51},{"square",255,47,187,51},{"triangle",268,35,205,33},
-            {"l1",42,11,49,10},{"r1",258,11,200,10},{"l2",42,11,49,10},{"r2",258,11,200,10},{"l3",39,78,83,85},{"r3",262,78,167,85},
-            {"start",272,100,177,28},{"select",255,100,73,28},{"up",32,35,47,36},{"down",32,58,47,64},{"left",20,47,33,51},{"right",44,47,61,51}};
-        for(const auto& m:markers)if(id==m.id) {int x=(ps?637:612)+(ps?m.px:m.hx),y=(ps?223:232)+(ps?m.py:m.hy);r.rect(x-12,y-12,25,2,cyan);r.rect(x-12,y+11,25,2,cyan);r.rect(x-12,y-12,2,25,cyan);r.rect(x+11,y-12,2,25,cyan);}
-        r.text(612,ps?391:383,Action(session,b.action),white,300,true);
+// ---- the unchanging parts: backdrop, header band, heading
+bool DrawBackdrop(Raster& r,const SettingsSession& session) {
+    const uint32_t* source=session.backdrop;const unsigned w=session.backdropW,h=session.backdropH;
+    if(!source||w<2||h<2||w>960||h>544)return false;
+    uint16_t column[960];for(unsigned x=0;x<960;++x)column[x]=static_cast<uint16_t>(x*w/960);
+    for(unsigned y=0;y<544;++y) {
+        const uint32_t* row=source+static_cast<size_t>(y*h/544)*w;const unsigned dim=BackdropDim(y);
+        uint32_t* to=r.s.pixels+static_cast<size_t>(y)*r.s.stride;
+        for(unsigned x=0;x<960;++x) {
+            const uint32_t p=row[column[x]];
+            to[x]=0xff000000u|((((p&0xff00ffu)*dim)>>8)&0xff00ffu)|((((p&0xff00u)*dim)>>8)&0xff00u);
+        }
     }
-    r.text(612,183,ps?"PLAYSTATION":"HANDHELD",gold,300,true);
-    const char* detected=!state.controller.connected?"Controller disconnected":state.detectedProfile!=state.working.profile?"Other controller connected":state.detectedProfile==controls::ProfileId::Handheld?"Connected: Handheld":"Connected: PlayStation";
-    r.text(612,202,detected,state.controller.connected?muted:red,300,true);
+    return true;
+}
+void Background(Raster& r,const SettingsSession& session) {
+    if(!DrawBackdrop(r,session))for(unsigned y=0;y<544;++y)r.rect(0,static_cast<int>(y),960,1,RGB(9+y/90,14+y/70,36+y/20));
+}
+void Header(Raster& r,Page page,bool paintBand) {
+    if(paintBand) {
+        r.rect(0,0,960,78,panel,170);r.rect(0,78,960,2,gold,230);r.rect(0,80,960,1,cyan,120);
+        r.asset(560,36,32,kStarGold);r.asset(606,44,32,kStarMint);r.asset(652,34,32,kStarPink);
+    }
+    const Fill fill{titleTop,titleBottom,titleEdge,2};
+    const char* right=page==Page::Display?"SETTINGS":"CONTROLS";
+    r.text(44,32,"SUPER MARIO GALAXY",white,500,false,kTitleSize,&fill);
+    r.text(916-std::min(300,r.width(right,false,kTitleSize)),32,right,white,300,false,kTitleSize,&fill);
+}
+// ---- the page
+void Commands(Raster& r,const UiState& state,const SettingsSession& session,uint64_t now,unsigned first) {
+    const bool dirty=Dirty(state);
+    int x=44;
+    for(unsigned i=0;i<3;++i) {
+        const char* label;const char* h1;const char* h2;CommandView(state,i,label,h1,h2);
+        const int w=r.width(label,true)+30;const bool focus=state.row==first+i;
+        if(focus) {
+            Focus(r,x,kCommandY,w,now>=state.changedAt?now-state.changedAt:0,state.working.reducedMotion,kCommandH);
+        } else r.rect(x,kCommandY,w,kCommandH,barIdle,200);
+        r.text(x+16,kCommandY+3,label,focus?white:muted,w-20,true);
+        x+=w+12;
+    }
+    const char* status=dirty?"Unsaved changes":"Saved choices";
+    r.text(916-std::min(220,r.width(status,true)),kCommandY+5,status,dirty?gold:muted,220,true);
+    (void)session;
+}
+struct LegendBuilder {
+    Raster& r;int x=44;
+    void text(const char* t) {r.text(x,kLegendY+3,t,muted,std::max(1,928-x),true);x+=r.width(t,true)+8;}
+    void icon(Icon i) {DrawIcon(r,x,kLegendY-3,i);x+=32;}
+    void gap() {x+=14;}
+};
+void Legend(Raster& r,const UiState& state,const SettingsSession& session) {
+    LegendBuilder l{r};
+    l.text("Up/Down: select");l.gap();
+    if(state.page==Page::Display) {
+        l.text("Left/Right,");l.icon(Icon::Cross);l.text("change");l.gap();
+        l.text("L / R: page");l.gap();
+        if(!session.overrides.empty()) {char label[40];std::snprintf(label,sizeof label,"overrides (%u)",static_cast<unsigned>(session.overrides.size()));l.icon(Icon::Triangle);l.text(label);l.gap();}
+    } else {
+        const bool extra=state.row>session.controls->actionCount&&state.row<=session.controls->actionCount+kControlExtras;
+        l.text(extra?"Left/Right: change":"Left/Right: slot");l.gap();
+        if(!extra) {l.icon(Icon::Cross);l.text("rebind");l.gap();}
+        if(extra) {if(state.row==session.controls->actionCount+1+ExtraTiltGain) {l.icon(Icon::Triangle);l.text("reset to 5");l.gap();}}
+        else if(session.features.remap) {l.icon(Icon::Triangle);l.text(state.row>0&&state.row<=session.controls->actionCount?"button list":"reset profile");l.gap();}
+        l.text("L / R: page");l.gap();
+    }
+    l.icon(Icon::Circle);l.text("back");
+}
+void Help(Raster& r,const UiState& state,const char* h1,const char* h2) {
+    if(!state.message.empty()) {
+        r.text(60,kHelpY,state.message.c_str(),red,868,true);
+        r.text(60,kHelpY+kHelpPitch,h1,muted,868,true);
+    } else {
+        r.text(60,kHelpY,h1,muted,868,true);
+        if(*h2)r.text(60,kHelpY+kHelpPitch,h2,muted,868,true);
+    }
+}
+void DisplayPage(Raster& r,const UiState& state,uint64_t now) {
+    const auto elapsed=now>=state.changedAt?now-state.changedAt:0;
+    const unsigned first=FirstRow(kDisplayRows,kListRows,std::min(state.row,kDisplayRows-1));
+    const unsigned shown=std::min<unsigned>(kListRows,kDisplayRows);
+    for(unsigned slot=0;slot<shown;++slot) {
+        const unsigned row=first+slot;const int y=kListY+static_cast<int>(slot)*kRowPitch;const bool focus=state.row==row;
+        RowView view;DisplayRowView(state,row,view);
+        if(focus)Focus(r,44,y-2,872,elapsed,state.working.reducedMotion,kRowPitch-1);
+        r.text(60,y,view.label,focus?white:muted,330,true);
+        if(focus) {
+            r.text(400,y,"<",cyan,20,true);
+            r.text(424,y,view.value,gold,430,true);
+            r.text(424+std::min(430,r.width(view.value,true))+12,y,">",cyan,20,true);
+        } else r.text(424,y,view.value,gold,470,true);
+    }
+    if(first>0)r.arrow(896,kListY+2,false,cyan);
+    if(first+shown<kDisplayRows)r.arrow(896,kListY+(static_cast<int>(shown)-1)*kRowPitch+6,true,cyan);
+    RowView view;if(state.row<kDisplayRows)DisplayRowView(state,state.row,view);
+    else {const char* label;CommandView(state,state.row-kDisplayRows,label,view.help1,view.help2);}
+    Help(r,state,view.help1,view.help2);
+}
+// Names for the reference table, shorter or fuller than the remap list's.
+const char* TableName(const char* id,const char* label) {
+    struct Name {const char* id;const char* text;};
+    static constexpr Name names[]={{"jump","Jump / confirm"},{"star_bits","Star Bits / aim"},{"crouch","Crouch / ground pound"},{"camera_centre","Camera / first-person"},{"minus","Minus / recalibrate"}};
+    for(const auto& n:names)if(!std::strcmp(n.id,id))return n.text;
+    return label;
+}
+void ControlsPage(Raster& r,const UiState& state,const SettingsSession& session,uint64_t now) {
+    const auto elapsed=now>=state.changedAt?now-state.changedAt:0;const auto& api=*session.controls;
+    const auto profile=state.working.profile;const bool reduced=state.working.reducedMotion;
+    // The remap list: the profile row, then the actions and the pointer-aiming option scrolling beneath it.
+    if(state.row==0)Focus(r,44,kProfileY-2,540,elapsed,reduced,kRowPitch+1);
+    r.text(60,kProfileY,"Profile",state.row==0?white:muted,100,true);
+    const char* name=profile==controls::ProfileId::Handheld?"Handheld":"PlayStation";
+    if(state.row==0) {r.text(150,kProfileY,"<",cyan,20,true);r.text(174,kProfileY,name,gold,120,true);r.text(174+std::min(120,r.width(name,true))+10,kProfileY,">",cyan,20,true);}
+    else r.text(174,kProfileY,name,gold,150,true);
+    const char* detected=!state.controller.connected?"Controller disconnected":state.detectedProfile!=profile?"Other controller connected":state.detectedProfile==controls::ProfileId::Handheld?"Connected: Handheld":"Connected: PlayStation";
+    r.text(340,kProfileY,detected,state.controller.connected?muted:red,236,true);
+    const unsigned items=static_cast<unsigned>(api.actionCount)+kControlExtras;
+    const unsigned focus=state.row>0&&state.row<=items?state.row-1:0;
+    const unsigned firstItem=FirstRow(items,kActionRows,focus);
+    for(unsigned slot=0;slot<kActionRows&&firstItem+slot<items;++slot) {
+        const unsigned i=firstItem+slot;const int y=kActionY+static_cast<int>(slot)*kActionPitch;const bool at=state.row==i+1;
+        if(at)Focus(r,44,y-2,540,elapsed,reduced,kActionPitch-1);
+        RowView view;ControlsRowView(state,i+1,view);
+        r.text(60,y,view.label,at?white:muted,250,true);
+        if(i>=api.actionCount) {r.text(330,y,view.value,gold,240,true);continue;}
+        const auto* binding=Binding(state,api.actions[i].id);if(!binding)continue;
+        char value[96];const bool slotFocus=state.bindingSlot&&at;
+        if(api.actions[i].maxBindings>1)std::snprintf(value,sizeof value,"%s%s%s%s",Label(session,profile,binding->buttons[0]),slotFocus?"  [":"  + ",Label(session,profile,binding->buttons[1]),slotFocus?"]":"");
+        else std::snprintf(value,sizeof value,"%s",Label(session,profile,binding->buttons[0]));
+        r.text(330,y,value,gold,240,true);
+    }
+    if(firstItem>0)r.arrow(570,kActionY+2,false,cyan);
+    if(firstItem+kActionRows<items)r.arrow(570,kActionY+(kActionRows-1)*kActionPitch+6,true,cyan);
+    // The reference table: every button of this layout and what it does, read from the working bindings.
+    r.rect(kTableX-12,kProfileY-2,1,kTableY+kTableRows*kTablePitch-kProfileY+4,rule);
+    r.text(kTableX,kProfileY,"BUTTON",cyan,80,true);r.text(kTableX+96,kProfileY,"ACTION",cyan,200,true);
+    const auto caps=controls::NominalCaps(profile);
+    const char* focusId=state.row>0&&state.row<=api.actionCount?api.actions[state.row-1].id:nullptr;
+    int row=0;
+    for(size_t b=0;b<api.buttonCount&&row<kTableRows;++b) {
+        if(!(caps.availableButtons&api.buttons[b].mask))continue;
+        char action[96]="";const char* only=nullptr;int count=0;bool marked=false;
+        for(size_t a=0;a<api.actionCount;++a) {
+            const auto* binding=Binding(state,api.actions[a].id);if(!binding)continue;
+            if(binding->buttons[0]!=api.buttons[b].id&&binding->buttons[1]!=api.buttons[b].id)continue;
+            const char* shown=TableName(api.actions[a].id,api.actions[a].label);only=shown;
+            std::snprintf(action+std::strlen(action),sizeof action-std::strlen(action),"%s%s",count?", ":"",shown);++count;
+            if(focusId&&!std::strcmp(focusId,api.actions[a].id))marked=true;
+        }
+        if(!count)continue;
+        (void)only;
+        const int y=kTableY+row*kTablePitch;
+        if(marked)r.rect(kTableX-6,y-1,320,kTablePitch,barColor);
+        r.text(kTableX,y,Label(session,profile,api.buttons[b].id),gold,92,true);r.text(kTableX+96,y,action,marked?white:muted,220,true);
+        ++row;
+    }
+    // Moves, with this layout's buttons.
+    r.rect(44,kMoveY-6,872,1,rule);
+    const auto word=[&](const char* id)->const char* {const auto* b=Binding(state,id);return b?Label(session,profile,b->buttons[0]):"?";};
+    const char* jump=word("jump");const char* crouch=word("crouch");const char* spin=word("spin");
+    char line[112];
+    const int col2=494;
+    std::snprintf(line,sizeof line,"Long jump: run, then %s + %s",crouch,jump);r.text(60,kMoveY,line,muted,420,true);
+    std::snprintf(line,sizeof line,"Backflip: stand, then %s + %s",crouch,jump);r.text(col2,kMoveY,line,muted,420,true);
+    std::snprintf(line,sizeof line,"Ground pound: %s in the air",crouch);r.text(60,kMoveY+kMovePitch,line,muted,420,true);
+    std::snprintf(line,sizeof line,"Wall jump: %s at a wall, then again",jump);r.text(col2,kMoveY+kMovePitch,line,muted,420,true);
+    std::snprintf(line,sizeof line,"Spin: %s, on the ground or in the air",spin);r.text(60,kMoveY+2*kMovePitch,line,muted,420,true);
+    r.text(col2,kMoveY+2*kMovePitch,"Left stick moves, right stick points",muted,420,true);
+    RowView view;if(state.row<=api.actionCount+kControlExtras)ControlsRowView(state,state.row,view);
+    else {const char* label;CommandView(state,state.row-SettingRows(state),label,view.help1,view.help2);}
+    Help(r,state,view.help1,view.help2);
 }
 void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
-    for(int y=0;y<544;++y)for(int x=0;x<960;++x)r.pixel(x,y,RGB(0,4,8),190);
-    r.rect(76,165,808,253,RGB(8,18,23));
-    r.rect(76,165,808,3,cyan);
+    for(int y=0;y<544;++y) {
+        uint32_t* row=r.s.pixels+static_cast<size_t>(y)*r.s.stride;
+        for(int x=0;x<960;++x) {const uint32_t p=row[x];row[x]=RGB(((p&255)*65)/255,(((p>>8)&255)*65+4*190)/255,(((p>>16)&255)*65+8*190)/255);}
+    }
+    r.rect(76,165,808,253,panel);
+    r.rect(76,165,808,3,gold);
     std::string title,body,detail,positive;
     switch(state.modal) {
-        case Modal::Discard:title="Discard changes?";body="Your saved settings will not change.";positive="Discard";break;
+        case Modal::Discard:title="Save your changes?";body="You changed settings since the last save.";break;
         case Modal::Restart:title="Apply and Restart?";body="Unsaved game progress will be lost.";detail="Saved choices apply together after restart.";positive="Save and Restart";break;
         case Modal::ResetProfile:title="Reset current profile?";body="Other profile and display settings will not change.";positive="Reset Profile";break;
         case Modal::Capture:title="Choose a control";body=Action(session,state.action);detail=state.candidate?"Waiting for release":"Waiting for button";break;
@@ -160,18 +424,18 @@ void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
         case Modal::Overrides:title="Developer overrides";break;
         default:break;
     }
-    r.text(104,186,title,white,748);
-    if(!body.empty())r.text(104,235,body,gold,748);
-    if(!detail.empty())r.text(104,279,detail,muted,748,true);
+    r.text(104,186,title.c_str(),white,748);
+    if(!body.empty())r.text(104,235,body.c_str(),gold,748);
+    if(!detail.empty())r.text(104,279,detail.c_str(),muted,748,true);
     if(state.modal==Modal::Overrides) {
         for(size_t i=0;i<session.overrides.size()&&i<6;++i) {
             const auto& override=session.overrides[i];int y=229+static_cast<int>(i)*27;
-            r.text(104,y,override.key,cyan,260,true);
-            r.text(374,y,override.effectiveLabel+"  (raw: "+override.rawValue+")",white,478,true);
+            r.text(104,y,override.key.c_str(),cyan,260,true);
+            r.text(374,y,(override.effectiveLabel+"  (raw: "+override.rawValue+")").c_str(),white,478,true);
         }
         r.text(104,395,"Close",muted,748,true);
     } else if(state.modal==Modal::Capture) {
-        if(!state.message.empty())r.text(104,321,state.message,red,748,true);
+        if(!state.message.empty())r.text(104,321,state.message.c_str(),red,748,true);
         r.asset(104,369,28,kButtonStart);r.text(140,372,"+",muted,28,true);r.asset(159,369,28,kButtonSelect);r.text(202,373,"Cancel",muted,650,true);
     } else if(state.modal==Modal::ButtonPicker) {
         std::vector<const controls::ButtonInfo*> buttons;auto caps=controls::NominalCaps(state.working.profile);
@@ -180,93 +444,52 @@ void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
         if(!buttons.empty()) {
             const size_t optional=state.bindingSlot>0?1:0,count=buttons.size()+optional,index=state.picker%count;
             const std::string label=optional&&index==0?"Unassigned":Button(session,state.working.profile,buttons[index-optional]->id);
-            r.text(104,298,"<   "+label+"   >",cyan,748);
+            r.text(104,298,("<   "+label+"   >").c_str(),cyan,748);
             r.asset(104,369,28,kButtonCross);r.text(145,373,"Select",muted,180,true);
         } else r.text(104,298,"No buttons available",muted,748);
         r.asset(322,369,28,kButtonCircle);r.text(363,373,"Cancel",muted,420,true);
+    } else if(state.modal==Modal::Discard) {
+        static const char* const labels[3]={"Keep editing","Discard","Save"};
+        for(int i=0;i<3;++i) {
+            const int x=104+i*246;const bool sel=static_cast<int>(state.modalChoice)==i;
+            if(sel){r.rect(x,354,230,39,barColor);r.rect(x,354,3,39,cyan);}
+            r.text(x+19,359,labels[i],sel?white:muted,200);
+        }
     } else {
-        int selected=state.modalChoice?478:104;r.rect(selected,354,278,39,RGB(24,75,81));r.rect(selected,354,3,39,cyan);
+        int selected=state.modalChoice?478:104;r.rect(selected,354,278,39,barColor);r.rect(selected,354,3,39,cyan);
         r.text(123,359,"Cancel",state.modalChoice?muted:white,230);
-        r.text(497,359,positive,state.modalChoice?white:muted,250);
+        r.text(497,359,positive.c_str(),state.modalChoice?white:muted,250);
     }
 }
 void Render(const UiState& state,const SettingsSession& session,Surface surface,uint64_t now,DrawAudit* audit) {
     if(!surface.pixels||surface.width!=960||surface.height!=544||surface.stride<960||!session.controls)return;
     Raster r{surface,audit,session.fonts};
-    for(unsigned y=0;y<544;++y)r.rect(0,static_cast<int>(y),960,1,RGB(9+y/90,18+y/65,25+y/30));
+    const int page=static_cast<int>(state.page);
+    if(session.layer) {
+        // The unchanging picture is built once per page, then each frame starts as a copy of it.
+        if(session.layerPage!=page) {
+            Raster layer{{session.layer,960,544,960},nullptr,session.fonts};
+            Background(layer,session);Header(layer,state.page,true);session.layerPage=page;
+        }
+        for(unsigned y=0;y<544;++y)std::memcpy(surface.pixels+static_cast<size_t>(y)*surface.stride,session.layer+static_cast<size_t>(y)*960,960*sizeof(uint32_t));
+        if(audit) {r.dry=true;Header(r,state.page,false);r.dry=false;}
+    } else {Background(r,session);Header(r,state.page,true);}
     for(unsigned i=0;i<68;++i) {
         int x=33+static_cast<int>((i*137+41)%894),y=33+static_cast<int>((i*79+19)%478);
         unsigned alpha=state.working.reducedMotion?145:95+static_cast<unsigned>((i*19+now/20000)%110);
         r.pixel(x,y,i%3==0?cyan:i%3==1?gold:white,alpha);if(i%11==0) {r.pixel(x+1,y,white,alpha);r.pixel(x,y+1,white,alpha);}
     }
-    r.asset(790,42,32,kStarGold);r.asset(847,70,32,kStarMint);r.asset(894,37,32,kStarPink);
-    r.text(44,32,"GALAXY",white,700,false,2);r.text(47,92,"SETTINGS FOR NEXT LAUNCH",muted,590,true);
-    const bool dirty=Dirty(state);r.text(663,107,dirty?"Unsaved changes":"Saved choices",dirty?gold:muted,260,true);
-    r.text(60,135,"Display",state.page==Page::Display?white:muted,180);r.text(248,135,"Controls",state.page==Page::Controls?white:muted,180);
-    r.rect(44,169,872,1,RGB(67,91,100));r.rect(state.page==Page::Display?44:232,166,160,4,cyan);
-    const auto elapsed=now>=state.changedAt?now-state.changedAt:0;
-    const unsigned commands=state.page==Page::Display?4:static_cast<unsigned>(session.controls->actionCount)+1;
-    if(state.page==Page::Display) {
-        const char* labels[]={"Picture rate","Dynamic quality","Game language","Reduced motion"};
-        std::string lang=state.working.language.empty()?(session.languages.names.empty()?"Game data unavailable":"Disc default"):state.working.language;
-        if(!state.working.language.empty()&&std::find(session.languages.names.begin(),session.languages.names.end(),state.working.language)==session.languages.names.end())lang+=" (unavailable)";
-        const std::string values[]={state.working.fpsLimit==30?"30 FPS":state.working.fpsLimit==kSteady30?"Steady 30":"Up to 60 FPS",state.working.autoQuality==AutoQuality::Default?"Default":state.working.autoQuality==AutoQuality::Enabled?"On":"Off",lang,state.working.reducedMotion?"On":"Off"};
-        for(unsigned i=0;i<4;++i) {
-            const int y=186+static_cast<int>(i)*46;if(state.row==i)Focus(r,y,880,elapsed,state.working.reducedMotion);
-            r.text(60,y+4,labels[i],white,288);
-            if(i==0) {
-                r.rect(370,y+2,140,31,state.working.fpsLimit==30?RGB(73,64,34):RGB(22,35,42));
-                r.rect(516,y+2,170,31,state.working.fpsLimit==kSteady30?RGB(73,64,34):RGB(22,35,42));
-                r.rect(692,y+2,200,31,state.working.fpsLimit==0?RGB(73,64,34):RGB(22,35,42));
-                r.text(382,y+4,"30 FPS",session.features.fixed30?gold:muted,124);
-                r.text(528,y+4,"Steady 30",gold,150);
-                r.text(704,y+4,"Up to 60",gold,180);
-            } else if(i==3) {
-                r.rect(373,y+4,26,26,muted);r.rect(375,y+6,22,22,RGB(14,28,35));
-                if(state.working.reducedMotion) {r.rect(379,y+14,5,9,cyan);r.rect(384,y+9,10,5,cyan);r.rect(384,y+13,5,10,cyan);}
-                r.text(416,y+4,values[i],gold,476);
-            } else r.text(371,y+4,"<  "+values[i]+"  >",gold,521);
-        }
-        std::string note=session.mode==OpenMode::Running?"Current game keeps its active settings until restart.":"Saved choices apply on a fresh launch.";
-        if(!session.features.fixed30&&state.working.fpsLimit==30)note="30 FPS saved; unavailable in this build. Current rate unchanged.";
-        else if(state.row==0&&state.working.fpsLimit==kSteady30)note="Steady 30: an even 30 FPS; lowers resolution and effects when needed.";
-        if(!session.overrides.empty()) {
-            r.asset(60,372,28,kButtonSquare);note="Developer Overrides ("+std::to_string(session.overrides.size())+")";r.text(100,377,note,muted,792,true);
-        } else r.text(60,377,note,muted,832,true);
-    } else {
-        if(state.row==0)Focus(r,181,536,elapsed,state.working.reducedMotion);
-        r.text(60,185,"Profile",white,160);r.text(244,185,state.working.profile==controls::ProfileId::Handheld?"Handheld":"PlayStation",gold,310);
-        unsigned focus=state.row>0&&state.row<=session.controls->actionCount?state.row-1:0;
-        unsigned first=focus<5?0:focus-4;
-        if(session.controls->actionCount>5) {
-            r.rect(583,226,2,160,RGB(39,57,63));
-            const int thumb=static_cast<int>(800/session.controls->actionCount);
-            const int offset=static_cast<int>(first*(160-thumb)/(session.controls->actionCount-5));
-            r.rect(583,226+offset,2,thumb,cyan);
-        }
-        for(unsigned slot=0;slot<5&&first+slot<session.controls->actionCount;++slot) {
-            unsigned i=first+slot;int y=229+static_cast<int>(slot)*32;if(state.row==i+1)Focus(r,y-3,536,elapsed,state.working.reducedMotion,28);
-            r.text(60,y,session.controls->actions[i].label,white,288,true);
-            const auto* binding=Binding(state,session.controls->actions[i].id);if(!binding)continue;
-            const auto& b=*binding;std::string value=Button(session,state.working.profile,b.buttons[0]);
-            if(session.controls->actions[i].maxBindings>1)value+=(state.bindingSlot&&state.row==i+1?"  [":"  + ")+Button(session,state.working.profile,b.buttons[1])+(state.bindingSlot&&state.row==i+1?"]":"");
-            r.text(360,y,value,gold,196,true);
-        }
-        Controller(r,state,session);
-        if(session.features.remap) {r.asset(60,382,28,kButtonSquare);r.text(100,390,state.row>0&&state.row<=session.controls->actionCount?"Button List":"Reset Profile",muted,488,true);}
-        else r.text(60,390,"Remapping unavailable in this build",muted,528,true);
-    }
-    Command(r,state,commands,414,session.mode==OpenMode::Running?"Save for Next Launch and Return":"Apply and Play",now);
-    Command(r,state,commands+1,447,session.mode==OpenMode::Running?"Apply and Restart":"Apply and Exit",now);
-    Command(r,state,commands+2,480,"Cancel",now);
-    if(!state.message.empty()) {
-        r.rect(434,456,484,56,RGB(10,24,31));r.text(447,459,state.message,red,458,true);
-        if(state.message.size()>54)r.text(447,480,state.message.substr(54),muted,458,true);
-    }
+    if(state.page==Page::Display)DisplayPage(r,state,now);else ControlsPage(r,state,session,now);
+    Commands(r,state,session,now,SettingRows(state));
+    r.rect(0,474,960,70,panel,238); // the picture's own small print is under the legend
+    Legend(r,state,session);
     if(state.modal!=Modal::None)ModalDraw(r,state,session);
 }
 }
 void Draw(const UiState& state,const SettingsSession& session,Surface surface,uint64_t now) {Render(state,session,surface,now,nullptr);}
 void DrawChecked(const UiState& state,const SettingsSession& session,Surface surface,uint64_t now,DrawAudit& audit) {audit={};Render(state,session,surface,now,&audit);}
-TextExtent MeasureMenuText(const SettingsSession& session,const std::string& text,bool small,unsigned scale) {if(!scale||scale>4)return {};return Extent(session.fonts,text,small,scale);}
+TextExtent MeasureMenuText(const SettingsSession& session,const std::string& text,bool small,unsigned scale) {
+    if(!scale||scale>4)return {};
+    TextRun run;run.build(session.fonts,text.c_str(),small,scale*4);return run.extent(run.n,LineHeight(session.fonts,small,scale*4));
+}
 }

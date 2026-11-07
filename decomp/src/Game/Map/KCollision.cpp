@@ -5,6 +5,95 @@
 #include "Game/Util/JMapInfo.hpp"
 #include "Game/Util/MathUtil.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+
+// GXV_KCL_MEMO (kcl, 6 Nov; default 1, vita/vgx-game/entry.cpp; exact): one query's octree walk (checkSphere,
+// checkSphereWithThickness, checkArea3D, checkArrow) meets the same prism again in every leaf cell the prism crosses. The original
+// tests it again each time and the answer cannot change (same prism, same query), so the walk remembers the prisms it has already
+// looked at in a small direct-mapped table on the stack (KclSeen) and goes past them:
+//   - sphere / area walks: a prism met again either missed (it misses again), or was stored (the std::find skipped it), or hit with
+//     the output full (foundCount only grows, so it is dropped again). Every prism met again is passed.
+//   - line walk: only prisms that MISSED are remembered. A prism that hit is tested and reported again in each cell, as before
+//     (the collect mode reports it once per cell, and that is kept).
+// A slot holds one prism index; a prism pushed out by another one is simply tested again, as before. Hits, their order, distances
+// and flags are the same bits. 0: every prism is tested in every cell, as before.
+// 2 (verify, kcl2): every query runs the memo walk into scratch arrays and then the original walk into the caller's arrays (the
+// caller gets the original's answer), and the two are compared bit for bit: count, prisms in order, distances, flags, the best
+// prism. "kcl-verify:" lines (port_log_summary): the first 8 mismatches in full (kind, KCL, local query as hex floats), then one
+// line per 65536 checks with the totals. The walks themselves are checkSphereWalk & co. (KCollision.hpp), with the memo as a
+// parameter, so the two runs share no state.
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include "port/hot_knob.h"
+#include <cstdlib>
+namespace {
+    // 0 off, 1 on, 2 verify (unset or anything else: 1)
+    inline int kclMemoMode() {
+        return PORT_HOT_KNOB(int, [] { const char* e = std::getenv("GXV_KCL_MEMO"); return e && *e == '0' ? 0 : e && *e == '2' ? 2 : 1; }());
+    }
+#if PORT_LOGGING
+    // (logging builds: one line per 2^18 queries, about every 1-3 minutes of play: prisms tested, prisms passed by the memo)
+    u32 sKclQueries = 0, sKclTested = 0, sKclPassed = 0;
+    inline void kclCount(u32 tested, u32 passed) {
+        sKclTested += tested;
+        sKclPassed += passed;
+        if ((++sKclQueries & 0x3FFFF) == 0) {
+            port_log_summary("kcl: last 262144 map queries: %u prism tests, %u repeats passed by the memo (GXV_KCL_MEMO=%d)", sKclTested,
+                             sKclPassed, kclMemoMode());
+            sKclTested = sKclPassed = 0;
+        }
+    }
+#define KCL_COUNT(tested, passed) kclCount((tested), (passed))
+#else
+#define KCL_COUNT(tested, passed) ((void)(tested), (void)(passed))
+#endif
+}  // namespace
+#else
+#define KCL_COUNT(tested, passed) ((void)(tested), (void)(passed))
+namespace {
+    inline int kclMemoMode() {
+        return 0;
+    }
+}  // namespace
+#endif
+
+#ifndef KCL_SEEN_SLOTS
+#define KCL_SEEN_SLOTS 256
+#endif
+namespace {
+    // The prisms one walk has looked at, by index (prism lists hold u16 indices, never 0; 0 marks a free slot). 512 bytes cleared
+    // per query, only when the memo is on. mPushedOut: some prism lost its slot in this walk. Until then the table holds every prism
+    // the walk has looked at, so a prism it does not hold was never looked at, and so is not among the walk's results either: the
+    // walk can leave out its std::find over them (the results only ever hold prisms looked at earlier in the same walk).
+    struct KclSeen {
+        u16 mSlot[KCL_SEEN_SLOTS];
+        bool mPushedOut;
+
+        void clear() {
+            std::memset(mSlot, 0, sizeof(mSlot));
+            mPushedOut = false;
+        }
+        // true: idx was already put in; otherwise puts it in (pushing out whichever prism had its slot)
+        bool testAndPut(u16 idx) {
+            u16& rSlot = mSlot[idx & (KCL_SEEN_SLOTS - 1)];
+            if (rSlot == idx) {
+                return true;
+            }
+            if (rSlot != 0) {
+                mPushedOut = true;
+            }
+            rSlot = idx;
+            return false;
+        }
+        bool has(u16 idx) const {
+            return mSlot[idx & (KCL_SEEN_SLOTS - 1)] == idx;
+        }
+        void put(u16 idx) {
+            mSlot[idx & (KCL_SEEN_SLOTS - 1)] = idx;
+        }
+    };
+}  // namespace
 
 void KCollision_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -174,7 +263,7 @@ KC_PrismData* KCollisionServer::checkPoint(Fxyz* pPoint, f32 param, f32* pDist) 
     return nullptr;
 }
 
-u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u32 maxCount) {
+u32 KCollisionServer::checkArea3DWalk(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u32 maxCount, bool memo) {
     s32 remX;
     s32 yStep;
     s32 zStep;
@@ -211,6 +300,13 @@ u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u
 
     if (!outCheck(&queryMin, &queryMax, &pointMin, &pointMax)) {
         return 0;
+    }
+
+    // GXV_KCL_MEMO (top of file): the prisms this walk has looked at (memo: the caller's choice, see the wrappers)
+    KclSeen seen;
+    u32 portTested = 0, portPassed = 0;
+    if (memo) {
+        seen.clear();
     }
 
     u32 x;
@@ -254,6 +350,12 @@ u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u
 
                 if (skipList == nullptr || list != skipList) {
                     while (*++list != 0) {
+                        if (memo && seen.testAndPut(*list)) {
+                            portPassed++;
+                            continue;
+                        }
+
+                        portTested++;
                         prism = &mFile->mPrisms[*list];
 
                         if (prism->mHeight <= 0.0f) {
@@ -262,7 +364,8 @@ u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u
 
                         KC_PrismData** end = pOut + foundCount;
 
-                        if (std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
+                        // (GXV_KCL_MEMO: a prism the table never held is not among the results; see KclSeen)
+                        if ((!memo || seen.mPushedOut) && std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
                             continue;
                         }
 
@@ -303,6 +406,7 @@ u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u
                         foundCount++;
 
                         if (foundCount == maxCount) {
+                            KCL_COUNT(portTested, portPassed);
                             return maxCount;
                         }
                     }
@@ -318,10 +422,12 @@ u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u
         z += zStep;
     } while (z <= pointMax.z);
 
+    KCL_COUNT(portTested, portPassed);
     return foundCount;
 }
 
-u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists, u8* pFlags) {
+u32 KCollisionServer::checkSphereWalk(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists, u8* pFlags,
+                                       bool memo) {
     KC_PrismData** end;
     s32 remX;
     s32 yStep;
@@ -353,6 +459,13 @@ u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxC
 
     if (!outCheck(&boxMin, &boxMax, &pointMin, &pointMax)) {
         return 0;
+    }
+
+    // GXV_KCL_MEMO (top of file): the prisms this walk has looked at (memo: the caller's choice, see the wrappers)
+    KclSeen seen;
+    u32 portTested = 0, portPassed = 0;
+    if (memo) {
+        seen.clear();
     }
 
     z = pointMin.z;
@@ -390,6 +503,12 @@ u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxC
 
                 if (skipList == nullptr || list != skipList) {
                     while (*++list != 0) {
+                        if (memo && seen.testAndPut(*list)) {
+                            portPassed++;
+                            continue;
+                        }
+
+                        portTested++;
                         prism = &mFile->mPrisms[*list];
 
                         if (prism->mHeight <= 0.0f) {
@@ -398,7 +517,8 @@ u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxC
 
                         end = pOut + foundCount;
 
-                        if (std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
+                        // (GXV_KCL_MEMO: a prism the table never held is not among the results; see KclSeen)
+                        if ((!memo || seen.mPushedOut) && std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
                             continue;
                         }
 
@@ -410,7 +530,8 @@ u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxC
                             continue;
                         }
 
-                        if (std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
+                        // (GXV_KCL_MEMO: the same search as the one above, over the same results; it can only fail again)
+                        if (!memo && std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
                             continue;
                         }
 
@@ -431,11 +552,12 @@ u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxC
         z += zStep;
     } while (z <= pointMax.z);
 
+    KCL_COUNT(portTested, portPassed);
     return foundCount;
 }
 
-u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists, u8* pFlags,
-                                               f32 thickness) {
+u32 KCollisionServer::checkSphereWithThicknessWalk(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists,
+                                                   u8* pFlags, f32 thickness, bool memo) {
     KC_PrismData** end;
     s32 remX;
     s32 yStep;
@@ -467,6 +589,13 @@ u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 pa
 
     if (!outCheck(&boxMin, &boxMax, &pointMin, &pointMax)) {
         return 0;
+    }
+
+    // GXV_KCL_MEMO (top of file): the prisms this walk has looked at (memo: the caller's choice, see the wrappers)
+    KclSeen seen;
+    u32 portTested = 0, portPassed = 0;
+    if (memo) {
+        seen.clear();
     }
 
     z = pointMin.z;
@@ -504,6 +633,12 @@ u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 pa
 
                 if (skipList == nullptr || list != skipList) {
                     while (*++list != 0) {
+                        if (memo && seen.testAndPut(*list)) {
+                            portPassed++;
+                            continue;
+                        }
+
+                        portTested++;
                         prism = &mFile->mPrisms[*list];
 
                         if (prism->mHeight <= 0.0f) {
@@ -512,7 +647,8 @@ u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 pa
 
                         end = pOut + foundCount;
 
-                        if (std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
+                        // (GXV_KCL_MEMO: a prism the table never held is not among the results; see KclSeen)
+                        if ((!memo || seen.mPushedOut) && std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
                             continue;
                         }
 
@@ -524,7 +660,8 @@ u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 pa
                             continue;
                         }
 
-                        if (std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
+                        // (GXV_KCL_MEMO: the same search as the one above, over the same results; it can only fail again)
+                        if (!memo && std::find(pOut, end, (KC_PrismData* const&)prism) != end) {
                             continue;
                         }
 
@@ -545,11 +682,12 @@ u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 pa
         z += zStep;
     } while (z <= pointMax.z);
 
+    KCL_COUNT(portTested, portPassed);
     return foundCount;
 }
 
-KC_PrismData* KCollisionServer::checkArrow(const TVec3f& rOrigin, const TVec3f& rDir, f32* pDists, u8* pFlags, u32* pCount, KC_PrismData** pOut,
-                                           u32 maxCount) const {
+KC_PrismData* KCollisionServer::checkArrowWalk(const TVec3f& rOrigin, const TVec3f& rDir, f32* pDists, u8* pFlags, u32* pCount,
+                                               KC_PrismData** pOut, u32 maxCount, bool memo, bool nearestOnly) const {
     if (rDir.x == 0.0f && rDir.y == 0.0f && rDir.z == 0.0f) {
         return nullptr;
     }
@@ -678,6 +816,15 @@ searchStart:
 
     bestPrism = nullptr;
 
+    // GXV_KCL_MEMO (top of file): the prisms this walk has seen MISS (a prism that hit is tested and reported again in each cell)
+    KclSeen missed;
+    u32 portTested = 0, portPassed = 0;
+    if (memo) {
+        missed.clear();
+    }
+    // PETARI_RAY_NEAREST (forkB; ported from Producdevity's fork, 1807939): the nearest hit found so far, as a fraction of rDir
+    f32 nearestHit = 1.0f;
+
     do {
         prismList = reinterpret_cast< u16* >(searchBlock(&shift, cell.x, cell.y, cell.z));
         u32 blockSize = 1 << shift;
@@ -706,6 +853,12 @@ searchStart:
         f32 dist = 1.0f;
 
         while (*++prismList != 0) {
+            if (memo && missed.has(*prismList)) {
+                portPassed++;
+                continue;
+            }
+
+            portTested++;
             KC_PrismData* prism = &mFile->mPrisms[*prismList];
 
             if (prism->mHeight <= 0.0f) {
@@ -715,6 +868,9 @@ searchStart:
             u8 flag = 0;
 
             if (!KCHitArrow(prism, rOrigin, rDir, &dist, &flag)) {
+                if (memo) {
+                    missed.put(*prismList);
+                }
                 continue;
             }
 
@@ -722,6 +878,9 @@ searchStart:
                 pDists[foundCount] = dist;
                 pOut[foundCount] = prism;
                 foundCount++;
+                if (dist < nearestHit) {
+                    nearestHit = dist;
+                }
 
                 if (dist < bestFraction) {
                     bestFraction = dist;
@@ -733,6 +892,7 @@ searchStart:
                         *pCount = foundCount;
                     }
 
+                    KCL_COUNT(portTested, portPassed);
                     return bestPrism;
                 }
             } else {
@@ -773,6 +933,12 @@ searchStart:
         step.scale(tMin);
         hitPoint += step;
         accumT += tMin;
+        // PETARI_RAY_NEAREST: for a caller that keeps only the nearest hit (MapUtil's first polygon on a line, no triangle filter),
+        // a cell that starts beyond the nearest hit found holds no nearer one: a prism with a nearer hit has that hit point in a
+        // cell the walk has already passed, and was tested there. One unit (a cell is at least one) of margin for the rounding.
+        if (nearestOnly && foundCount != 0 && nearestHit * length + 1.0f < accumT) {
+            break;
+        }
 
         cell.setUsingCast(hitPoint);
 
@@ -785,7 +951,210 @@ searchStart:
         *pCount = foundCount;
     }
 
+    KCL_COUNT(portTested, portPassed);
     return bestPrism;
+}
+
+#ifdef TARGET_PC
+// GXV_KCL_MEMO=2 (verify): scratch for the memo walk's answer, and the comparison. Used by one query at a time (sKvBusy): a query
+// that came in while another was being verified (another thread, or a re-entry, which the walks never make) and a query asking for
+// more than cKvMax results are answered by the original walk alone and counted as "not checked".
+namespace {
+    const u32 cKvMax = 512;
+    KC_PrismData* sKvOut[cKvMax];
+    f32 sKvDists[cKvMax];
+    u8 sKvFlags[cKvMax];
+    bool sKvBusy = false;
+    u32 sKvChecks = 0, sKvMismatches = 0, sKvUnchecked = 0, sKvLogged = 0;
+
+    bool kvSameBits(const void* a, const void* b, u32 n) {
+        return n == 0 || std::memcmp(a, b, n) == 0;
+    }
+    void kvPeriodic() {
+        if ((++sKvChecks & 0xFFFF) == 0) {
+            port_log_summary("kcl-verify: %u checks, %u mismatches, %u not checked since the start (GXV_KCL_MEMO=2; the game used the original walk)",
+                             sKvChecks, sKvMismatches, sKvUnchecked);
+        }
+    }
+    // one mismatch: counted; the first 8 written out in full. q: the query's floats in the KCL's own (local) space.
+    void kvMismatch(const KCollisionServer* pSrv, const char* pKind, const char* pWhat, u32 nOrig, u32 nMemo, u32 at, const f32* q, int nq,
+                    u32 maxCount) {
+        sKvMismatches++;
+        if (sKvLogged >= 8) {
+            return;
+        }
+        sKvLogged++;
+        const KCLFile* f = pSrv->mFile;
+        char qs[160];
+        int len = 0;
+        for (int i = 0; i < nq && len < (int)sizeof(qs) - 20; i++) {
+            len += snprintf(qs + len, sizeof(qs) - len, "%s%a", i ? "," : "", (double)q[i]);
+        }
+        port_log_summary("kcl-verify: MISMATCH #%u %s (%s at %u): original %u results, memo %u; KCL %p, %d prisms, min (%a,%a,%a), masks %x/%x/%x "
+                         "shift %d; query (%s) max %u; check #%u",
+                         sKvMismatches, pKind, pWhat, at, nOrig, nMemo, (const void*)f, (int)pSrv->getTriangleNum(), (double)f->mMin.x,
+                         (double)f->mMin.y, (double)f->mMin.z, (unsigned)f->mXMask, (unsigned)f->mYMask, (unsigned)f->mZMask,
+                         (int)f->mBlockWidthShift, qs, maxCount, sKvChecks);
+    }
+    // the hit lists: count, then prisms in order, then distances (bits), then flags (pFlagsOrig null: not compared)
+    bool kvCompareLists(const KCollisionServer* pSrv, const char* pKind, u32 nOrig, u32 nMemo, KC_PrismData* const* pOutOrig, const f32* pDistsOrig,
+                        const u8* pFlagsOrig, const f32* q, int nq, u32 maxCount) {
+        if (nOrig != nMemo) {
+            kvMismatch(pSrv, pKind, "count", nOrig, nMemo, 0, q, nq, maxCount);
+            return false;
+        }
+        for (u32 i = 0; i < nOrig; i++) {
+            if (pOutOrig[i] != sKvOut[i]) {
+                kvMismatch(pSrv, pKind, "prism", nOrig, nMemo, i, q, nq, maxCount);
+                return false;
+            }
+            if (pDistsOrig != nullptr && !kvSameBits(&pDistsOrig[i], &sKvDists[i], sizeof(f32))) {
+                kvMismatch(pSrv, pKind, "distance", nOrig, nMemo, i, q, nq, maxCount);
+                return false;
+            }
+            if (pFlagsOrig != nullptr && pFlagsOrig[i] != sKvFlags[i]) {
+                kvMismatch(pSrv, pKind, "flag", nOrig, nMemo, i, q, nq, maxCount);
+                return false;
+            }
+        }
+        return true;
+    }
+}  // namespace
+#endif
+
+// GXV_KCL_MEMO: the public queries. 0 / 1: the walk with the memo off / on. 2: both, compared; the caller gets the original's answer.
+u32 KCollisionServer::checkArea3D(Fxyz* pMin, Fxyz* pMax, KC_PrismData** pOut, u32 maxCount) {
+#ifdef TARGET_PC
+    const int mode = kclMemoMode();
+    if (mode != 2) {
+        return checkArea3DWalk(pMin, pMax, pOut, maxCount, mode == 1);
+    }
+    if (sKvBusy || maxCount > cKvMax) {
+        sKvUnchecked++;
+        return checkArea3DWalk(pMin, pMax, pOut, maxCount, false);
+    }
+    sKvBusy = true;
+    const f32 q[6] = {pMin->x, pMin->y, pMin->z, pMax->x, pMax->y, pMax->z};
+    const u32 nMemo = checkArea3DWalk(pMin, pMax, sKvOut, maxCount, true);
+    const u32 n = checkArea3DWalk(pMin, pMax, pOut, maxCount, false);
+    kvCompareLists(this, "area", n, nMemo, pOut, nullptr, nullptr, q, 6, maxCount);
+    kvPeriodic();
+    sKvBusy = false;
+    return n;
+#else
+    return checkArea3DWalk(pMin, pMax, pOut, maxCount, false);
+#endif
+}
+
+u32 KCollisionServer::checkSphere(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists, u8* pFlags) {
+#ifdef TARGET_PC
+    const int mode = kclMemoMode();
+    if (mode != 2) {
+        return checkSphereWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, mode == 1);
+    }
+    if (sKvBusy || maxCount > cKvMax) {
+        sKvUnchecked++;
+        return checkSphereWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, false);
+    }
+    sKvBusy = true;
+    const f32 q[5] = {pCenter->x, pCenter->y, pCenter->z, radius, param};
+    const u32 nMemo = checkSphereWalk(pCenter, radius, param, maxCount, sKvOut, sKvDists, sKvFlags, true);
+    const u32 n = checkSphereWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, false);
+    kvCompareLists(this, "sphere", n, nMemo, pOut, pDists, pFlags, q, 5, maxCount);
+    kvPeriodic();
+    sKvBusy = false;
+    return n;
+#else
+    return checkSphereWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, false);
+#endif
+}
+
+u32 KCollisionServer::checkSphereWithThickness(Fxyz* pCenter, f32 radius, f32 param, u32 maxCount, KC_PrismData** pOut, f32* pDists, u8* pFlags,
+                                               f32 thickness) {
+#ifdef TARGET_PC
+    const int mode = kclMemoMode();
+    if (mode != 2) {
+        return checkSphereWithThicknessWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, thickness, mode == 1);
+    }
+    if (sKvBusy || maxCount > cKvMax) {
+        sKvUnchecked++;
+        return checkSphereWithThicknessWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, thickness, false);
+    }
+    sKvBusy = true;
+    const f32 q[6] = {pCenter->x, pCenter->y, pCenter->z, radius, param, thickness};
+    const u32 nMemo = checkSphereWithThicknessWalk(pCenter, radius, param, maxCount, sKvOut, sKvDists, sKvFlags, thickness, true);
+    const u32 n = checkSphereWithThicknessWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, thickness, false);
+    kvCompareLists(this, "sphere-thick", n, nMemo, pOut, pDists, pFlags, q, 6, maxCount);
+    kvPeriodic();
+    sKvBusy = false;
+    return n;
+#else
+    return checkSphereWithThicknessWalk(pCenter, radius, param, maxCount, pOut, pDists, pFlags, thickness, false);
+#endif
+}
+
+#ifdef TARGET_PC
+KC_PrismData* KCollisionServer::checkArrow(const TVec3f& rOrigin, const TVec3f& rDir, f32* pDists, u8* pFlags, u32* pCount, KC_PrismData** pOut,
+                                           u32 maxCount, bool nearestOnly) const {
+#else
+KC_PrismData* KCollisionServer::checkArrow(const TVec3f& rOrigin, const TVec3f& rDir, f32* pDists, u8* pFlags, u32* pCount, KC_PrismData** pOut,
+                                           u32 maxCount) const {
+#endif
+#ifdef TARGET_PC
+    const int mode = kclMemoMode();
+    if (mode != 2) {
+        return checkArrowWalk(rOrigin, rDir, pDists, pFlags, pCount, pOut, maxCount, mode == 1, nearestOnly);
+    }
+    if (sKvBusy || (pOut != nullptr && maxCount > cKvMax)) {
+        sKvUnchecked++;
+        return checkArrowWalk(rOrigin, rDir, pDists, pFlags, pCount, pOut, maxCount, false, nearestOnly);
+    }
+    sKvBusy = true;
+    const f32 q[6] = {rOrigin.x, rOrigin.y, rOrigin.z, rDir.x, rDir.y, rDir.z};
+    // The count is written only on some paths: both runs start from the caller's value. A caller with no count gets none written
+    // (the original's goes to a local).
+    u32 countOrig = pCount != nullptr ? *pCount : 0;
+    u32 countMemo = countOrig;
+    KC_PrismData* best;
+    if (pOut != nullptr) {
+        // collect mode: every hit's prism and distance (flags are not written in this mode, by either walk)
+        KC_PrismData* bestMemo = checkArrowWalk(rOrigin, rDir, sKvDists, sKvFlags, &countMemo, sKvOut, maxCount, true, nearestOnly);
+        best = checkArrowWalk(rOrigin, rDir, pDists, pFlags, pCount != nullptr ? pCount : &countOrig, pOut, maxCount, false, nearestOnly);
+        if (pCount != nullptr) {
+            countOrig = *pCount;
+        }
+        if (kvCompareLists(this, "line-collect", countOrig, countMemo, pOut, pDists, nullptr, q, 6, maxCount) && best != bestMemo) {
+            kvMismatch(this, "line-collect", "best", countOrig, countMemo, 0, q, 6, maxCount);
+        }
+    } else {
+        // first-hit mode: the best prism, its distance and flag (written only on a hit: both start from the caller's values)
+        // (the game's only caller, CollisionParts::checkStrikeLine, uses collect mode; this one is for completeness)
+        f32 distMemo = 0.0f;
+        u8 flagMemo = pFlags != nullptr ? *pFlags : 0;
+        if (pDists != nullptr) {
+            std::memcpy(&distMemo, pDists, sizeof(f32));
+        }
+        KC_PrismData* bestMemo = checkArrowWalk(rOrigin, rDir, &distMemo, &flagMemo, &countMemo, nullptr, maxCount, true, nearestOnly);
+        best = checkArrowWalk(rOrigin, rDir, pDists, pFlags, pCount != nullptr ? pCount : &countOrig, nullptr, maxCount, false, nearestOnly);
+        if (pCount != nullptr) {
+            countOrig = *pCount;
+        }
+        if (best != bestMemo) {
+            kvMismatch(this, "line-first", "best", countOrig, countMemo, 0, q, 6, maxCount);
+        } else if (pDists != nullptr && !kvSameBits(pDists, &distMemo, sizeof(f32))) {
+            kvMismatch(this, "line-first", "distance", countOrig, countMemo, 0, q, 6, maxCount);
+        } else if (pFlags != nullptr && *pFlags != flagMemo) {
+            kvMismatch(this, "line-first", "flag", countOrig, countMemo, 0, q, 6, maxCount);
+        } else if (countOrig != countMemo) {
+            kvMismatch(this, "line-first", "count", countOrig, countMemo, 0, q, 6, maxCount);
+        }
+    }
+    kvPeriodic();
+    sKvBusy = false;
+    return best;
+#else
+    return checkArrowWalk(rOrigin, rDir, pDists, pFlags, pCount, pOut, maxCount, false);
+#endif
 }
 
 bool KCollisionServer::KCHitSphere(KC_PrismData* pPrism, Fxyz* pCenter, f32 radius, f32 param, f32* pDist, u8* pFlag) {

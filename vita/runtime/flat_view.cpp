@@ -43,12 +43,13 @@ extern "C" void port_vr_wipe(int, float closed, unsigned int) {
     wipeClosed.store(closed, std::memory_order_relaxed);
     wipeFrame.store(frame, std::memory_order_relaxed);
 }
-// 1 while the pause menu waits for a choice, or a fade / wipe drawn in the last 3 recorded frames has the screen 90 %
-// closed or more. Any thread.
+// 1 while the pause menu waits for a choice, 2 while a fade / wipe drawn in the last 3 recorded frames has the screen 90 %
+// closed or more (the automatic quality's GXV_AUTOQ_WIPE tells the two apart: after a wipe comes another area, after the
+// pause menu the same one; every other caller only tests for non-zero). Any thread.
 extern "C" int port_screen_quiet(void) {
     if (port_zoom_menu_active && port_zoom_menu_active()) return 1;
     if (!port_gx_recording_frame) return 0;
     const uint64_t now = port_gx_recording_frame(), at = wipeFrame.load(std::memory_order_relaxed);
-    return at != 0 && now - at <= 3 && wipeClosed.load(std::memory_order_relaxed) >= 0.9f ? 1 : 0;
+    return at != 0 && now - at <= 3 && wipeClosed.load(std::memory_order_relaxed) >= 0.9f ? 2 : 0;
 }
 extern "C" void port_vr_pause_menu(int) {}

@@ -5,7 +5,7 @@ const inputs={};
 let source='';
 for(const [file,start,end] of [
  ['platform/vgx/src/vgx_stats.cpp','int ExportFrameLog() {','void FrameEnd('],
- ['platform/vgx/src/vgx_backend_gl.cpp','int ExportCountLog() {','void Execute(']
+ ['platform/vgx/src/vgx_backend_gl.cpp','int ExportCountLog() {','static void ExecuteFrame(']
 ]) {
  const data=fs.readFileSync(path.join(root,file),'utf8');
  inputs[file]=crypto.createHash('sha256').update(data).digest('hex');

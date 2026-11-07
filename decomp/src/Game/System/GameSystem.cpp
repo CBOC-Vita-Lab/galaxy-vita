@@ -33,6 +33,9 @@
 #include <nw4r/lyt/init.h>
 #include <revolution.h>
 #include "port/game_progress.h"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#endif
 
 #define GX_FIFO_SIZE 0x80000
 
@@ -232,6 +235,38 @@ bool GameSystem::isPreparedReset() const {
 #ifdef TARGET_PC
 extern "C" int port_frameskip_turn(int allowed);
 extern "C" void port_turn_skipped_set(int v);
+extern "C" void port_mark_frame_thread(void);  // platform/src/port/perf.cpp
+extern "C" void port_dl_flush_stale(int drop);   // GXV_DL_LAZY: decomp/src/Game/LiveActor/ModelManager.cpp
+extern "C" void port_j3d_picture_begin(void);    // decomp/src/JSystem/J3DGraphBase/J3DPacket.cpp
+extern "C" void port_anim_flush_stale(int drop); // GXV_ANIM_LOD: decomp/src/Game/LiveActor/LiveActor.cpp
+extern "C" void port_par_flush_prepare(void);   // GXV_PAR_FLUSH (par2): decomp/src/Game/LiveActor/ModelManager.cpp
+extern "C" void port_par_flush_end(void);
+extern "C" void port_gx_drawdone_settle(int point);
+extern "C" void port_view_flush(int drop);
+extern "C" void port_gx_flush_scope(int on);
+// GXV_PAR_VIEW=2 (decomp/src/Game/LiveActor/ModelManager.cpp): the drawn turn's view pass may leave its arithmetic to a worker while
+// draw() runs (armed around port_view_flush below); every job is done and the worker out of the batch after draw() (retire).
+extern "C" void port_par_view_async_arm(int on);
+extern "C" void port_par_view_retire(void);
+extern "C" void __PortGXFifoIdlePoint(void) __attribute__((weak));  // GXV_SEG_IDLE: platform/src/gx/gx_fifo.cpp
+// GXV_ANIM_PROF (platform/src/port/perf.cpp): the drawn turn's flushes timed, and the end of every turn (its log every 300 turns)
+extern "C" int port_anim_prof_on(void);
+extern "C" void port_anim_prof_flush(int which, int64_t ns);
+extern "C" void port_anim_prof_turn(int drawn);
+// GXV_DRAW_PROF (draw7; platform/src/port/perf.cpp): the drawn turn's draw phase and flushes, per stage and per draw list
+extern "C" int port_draw_prof_on(void);
+extern "C" void port_draw_prof_stage(int stage, int64_t ns);
+extern "C" void port_draw_prof_turn(void);
+#define PORT_PROF_FLUSH(which, call)                                          \
+    do {                                                                      \
+        if (port_anim_prof_on() || port_draw_prof_on()) {                     \
+            const int64_t profT0 = port_host_time_ns();                       \
+            call;                                                             \
+            port_anim_prof_flush((which), port_host_time_ns() - profT0);      \
+        } else {                                                              \
+            call;                                                             \
+        }                                                                     \
+    } while (0)
 #if defined(__vita__)
 extern "C" void port_settings_game_boundary(int safe);
 #endif
@@ -240,6 +275,10 @@ extern "C" void port_settings_game_boundary(int safe);
 void GameSystem::frameLoop() {
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_BEGIN);
 #ifdef TARGET_PC
+    // (GXV_SEG_IDLE, platform/src/gx/vgx_galaxy.cpp: the front end's staging segment changes here, between two turns, when the front
+    // end has caught up, instead of filling up and making the game wait for the front end in the middle of a draw)
+    if (__PortGXFifoIdlePoint) __PortGXFifoIdlePoint();
+    port_mark_frame_thread();
 #if defined(__vita__)
     port_settings_game_boundary(!mSceneController->isChangingScene() && !port_skip_fast_forwarding());
 #endif
@@ -250,6 +289,12 @@ void GameSystem::frameLoop() {
         // retrace wait still gives the other threads (audio, loading) their
         // turn.
         int64_t start = port_host_time_ns();
+        port_gx_drawdone_settle(3);
+        port_gx_flush_scope(1);
+        port_anim_flush_stale(0);
+        port_dl_flush_stale(0);
+        port_view_flush(0);
+        port_gx_flush_scope(0);
         do {
             update();
             PORT_GAME_PROGRESS(PORT_GAME_PHASE_CALC_ANIM);
@@ -280,6 +325,7 @@ void GameSystem::frameLoop() {
         calcAnim();
         port_turn_skipped_set(0);
         port_perf_frame_work_done();
+        port_anim_prof_turn(0);
         // A turn skipped because the GPU is behind (1) is not late, and must not run ahead of the display's
         // clock: it takes its retrace as one that draws does. A turn skipped to catch up (2) does not wait:
         // the turns that follow it start on time again.
@@ -291,10 +337,40 @@ void GameSystem::frameLoop() {
         return;
     }
 #endif
+#ifdef TARGET_PC
+    // (GXV_DL_LAZY) the materials the turns without a picture left out, from the same state, before this picture is drawn; the
+    // front end must be past the last picture's lists first (a deferred draw-done wait is made here if one is still outstanding)
+    port_par_flush_prepare();    // (GXV_PAR_FLUSH: the far models' joints handed to the fourth core, before the wait below)
+    port_gx_drawdone_settle(3);  // (mode 3: the only wait of the turns since the last picture; mode 4: none)
+    port_gx_flush_scope(1);      // (modes 3, 4: what follows writes the half the front end does not read)
+    PORT_PROF_FLUSH(0, port_anim_flush_stale(0));  // (GXV_ANIM_LOD: the far models' joints, exactly)
+    port_par_flush_end();        // (GXV_PAR_FLUSH: no flush job is read after the flush)
+    PORT_PROF_FLUSH(1, port_dl_flush_stale(0));
+    port_par_view_async_arm(1);                    // (GXV_PAR_VIEW=2: draw() follows the view pass at once)
+    PORT_PROF_FLUSH(2, port_view_flush(0));        // (GXV_DRAWDONE_DEFER 3, 4: the view pass left out since the last picture)
+    port_par_view_async_arm(0);
+    port_gx_flush_scope(0);
+#endif
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_BEGIN_RENDER);
     MainLoopFramework::sManager->beginRender();
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_DRAW);
+#ifdef TARGET_PC
+    port_j3d_picture_begin();  // (GXV_J3D_MATMERGE: the drawn picture's number; the "j3d lists:" counters)
+#endif
+#ifdef TARGET_PC
+    if (port_draw_prof_on()) {
+        const int64_t drawT0 = port_host_time_ns();
+        draw();
+        port_draw_prof_stage(0, port_host_time_ns() - drawT0);
+    } else {
+        draw();
+    }
+#else
     draw();
+#endif
+#ifdef TARGET_PC
+    port_par_view_retire();  // (GXV_PAR_VIEW=2: the view jobs the draw did not reach, and the worker out of the batch)
+#endif
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_END_RENDER);
     MainLoopFramework::sManager->endRender();
     update();
@@ -306,6 +382,8 @@ void GameSystem::frameLoop() {
     MainLoopFramework::sManager->endFrame();
 #ifdef TARGET_PC
     port_perf_frame_work_done();
+    port_anim_prof_turn(1);
+    port_draw_prof_turn();
 #endif
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_WAIT_RETRACE);
     MainLoopFramework::sManager->waitForRetrace();
@@ -313,7 +391,20 @@ void GameSystem::frameLoop() {
 }
 
 void GameSystem::draw() {
+#ifdef TARGET_PC
+    // GXV_AUDIO_CPU1 (platform/src/os/os_thread.cpp): the game's audio thread may run on core 1 meanwhile; drawing does not drive JAudio
+    PORT_AUDIO_WINDOW(1);
+    const bool prof = port_draw_prof_on() != 0;
+    int64_t profT = prof ? port_host_time_ns() : 0;
     mSceneController->drawScene();
+    if (prof) {
+        const int64_t now = port_host_time_ns();
+        port_draw_prof_stage(1, now - profT);
+        profT = now;
+    }
+#else
+    mSceneController->drawScene();
+#endif
 #ifdef TARGET_PC
     // Everything drawn over the scene is 2D too: the save and error windows,
     // the pointer's cursor, the system wipe.  In VR it goes on the HUD panel
@@ -323,6 +414,9 @@ void GameSystem::draw() {
 #endif
     mSequenceDirector->draw();
 #ifdef TARGET_PC
+    if (prof) {
+        port_draw_prof_stage(2, port_host_time_ns() - profT);
+    }
     port_gx_marker(PORT_GX_MARK_POINTER_BEGIN);
 #endif
     mObjHolder->drawStarPointer();
@@ -340,10 +434,18 @@ void GameSystem::draw() {
     SingletonHolder< GameSystemResetAndPowerProcess >::get()->draw();
 #ifdef TARGET_PC
     port_gx_marker(PORT_GX_MARK_HUD_END);
+    PORT_AUDIO_WINDOW(0);
 #endif
 }
 
+#ifdef TARGET_PC
+extern "C" void port_gx_drawdone_settle(int point);  // GXV_DRAWDONE_DEFER: platform/src/port/perf.cpp, MainLoopFramework.cpp
+#endif
+
 void GameSystem::update() {
+#ifdef TARGET_PC
+    port_gx_drawdone_settle(1);
+#endif
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_UPDATE_RESET);
     SingletonHolder< GameSystemResetAndPowerProcess >::get()->movement();
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_UPDATE_SCENE);
@@ -394,6 +496,8 @@ void GameSystem::updateSceneController() {
             mSystemWipeHolder->movement();
         }
 
+        // (the profile's "update-scene" phase from here: the scene's movement, apart from the sound objects before it)
+        PORT_GAME_PROGRESS(PORT_GAME_PHASE_UPDATE_SCENE);
         mSceneController->updateScene();
     }
 
@@ -403,9 +507,18 @@ void GameSystem::updateSceneController() {
 }
 
 void GameSystem::calcAnim() {
+#ifdef TARGET_PC
+    // GXV_AUDIO_CPU1 (platform/src/os/os_thread.cpp): the game's audio thread may run on core 1 meanwhile (also through the front-end
+    // wait below); the animation, effect and view passes do not drive JAudio (the sound starts and stops are in update())
+    PORT_AUDIO_WINDOW(1);
+    port_gx_drawdone_settle(2);
+#endif
     mSceneController->calcAnimScene();
 
     if (mSystemWipeHolder != nullptr) {
         mSystemWipeHolder->calcAnim();
     }
+#ifdef TARGET_PC
+    PORT_AUDIO_WINDOW(0);
+#endif
 }

@@ -54,6 +54,14 @@ void DiskGravity::setEnableEdgeGravity(bool val) {
     mEnableEdgeGravity = val;
 }
 
+#ifdef TARGET_PC
+// (an accepted position is within the radius of the centre across the disk and within the range of the disk or its edge)
+f32 DiskGravity::calcReach(TVec3f* pCentre) const {
+    *pCentre = mWorldPosition;
+    return mRange < 0.0f ? -1.0f : __builtin_fabsf(mWorldRadius) + mRange + mDistant;
+}
+#endif
+
 bool DiskGravity::calcOwnGravityVector(TVec3f* pDest, f32* pDistance, const TVec3f& rPosition) const {
     TVec3f relativePos;
     relativePos = rPosition - mWorldPosition;
