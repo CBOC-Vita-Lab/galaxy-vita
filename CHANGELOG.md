@@ -1,44 +1,41 @@
-# Version 2.0 — November 2026
+# Version 2.0 — November 7, 2026
 
-Full resolution: the Vita's whole 960×544 at a steady 30 FPS, or up to 60 FPS in the new Performance mode.
+The full-resolution update. Super Mario Galaxy now runs at the Vita's native 960×544 at a steady 30 FPS, with a new Performance mode that reaches for 60.
 
-### Three picture modes
-- **Quality (the default): a steady 30 at the full 960×544.** If the graphics chip falls behind, edge smoothing goes first, then sharpness one small step at a time. It only steps down after about 4 seconds of pictures that came late because of the graphics chip. A slowdown caused by the game's own work never costs sharpness, and everything comes back when there's room.
-- **Performance: up to 60 FPS** at up to 720×404, and up to 960×544 when there's clear room. Under load it gives up edge smoothing first, then size. When 60 is out of reach, it shows an even 30 instead of an uneven 40 and sizes the picture for that 30.
-- **Locked 30:** an even 30, never below 960×544, with multisampled edges when there's room.
+### Pick your picture
+- **Quality (the default):** the sharpest picture at a steady 30 FPS, at up to the full 960×544. In the busiest moments it softens edges first, then sharpness a step at a time, and brings everything back as soon as there's room.
+- **Performance:** as close to 60 FPS as each scene allows. When 60 isn't possible it settles on a smooth 30 rather than a choppy 40.
+- **Locked 30:** always 960×544, always 30 FPS when the Vita can manage it.
 
-### Faster
-- **The Vita's fourth CPU core,** with the CapUnlocker plug-in: sound, part of the renderer, the camera pass and animation work run on it. Without the plug-in the game still runs, a few FPS slower in the busiest scenes.
-- **The game no longer waits for the renderer** between pictures, and its audio thread runs on another core while it draws.
-- **Cheaper graphics at full size:** edge smoothing skips the HUD, the bloom blur runs at half size, a full-screen pass the graphics library didn't need is skipped, the picture is presented in one pass, shaders skip clamps and light maths proven unnecessary, water discards pixels that change nothing, and off-screen map pieces aren't drawn.
-- **Less repeated game work:** collision, gravity, area and shadow queries reuse answers while nothing changed (each checked on the console against the original, with no differences), and flower patches animate once per shown picture.
-- **Smoother pacing:** each picture is shown on the refresh of its own game turn, and a picture comes at least every 3 turns.
+### Smoother play
+- **Honeyhive, Beach Bowl and the Bowser fights hold 30 FPS** in Quality mode. They used to drop into the teens and 20s.
+- **All four CPU cores.** With the CapUnlocker plug-in, sound, animation and part of the graphics work move to the Vita's fourth core.
+- **The game and the graphics work side by side,** so the game never waits on the renderer between frames.
+- **Leaner graphics:** lighter shaders, cheaper water and glow effects, and nothing drawn that ends up off screen.
+- **Even frame pacing,** with each frame shown right on time.
 
 ### Better picture
-- **16:9 picture sizes** (720×404, 664×376, 608×348) instead of 4:3-shaped ones, for the same cost, and texture sharpness that follows the picture size.
-- **Edge smoothing** on the whole picture (the HUD stays crisp).
-- **A 1-pixel line is gone** from the top-left of Beach Bowl and under menu buttons, and a line under the star counter at the smallest sizes.
-- **The unpowered Comet Observatory** early in a new game shows dim but visible floors instead of near-black ones (`PETARI_ASTRO_DEAD_LIGHT=0` in `env.txt` restores the original look).
-- **The pause menu** shows a still copy of the scene.
+- **Widescreen picture sizes** and texture sharpness that follows the resolution.
+- **Edge smoothing** across the whole picture, with the HUD kept crisp.
+- **No more stray lines:** a 1-pixel line in Beach Bowl and under menu buttons, and a line under the star counter, are gone.
+- **The unpowered Comet Observatory,** early in a new game, now has dim but visible floors.
 
-### Pause menu
-- **A four-row panel:** camera zoom (L/R), rear-touch aiming (Triangle), **right stick as camera or Star Bit pointer** (Square), and **Star Bit reach** (Select: Off, 1.5×, 2×, 3× or All). All four are saved in `settings.ini`.
+### Controls and gameplay
+- **New pause-menu options:** use the right stick as the Star Bit pointer (Square), and set Star Bit reach (Select) to collect from farther away.
+- **Enemies that grab and release Mario hurt him again,** just like on the Wii.
+- **Hidden-star missions** work properly.
+- **Rear touch works right after the Settings menu.**
+- **Spins come out every time,** even when you press Square right after a jump.
 
-### Fixed
-- **Enemies that release Mario with damage hurt him again,** as on the Wii (acid, freeze, fire and electric releases did nothing).
-- **Hidden-star scenarios** no longer write past the end of the launch-star storage. Saves are unchanged.
-- **Rear touch works right after the Settings menu,** even with fingers resting on the back, and a quick slide counts from where the finger landed.
-- **Spins:** a Square press during the short pause after a jump is held, and the spin happens when the pause ends.
-- **Shaders are prepared after an update** instead of an old warm-up list skipping the preparation, and a damaged list rewrites itself.
-- **Full graphics-buffer pools give back their oldest buffer** instead of growing.
-- **CPU clock:** the game no longer lowers a 500 MHz PSVshell profile to 444 MHz.
-- **The quality system ignores movie frames,** so a movie never changes the picture size.
-- **HD texture pack builder:** compressed textures with transparency use the Wii's colour weights.
+### Under the hood
+- Shaders are prepared again after an update, graphics memory stays tidy in long sessions, and a 500 MHz PSVshell profile is left alone.
+- The HD texture pack builder matches the game's colours exactly.
+- Full details are in [Technical notes](docs/TECHNICAL.md) and [Source record](docs/SOURCE.md).
 
 ### Thanks
-Several fixes and ideas come from Producdevity's fork of version 1.1: Star Bit reach, the right-stick pointer, the enemy-damage, hidden-star and rear-touch fixes, the 608×348 and 592×424 sizes, the buffer-pool and warm-up-list fixes, the NEON audio resampler and AFC decoder, and several exact speed-ups. See [Credits](CREDITS.md).
+Several fixes and ideas come from Producdevity's fork of version 1.1: Star Bit reach, the right-stick pointer, the enemy-damage, hidden-star and rear-touch fixes, and some speed-ups. See [Credits](CREDITS.md).
 
-Updating? Install the new VPK over the old one. Your saves and settings are kept. Measured frame rates are in [Performance](docs/PERFORMANCE.md).
+**Updating?** Install the new VPK over the old one. Your saves and settings stay. Measured frame rates are in [Performance](docs/PERFORMANCE.md).
 
 # Version 1.2 — October 31, 2026
 

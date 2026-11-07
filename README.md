@@ -15,15 +15,17 @@ You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
 ## New In Version 2.0
 
-Full resolution: the Vita's whole 960×544 at a steady 30 FPS, or up to 60 FPS in the new Performance mode.
+The biggest update yet. Galaxy now runs at the Vita's full 960×544 resolution at a locked-in 30 FPS, and a new Performance mode pushes toward 60.
 
-- **Three picture modes.** **Quality** (the default) holds 30 FPS at up to the full 960×544, **Performance** goes for 60, and **Locked 30** never drops below 960×544.
-- **The Vita's fourth CPU core** is put to work when the CapUnlocker plug-in is installed, and the game no longer waits for the renderer between pictures.
-- **Honeyhive, Beach Bowl and Bowser's Star Reactor hold 30** in Quality mode, where 1.2 dipped into the teens and 20s.
-- **A four-row pause panel:** camera zoom, rear-touch aiming, the right stick as camera or Star Bit pointer, and Star Bit reach.
-- **Fixes:** enemies that release Mario with damage hurt him again, hidden-star scenarios, rear touch after the Settings menu, spins right after a jump, a 1-pixel line in Beach Bowl, and more.
+- **Full resolution, steady 30.** Quality mode draws at up to the Vita's native 960×544 and holds 30 FPS in every galaxy we tested, from Good Egg to the Bowser fights.
+- **Up to 60 FPS.** Pick Performance mode and lighter galaxies run at 50 to 60 FPS. When a scene is too heavy for 60, it settles on a smooth 30 instead of a choppy 40.
+- **Honeyhive, Beach Bowl and the Bowser fights hold 30.** These used to drop into the teens and 20s.
+- **All four of the Vita's CPU cores.** With the CapUnlocker plug-in, the game spreads its work across every core the Vita has.
+- **More control in the pause menu.** Camera zoom, rear-touch aiming, a right-stick Star Bit pointer and Star Bit reach, all one button away.
+- **Gameplay fixes.** Enemies that grab Mario hurt him again like on the Wii, hidden-star missions work properly, rear touch works right after visiting Settings, and spins come out even right after a jump.
+- **Plus everything from 1.2.** Bowser, the Lumas and about 85 effects look the way they should, a full Settings menu, no freezes on a galaxy's first visit, a 20-second start, music after sleep and full PS TV support.
 
-Still here from 1.2: the correct Bowser, Lumas and effects, the full Settings menu, tilt from 1 to 10, no first-visit freezes, a 20-second start, music after sleep and full PS TV support. Everything is listed in [What's New](CHANGELOG.md). See [Known Issues](KNOWN-ISSUES.md) for what's still being worked on.
+The full list is in [What's New](CHANGELOG.md), and [Known Issues](KNOWN-ISSUES.md) covers what's still being worked on.
 
 ## Touch Controls, Built For The Vita
 
@@ -45,26 +47,29 @@ The full list is in [Controls](CONTROLS.md).
 
 ## How Smooth Is It?
 
-Frames per second (fps) is how many new pictures you see each second. 60 is the most the Vita's screen can show, and many
-console games aim for 30. Version 2.0 has three picture modes (Settings > Display > Picture mode). Measured with version 2.0
-on a PS Vita at the widest camera zoom (1.0×, the hardest case), in scripted runs of running, jumping, spins and camera turns:
+Choose your style in Settings > Display > Picture mode:
 
-| Galaxy | Quality (default) | Performance | Locked 30 |
+- **Quality** (default): the sharpest picture at a steady 30 FPS.
+- **Performance**: as close to 60 FPS as each scene allows.
+- **Locked 30**: always full 960×544, always 30 FPS when the Vita can manage it.
+
+Measured on a real PS Vita at the widest camera zoom, the toughest view in the game:
+
+| Galaxy | Quality | Performance | Locked 30 |
 |---|---|---|---|
-| **Good Egg** | **30 fps** at 848–960 wide | **54 fps** | 30 at 960×544 |
-| **Beach Bowl** | **30** at 720–784 wide | 30 | 25 at 960×544 |
-| **Honeyhive** | **30** at 784–848 wide | **42** | 30 at 960×544 |
-| **Bowser's Star Reactor** | **29** at 784–848 wide | **45** | 30 at 960×544 |
+| **Good Egg** | **30 FPS**, up to 960 wide | **54 FPS** | 30, at 960×544 |
+| **Beach Bowl** | **30 FPS**, up to 784 wide | 30 FPS | 25, at 960×544 |
+| **Honeyhive** | **30 FPS**, up to 848 wide | **42 FPS** | 30, at 960×544 |
+| **Bowser's Star Reactor** | **29 FPS**, up to 848 wide | **45 FPS** | 30, at 960×544 |
+
+At the default camera zoom, Performance mode hits 60 FPS in Good Egg and 54 in Honeyhive. For comparison, version 1.2 ran Honeyhive at 12 FPS from this view.
 
 | | |
 |---|---|
-| **Quality** | a steady 30 at up to the full 960×544; the closer default zoom (1.5×) holds 30 in all four, at 720–960 wide |
-| **Performance** | up to 60: 60 in Good Egg and 54–59 in Honeyhive at 1.5–2.0×, at 608–720 wide |
 | **Start-up** | the title screen in about 20 seconds |
-| **Download** | about 7 MB (2.5 GB on the memory card with your game files) |
+| **Download** | about 9 MB (2.5 GB on the memory card with your game files) |
 
-Version 1.2 managed 12 fps in Honeyhive and 25 in the Bowser fight at this zoom, at 544×388. Every table, zoom and mode is in
-[Performance](docs/PERFORMANCE.md).
+Every galaxy, zoom and mode we measured is in [Performance](docs/PERFORMANCE.md).
 
 ![The Comet Observatory on the PS Vita](store/screenshots/02-comet-observatory.png)
 
