@@ -130,10 +130,17 @@ void ScenarioSelectScene::calcViewAndEntry() {
     }
 }
 
+#if defined(__vita__)
+extern "C" void port_menu_layer_mark(void);  // platform/src/port/perf.cpp
+#endif
+
 void ScenarioSelectScene::draw() const {
     bool res = isExecForeground() && _28 == 0;
 
     if (res) {
+#if defined(__vita__)
+        port_menu_layer_mark();  // (GXV_STAGEWARM_MENU) the renderer records what is drawn now under the menu list
+#endif
         OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
         setupCameraMtx();
         j3dSys.drawInit();

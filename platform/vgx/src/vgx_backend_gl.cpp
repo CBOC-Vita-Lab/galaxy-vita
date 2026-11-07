@@ -151,6 +151,7 @@ extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));  /
 // thread): its key while it loads and after, 0 before the first load; and 1 while the loading thread runs (GXV_STAGEWARM).
 extern "C" uint32_t port_scene_loading_key(void) __attribute__((weak));
 extern "C" int port_scene_loading_active(void) __attribute__((weak));
+extern "C" int port_menu_layer_recent(void) __attribute__((weak)); // (GXV_STAGEWARM_MENU) the star select / galaxy map drew in the last moments
 // The front end's texture decode time so far, in microseconds (vgx_texcache.cpp; GXV_STUTTER_LOG). Weak: absent without the front end.
 extern "C" uint64_t vgx_tex_decode_us(void) __attribute__((weak));
 
@@ -239,6 +240,7 @@ long DiagnosticInt(const char* name, long fallback) { return kBackendDiagnostics
     X(sceneReuploads) /* draws that gave all their uniform blocks again because they open a scene with the previous draw's program */ \
     X(constAttrDraws) /* draws whose vertex shader reads an attribute the vertex layout does not have (a glVertexAttrib4f constant) */ \
     X(efbDepthLoads) X(efbDepthStores) /* EFB scenes whose depth buffer is loaded / stored (GXV_DEPTH_SKIP, GXV_DEPTHPLAN) */           \
+    X(colorLoadSkips) /* GXV_COLOR_LOADSKIP: scenes begun with the cheap colour load (vitaGL patches/0021) */                          \
     X(depthPlanSaved) /* of the loads and stores GXV_DEPTH_SKIP=2 alone makes: left out by GXV_DEPTHPLAN (EFB size x 4 bytes each) */   \
     X(efbSwaps)       /* GXV_EFBSWAP: full-size copies made by handing the EFB's colour buffer to the texture (no copy scene) */     \
     X(efbRestores)    /* of those: the EFB's new colour buffer filled from the old one by a quad at the start of the next EFB scene */ \
@@ -276,6 +278,7 @@ struct Program {
     bool ok = false;
     bool warmCompatible = false; // last use had the EFB format and the warm draw's zero vertex base
     uint32_t recStage = 0, recLB = ~0u; // (GXV_STAGEWARM) stage and layout/blend of its last draw already in that stage's set
+    uint32_t recMenuLB = 0;             // (GXV_STAGEWARM_MENU) layout/blend (| 0x80000000) of its last draw already in the menu list
     uint8_t failures = 0;        // (GXV_GL_RETRY) failed links so far; the GL program of a failed link is deleted
     uint64_t retryAfter = 0;     // (GXV_GL_RETRY) frame from which a failed link may be tried again
     // (GXV_UNI_SHADOW) per uniform (US_*): where vitaGL keeps its values for each stage; ok = it is written there directly
@@ -424,6 +427,9 @@ unsigned g_efbSwapsPartialTotal = 0, g_rawConvertsTotal = 0; // GXV_EFBSWAP2's, 
 unsigned g_efbSwapHoldsTotal = 0; // GXV_EFBSWAP2_HOLD: conversion swaps refused (tests: DebugEfbSwapHolds)
 unsigned g_efbLoadFromsTotal = 0; // GXV_VGL_LOADFROM: swaps whose drawing back was the next scene's colour load (tests)
 ColorLoadHook g_colorLoadHook = nullptr; // (GXV_VGL_LOADFROM: the host's vglColorLoadFrom)
+ColorSkipHook g_colorSkipHook = nullptr; // (GXV_COLOR_LOADSKIP: the host's vglColorLoadSkip)
+bool g_colorSkipArmed = false;           // armed by TouchTarget, taken back after the clear that began the scene
+bool g_quadFillsTarget = false;          // (GXV_COLOR_LOADSKIP bit 8) the copy-program quad / clear about to be drawn writes all four channels of every pixel of its target
 unsigned g_efbAdoptsTotal = 0; // EFB buffers that became a texture's own storage (AdoptEfbBuffer; tests: DebugEfbAdopts)
 
 // Framebuffer objects for everything that is not the EFB: copy destinations and
@@ -454,8 +460,16 @@ struct PoolFbo {
     // hands none of them to a texture, and the EFB colour buffers of GXV_EFBSWAP are never pool entries.
     uint8_t held = 0;
 };
-namespace PoolHeld { constexpr uint8_t FX = 1; }
+namespace PoolHeld { constexpr uint8_t FX = 1; constexpr uint8_t RUNG = 2; } // (RUNG: GXV_RUNG_PREBUILD's, kept across a change of rung and the idle trim)
 std::vector<PoolFbo> g_pool;
+// GXV_RUNG_PREBUILD / the log of a change of rung: pooled objects made (each gets its sceGxm render target and depth buffer at its first
+// scene, ~10-25 ms on the console), and the watch on the presents after a change ("[autoq-rung] after").
+uint64_t g_poolMade = 0;
+int g_rungWatch = 0;                       // presents left in which the objects made are listed
+unsigned g_rungWatchN = 0;
+int g_rungWatchSize[12][2] = {};
+uint64_t g_rungWatchMade0 = 0;
+int g_rungWatchRung = 0;
 uint64_t g_presents = 0; // CMD_PRESENTs executed (pool ageing)
 uint64_t g_poolRecycled = 0; // pooled objects given up by RecycleFbo (status line)
 uint32_t g_fboMaxUses = 8;
@@ -707,7 +721,13 @@ Desc* g_cur = nullptr;
 std::vector<int8_t> g_fsDiscard; // per fragment shader id: -1 not known yet, 0 / 1 its text has no / a `discard`
 Cpu g_cpu[kKinds];
 Gpu g_gpu[kKinds], g_main;
+uint64_t g_totalPictures = 0; // (never reset; g_cpuPictures starts again every 5 s window: GXV_SCENE0_FROM compares with this one)
 uint64_t g_cpuPictures = 0, g_gpuPictures = 0, g_busyUs = 0, g_untimed = 0, g_early = 0, g_untagged = 0;
+// (Report zeroes g_cpuPictures every 5 s: these two run from the first picture, for GXV_SCENE0_FROM / GXV_SCENE0_AFTER_S)
+uint64_t g_allPictures = 0;
+double g_firstPicMs = 0.0;
+// GXV_OVERDRAW (ExecuteFrame, OverdrawPlan): draws left out because a later draw overwrites everything they write (window totals)
+struct OverdrawCounts { uint64_t covered = 0, noEffect = 0, blended = 0; double px = 0.0; uint32_t frames = 0; } g_ovN;
 uint64_t g_mainIdx = 0, g_mainDraws = 0;
 // scenes timed after an untimed one (their TA / 3D include the untimed scenes' remaining work: counted in the picture's totals only)
 uint64_t g_gapScenes = 0, g_gapTaUs = 0, g_gapFUs = 0;
@@ -879,6 +899,16 @@ void Report(double nowMs) {
     g_voDraws = g_voPruned = g_voIdx = g_voColGone = g_voPartOff = g_voTexOff = 0;
     if (port_log_summary) port_log_summary("%s", line);
     else std::fprintf(stderr, "%s\n", line);
+    if (g_ovN.frames) { // (GXV_OVERDRAW: a picture's draws left out; screens = EFB-sized target pixels)
+        const double fr = static_cast<double>(g_ovN.frames), scr = static_cast<double>(g_efbW > 0 ? g_efbW : 640) * static_cast<double>(g_efbH > 0 ? g_efbH : 456);
+        char ol[512];
+        std::snprintf(ol, sizeof ol, "gpu-scenes overdraw: GXV_OVERDRAW draws left out a picture: %.2f covered by a later draw, %.2f blended and covered (of those), %.2f no-effect; "
+                      "%.2f screens of pixels a picture (%llu pictures)", g_ovN.covered / fr, g_ovN.blended / fr, g_ovN.noEffect / fr, g_ovN.px / fr / (scr > 0.0 ? scr : 1.0),
+                      static_cast<unsigned long long>(g_ovN.frames));
+        if (port_log_summary) port_log_summary("%s", ol);
+        else std::fprintf(stderr, "%s\n", ol);
+    }
+    g_ovN = OverdrawCounts{};
     if (g_mode >= 2) ReportTop((nowMs - g_windowStartMs) / 1000.0);
     for (Cpu& c : g_cpu) c = Cpu{};
     for (Gpu& g : g_gpu) g = Gpu{};
@@ -906,7 +936,10 @@ void FrameEnd() {
     if (!g_on) return;
     Close();
     g_ordinal = 0;
+    ++g_totalPictures;
     ++g_cpuPictures;
+    ++g_allPictures;
+    if (g_firstPicMs == 0.0) g_firstPicMs = static_cast<double>(beprof::Now()) / 1000.0;
     if (g_timers) {
         VgxRtGpuScene recs[64];
         for (int rounds = 0; rounds < 4; ++rounds) {
@@ -1159,7 +1192,33 @@ inline void XferIssued(Tex& t) {
 inline void XferFenceFor(const Tex& t) {
     if (g_xferOpen && t.xferEpoch == g_xferEpoch) XferFence();
 }
-inline void TouchTarget(int need = DN_KEEP) {
+// ---- GXV_COLOR_LOADSKIP=<bits> (default 0, console A/B; needs vitaGL with patches/0021, the host's SetColorSkipHook)
+// Every scene on the GPU begins by loading the colour of its target (the tile fill from the colour surface's background texture)
+// and ends by storing it: 2.1 MB each way at 960x544, 1.2 MB at 720x404, whatever the scene does. A scene that begins with a clear
+// of ALL of its target (all four channels, scissor off) never uses what was loaded: the clear's quad writes every pixel first.
+// For such a scene (certainly a new one for vitaGL, a single-sampled one) vitaGL is asked to fill the tiles from a 32x32 texture
+// that stays in the texture cache. The store is untouched, so the target ends exactly as before. Where the clear is "dead" (the
+// next draw covers it, GXV_PX_DEADCLEAR) nothing is asked: that path is left as it is.
+//   bit 1: the EFB's scenes that begin with a full colour+alpha clear (after the present hook, after a copy with a clear)
+//   bit 2: pass / copy-destination / half-size effect targets that begin with their full clear (PassBegin, the FX targets)
+//   bit 4: the display's scene (the host's present: PresentDisplayCopy covers the whole 960x544 picture; vgx_host_galaxy_vita.cpp)
+//   bit 8: the copy scenes (CopyTex: the copy quad, or the constant clear, of a non-atlas copy covers its whole target, unblended, all four
+//          channels written: the copy's destination texture is a scene of its own whose old colour is never read) and the EFB's first
+//          scene after a GXV_EFBSWAP hand-over when the draw-back quad writes all four channels (the new buffer's load is never read)
+// The request is taken back after the clear (ColorSkipDisarm), so one that vitaGL did not use at once cannot reach a later scene.
+// An exact change if the GPU loads from the background texture as the GXM surface layout says (see patches/0021): what is not
+// loaded is never read. Not verified on a console: check with GXV_GPU_SCENES=2 for the picture, and a flat colour / garbage
+// at a scene's start would show as noise in the part that is not drawn (there is none: the clear covers all).
+inline long ColorSkipMode() {
+    static const long m = EnvInt("GXV_COLOR_LOADSKIP", 0);
+    return m;
+}
+inline void ColorSkipDisarm() {
+    if (!g_colorSkipArmed) return;
+    g_colorSkipArmed = false;
+    if (g_colorSkipHook) g_colorSkipHook(false);
+}
+inline void TouchTarget(int need = DN_KEEP, int colorDeadBit = 0) {
     bool began = false; // (GXV_GPU_SCENES=2: this call begins the scene)
     if (S.fbo != g_inUseFbo || g_fbDirty) {
         began = true;
@@ -1174,6 +1233,10 @@ inline void TouchTarget(int need = DN_KEEP) {
         g_fbDirty = false;
         g_midFlushDraws = 0; // (GXV_MIDFLUSH counts a scene's draws)
         if (gpuscenes::g_on) gpuscenes::Begin(S.fbo == g_efbFbo ? gpuscenes::kEfb : S.fbo == 0 ? gpuscenes::kDisp : gpuscenes::kTex); // (GXV_GPU_SCENES)
+        if (colorDeadBit && (ColorSkipMode() & colorDeadBit) && certain && g_colorSkipHook && g_colorSkipHook(true)) { // (GXV_COLOR_LOADSKIP)
+            g_colorSkipArmed = true;
+            ++C.colorLoadSkips;
+        }
         SceneDepth(need, certain);
         MarkScissorDirty(); // (vitaGL, STORE_DEPTH_STENCIL: every scene on a framebuffer object rebuilds the mask)
     }
@@ -1224,7 +1287,63 @@ inline void UseProgram(GLuint id) {
     S.program = id;
     g_uniDirtyV = g_uniDirtyF = true;
 }
+// ---- GXV_RUNG_SKIPRS (default 1): a render-target texture that the game rewrites whole in every picture before it reads it is not resampled
+// by a change of rung (ApplyRung): the new texture is taken blank (or premade) and the next copy fills it. Evidence, per texture (RtTrack):
+// RtMarkWrite (a whole-texture copy, CopyDisp's non-atlas path) stamps the picture (g_presents) of each write and counts the pictures in a
+// row; every sampling of a tracked texture goes through BindTex (draws, copy quads, passes: RtNoteRead), and a sampling in a picture before
+// that picture's own write is a history read: the texture is then never skipped again (for 7200 presents). Skipped only with 4 pictures in
+// a row written, the last one just before, and no history read. If a skipped texture is nevertheless sampled before its rewrite the log says
+// "[autoq-rung] WRONG SKIP" (one blank picture of that texture at most).
+struct RtTrack {
+    GLuint name = 0;
+    uint32_t slot = 0;
+    uint64_t wrote = 0, staleAt = 0;
+    uint32_t streak = 0, clean = 0;
+    bool stale = false, skipPending = false;
+};
+constexpr unsigned kRtTrackMax = 16;
+RtTrack g_rtTrack[kRtTrackMax];
+unsigned g_rtTrackN = 0;
+bool g_rtTrackPause = false; // (ApplyRung's own resamples read the textures)
+unsigned g_rtWrongSkips = 0;
+inline void RtNoteRead(GLuint name) {
+    if (g_rtTrackPause) return;
+    for (unsigned i = 0; i < g_rtTrackN; ++i) {
+        RtTrack& e = g_rtTrack[i];
+        if (e.name != name) continue;
+        if (e.wrote == g_presents) { ++e.clean; return; }
+        e.stale = true;
+        e.staleAt = g_presents;
+        if (e.skipPending) {
+            e.skipPending = false;
+            if (++g_rtWrongSkips <= 8) autoq::Log("[autoq-rung] WRONG SKIP: texture slot %u was sampled before its rewrite after a change of rung without a resample", e.slot);
+        }
+        return;
+    }
+}
+void RtMarkWrite(uint32_t slot) {
+    if (slot >= g_tex.size() || !g_tex[slot].id) return;
+    RtTrack* e = nullptr;
+    for (unsigned i = 0; i < g_rtTrackN; ++i)
+        if (g_rtTrack[i].slot == slot) { e = &g_rtTrack[i]; break; }
+    if (!e) {
+        if (g_rtTrackN < kRtTrackMax) e = &g_rtTrack[g_rtTrackN++];
+        else {
+            for (unsigned i = 0; i < kRtTrackMax; ++i)
+                if (g_presents - g_rtTrack[i].wrote > 600 && (!e || g_rtTrack[i].wrote < e->wrote)) e = &g_rtTrack[i];
+            if (!e) return;
+        }
+        *e = RtTrack{};
+        e->slot = slot;
+    }
+    e->name = g_tex[slot].id;
+    if (e->wrote + 1 == g_presents) ++e->streak;
+    else if (e->wrote != g_presents) e->streak = 1;
+    e->wrote = g_presents;
+    e->skipPending = false;
+}
 inline void BindTex(int unit, GLuint name) {
+    RtNoteRead(name);
     if (S.tex[unit] == name) return;
     if (S.unit != unit) { G(glActiveTexture(GL_TEXTURE0 + unit)); S.unit = unit; }
     G(glBindTexture(GL_TEXTURE_2D, name));
@@ -2165,6 +2284,7 @@ void AsyncSummary() {
                      static_cast<unsigned long long>(a.cacheHits), a.probeMs);
 }
 
+void StageDemandNote(uint16_t vsId, uint16_t fsId, uint32_t key, uint32_t layoutNeed); // (GXV_STAGEWARM_PROGREC / _DIAG)
 Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false, const DrawRec* draw = nullptr) {
     const uint32_t key = (static_cast<uint32_t>(vsId) << 16) | fsId;
     auto& fr = g_programFront[((vsId * 7u + fsId) * 2654435761u) >> 22];
@@ -2354,6 +2474,7 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false, const D
             ResourceAudit(ResourceStage::MissingSource, ResourcePair(vsId, fsId, 0, "await-registration", "unregistered"));
         return UnavailableProgram();
     }
+    if (!optional && p.ok) StageDemandNote(vsId, fsId, key, p.layoutNeed);
     if (it != g_programs.end()) {
         // (a retried link: the entry keeps its address, which g_programFront may hold)
         it->second = p;
@@ -2402,6 +2523,8 @@ inline int Rnd(float v) {
 //                       passes over the target).
 // "pxcut:" basic-log line every 600 pictures while a switch is on: what was left out.
 struct PxCuts { bool noop = false, deadClear = false, scissor = false; } g_px;
+bool g_overdraw = false; // GXV_OVERDRAW (default 0; OverdrawPlan, before ExecuteFrame)
+std::vector<uint8_t> g_ovDead, g_ovPass; // per command: 1 a draw left out (covered), 2 (covered, blended), 3 (no effect); 1 a draw inside an offscreen pass
 struct PxCounts { uint64_t noop = 0, clearColour = 0, clearDepth = 0, clearWhole = 0, scissorKept = 0; } g_pxN, g_pxTotal; // (this window's, the logged windows')
 const CmdBuf* g_pxBuf = nullptr; // the buffer being executed (ExecuteFrame)
 bool g_pxPassScan = false;       // the next BeginPass is the buffer's own CMD_PASS_BEGIN (dplan::g_cmd): it may look at the pass's commands
@@ -2965,10 +3088,28 @@ void RunWarm() {
 // (GXV_STAGEWARM_COMPILE_MS, default 1500; 0 = off) While a stage loads (the screen not live) its queue may run past the usual slice
 // (GXV_STAGEWARM_MS), up to GXV_STAGEWARM_COMPILE_SLICE_MS (default 100) a frame, until this much time beyond the slices has gone into
 // that load's queue; what is left then is logged and goes on in the usual slices. In frames only: no GPU scene between frames.
+// (GXV_STAGEWARM_SCALE, default 1) The budget beyond the slices is the larger of that and GXV_STAGEWARM_SCALE_MS (default 20) ms for each
+// program of the stage that is not linked yet when the load starts, at most GXV_STAGEWARM_SCALE_MAX (default 6000): 1500 ms paid for
+// 75 links of the 200 a stage draws with, and the rest was linked by the first draws in play (hitches of 100-650 ms). g_stageCompileBudget
+// is set by StageBuild for the load being prepared (-1 = not yet: the base).
+long g_stageCompileBudget = -1;
 long StageCompileMs() {
     static const long ms = std::max(0L, EnvInt("GXV_STAGEWARM_COMPILE_MS", 1500));
-    return ms;
+    return g_stageCompileBudget >= 0 && ms > 0 ? g_stageCompileBudget : ms;
 }
+long StageCompileBase() { return std::max(0L, EnvInt("GXV_STAGEWARM_COMPILE_MS", 1500)); }
+// (GXV_STAGEWARM_COMMON, default 3; 0 = off) Programs that the lists of at least that many OTHER stages hold (Mario and his forms, the
+// HUD, coins, star bits, the common enemies and effects) join the queue of every stage after its own programs, up to
+// GXV_STAGEWARM_COMMON_MAX (default 160): a stage's list only holds what was drawn in it while it was recorded, and what is missing
+// there is linked by a draw in play. Linked ones stay (the stage's programs are spared by the evictions), so the jump from one galaxy
+// to the next keeps the links they share.
+long StageCommonN() { static const long n = std::max(0L, EnvInt("GXV_STAGEWARM_COMMON", 3)); return n; }
+long StageCommonMax() { static const long n = std::max(0L, EnvInt("GXV_STAGEWARM_COMMON_MAX", 160)); return n; }
+// (GXV_STAGEWARM_PROGREC, default 1) a program that a draw in play had to link and that no draw of the stage recorded (its draw was
+// refused later, or it was only announced) is recorded as a program (empty blend) when the frame ends.
+bool StageProgRecOn() { static const bool on = EnvInt("GXV_STAGEWARM_PROGREC", 1) != 0; return on; }
+// (GXV_STAGEWARM_DIAG, default 1) up to 12 lines per stage for the programs a draw links in play: "stage warm-up: ... new in play".
+bool StageDiagOn() { static const bool on = EnvInt("GXV_STAGEWARM_DIAG", 1) != 0; return on; }
 struct StageRec { uint64_t vs = 0, fs = 0; uint32_t lb = 0; }; // shader key hashes; layout mask << 13 | blend key
 struct StageFileRec { uint32_t stage, lb; uint64_t vs, fs; };  // 24 bytes, after an 8-byte magic
 static_assert(sizeof(StageFileRec) == 24, "stage warm-up file record");
@@ -2978,6 +3119,13 @@ struct StageSet { std::vector<StageRec> recs; std::unordered_set<uint64_t> seen;
 std::unordered_map<uint32_t, StageSet> g_stageSets;
 std::deque<VariantCmd> g_stageQueue;
 std::atomic<unsigned> g_stageLeft{0};
+// (GXV_STAGEWARM_MENU) the pseudo stage "menu": what the pause menu, the star select / galaxy map and the title menus draw (recorded like a
+// stage's list), warmed at start-up (the target while no stage is loaded) and part of every stage's queue and set.
+constexpr uint32_t kMenuKey = 0x4D454E55u;
+bool g_menuRec = false;                       // this frame's draws also go into the menu list
+std::atomic<bool> g_stageMenuQueue{false};    // the queue is the menu's own (start-up): nothing holds the game for it
+// (GXV_STAGEWARM_HOLD_MS) the game thread's StageWarmHold stamps this (ms) on every poll while it holds the closed screen for the queue.
+std::atomic<double> g_stageHoldStampMs{0.0};
 uint32_t g_stageTarget = 0, g_stageRecKey = 0; // stage the queue was made for; stage this frame's draws are recorded under
 bool g_stageLoaded = false;
 uint64_t g_stageFlushSerial = 0;
@@ -3132,16 +3280,21 @@ void StageBuild(uint32_t target) {
     g_stageIdleBlocked = false;
     g_stageCompileMs = 0;
     g_stageCompileLogged = false;
+    g_stageCompileBudget = -1;
     g_stageLeft.store(0, std::memory_order_relaxed);
+    g_stageMenuQueue.store(target == kMenuKey, std::memory_order_relaxed);
     const auto it = g_stageSets.find(target);
-    if (!target || it == g_stageSets.end() || it->second.recs.empty()) return;
+    // (the stage's own records; none: the common programs below still make a queue)
+    static const std::vector<StageRec> noRecs;
+    const std::vector<StageRec>& own = it == g_stageSets.end() ? noRecs : it->second.recs;
+    if (!target || (own.empty() && StageCommonN() <= 0)) return;
     std::unordered_map<uint64_t, uint16_t> vsIds, fsIds;
     vsIds.reserve(g_vsSrc.size());
     fsIds.reserve(g_fsSrc.size());
     for (size_t i = 0; i < g_vsSrc.size() && i <= 0xFFFFu; ++i) if (g_vsSrc[i]) vsIds.emplace(g_vsSrc[i]->keyHash, static_cast<uint16_t>(i));
     for (size_t i = 0; i < g_fsSrc.size() && i <= 0xFFFFu; ++i) if (g_fsSrc[i]) fsIds.emplace(g_fsSrc[i]->keyHash, static_cast<uint16_t>(i));
     unsigned unknown = 0;
-    for (const StageRec& r : it->second.recs) {
+    for (const StageRec& r : own) {
         const auto v = vsIds.find(r.vs), f = fsIds.find(r.fs);
         if (v == vsIds.end() || f == fsIds.end()) { ++unknown; continue; }
         VariantCmd c;
@@ -3152,13 +3305,88 @@ void StageBuild(uint32_t target) {
         g_stageQueue.push_back(c);
         g_stageProgs.insert((static_cast<uint32_t>(c.vsId) << 16) | c.fsId);
     }
+    // (GXV_STAGEWARM_MENU, default 1) after the stage's own: the menu list's programs (the pause menu, star select and title menus draw
+    // them at any moment), so a menu opens without a link and the evictions spare them
+    unsigned menuN = 0;
+    const size_t ownN = g_stageQueue.size();
+    static const bool menuOn = EnvInt("GXV_STAGEWARM_MENU", 1) != 0;
+    if (menuOn && target != kMenuKey) {
+        const auto mi = g_stageSets.find(kMenuKey);
+        if (mi != g_stageSets.end())
+            for (const StageRec& r : mi->second.recs) {
+                const auto v = vsIds.find(r.vs), f = fsIds.find(r.fs);
+                if (v == vsIds.end() || f == fsIds.end()) continue;
+                const uint32_t k = (static_cast<uint32_t>(v->second) << 16) | f->second;
+                if (!g_stageProgs.insert(k).second) continue;
+                VariantCmd c;
+                c.vsId = v->second;
+                c.fsId = f->second;
+                c.layoutMask = static_cast<uint16_t>((r.lb >> 13) & 0xFFFu);
+                c.blendKey = static_cast<uint16_t>(r.lb & 0x1FFFu);
+                g_stageQueue.push_back(c);
+                ++menuN;
+            }
+    }
+    unsigned common = 0, hot = 0;
+    if (StageCommonN() > 0 && StageCommonMax() > 0 && target != kMenuKey) {
+        // (GXV_STAGEWARM_COMMON) the programs other stages' lists share, most shared first, after the stage's own
+        struct Cnt { unsigned n = 0; uint32_t lb = 0; uint16_t vs = 0, fs = 0; };
+        std::unordered_map<uint32_t, Cnt> cnt;
+        std::unordered_set<uint32_t> mine;
+        for (const auto& kv : g_stageSets) {
+            if (kv.first == target) continue;
+            mine.clear();
+            for (const StageRec& r : kv.second.recs) {
+                const auto v = vsIds.find(r.vs), f = fsIds.find(r.fs);
+                if (v == vsIds.end() || f == fsIds.end()) continue;
+                const uint32_t k = (static_cast<uint32_t>(v->second) << 16) | f->second;
+                if (!mine.insert(k).second) continue;
+                Cnt& c = cnt[k];
+                if (!c.n) { c.lb = r.lb; c.vs = v->second; c.fs = f->second; }
+                ++c.n;
+            }
+        }
+        std::vector<std::pair<uint64_t, uint32_t>> order; // (-count << 32 | key) so that sort puts the most shared first
+        for (const auto& kv : cnt)
+            if (kv.second.n >= static_cast<unsigned>(StageCommonN()) && !g_stageProgs.count(kv.first))
+                order.emplace_back((uint64_t{0xFFFFu - std::min(kv.second.n, 0xFFFFu)} << 32) | kv.first, kv.first);
+        std::sort(order.begin(), order.end());
+        // (GXV_STAGEWARM_HOT, default 1) the programs that at least half of the other stages' lists hold (Mario, the HUD, ...) are what the
+        // first frames of any stage draw: they go before the stage's own list (already linked ones cost nothing)
+        unsigned others = 0;
+        for (const auto& kv : g_stageSets) if (kv.first != target && kv.first != kMenuKey && !kv.second.recs.empty()) ++others;
+        static const bool hotOn = EnvInt("GXV_STAGEWARM_HOT", 1) != 0;
+        const unsigned hotMin = std::max(static_cast<unsigned>(StageCommonN()), (others + 1) / 2);
+        for (const auto& o : order) {
+            if (common >= static_cast<unsigned>(StageCommonMax())) break;
+            const Cnt& c = cnt[o.second];
+            if (hotOn && hot == common && c.n >= hotMin) ++hot;
+            VariantCmd q;
+            q.vsId = c.vs;
+            q.fsId = c.fs;
+            q.layoutMask = static_cast<uint16_t>((c.lb >> 13) & 0xFFFu);
+            q.blendKey = static_cast<uint16_t>(c.lb & 0x1FFFu);
+            g_stageQueue.push_back(q);
+            g_stageProgs.insert(o.second);
+            ++common;
+        }
+    }
+    if (hot) std::rotate(g_stageQueue.begin(), g_stageQueue.begin() + (ownN + menuN), g_stageQueue.begin() + (ownN + menuN + hot)); // hot first
     g_stageQueued = static_cast<unsigned>(g_stageQueue.size());
     g_stageLeft.store(g_stageQueued, std::memory_order_relaxed);
-    StageLog("stage warm-up: stage %08x: %u draw variants of %u programs queued (%u with shaders this run does not know)", target, g_stageQueued,
-             static_cast<unsigned>(g_stageProgs.size()), unknown);
-    if (StageCompileMs() > 0) {
+    if (hot || menuN || target == kMenuKey)
+        StageLog("stage warm-up: stage %08x: queue order: %u programs of most stages' lists first, then its own %u, %u menu programs, then the other shared ones%s", target, hot,
+                 static_cast<unsigned>(ownN), menuN, target == kMenuKey ? " (this is the menu list itself, warmed at start-up)" : "");
+    StageLog("stage warm-up: stage %08x: %u draw variants of %u programs queued (%u with shaders this run does not know; %u of them programs of other stages' lists)", target, g_stageQueued,
+             static_cast<unsigned>(g_stageProgs.size()), unknown, common);
+    if (StageCompileBase() > 0) {
         unsigned fresh = 0;
         for (const uint32_t k : g_stageProgs) { const auto p = g_programs.find(k); if (p == g_programs.end() || !p->second.ok) ++fresh; }
+        static const bool scale = EnvInt("GXV_STAGEWARM_SCALE", 1) != 0;
+        if (scale) {
+            const long per = std::max(1L, EnvInt("GXV_STAGEWARM_SCALE_MS", 20)), cap = std::max(StageCompileBase(), EnvInt("GXV_STAGEWARM_SCALE_MAX", 6000));
+            g_stageCompileBudget = std::min(cap, std::max(StageCompileBase(), per * static_cast<long>(fresh)));
+        }
         StageLog("stage warm-up: stage %08x: %u of its programs are not linked yet (compiled here if the card's cache and the package's seed lack them), up to %ld ms beyond the slices",
                  target, fresh, StageCompileMs());
     }
@@ -3169,6 +3397,11 @@ bool StageEvict() {
     static std::vector<std::pair<uint64_t, uint32_t>> victims;
     CollectProgramVictims(victims, 2, ~0u, 0, true);
     return DeleteProgramVictims(victims, per) != 0;
+}
+// (GXV_STAGEWARM_HOLD_MS) the game thread polled StageWarmHold a moment ago and is holding the closed screen for the queue
+inline bool StageHoldActive() {
+    const double at = g_stageHoldStampMs.load(std::memory_order_relaxed);
+    return at > 0.0 && NowMs() - at < 400.0;
 }
 // A slice of the stage's queue. True when it did work or work is left (the generic warm-up then waits for a later frame).
 bool RunStageWarm(bool idle) {
@@ -3182,6 +3415,7 @@ bool RunStageWarm(bool idle) {
     static const double sliceMax = static_cast<double>(std::max(1L, EnvInt("GXV_STAGEWARM_COMPILE_SLICE_MS", 100)));
     const double compileLeft = static_cast<double>(StageCompileMs()) - g_stageCompileMs;
     if (!g_screenLive && compileLeft > 0.0 && sliceMax > budgetMs) budgetMs += std::min(compileLeft, sliceMax - budgetMs);
+    if (StageHoldActive()) budgetMs = std::max(budgetMs, sliceMax); // (GXV_STAGEWARM_HOLD_MS) the game waits for this queue: whole slices, whatever is left of the budget
     const uint32_t capacityKey = g_warmCapacityKey;
     g_optionalReserve = reserve;
     const double t0 = NowMs();
@@ -3230,7 +3464,56 @@ bool RunStageWarm(bool idle) {
     if (g_stageQueue.empty())
         StageLog("stage warm-up: stage %08x ready: %u draw variants, %u links, %.0f ms in all (the last slice %s)", g_stageTarget, g_stageQueued,
                  g_stageQueueLinks, g_stageQueueMs, idle ? "between frames" : (g_screenLive ? "in play" : "in a quiet frame"));
+    if (g_stageQueue.empty() && StageDiagOn()) {
+        unsigned linked = 0, none = 0;
+        for (const uint32_t k : g_stageProgs) { const auto p = g_programs.find(k); if (p != g_programs.end() && p->second.ok) ++linked; else ++none; }
+        StageLog("stage warm-up: stage %08x: %u of its %u programs are linked now, %u are not (a link refused, failed or deleted)", g_stageTarget, linked,
+                 static_cast<unsigned>(g_stageProgs.size()), none);
+    }
     return true;
+}
+// (GXV_STAGEWARM_PROGREC, GXV_STAGEWARM_DIAG) A program a draw linked in play. Only while the stage played is the stage loaded
+// (rec key = target) and the screen is live: the announcements of a load in progress belong to the next stage.
+struct StagePend { uint32_t stage, key; uint16_t vs, fs, need; };
+std::vector<StagePend> g_stagePend;
+void StageDemandNote(uint16_t vsId, uint16_t fsId, uint32_t key, uint32_t layoutNeed) {
+    if (g_menuRec && StageDiagOn() && StageWarmOn()) { // (GXV_STAGEWARM_MENU, _DIAG) a menu's draw had to link: the menu list was missing it
+        static unsigned menuLines = 0;
+        static uint64_t lastSerial = 0;
+        if (g_serial > lastSerial + 90) menuLines = 0; // (a new opening: at most 8 lines each)
+        lastSerial = g_serial;
+        if (menuLines < 8 && vsId < g_vsSrc.size() && fsId < g_fsSrc.size() && g_vsSrc[vsId] && g_fsSrc[fsId]) {
+            ++menuLines;
+            StageLog("stage warm-up: menu: program vs %08x fs %08x linked by a draw in a menu (%s)", static_cast<unsigned>(g_vsSrc[vsId]->keyHash),
+                     static_cast<unsigned>(g_fsSrc[fsId]->keyHash), g_stageProgs.count(key) ? "it was in the queue and is gone or was refused" : "not in the menu list yet: recorded now");
+        }
+    }
+    if (!g_screenLive || !g_stageRecKey || g_stageRecKey != g_stageTarget || !StageWarmOn()) return;
+    if (StageDiagOn()) {
+        static uint32_t diagStage = 0;
+        static unsigned diagLines = 0;
+        if (diagStage != g_stageTarget) { diagStage = g_stageTarget; diagLines = 0; }
+        if (diagLines < 12 && vsId < g_vsSrc.size() && fsId < g_fsSrc.size() && g_vsSrc[vsId] && g_fsSrc[fsId]) {
+            ++diagLines;
+            const bool queued = g_stageProgs.count(key) != 0;
+            StageLog("stage warm-up: stage %08x: program vs %08x fs %08x linked by a draw in play (%s)", g_stageTarget,
+                     static_cast<unsigned>(g_vsSrc[vsId]->keyHash), static_cast<unsigned>(g_fsSrc[fsId]->keyHash),
+                     queued ? "it was in the stage's queue and is gone or was refused" : "not in the stage's list");
+        }
+    }
+    if (StageProgRecOn() && g_stagePend.size() < 512) g_stagePend.push_back(StagePend{g_stageRecKey, key, vsId, fsId, static_cast<uint16_t>(layoutNeed & 0xFFFu)});
+}
+// At the start of the next frame: the programs of those that no draw recorded (StageNote sets the program's recStage).
+void StageFlushPending() {
+    if (g_stagePend.empty()) return;
+    for (const StagePend& e : g_stagePend) {
+        if (e.stage != g_stageRecKey || e.vs >= g_vsSrc.size() || e.fs >= g_fsSrc.size() || !g_vsSrc[e.vs] || !g_fsSrc[e.fs]) continue;
+        const auto p = g_programs.find(e.key);
+        if (p != g_programs.end() && p->second.recStage == e.stage) continue;
+        if (StageAdd(e.stage, StageRec{g_vsSrc[e.vs]->keyHash, g_fsSrc[e.fs]->keyHash, static_cast<uint32_t>(e.need) << 13}) && e.stage == g_stageTarget)
+            g_stageProgs.insert(e.key);
+    }
+    g_stagePend.clear();
 }
 // Start of a frame: the stage to record under and to prepare for; the file is read the first time, appended in quiet moments.
 void StageFrameBegin() {
@@ -3238,7 +3521,16 @@ void StageFrameBegin() {
     if (!g_stageLoaded) StageLoad();
     g_stageRecKey = port_scene_key ? port_scene_key() : 0;
     const uint32_t loading = port_scene_loading_key ? port_scene_loading_key() : 0;
-    const uint32_t target = loading ? loading : g_stageRecKey;
+    uint32_t target = loading ? loading : g_stageRecKey;
+    // (GXV_STAGEWARM_MENU) no stage yet (the title menus): the menu list is the target, warmed while the title / loading screen is up
+    static const bool menuOn = EnvInt("GXV_STAGEWARM_MENU", 1) != 0;
+    if (menuOn && !target) {
+        const auto mi = g_stageSets.find(kMenuKey);
+        if (mi != g_stageSets.end() && !mi->second.recs.empty()) target = kMenuKey;
+    }
+    // this frame's draws also go into the menu list: no stage yet, the pause menu waits for a choice, or the star select / galaxy map is up
+    g_menuRec = menuOn && (!g_stageRecKey || (port_screen_quiet && port_screen_quiet() == 1) || (port_menu_layer_recent && port_menu_layer_recent() != 0));
+    StageFlushPending();
     if (target != g_stageTarget) StageBuild(target);
     if (!g_screenLive && g_serial >= g_stageFlushSerial + 120) {
         g_stageFlushSerial = g_serial;
@@ -3247,6 +3539,15 @@ void StageFrameBegin() {
 }
 // A draw: its variant goes into the set of the stage being played (once per stage; the program remembers its last one).
 inline void StageNote(Program& p, const DrawRec& r, uint32_t blendKey) {
+    if (g_menuRec) { // (GXV_STAGEWARM_MENU) the menu list; the draw is also recorded under its stage below
+        const uint32_t mlb = ((static_cast<uint32_t>(r.layoutMask) & 0xFFFu) << 13) | (blendKey & 0x1FFFu);
+        if (p.recMenuLB != (mlb | 0x80000000u)) {
+            p.recMenuLB = mlb | 0x80000000u;
+            if (r.vsId < g_vsSrc.size() && r.fsId < g_fsSrc.size() && g_vsSrc[r.vsId] && g_fsSrc[r.fsId] &&
+                StageAdd(kMenuKey, StageRec{g_vsSrc[r.vsId]->keyHash, g_fsSrc[r.fsId]->keyHash, mlb}) && g_stageTarget && g_stageTarget != kMenuKey)
+                g_stageProgs.insert((static_cast<uint32_t>(r.vsId) << 16) | r.fsId);
+        }
+    }
     if (!g_stageRecKey) return;
     const uint32_t lb = ((static_cast<uint32_t>(r.layoutMask) & 0xFFFu) << 13) | (blendKey & 0x1FFFu);
     if (p.recStage == g_stageRecKey && p.recLB == lb) return;
@@ -4224,10 +4525,11 @@ void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float
         S.layoutMask = 0;
         S.layoutBase = 0;
     }
-    TouchTarget();
+    TouchTarget(DN_KEEP, g_quadFillsTarget ? 8 : 0); // (GXV_COLOR_LOADSKIP bit 8)
     if (gpuscenes::g_mode >= 2) gpuscenes::NoteQuad(); // (GXV_GPU_SCENES=2)
     if (!pad) {
         G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        ColorSkipDisarm();
         return;
     }
     // (the scissor: the real viewport, inside the caller's scissor when one is on; both put back afterwards)
@@ -4242,9 +4544,11 @@ void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float
         SetScissor(true, x0, y0, x1 - x0, y1 - y0);
         SetViewport(vx, vy, vw + (vw & 1), vh + (vh & 1));
         G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        ColorSkipDisarm();
         ++C.quadPads;
         SetViewport(vx, vy, vw, vh);
     }
+    ColorSkipDisarm(); // (nothing was drawn: nothing may stay armed)
     if (scOn == 1) SetScissor(true, sc[0], sc[1], sc[2], sc[3]);
     else SetScissor(false);
 }
@@ -4434,6 +4738,7 @@ void ClearEfb(const ClearSpec& c, const EfbRect& r) {
     if (x0 == 0 && y0 == 0 && x1 == g_rtW && y1 == g_rtH) SetScissor(false);
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     bool colorByClear = c.color || c.alpha;
+    const bool wholeTarget = x0 == 0 && y0 == 0 && x1 == g_rtW && y1 == g_rtH;
     if (colorByClear && g_px.deadClear && PxEfbClearDead(c, x0, y0, x1, y1)) { // (GXV_PX_DEADCLEAR: the next draw covers it)
         colorByClear = false;
         ++g_pxN.clearColour;
@@ -4466,9 +4771,12 @@ void ClearEfb(const ClearSpec& c, const EfbRect& r) {
     }
     if (mask) {
         // (scissor off: the whole target; the colour mask does not matter for the depth plane)
-        TouchTarget((c.depth && x0 == 0 && y0 == 0 && x1 == g_rtW && y1 == g_rtH) ? DN_CLEARED : DN_KEEP);
+        // (GXV_COLOR_LOADSKIP bit 1: a clear of every channel of the whole target, drawn by glClear itself: colorByClear is still set
+        // here only if neither the dead-clear path nor the partial-channel quad took it)
+        TouchTarget((c.depth && wholeTarget) ? DN_CLEARED : DN_KEEP, (colorByClear && c.color && c.alpha && wholeTarget && g_efbSamples <= 1) ? 1 : 0);
         if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(colorByClear, c.depth); // (GXV_GPU_SCENES=2)
         G(glClear(mask));
+        ColorSkipDisarm();
         ++C.clears;
     }
 }
@@ -4545,6 +4853,8 @@ int AcquireFbo(int w, int h, GLuint tex, bool wantDepth, bool guardName = false)
         if (guardName && !f.fbo) return -1;
         g_pool.push_back(f);
         idx = static_cast<int>(g_pool.size() - 1);
+        ++g_poolMade;
+        if (g_rungWatch > 0 && g_rungWatchN < 12) { g_rungWatchSize[g_rungWatchN][0] = w; g_rungWatchSize[g_rungWatchN][1] = h; ++g_rungWatchN; }
         VGX_LOG("framebuffer object %dx%d created (%u pooled)\n", w, h, static_cast<unsigned>(g_pool.size()));
     }
     PoolFbo& f = g_pool[idx];
@@ -4744,9 +5054,12 @@ void BeginPass(const PassCmd& p) {
         if (!clearMask) ++g_pxN.clearWhole;
     }
     if (clearMask) { // (none left: the pass's scene begins with its first draw)
-        TouchTarget((clearMask & GL_DEPTH_BUFFER_BIT) ? DN_CLEARED : DN_KEEP);
+        // (GXV_COLOR_LOADSKIP bit 2: the pass's clear covers all channels of the whole object: scissor off, colour mask all on, unless an atlas pass)
+        TouchTarget((clearMask & GL_DEPTH_BUFFER_BIT) ? DN_CLEARED : DN_KEEP,
+                    ((clearMask & GL_COLOR_BUFFER_BIT) && !p.atlasTex && st == GL_FRAMEBUFFER_COMPLETE) ? 2 : 0);
         if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear((clearMask & GL_COLOR_BUFFER_BIT) != 0, (clearMask & GL_DEPTH_BUFFER_BIT) != 0); // (GXV_GPU_SCENES=2)
         G(glClear(clearMask));
+        ColorSkipDisarm();
         ++C.clears;
     }
     g_inPass = true;
@@ -4778,6 +5091,33 @@ void EndPass() { // back to the EFB
 }
 
 bool EfbSwap(const CopyTexCmd& c); // (GXV_EFBSWAP, below)
+// GXV_COPYWHY=<n> (diagnostic, default 0; GXV_COPYWHY_FROM=<frame>, default 600): the first n copies made at or after that picture, one
+// line each in the console's log: what the copy is (source rectangle, destination size, kind, which channels its conversion leaves
+// as they are, clear), and the scene count so far in the picture. It names the copies that cost a copy scene and an EFB split
+// (GXV_GPU_SCENES's "texture" scenes) so that each can be matched with the game's code: a whole-EFB A8 / RGB565 capture is
+// GXV_EFBSWAP2's, a small A8 corner is the player's shadow texture (CollisionShadow::drawAndCaptureTex, 160x160 at 448,0).
+void CopyWhy(const CopyTexCmd& c) {
+    static long left = EnvInt("GXV_COPYWHY", 0);
+    static const long from = EnvInt("GXV_COPYWHY_FROM", 600);
+    if (left <= 0 || static_cast<long>(g_progFrame) < from) return;
+    --left;
+    char rows[40];
+    int k = 0;
+    for (int r = 0; r < 4; ++r) { // (per channel of the result: 'i' it is the EFB's channel unchanged, 'a' only alpha feeds it, 'k' a constant, 'x' anything else)
+        bool ident = c.add[r] == 0, onlyA = c.mat[r][0] == 0 && c.mat[r][1] == 0 && c.mat[r][2] == 0 && c.mat[r][3] != 0, none = true;
+        for (int col = 0; col < 4; ++col) {
+            ident = ident && c.mat[r][col] == (r == col ? 1.0f : 0.0f);
+            none = none && c.mat[r][col] == 0;
+        }
+        rows[k++] = ident ? 'i' : (none ? 'k' : (onlyA ? 'a' : 'x'));
+    }
+    rows[k] = 0;
+    GPUPASS_NOTE(1 << 30, "GXV_COPYWHY: picture %llu, scene %u so far: copy into texture %u: EFB (%d,%d) %dx%d -> %ux%u%s%s%s%s%s%s rgba rows [%s]%s%s%s, whole EFB %d, swapOk %d\n",
+                 static_cast<unsigned long long>(g_progFrame), C.scenes, c.texId, c.src.x, c.src.y, c.src.w, c.src.h, static_cast<unsigned>(c.dstW), static_cast<unsigned>(c.dstH),
+                 c.fromPass ? " from a pass" : "", c.srcTex ? " out of an atlas" : "", c.dstTexW ? " into an atlas" : "", c.depth ? " depth" : "", c.fill ? " fill" : "",
+                 c.passMore ? " passMore" : "", rows, c.clear.enable ? " clear:" : "", c.clear.enable && c.clear.color ? "c" : "", c.clear.enable && c.clear.depth ? "z" : "",
+                 (!c.fromPass && !c.srcTex && c.src.x == 0 && c.src.y == 0 && c.src.w == g_efbW && c.src.h == g_efbH) ? 1 : 0, c.swapOk ? 1 : 0);
+}
 void CopyTex(const CopyTexCmd& c) {
     if (c.skip || SanitizeCopyOnlyClear(c)) { // only its clear matters (a dead copy, or one that is made later from an atlas cell)
         if (c.fromPass && g_inPass) EndPass();
@@ -4801,6 +5141,7 @@ void CopyTex(const CopyTexCmd& c) {
         if (c.swapOk) ++C.wholeOk;
         if (c.swapPredictedNo) ++C.wholePredNo;
     }
+    CopyWhy(c); // (GXV_COPYWHY)
     if (EfbSwap(c)) return; // (GXV_EFBSWAP)
     if (c.fromPass && g_pass >= 0 && g_passDirectTex == c.texId) {
         // The pass was drawn straight into this texture: nothing to copy. (GXV_PASSDIRECT2: further copies of the pass
@@ -4840,6 +5181,7 @@ void CopyTex(const CopyTexCmd& c) {
         SetViewport(Rnd(c.dstX * sx), Rnd(c.dstY * sy), w, h);
     } else {
         if (AcquireCopyTarget(c.texId, w, h, c.dstW, c.dstH, guard) < 0) { failedTarget(); return; }
+        RtMarkWrite(c.texId); // (GXV_RUNG_SKIPRS: a whole-texture write, below)
         SetViewport(0, 0, w, h);
     }
     SetScissor(false);
@@ -4863,11 +5205,15 @@ void CopyTex(const CopyTexCmd& c) {
         g_rsValid = false;
         return; // (not the end of a pass, and it has no clear)
     }
+    // (GXV_COLOR_LOADSKIP bit 8: the viewport is the whole target, no scissor, no blend, all four channels written, so the colour this
+    // scene would load is never read; an atlas copy writes a rectangle only. Set for the quad / clear below, cleared right after.)
+    const bool wholeTargetCopy = !c.dstTexW && g_efbSamples <= 1;
     if (c.depth && !g_hasDepthTex) {
         G(glClearColor(1, 1, 1, 1));
-        TouchTarget();
+        TouchTarget(DN_KEEP, wholeTargetCopy ? 8 : 0);
         if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(true, false); // (GXV_GPU_SCENES=2)
         G(glClear(GL_COLOR_BUFFER_BIT));
+        ColorSkipDisarm();
         ++C.clears;
     } else if (c.fill && !c.depth) {
         // The source is one known colour (as stored in the 8-bit EFB): write its converted value.
@@ -4878,19 +5224,22 @@ void CopyTex(const CopyTexCmd& c) {
         }
         for (int r = 0; r < 4; ++r) o[r] = c.mat[r][0] * q[0] + c.mat[r][1] * q[1] + c.mat[r][2] * q[2] + c.mat[r][3] * q[3] + c.add[r];
         G(glClearColor(o[0], o[1], o[2], o[3]));
-        TouchTarget();
+        TouchTarget(DN_KEEP, wholeTargetCopy ? 8 : 0);
         if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(true, false); // (GXV_GPU_SCENES=2)
         G(glClear(GL_COLOR_BUFFER_BIT));
+        ColorSkipDisarm();
         ++C.clears;
     } else {
         float m[16];
         for (int r = 0; r < 4; ++r)
             for (int col = 0; col < 4; ++col) m[col * 4 + r] = c.depth ? (col == 0 ? 1.0f : 0.0f) : c.mat[r][col];
         const GLuint src = c.depth ? g_efbDepthTex : (fromPass ? passColor : g_efbColor);
+        g_quadFillsTarget = wholeTargetCopy;
         if (fromPass) DrawQuad(src, 0.0f, 0.0f, 1.0f, 1.0f, m, c.add);
         else
             DrawQuad(src, static_cast<float>(c.src.x) / g_efbW, static_cast<float>(c.src.y) / g_efbH, static_cast<float>(c.src.w) / g_efbW,
                      static_cast<float>(c.src.h) / g_efbH, m, c.add);
+        g_quadFillsTarget = false;
         ++C.copyQuads;
     }
     if (c.passMore && fromPass) {
@@ -5373,7 +5722,42 @@ void EfbApplySamples(int samples) {
     g_rsValid = false;
 }
 
+// ---- GXV_RUNG_PREBUILD (default below): what a change of rung costs on the console is the sceGxm render targets (and the depth buffers)
+// that the new sizes need: each pooled object gets its own at its first scene (vitaGL gxm.c scene_reset: sceGxmCreateRenderTarget, a
+// depth surface), about 10-25 ms each, and a change makes one for the EFB, one for the kept picture and one for each render-target
+// texture it resamples (118-130 ms in all in the 7 Nov play log). While the picture is steady, the rung below the current one (where
+// the controller goes under load) is therefore made ahead, one piece at a time: the EFB target kept in an EFB slot (EfbSlot), and for each
+// size the change resamples into a blank texture of that size attached to a pooled object whose first scene has begun (so its render
+// target and depth buffer exist). The change then finds all of them: ApplyRung takes the slot and the textures, nothing is created.
+// What is drawn is the same: a premade texture is blank until the resample overwrites all of it, as a new one is.
+struct RungPre { int w, h; GLuint tex; };
+std::vector<RungPre> g_rungPre;     // the premade textures (each attached to a pooled object held with PoolHeld::RUNG)
+int g_rungPreRung = -1000;          // the rung they are for
+unsigned g_rungPreHits = 0;         // taken by NewRenderTexture (the change's log)
+uint64_t g_rungChangedAt = 0;       // g_presents at the last change of rung
+bool g_rungChangedDown = false;     // ... and it was a step down
+// GXV_RUNG_PREBUILD=1: make the rung below the current one ahead (see above). Default 1 on the Vita; it only does anything where the EFB
+// targets are kept (EfbKeepOn: the console), never under the emulator's GXV_KEEP_RT or on the desktop.
+bool RungPrebuildOn() {
+    static const bool on = EnvInt("GXV_RUNG_PREBUILD", 1) != 0;
+    return on;
+}
+GLuint TakeRungPre(int w, int h) {
+    for (size_t i = 0; i < g_rungPre.size(); ++i)
+        if (g_rungPre[i].w == w && g_rungPre[i].h == h) {
+            const GLuint id = g_rungPre[i].tex;
+            g_rungPre.erase(g_rungPre.begin() + static_cast<std::ptrdiff_t>(i));
+            BindTexForEdit(id);
+            SetupNewTexture(GL_LINEAR);
+            ++g_rungPreHits;
+            return id;
+        }
+    return 0;
+}
+
 GLuint NewRenderTexture(int w, int h) {
+    if (!g_rungPre.empty())
+        if (const GLuint pre = TakeRungPre(w, h)) return pre;
     if (KeepRenderTargets())
         if (const GLuint spare = TakeRtSpare(w, h)) return spare;
     GLuint id = 0;
@@ -5451,6 +5835,32 @@ void DropEfbSpares(); // (gpupass section: spare EFB colour buffers of the old s
 uint32_t g_poolFastTrim = 0; // presents left in which pooled objects unused for 2 presents are deleted (after a change)
 unsigned g_lastResampled = 0, g_lastPlain = 0; // (tests) render textures of the last size change: resampled / resized plainly
 // false: the new EFB target got no memory; the old target, size and rung stay (the caller puts the controller back).
+// (GXV_RUNG_SKIPRS) true: the texture's picture need not be carried over (see RtTrack).
+bool RtSkippable(const Tex& t, bool on) {
+    if (!on || t.efbBuf) return false;
+    const size_t slot = static_cast<size_t>(&t - g_tex.data());
+    for (unsigned i = 0; i < g_rtTrackN; ++i) {
+        const RtTrack& e = g_rtTrack[i];
+        if (e.slot != slot) continue;
+        if (e.name != t.id || e.streak < 4 || e.skipPending) return false;
+        if (e.wrote != g_presents && e.wrote + 1 != g_presents) return false;
+        if (e.stale && g_presents - e.staleAt < 7200) return false;
+        return true;
+    }
+    return false;
+}
+void RtRename(const Tex& t, GLuint id) { // (the texture has a new name: its reads are tracked under it)
+    const size_t slot = static_cast<size_t>(&t - g_tex.data());
+    for (unsigned i = 0; i < g_rtTrackN; ++i)
+        if (g_rtTrack[i].slot == slot) g_rtTrack[i].name = id;
+}
+void RungSkipResample(Tex& t, GLuint id) {
+    const size_t slot = static_cast<size_t>(&t - g_tex.data());
+    RetireTexture(t.id, t.w, t.h);
+    t.id = id;
+    for (unsigned i = 0; i < g_rtTrackN; ++i)
+        if (g_rtTrack[i].slot == slot) { g_rtTrack[i].name = id; g_rtTrack[i].skipPending = true; }
+}
 bool ApplyRung(int rung, const char* why) {
     if (rung == g_rung || !g_efbFbo) return true;
     // (the game's copies of whole pictures that it keeps across frames take a new one: the frozen pause picture, GameScene.cpp;
@@ -5458,6 +5868,8 @@ bool ApplyRung(int rung, const char* why) {
     if (port_render_size_changed) port_render_size_changed();
     const int fromRung = g_rung, oldW = g_rtW, oldH = g_rtH, oldSamples = g_efbSamples;
     const double t0 = NowMs();
+    const unsigned preHits0 = g_rungPreHits;
+    const uint64_t made0 = g_poolMade;
     const uint64_t before = RenderTargetBytes();
     if (g_inPass) EndPass();
     SetRungFactors(rung);
@@ -5492,6 +5904,7 @@ bool ApplyRung(int rung, const char* why) {
         autoq::Log("[autoq] no memory to keep the EFB's picture over the change to %dx%d: the new target starts cleared", nw, nh);
     }
     if (keep) Resample(g_efbColor, keep, nw, nh);
+    const double tKeep = NowMs(); // (the parts of the change, for the "[autoq-rung]" line: the kept picture's texture and its resample)
     // (the EFB target of the size left is kept, and one of the new size kept earlier is taken back: EfbSlot)
     bool taken = false, stashed = false;
     const EfbSlot cur{g_rtW, g_rtH, g_efbFbo, g_efbColor, g_efbDepthRb, g_efbDepthTex, g_presents};
@@ -5559,11 +5972,15 @@ bool ApplyRung(int rung, const char* why) {
         DrawQuad(keep, 0.0f, 0.0f, 1.0f, 1.0f, identity, zero);
         RetireTexture(keep, nw, nh);
     }
+    const double tBack = NowMs();
     // 2. Every render-target texture at the size the next copy into it will make (its EFB size at the new scale).
     //    No memory for a second copy (the picture's, while the old one still holds it): the plain resize, the texture
     //    given its new size in place and its picture lost (it starts cleared; a copy into it comes before most reads).
     const float sx = ScaleX(), sy = ScaleY();
-    unsigned resampled = 0, plain = 0;
+    unsigned resampled = 0, plain = 0, skippedRs = 0;
+    double msNewTex = 0, msResample = 0, msResampleMax = 0;
+    static const bool skipRs = EnvInt("GXV_RUNG_SKIPRS", 1) != 0;
+    g_rtTrackPause = true; // (our own resamples are not the game's reads)
     for (Tex& t : g_tex) {
         // (GXV_EFBSWAP: a texture that holds a colour buffer the EFB had is left as it is: the buffer is the gpupass section's,
         // it goes back to the spares at the next copy into the texture, and a spare of the old size is then deleted)
@@ -5572,7 +5989,9 @@ bool ApplyRung(int rung, const char* why) {
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         if (w == t.w && h == t.h) continue;
+        const double tNew0 = NowMs();
         GLuint id = NewRenderTexture(w, h);
+        msNewTex += NowMs() - tNew0;
         if (!BoundTexHasStorage(w, h)) {
             G(glDeleteTextures(1, &id));
             ForgetTex(id);
@@ -5581,6 +6000,7 @@ bool ApplyRung(int rung, const char* why) {
                 id = NewRenderTexture(w, h);
                 RetireTexture(t.id, t.w, t.h);
                 t.id = id;
+                RtRename(t, id);
             } else {
                 DetachFromPool(t.id);
                 BindTexForEdit(t.id);
@@ -5589,10 +6009,19 @@ bool ApplyRung(int rung, const char* why) {
                 if (!BoundTexHasStorage(w, h)) VGX_ERR("no GPU memory for a %dx%d copy texture even in place\n", w, h);
             }
             ++plain;
+        } else if (RtSkippable(t, skipRs)) {
+            // (GXV_RUNG_SKIPRS: rewritten whole in every picture before it is read: nothing to carry over)
+            RungSkipResample(t, id);
+            ++skippedRs;
         } else {
+            const double tRs0 = NowMs();
             Resample(t.id, id, w, h);
+            const double dRs = NowMs() - tRs0;
+            msResample += dRs;
+            msResampleMax = std::max(msResampleMax, dRs);
             RetireTexture(t.id, t.w, t.h);
             t.id = id;
+            RtRename(t, id);
             ++resampled;
         }
         t.w = static_cast<uint16_t>(w);
@@ -5601,6 +6030,7 @@ bool ApplyRung(int rung, const char* why) {
         t.wrapS = t.wrapT = WRAP_CLAMP;
         t.minF = t.magF = FILT_LINEAR;
     }
+    g_rtTrackPause = false;
     const double tTextures = NowMs();
     // 3. The pooled objects made before the change (their sizes belong to the old scale; each holds a sceGxm render
     //    target, of which the system has a few dozen). Under GXV_KEEP_RT (the emulator) they stay in the pool unless it
@@ -5611,8 +6041,11 @@ bool ApplyRung(int rung, const char* why) {
     size_t dropped = 0;
     if ((!KeepRenderTargets() || g_pool.size() > 48) && !g_inPass && g_pass < 0) {
         S.fbo = ~0u;
+        // (GXV_RUNG_PREBUILD: the objects made ahead for a rung below this one stay, they are not of the old scale)
+        std::vector<PoolFbo> ahead;
         for (size_t i = 0; i < oldPool; ++i) {
             PoolFbo& f = g_pool[i];
+            if (f.held & PoolHeld::RUNG) { ahead.push_back(f); continue; }
             G(glDeleteFramebuffers(1, &f.fbo));
             if (!KeepRenderTargets()) {
                 if (f.color) { ForgetTex(f.color); G(glDeleteTextures(1, &f.color)); }
@@ -5623,7 +6056,14 @@ bool ApplyRung(int rung, const char* why) {
             }
         }
         g_pool.erase(g_pool.begin(), g_pool.begin() + static_cast<std::ptrdiff_t>(oldPool));
-        dropped = oldPool;
+        g_pool.insert(g_pool.begin(), ahead.begin(), ahead.end());
+        dropped = oldPool - ahead.size();
+    }
+    for (PoolFbo& f : g_pool) { // (an object whose premade texture was taken is an ordinary one now)
+        if (!(f.held & PoolHeld::RUNG)) continue;
+        bool still = false;
+        for (const RungPre& rp : g_rungPre) still = still || rp.tex == f.attached;
+        if (!still) f.held &= static_cast<uint8_t>(~PoolHeld::RUNG);
     }
     const double tPool = NowMs();
     g_inUseFbo = ~0u;
@@ -5641,6 +6081,20 @@ bool ApplyRung(int rung, const char* why) {
                fromRung, fromText, oldW, oldH, rung, toText, g_rtW, g_rtH, g_efbW, g_efbH, why, resampled, plain, static_cast<unsigned>(dropped),
                static_cast<double>(before) / 1048576.0, static_cast<double>(after) / 1048576.0, NowMs() - t0, tTarget - t0,
                taken ? ", kept from before" : "", tTextures - tTarget, tPool - tTextures);
+    // The same change in its parts (GXV_RUNG_PREBUILD's proof): "made" are the pooled objects created in it (each a sceGxm render target and a
+    // depth buffer at its first scene), "premade" the textures and the EFB target found ready.
+    autoq::Log("[autoq-rung] %d -> %d parts: kept picture %.1f ms (texture and resample), EFB target %.1f ms (%s), picture back %.1f ms, render textures %.1f ms "
+               "(%u resampled, %u not resampled (rewritten every picture): new textures %.1f ms, resamples %.1f ms, longest %.1f ms), pool let go %.1f ms (%u), the rest %.1f ms; pooled objects made %u, "
+               "premade textures taken %u, EFB target %s; GXV_RUNG_PREBUILD %s",
+               fromRung, rung, tKeep - t0, tTarget - tKeep, taken ? "kept before" : "made", tBack - tTarget, tTextures - tBack, resampled, skippedRs, msNewTex, msResample,
+               msResampleMax, tPool - tTextures, static_cast<unsigned>(dropped), (NowMs() - t0) - (tPool - t0), static_cast<unsigned>(g_poolMade - made0),
+               g_rungPreHits - preHits0, taken ? "ready" : "created", RungPrebuildOn() ? "on" : "off");
+    g_rungWatch = 3; // (the presents that follow: which pooled objects the new sizes still make by themselves, "[autoq-rung] after")
+    g_rungWatchN = 0;
+    g_rungWatchMade0 = g_poolMade;
+    g_rungWatchRung = rung;
+    g_rungChangedAt = g_presents;
+    g_rungChangedDown = rung < fromRung;
     return true;
 }
 
@@ -5707,6 +6161,15 @@ bool RungFits(int want, double& needMiB, double& freeMiB) {
 // emulator) only while the pool is over 48, and the textures are only forgotten (see DeleteTex).
 void EvictIdlePool() {
     ++g_presents;
+    if (g_rungWatch > 0 && --g_rungWatch == 0) {
+        char sizes[160] = "";
+        for (unsigned i = 0; i < g_rungWatchN && i < 12; ++i) {
+            const size_t used = std::strlen(sizes);
+            std::snprintf(sizes + used, sizeof sizes - used, "%s%dx%d", i ? " " : "", g_rungWatchSize[i][0], g_rungWatchSize[i][1]);
+        }
+        autoq::Log("[autoq-rung] after the change to rung %d: %u pooled objects made by the next 3 presents (each a render target and a depth buffer made in play): %s",
+                   g_rungWatchRung, static_cast<unsigned>(g_poolMade - g_rungWatchMade0), sizes);
+    }
     static const long idleSetting = EnvInt("GXV_POOL_IDLE", 60);
     if (idleSetting <= 0 || g_inPass || g_pass >= 0) return; // (never while a pass is open: a pool index is in use)
     const long idle = g_poolFastTrim ? 2 : idleSetting;    // (after a change of rung: a quick trim, ApplyRung)
@@ -5891,6 +6354,19 @@ void AutoQualityInit() {
             const long above = std::clamp<long>(EnvInt("GXV_STEADY30_ABOVE", static_cast<long>(port::pace::kSteady30AboveFps)), 31, 60);
             cfg.cadenceReachFps = std::max(static_cast<double>(above), static_cast<double>(below) + 3.0);
         }
+        // GXV_AUTOQ_FAST60=1|0 (default 1; target 60 ONLY, i.e. Performance mode: Quality (30) and Locked 30 never get it, the controller
+        // also forces it off for any other target; vgx_autoq.h "Performance mode: fast60"): 8 of the last 12 pictures late for the GPU
+        // (every other stage fitting) step down one size at once (anisotropic filtering, the edge smoothing, then a rung), and again while
+        // they stay late, instead of after 4+ s and a quiet moment. GXV_AUTOQ_FAST60_PICS / _LATE (12 / 8), _SPAN_MS (1000), _GAP_MS (750),
+        // _REACH_FPS (55: not when even the floor rung cannot hold it: the steady 30's case). r100: Good Egg zoom 2.0 48.6 fps at 720x404.
+        cfg.fast60 = targetFps == 60 && EnvInt("GXV_AUTOQ_FAST60", 1) != 0;
+        if (cfg.fast60) {
+            cfg.fast60Pics = static_cast<int>(EnvInt("GXV_AUTOQ_FAST60_PICS", cfg.fast60Pics));
+            cfg.fast60Late = static_cast<int>(EnvInt("GXV_AUTOQ_FAST60_LATE", cfg.fast60Late));
+            cfg.fast60SpanSec = static_cast<double>(std::clamp<long>(EnvInt("GXV_AUTOQ_FAST60_SPAN_MS", 1000), 100, 5000)) / 1000.0;
+            cfg.fast60GapSec = static_cast<double>(std::clamp<long>(EnvInt("GXV_AUTOQ_FAST60_GAP_MS", 750), 250, 10000)) / 1000.0;
+            cfg.fast60ReachFps = static_cast<double>(EnvInt("GXV_AUTOQ_FAST60_REACH_FPS", 55));
+        }
         // GXV_AUTOQ_EDGECHECK=1|0 (default 1; target 60 with GXV_AUTOQ_EDGESTEP): the edge step's trial over 4 s, kept for a 3 % fall of
         // the GPU's time (vgx_autoq.h, Config::edgeCheck). Good Egg, 720x404 pinned: 20.9 -> 18.4 ms of GPU a picture without the present's
         // edge smoothing, yet its 2 s trial in play read only 5 % through the camera's noise and undid it. 0: checkSec and betterFrac as
@@ -5945,6 +6421,11 @@ void AutoQualityInit() {
                    "at %.1f ms or more, under %.0f a second), sizes up to 720x404 and the quality steps come back against 33.3 ms (within "
                    "%.0f %%, the cadence held, none late for the GPU); a climb that then loses pictures to the GPU goes back within %.0f s "
                    "and that size is blocked", 1000.0 / c.cadenceReachFps, c.cadenceReachFps, c.cadenceUpFrac * 100.0, c.holdTrialSec);
+    if (c.fast60)
+        autoq::Log("[autoq] GXV_AUTOQ_FAST60: Performance steps down at once when %d of the last %d pictures (within %.1f s) are late for the GPU with every "
+                   "other stage fitting: anisotropic filtering, the edge smoothing, then one size (the size left blocked, doubling), again while they stay "
+                   "late; not when the floor rung cannot hold %.0f a second; %.2f s between changes", c.fast60Late, c.fast60Pics, c.fast60SpanSec,
+                   c.fast60ReachFps, c.fast60GapSec);
     if (c.edgeCheck)
         autoq::Log("[autoq] GXV_AUTOQ_EDGECHECK: the edge step's trial is judged over %.0f s and kept when the GPU's time fell by %.1f %% "
                    "or more",
@@ -6065,6 +6546,231 @@ void FloorReport() {
                       w.front, w.other, w.unknown, g_rung, rungText, steps, extra);
 }
 
+// ---- GXV_RUNG_PREBUILD (see NewRenderTexture): the rung below the current one, made ahead one piece at a time.
+//   GXV_RUNG_PREBUILD=0|1|2       0 off; 1 (default) in quiet moments (closed fades and wipes, the pause menu) and, in play, when the last
+//                                 decision window had no late pictures and the rung has been steady GXV_RUNG_PREBUILD_STABLE presents;
+//                                 2 in quiet moments only
+//   GXV_RUNG_PREBUILD_STABLE=<n>  presents the rung must have stood before a piece is made in play (default 300)
+//   GXV_RUNG_PREBUILD_GAP=<n>     presents between two pieces made in play (default 20; in a quiet moment one a picture)
+//   GXV_RUNG_PREBUILD_RESERVE_MIB=<n>  video memory that must stay free after a piece (default 26: above the 24 at which kept targets are let go)
+//   GXV_RUNG_PREBUILD_URGENT_GAP=<n>   presents between two pieces in play after a step down or while the pictures are late (default 3; no steady wait then)
+//   GXV_RUNG_PREBUILD_DEPTH=1|2    rungs below the current one made ahead (default 2; the nearer first)
+// A piece: the EFB target of the rung below, kept in an EFB slot (the change takes it: ApplyRung / EfbSlotTake); or, for one size the
+// change resamples a texture into, a blank texture of that size on a pooled object whose first scene has begun (a clear), so that its sceGxm
+// render target and depth buffer exist (the change takes the texture: NewRenderTexture). At most one EFB slot besides the one the change
+// itself puts (the kept target of the size left). Dropped when the rung below is another one, when a step up lacks the memory
+// (AutoQualityFrame), or when the sizes of the render textures changed (their premade textures are let go; RungDropPre).
+void ReleaseRungHolds() {
+    for (PoolFbo& f : g_pool) {
+        if (!(f.held & PoolHeld::RUNG)) continue;
+        bool still = false;
+        for (const RungPre& rp : g_rungPre) still = still || rp.tex == f.attached;
+        if (!still) f.held &= static_cast<uint8_t>(~PoolHeld::RUNG);
+    }
+}
+void RungDropPre(bool onlyStale = false, const std::vector<std::pair<int, int>>* keep = nullptr) {
+    for (size_t i = 0; i < g_rungPre.size();) {
+        bool wanted = false;
+        if (onlyStale && keep)
+            for (const auto& sz : *keep) wanted = wanted || (sz.first == g_rungPre[i].w && sz.second == g_rungPre[i].h);
+        if (wanted) { ++i; continue; }
+        RetireTexture(g_rungPre[i].tex, g_rungPre[i].w, g_rungPre[i].h);
+        g_rungPre.erase(g_rungPre.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+    ReleaseRungHolds();
+}
+// The sizes a change to `rung` makes: the EFB target (and the kept picture) first, then the render textures it resamples (ApplyRung's
+// own rule, step 2).
+void RungPreSizes(int rung, int& nw, int& nh, std::vector<std::pair<int, int>>& sizes) {
+    const float sx0 = g_rungSX, sy0 = g_rungSY;
+    g_rungSX = static_cast<float>(autoq::RungAt(rung).w) / static_cast<float>(autoq::kBaseW);
+    g_rungSY = static_cast<float>(autoq::RungAt(rung).h) / static_cast<float>(autoq::kBaseH);
+    TargetSize(g_efbW, g_efbH, nw, nh);
+    g_rungSX = sx0;
+    g_rungSY = sy0;
+    sizes.clear();
+    sizes.emplace_back(nw, nh);
+    const float sx = static_cast<float>(nw) / static_cast<float>(g_efbW), sy = static_cast<float>(nh) / static_cast<float>(g_efbH);
+    for (const Tex& t : g_tex) {
+        if (!t.id || !t.renderTarget || !t.ew || !t.eh || t.efbBuf) continue;
+        int w = Rnd(t.ew * sx), h = Rnd(t.eh * sy);
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        if (w == t.w && h == t.h) continue;
+        bool have = false;
+        for (const auto& sz : sizes) have = have || (sz.first == w && sz.second == h);
+        if (!have) sizes.emplace_back(w, h);
+    }
+}
+uint64_t RungPreColor(int w, int h) { return static_cast<uint64_t>((w + 7) & ~7) * static_cast<uint64_t>(h) * 4u; }
+// The EFB target of rung `rung` into an EFB slot; the current target stays as it is (the way ApplyRung stashes it).
+bool RungBuildSlot(int rung) {
+    const EfbSlot cur{g_rtW, g_rtH, g_efbFbo, g_efbColor, g_efbDepthRb, g_efbDepthTex, g_presents};
+    const float sx0 = g_rungSX, sy0 = g_rungSY;
+    g_rungSX = static_cast<float>(autoq::RungAt(rung).w) / static_cast<float>(autoq::kBaseW);
+    g_rungSY = static_cast<float>(autoq::RungAt(rung).h) / static_cast<float>(autoq::kBaseH);
+    g_efbFbo = g_efbColor = g_efbDepthRb = g_efbDepthTex = 0; // (CreateTarget makes new objects; the old stay whole)
+    const bool ok = CreateTarget();
+    g_rungSX = sx0;
+    g_rungSY = sy0;
+    if (ok) EfbSlotPut(EfbSlot{g_rtW, g_rtH, g_efbFbo, g_efbColor, g_efbDepthRb, g_efbDepthTex, g_presents});
+    g_efbFbo = cur.fbo;
+    g_efbColor = cur.color;
+    g_efbDepthRb = cur.depthRb;
+    g_efbDepthTex = cur.depthTex;
+    g_rtW = cur.w;
+    g_rtH = cur.h;
+    g_inUseFbo = ~0u;
+    BindFbo(g_efbFbo);
+    g_rsValid = false;
+    ResetCrowd();
+    return ok;
+}
+// A blank texture of w x h on a pooled object, its first scene begun by a clear (the render target and depth buffer are made by it).
+bool RungBuildSize(int w, int h) {
+    const GLuint tex = NewRenderTexture(w, h);
+    if (!BoundTexHasStorage(w, h)) {
+        G(glDeleteTextures(1, &tex));
+        ForgetTex(tex);
+        return false;
+    }
+    const int idx = AcquireFbo(w, h, tex, false);
+    if (idx < 0) {
+        RetireTexture(tex, w, h);
+        return false;
+    }
+    SetScissor(false);
+    SetColorMask(true, true);
+    G(glClearColor(0, 0, 0, 1));
+    TouchTarget();
+    G(glClear(GL_COLOR_BUFFER_BIT));
+    ++C.clears;
+    g_pool[static_cast<size_t>(idx)].held |= PoolHeld::RUNG;
+    g_rungPre.push_back(RungPre{w, h, tex});
+    g_inUseFbo = ~0u;
+    BindFbo(g_efbFbo);
+    g_rsValid = false;
+    ResetCrowd();
+    return true;
+}
+void RungPrebuildStep(bool quiet) {
+    if (!RungPrebuildOn() || !g_autoq || !EfbKeepOn() || KeepRenderTargets() || g_inPass || g_pass >= 0 || g_fixedW > 0) return;
+    // The two rungs below the current one, the nearer first (a second only when the first is done and the memory allows).
+    int targets[2] = {0, 0};
+    unsigned nt = 0;
+    if (g_rung >= 1 && RungSamples(g_rung) == 1 && g_efbSamples == 1)
+        for (int d = 1; d <= 2; ++d) {
+            const int tr = g_rung - d;
+            if (tr < 0 || tr < g_autoq->Cfg().minRung || RungSamples(tr) != 1) break;
+            targets[nt++] = tr;
+        }
+    if (nt == 0) {
+        if (!g_rungPre.empty()) RungDropPre();
+        g_rungPreRung = -1000;
+        return;
+    }
+    g_rungPreRung = targets[0];
+    static const long mode = EnvInt("GXV_RUNG_PREBUILD", 1);
+    static const long stable = EnvInt("GXV_RUNG_PREBUILD_STABLE", 300);
+    static const long gap = EnvInt("GXV_RUNG_PREBUILD_GAP", 20);
+    static const long urgentGap = EnvInt("GXV_RUNG_PREBUILD_URGENT_GAP", 3);
+    static const long depth = EnvInt("GXV_RUNG_PREBUILD_DEPTH", 2);
+    static const double reserveMiB = static_cast<double>(EnvInt("GXV_RUNG_PREBUILD_RESERVE_MIB", 26));
+    static uint64_t lastAt = 0;
+    static int reportedKey = -1000;
+    if (g_presents - g_rungChangedAt < 4) return; // (the change's own watch)
+    if (depth < 2 && nt > 1) nt = 1;
+    // Urgent: the controller has just stepped down (the next step is likely) or the last window had late pictures: a piece of ~10-30 ms in play
+    // is far cheaper than the 120 ms change it saves, so no steady wait and a short gap.
+    const bool urgent = (g_rungChangedDown && g_presents - g_rungChangedAt < 1200) || (g_autoq->Cfg().hold30 && g_autoq->HoldMissRun() != 0);
+    if (!quiet) {
+        if (mode == 2) return;
+        if (urgent) {
+            if (static_cast<long>(g_presents - lastAt) < urgentGap) return;
+        } else {
+            if (static_cast<long>(g_presents - g_rungChangedAt) < stable) return;
+            if (static_cast<long>(g_presents - lastAt) < gap) return;
+        }
+    } else if (g_presents == lastAt) {
+        return;
+    }
+    std::vector<std::pair<int, int>> sizes[2], all;
+    int nw[2] = {0, 0}, nh[2] = {0, 0};
+    for (unsigned k = 0; k < nt; ++k) {
+        RungPreSizes(targets[k], nw[k], nh[k], sizes[k]);
+        for (const auto& sz : sizes[k]) {
+            bool have = false;
+            for (const auto& q : all) have = have || (q == sz);
+            if (!have) all.push_back(sz);
+        }
+    }
+    if (nw[0] == g_rtW && nh[0] == g_rtH) return;
+    RungDropPre(true, &all); // (textures of sizes the game no longer copies into, or of a rung no longer near)
+    for (EfbSlot& e : g_efbKept)
+        for (unsigned k = 0; k < nt; ++k)
+            if (e.fbo && e.w == nw[k] && e.h == nh[k]) e.lastPresent = g_presents; // (EvictIdlePool's 1800-present timeout: in use)
+    double freeMiB = 0;
+    if (!FreeVram(freeMiB)) return;
+    bool missing = false;
+    unsigned complete = 0;
+    for (unsigned k = 0; k < nt; ++k) {
+        const int target = targets[k];
+        bool haveSlot = false;
+        unsigned occupied = 0;
+        for (const EfbSlot& e : g_efbKept)
+            if (e.fbo) {
+                ++occupied;
+                haveSlot = haveSlot || (e.w == nw[k] && e.h == nh[k]);
+            }
+        const double t0 = NowMs();
+        if (!haveSlot && occupied > 1 && k == 0) {
+            // (the nearer rung needs room: a kept target that is none of the wanted ones, the oldest, goes)
+            EfbSlot* old = nullptr;
+            for (EfbSlot& e : g_efbKept) {
+                bool wanted = false;
+                for (unsigned q = 0; q < nt; ++q) wanted = wanted || (e.w == nw[q] && e.h == nh[q]);
+                if (e.fbo && !wanted && (!old || e.lastPresent < old->lastPresent)) old = &e;
+            }
+            if (old) { EfbSlotDrop(*old); --occupied; }
+        }
+        if (!haveSlot && occupied <= 1) {
+            const double mib = static_cast<double>(RungPreColor(nw[k], nh[k]) + EfbDepthBytes(nw[k], nh[k], 1)) / 1048576.0;
+            if (freeMiB - mib >= reserveMiB) {
+                const bool ok = RungBuildSlot(target);
+                lastAt = g_presents;
+                autoq::Log("[autoq-rung] prebuild for rung %d (%dx%d): EFB target %s in %.1f ms (%.1f MiB; video memory free %.1f MiB before; %s)", target, nw[k], nh[k],
+                           ok ? "made" : "NOT made", NowMs() - t0, mib, freeMiB, quiet ? "quiet moment" : (urgent ? "in play, urgent" : "in play"));
+                return;
+            }
+            missing = true;
+        } else if (!haveSlot) {
+            missing = true;
+        }
+        bool sizesDone = true;
+        for (const auto& sz : sizes[k]) {
+            bool have = false;
+            for (const RungPre& rp : g_rungPre) have = have || (rp.w == sz.first && rp.h == sz.second);
+            if (have) continue;
+            sizesDone = false;
+            const double mib = static_cast<double>(RungPreColor(sz.first, sz.second) + DepthBytes(sz.first, sz.second, GlobalSamples())) / 1048576.0;
+            if (freeMiB - mib < reserveMiB) { missing = true; break; }
+            const bool ok = RungBuildSize(sz.first, sz.second);
+            lastAt = g_presents;
+            autoq::Log("[autoq-rung] prebuild for rung %d (%dx%d): %dx%d texture and its render target %s in %.1f ms (%.1f MiB; video memory free %.1f MiB before; %s)", target,
+                       nw[k], nh[k], sz.first, sz.second, ok ? "made" : "NOT made", NowMs() - t0, mib, freeMiB, quiet ? "quiet moment" : (urgent ? "in play, urgent" : "in play"));
+            return;
+        }
+        if (haveSlot && sizesDone) ++complete;
+        if (!(haveSlot && sizesDone)) break; // (the nearer rung first)
+    }
+    const int key = targets[0] * 16 + static_cast<int>(complete) * 4 + (missing ? 1 : 0);
+    if (reportedKey != key) {
+        reportedKey = key;
+        autoq::Log("[autoq-rung] prebuild below rung %d: %u of %u rungs complete (%s; premade %u texture sizes, video memory free %.1f MiB, reserve %.0f MiB)", g_rung, complete, nt,
+                   missing ? "the rest not made: not enough video memory or no free slot" : "all made", static_cast<unsigned>(g_rungPre.size()), freeMiB, reserveMiB);
+    }
+}
+
 void AutoQualityFrame() {
     g_stepFx = g_stepFxWanted; // (the steps latch here: a frame is wholly one state)
     g_stepBg = g_stepBgWanted;
@@ -6163,6 +6869,7 @@ void AutoQualityFrame() {
             g_rungSY = sy;
         }
         bool dropped = false;
+        if (!g_rungPre.empty()) { RungDropPre(); dropped = true; } // (GXV_RUNG_PREBUILD's textures give their memory back first)
         for (EfbSlot& k : g_efbKept)
             if (k.fbo && !(k.w == ww && k.h == wh)) { EfbSlotDrop(k); dropped = true; }
         if (dropped) autoq::Log("[autoq] kept render targets of other sizes let go for the step up");
@@ -6190,6 +6897,7 @@ void AutoQualityFrame() {
         const int from = g_rung;
         if (!ApplyRung(want, why)) g_autoq->Refused(from, want, autoq::clock::NowUs()); // (no memory: back, that rung blocked)
     }
+    RungPrebuildStep(quiet); // (GXV_RUNG_PREBUILD)
 }
 } // namespace
 
@@ -6223,6 +6931,7 @@ unsigned DebugRawConverts() { return g_rawConvertsTotal; }
 unsigned DebugEfbSwapHolds() { return g_efbSwapHoldsTotal; }
 unsigned DebugEfbLoadFroms() { return g_efbLoadFromsTotal; }
 void SetColorLoadHook(ColorLoadHook hook) { g_colorLoadHook = hook; }
+void SetColorSkipHook(ColorSkipHook hook) { g_colorSkipHook = hook; }
 unsigned DebugEfbAdopts() { return g_efbAdoptsTotal; }
 const sanitize::Counts& DebugSanitizeCounts() { return g_san; } // (GXV_SANITIZE: tests)
 int EfbSamples() { return g_efbSamples; }
@@ -7396,6 +8105,8 @@ bool Init(int renderWidth, int renderHeight) {
     g_px.noop = EnvInt("GXV_PX_NOOP", 0) != 0;
     g_px.deadClear = EnvInt("GXV_PX_DEADCLEAR", 0) != 0;
     g_px.scissor = EnvInt("GXV_PX_SCISSOR", 0) != 0;
+    g_overdraw = EnvInt("GXV_OVERDRAW", 0) != 0;
+    if (g_overdraw && port_log_summary) port_log_summary("GXV_OVERDRAW=1: an EFB draw fully covered by a later draw, with nothing reading what it wrote in between, is not drawn (counts: gpu-scenes overdraw: line)");
     if ((g_px.noop || g_px.deadClear || g_px.scissor) && port_log_summary)
         port_log_summary("pxcut: GXV_PX_NOOP=%d GXV_PX_DEADCLEAR=%d GXV_PX_SCISSOR=%d (pixel-work cuts that keep the picture)", g_px.noop ? 1 : 0, g_px.deadClear ? 1 : 0,
                          g_px.scissor ? 1 : 0);
@@ -7869,8 +8580,12 @@ void PlanHoists(const CmdBuf& buf) {
         // (bilinear: at 544x388, 448 is 380.8 and the copy is a resample shifted by a fifth of a pixel), the corner's own
         // target starts on a whole pixel and is copied 1:1. Else the copy stays where it is (equal pictures; GXV_PASSVERIFY).
         if (g_efbSamples > 1) continue; // (a multisampled EFB: the corner's own target is single-sampled, its copy would lose the smoothing)
-        if (!OnRenderPixels(y.src.x, ScaleX()) || !OnRenderPixels(y.src.w, ScaleX()) || !OnRenderPixels(y.src.y, ScaleY()) || !OnRenderPixels(y.src.h, ScaleY()))
+        if (!OnRenderPixels(y.src.x, ScaleX()) || !OnRenderPixels(y.src.w, ScaleX()) || !OnRenderPixels(y.src.y, ScaleY()) || !OnRenderPixels(y.src.h, ScaleY())) {
+            // (the player's 160x160 shadow corner at (448,0) lands here at 720x404 and 960x544: 160 EFB rows are 141.75 / 190.9 render rows)
+            GPUPASS_NOTE(3, "GXV_PASSHOIST: frame %llu: the %dx%d copy at (%d,%d) into texture %u stays in the EFB's scene: not on whole render pixels at scale %.4f x %.4f\n",
+                         static_cast<unsigned long long>(g_progFrame), y.src.w, y.src.h, y.src.x, y.src.y, y.texId, ScaleX(), ScaleY());
             continue;
+        }
         bool readsC = false;
         for (int r = 0; r < 4; ++r)
             if (y.mat[r][0] != 0 || y.mat[r][1] != 0 || y.mat[r][2] != 0) readsC = true;
@@ -8383,6 +9098,47 @@ void NoteDrawDetail(const CmdBuf& buf, const DrawRec& r) {
         px = x1 > x0 && y1 > y0 ? (x1 - x0) * (y1 - y0) * s2 : 0.0f;
         bound = true;
     }
+    // GXV_SCENE0_DUMP=<n> (default 0, mode 2 only): the draws of scene number GXV_SCENE0_ORD (default 0) of n pictures, one basic-log line each
+    // (what the draw is: shaders, blend, depth, mask, cull, scissor, viewport, pixels), the fragment shader's text once. Diagnostics only.
+    {
+        static const long dumpPics = EnvInt("GXV_SCENE0_DUMP", 0);
+        static const long dumpOrd = EnvInt("GXV_SCENE0_ORD", 0);
+        static const long dumpFrom = EnvInt("GXV_SCENE0_FROM", 0);  // (the first picture number to dump: skip the title and loading; counted from the start of the run)
+        static const long dumpAfterS = EnvInt("GXV_SCENE0_AFTER_S", 0); // (or: start this many seconds after the first picture)
+        static uint64_t lastDumped = ~0ull;
+        static long picsDone = 0;
+        static std::vector<uint16_t> shown;
+        if (dumpPics > 0 && picsDone <= dumpPics && g_allPictures >= static_cast<uint64_t>(dumpFrom) &&
+            (dumpAfterS <= 0 || (g_firstPicMs > 0.0 && static_cast<double>(beprof::Now()) / 1000.0 - g_firstPicMs >= dumpAfterS * 1000.0)) && g_cur->ordinal == dumpOrd && g_cur->kind == kEfb && port_log_summary) {
+            if (lastDumped != g_allPictures) {
+                lastDumped = g_allPictures;
+                if (++picsDone <= dumpPics)
+                    port_log_summary("scene0-dump: picture %llu, scene %u %ux%u, depth load %d store %d", static_cast<unsigned long long>(g_allPictures), g_cur->ordinal,
+                                     g_cur->w, g_cur->h, g_cur->dLoad, g_cur->dStore);
+            }
+            if (picsDone <= dumpPics) {
+                port_log_summary("scene0-dump:  draw vs %u fs %u [%s%s] idx %u vtx %u %s cov %u blend %u(src %u dst %u eq %u dza %u) depth %u(func %u write %u) cull %u "
+                                 "mask c%u a%u sc %d,%d %dx%d vp %.0f,%.0f %.0fx%.0f z %.2f..%.2f tex %02x px %.0f (%.2f screens)%s",
+                                 r.vsId, r.fsId, cls == kOpaque ? "opaque" : cls == kBlended ? "blended" : cls == kDiscard ? "discard" : cls == kDepthOnly ? "depth-only" : "no-effect",
+                                 (info & 0x40000000u) ? ",discard" : "", r.idxCount, r.vtxCount, r.vbuf ? "static" : "stream", r.cover, rs.blend, rs.blendSrc, rs.blendDst,
+                                 rs.blendEq, rs.dstAlphaZero, rs.depthTest, rs.depthFunc, rs.depthWrite, rs.cull, rs.colorWrite, rs.alphaWrite, rs.scX, rs.scY, rs.scW, rs.scH,
+                                 rs.vpX, rs.vpY, rs.vpW, rs.vpH, rs.zNear, rs.zFar, r.texMask, px,
+                                 g_cur->w && g_cur->h ? px / (static_cast<float>(g_cur->w) * static_cast<float>(g_cur->h)) : 0.0f, bound ? " (bounded only)" : "");
+                if (std::find(shown.begin(), shown.end(), r.fsId) == shown.end() && shown.size() < 16) {
+                    shown.push_back(r.fsId);
+                    if (r.fsId < g_fsSrc.size() && g_fsSrc[r.fsId]) {
+                        const std::string& t = g_fsSrc[r.fsId]->text;
+                        for (size_t p = 0; p < t.size() && p < 6000;) {
+                            size_t e = t.find('\n', p);
+                            if (e == std::string::npos) e = t.size();
+                            port_log_summary("scene0-dump:   fs %u | %.*s", r.fsId, static_cast<int>(e - p), t.c_str() + p);
+                            p = e + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
     ++x->clsDraws[cls];
     if (bound) { ++x->clsBound[cls]; x->clsBoundPx[cls] += px; }
     else x->clsPx[cls] += px;
@@ -8696,8 +9452,9 @@ void BeginFx(const CmdBuf& buf, size_t i) {
     SetDepthMask(true);
     G(glClearColor(0, 0, 0, 0));
     G(glClearDepthf(1.0f));
-    TouchTarget(DN_CLEARED);
+    TouchTarget(DN_CLEARED, 2); // (GXV_COLOR_LOADSKIP bit 2: scissor off, colour mask all on, a full clear of a target of its own)
     G(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    ColorSkipDisarm();
     ++C.clears;
     // The scene's depth: the EFB depth under each pixel's centre (point sampling).
     SetColorMask(false, false);
@@ -9268,7 +10025,9 @@ bool EfbSwap(const CopyTexCmd& c) {
             DrawQuad(old, 0.0f, 0.0f, 2.0f / static_cast<float>(g_rtW), 2.0f / static_cast<float>(g_rtH), identity, zero4);
             SetViewport(0, 0, g_rtW, g_rtH);
         } else {
+            g_quadFillsTarget = keepC && keepA && g_efbSamples <= 1; // (GXV_COLOR_LOADSKIP bit 8: all four channels of every pixel are written)
             DrawQuad(old, 0.0f, 0.0f, 1.0f, 1.0f, identity, zero4);
+            g_quadFillsTarget = false;
         }
         ++C.copyQuads;
         ++C.efbRestores;
@@ -9294,7 +10053,7 @@ void GpupassMemReport(uint64_t frame) {
         if (f.depthTex || f.depthRb) { ++withDepth; poolBytes += static_cast<uint64_t>(f.w) * f.h * 4; }
     }
     unsigned heldPool = 0;
-    for (const PoolFbo& f : g_pool) heldPool += f.held ? 1u : 0u;
+    for (const PoolFbo& f : g_pool) heldPool += (f.held & ~PoolHeld::RUNG) ? 1u : 0u; // (GXV_RUNG_PREBUILD's holds are not gpupass's)
     unsigned inTex = 0;
     uint64_t efbBytes = 0;
     for (const Tex& t : g_tex)
@@ -9471,6 +10230,114 @@ int ExportCountLog() {
     return result;
 }
 
+// ---- GXV_OVERDRAW=1 (default 0; the pixel work of draws whose pixels are overwritten before anything looks at them)
+// A draw A of the EFB (not in an offscreen pass, not one of GXV_FXHALF's run) is left out when
+//   - it changes nothing (PxNoEffect: nothing written, or blended ZERO / ONE with no depth write), or
+//   - a LATER draw B of the same stretch of commands writes every plane A writes (colour, alpha, depth only when written: test on and
+//     mask on) over every pixel A can reach, so A's result is gone before anything reads it. B: the PxDrawCovers rectangle of the dead-clear
+//     test (one quad of four vertices over the whole of A's pixels, unblended, depth test off or ALWAYS, colour written, a fragment shader without
+//     `discard`, its program built), with colour / alpha / depth written wherever A writes them (depth: test ALWAYS and mask on). A is
+//     blended or not, depth tested or not: it only writes, what it reads is its own business.
+//     And no draw between A and B (that is drawn) reads what A wrote where A wrote it: a draw whose extent meets A's pixels and that blends (reads
+//     colour / alpha) or depth-tests with another function than ALWAYS (reads depth). A stretch of commands ends at every command but a texture /
+//     buffer upload or free and the shader warm-up commands (a copy, a pass, a display copy, a target change, the present); draws of an offscreen pass
+//     and GXV_FXHALF's are never touched and end the stretch. Not with a multisampled EFB (the quad's coverage test is for pixel centres).
+// A's extent is DrawRec::ex cut to its scissor (the rectangle its pixels stay in), one target pixel more on each side. Draw() applies each
+// draw's state itself, so leaving one out changes no state the next draw relies on.
+inline uint8_t OvPlanes(const RenderState& rs) {
+    return static_cast<uint8_t>((rs.colorWrite ? 1u : 0u) | (rs.alphaWrite ? 2u : 0u) | ((rs.depthTest && rs.depthWrite) ? 4u : 0u));
+}
+inline bool OvPlainFs(uint16_t fsId) { return fsId < g_fsSrc.size() && g_fsSrc[fsId] && !(gpuscenes::FsInfo(fsId) & 0x40000000u); }
+inline bool OvNeutral(uint8_t t) { return FxNeutral(t) || t == CMD_SHADER || t == CMD_PROGRAM || t == CMD_VARIANT; }
+// Does a drawn draw D between A and its coverer read what A (planes `planes`, EFB pixels [ax0, ax1) x [ay0, ay1)) wrote there? (unknown: yes)
+inline bool OvReads(const DrawRec& d, uint8_t planes, int ax0, int ay0, int ax1, int ay1) {
+    const RenderState& rs = d.rs;
+    const bool rdCA = (planes & 3u) && rs.blend && (rs.colorWrite || rs.alphaWrite) && !PxNoEffect(rs);
+    const bool rdZ = (planes & 4u) && rs.depthTest && (rs.depthFunc & 7) != CMP_ALWAYS;
+    if (!rdCA && !rdZ) return false;
+    if (d.prim != PRIM_TRIANGLES || d.exW <= 0 || d.exH <= 0) return true;
+    const int m = 2; // (EFB pixels to spare)
+    return !(d.exX + d.exW + m <= ax0 || d.exX - m >= ax1 || d.exY + d.exH + m <= ay0 || d.exY - m >= ay1);
+}
+void OverdrawPlan(const CmdBuf& buf, bool diag) {
+    g_ovDead.clear();
+    if (!g_overdraw || diag || g_skipDraws || g_gpuAttrib || SanMode() || g_efbSamples > 1 || g_validateFrame || g_verify.shadow) return;
+    const size_t n = buf.cmds.size();
+    if (n < 2 || buf.draws.size() < 2) return;
+    g_ovPass.assign(n, 0);
+    bool inPass = false;
+    for (size_t i = 0; i < n; ++i) {
+        const Cmd& c = buf.cmds[i];
+        switch (c.type) {
+        case CMD_DRAW: g_ovPass[i] = inPass ? 1 : 0; break;
+        case CMD_PASS_BEGIN: inPass = true; break;
+        case CMD_COPY_TEX: {
+            const CopyTexCmd& t = buf.copyTex[c.arg];
+            if (t.skip ? t.fromPass : !(t.srcTex || (t.passMore && t.fromPass))) inPass = false;
+            break;
+        }
+        case CMD_COPY_DISP: case CMD_SET_TARGET: case CMD_PRESENT: inPass = false; break;
+        default: break;
+        }
+    }
+    g_ovDead.assign(n, 0);
+    struct Cov { size_t cmd; uint8_t planes; };
+    Cov cov[8];
+    unsigned nCov = 0, ring = 0;
+    const float sx = ScaleX(), sy = ScaleY();
+    uint32_t nCovered = 0, nBlended = 0, nNoEffect = 0;
+    double px = 0.0;
+    for (size_t i = n; i-- > 0;) {
+        const Cmd& c = buf.cmds[i];
+        if (c.type != CMD_DRAW) { if (!OvNeutral(c.type)) nCov = 0; continue; }
+        if (g_ovPass[i] || FxCmd(i)) { nCov = 0; continue; }
+        const DrawRec& a = buf.draws[c.arg];
+        if (a.idxCount == 0) continue;
+        const RenderState& rs = a.rs;
+        const uint8_t planes = OvPlanes(rs);
+        // (A's rectangle: its extent cut to its scissor, EFB pixels)
+        const int ax0 = std::max<int>(a.exX, rs.scX), ay0 = std::max<int>(a.exY, rs.scY);
+        const int ax1 = std::min<int>(a.exX + a.exW, rs.scX + rs.scW), ay1 = std::min<int>(a.exY + a.exH, rs.scY + rs.scH);
+        const bool haveRect = a.prim == PRIM_TRIANGLES && a.exW > 0 && a.exH > 0 && ax1 > ax0 && ay1 > ay0;
+        uint8_t why = 0;
+        if (PxNoEffect(rs) || planes == 0) {
+            why = 3;
+        } else if (nCov && haveRect) {
+            const int x0 = std::max(0, static_cast<int>(std::floor(ax0 * sx)) - 1), y0 = std::max(0, static_cast<int>(std::floor(ay0 * sy)) - 1);
+            const int x1 = std::min(g_rtW, static_cast<int>(std::ceil(ax1 * sx)) + 1), y1 = std::min(g_rtH, static_cast<int>(std::ceil(ay1 * sy)) + 1);
+            for (unsigned k = 0; k < nCov && !why; ++k) {
+                if (planes & ~cov[k].planes) continue;
+                const DrawRec& b = buf.draws[buf.cmds[cov[k].cmd].arg];
+                if (!(b.exX <= ax0 && b.exY <= ay0 && b.exX + b.exW >= ax1 && b.exY + b.exH >= ay1)) continue;
+                if (!PxDrawCovers(buf, b, x0, y0, x1, y1, sx, sy, 0, 0)) continue;
+                bool read = false;
+                for (size_t j = i + 1; j < cov[k].cmd && !read; ++j) {
+                    if (buf.cmds[j].type != CMD_DRAW || g_ovDead[j]) continue;
+                    const DrawRec& d = buf.draws[buf.cmds[j].arg];
+                    if (d.idxCount && OvReads(d, planes, ax0, ay0, ax1, ay1)) read = true;
+                }
+                if (!read) why = rs.blend ? 2 : 1;
+            }
+        }
+        if (why) {
+            g_ovDead[i] = why;
+            if (why == 3) ++nNoEffect;
+            else { ++nCovered; nBlended += why == 2; }
+            if (haveRect) px += static_cast<double>(ax1 - ax0) * static_cast<double>(ay1 - ay0);
+            continue;
+        }
+        // (a drawn draw that can cover: one quad over its extent, writing colour, no blend / discard / depth test other than ALWAYS)
+        if (a.cover && a.vtxCount == 4 && a.prim == PRIM_TRIANGLES && !a.vbuf && !rs.blend && rs.colorWrite && (!rs.depthTest || (rs.depthFunc & 7) == CMP_ALWAYS) &&
+            OvPlainFs(a.fsId) && PxProgramReady(a)) {
+            const Cov e{i, planes};
+            if (nCov < 8) cov[nCov++] = e;
+            else cov[ring++ & 7u] = e;
+        }
+    }
+    gpuscenes::OverdrawCounts& o = gpuscenes::g_ovN;
+    o.covered += nCovered; o.blended += nBlended; o.noEffect += nNoEffect; o.px += px; ++o.frames;
+}
+
 static void ExecuteFrame(const CmdBuf& buf) {
 #if VGX_COLDTRACE
     coldtrace::SpanScope executeTrace(coldtrace::g_recorder,coldtrace::SpanKind::Execute,buf.frame);
@@ -9497,7 +10364,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
     ++g_serial;
     // (GXV_STUTTER_LOG) this frame's costs, logged when it ends
     struct StutterScope { uint64_t frame; double t0; ~StutterScope() { StutterFrameEnd(frame, NowMs() - t0); } } stutterScope{buf.frame, NowMs()};
-    g_screenLive = ScreenLive();
+    g_screenLive = ScreenLive() && !StageHoldActive(); // (a screen held closed for the stage warm-up is not live)
     StageFrameBegin(); // (GXV_STAGEWARM)
     EvictPrograms();
     AutoQualityFrame(); // (a new render scale, if the controller wants one, takes effect here: between frames)
@@ -9607,6 +10474,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
     PlanFrame(buf); // (GXV_DEPTHPLAN, GXV_EFBSWAP)
     RawPrescan(buf); // (GXV_EFBSWAP2: a later frame's reader of a copy made without its conversion)
     if (cutAt != ~static_cast<size_t>(0) || passTime || drawTime) dplan::g_valid = false; // (diagnostic waits and cuts: no plan)
+    OverdrawPlan(buf, cutAt != ~static_cast<size_t>(0) || passTime || drawTime); // (GXV_OVERDRAW)
     // What an earlier buffer left of the deferred warm-up: a slice of it, before this frame's own commands. The stage being entered
     // goes first (GXV_STAGEWARM); the generic list waits for a frame the stage's queue leaves alone.
     if (!RunStageWarm(false)) RunWarm();
@@ -9637,6 +10505,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
         const double swT0 = swUnits ? NowMs() : 0.0;
         switch (c.type) {
         case CMD_DRAW:
+            if (commandIndex < g_ovDead.size() && g_ovDead[commandIndex]) break; // (GXV_OVERDRAW: nothing reads what it writes)
             if (FxCmd(commandIndex)) { // (GXV_FXHALF)
                 if (!g_fxOpen) BeginFx(buf, commandIndex);
                 if (g_fxOpen) {
@@ -10296,6 +11165,44 @@ void WarmIdle() {
 }
 unsigned WarmTotal() { return g_warmAll.load(std::memory_order_relaxed); }
 unsigned StageWarmPending() { return StageWarmOn() ? g_stageLeft.load(std::memory_order_relaxed) : 0; }
+// (GXV_STAGEWARM_HOLD_MS, default 3000; 0 = off) Called by the game thread every time the game asks whether the loaded scene may start
+// (GameSystemSceneController::isReadyToStartScene, the closed wipe opens only after that). 1 = wait a frame: the stage's queue (the
+// programs the first frames of play draw) is not finished, and the frames of the held screen are used to link it, whole slices
+// (GXV_STAGEWARM_COMPILE_SLICE_MS) at a time. The hold ends when the queue is done, after the cap, or when the queue has not moved for
+// GXV_STAGEWARM_HOLD_STALL_MS (default 800: slots at the reserve, nothing left that can be linked). Never for the menu list's start-up queue.
+int StageWarmHold() {
+    static const long capMs = EnvInt("GXV_STAGEWARM_HOLD_MS", 5000);
+    if (capMs <= 0 || !StageWarmOn()) return 0;
+    static const long stallMs = std::max(100L, EnvInt("GXV_STAGEWARM_HOLD_STALL_MS", 800));
+    static bool holding = false, released = false;
+    static double startMs = 0, moveMs = 0;
+    static unsigned lastLeft = 0;
+    if (port_scene_loading_active && port_scene_loading_active()) { holding = false; released = false; return 0; } // (a new load: the next ready may hold again)
+    const unsigned left = g_stageLeft.load(std::memory_order_relaxed);
+    const double now = NowMs();
+    if (released || g_stageMenuQueue.load(std::memory_order_relaxed) || left == 0) {
+        if (holding) StageLog("stage warm-up: held the closed screen %.0f ms for the queue of stage %08x, %u draw variants left", now - startMs, g_stageTarget, left);
+        holding = false;
+        g_stageHoldStampMs.store(0.0, std::memory_order_relaxed);
+        return 0;
+    }
+    if (!holding) {
+        holding = true;
+        startMs = moveMs = now;
+        lastLeft = left;
+        StageLog("stage warm-up: holding the closed screen for the queue of stage %08x: %u draw variants left (at most %ld ms)", g_stageTarget, left, capMs);
+    }
+    if (left != lastLeft) { lastLeft = left; moveMs = now; }
+    if (now - startMs >= static_cast<double>(capMs) || now - moveMs >= static_cast<double>(stallMs)) {
+        StageLog("stage warm-up: hold over after %.0f ms (%s), %u draw variants left", now - startMs, now - startMs >= static_cast<double>(capMs) ? "cap" : "queue not moving", left);
+        released = true;
+        holding = false;
+        g_stageHoldStampMs.store(0.0, std::memory_order_relaxed);
+        return 0;
+    }
+    g_stageHoldStampMs.store(now, std::memory_order_relaxed);
+    return 1;
+}
 // GXV_STAGEWARM_IDLE=1 (default 0): between frames, while the game's loading thread runs, the programs of the stage's queue are linked
 // (compile + glLinkProgram, as a draw's own link) - and nothing else. Two console runs (r32 15:30, r36 16:52) froze for good right after
 // "stage warm-up: stage ... queued" with the first version of this path, which did the queue's warm draws here: an empty triangle into
@@ -10401,6 +11308,9 @@ void DrawRejectReport() {
 Stats GetStats() { return g_stats; }
 
 } // namespace vgx::backend
+
+// (GXV_STAGEWARM_HOLD_MS) for GameSystemSceneController::isReadyToStartScene (weak there): 1 = the stage's warm-up queue is not done, wait a frame.
+extern "C" int port_stage_warm_hold(void) { return vgx::backend::StageWarmHold(); }
 
 #ifdef VGX_GL_STUB
 namespace vgx::host {

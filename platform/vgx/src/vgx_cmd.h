@@ -466,6 +466,12 @@ void SetAnisotropicHook(AnisoHook hook);
 // (vglColorLoadFrom); without one the back end draws the EFB's old picture back with a quad as before.
 using ColorLoadHook = bool (*)(unsigned tex);
 void SetColorLoadHook(ColorLoadHook hook);
+// GXV_COLOR_LOADSKIP (vitaGL patches/0021, COLOR_LOAD_FROM): asks the GL to make the next scene begun on the framebuffer bound for
+// drawing (arm = true) load its colour from a tiny texture instead of from its own 2.1 MB / 1.2 MB buffer, or takes the request back
+// (arm = false, called right after the clear that began the scene); true when armed. Set by the host (vglColorLoadSkip); without one
+// nothing is asked and the scenes load as before.
+using ColorSkipHook = bool (*)(bool arm);
+void SetColorSkipHook(ColorSkipHook hook);
 // (tests) GXV_VGL_LOADFROM: GXV_EFBSWAP buffers handed to the next scene's colour load instead of a quad.
 unsigned DebugEfbLoadFroms();
 bool AnisotropicOn(); // in force for the frame being drawn
