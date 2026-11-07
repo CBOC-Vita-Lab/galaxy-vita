@@ -1,5 +1,5 @@
-Super Mario Galaxy Vita 2.1
-===========================
+Super Mario Galaxy Vita 2.1.1
+=============================
 
 Thanks for trying Super Mario Galaxy on your PS Vita. It runs natively, not in an
 emulator, and it was built to feel at home on the Vita: touch to point, rear

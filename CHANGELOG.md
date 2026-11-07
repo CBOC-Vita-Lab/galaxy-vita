@@ -1,3 +1,12 @@
+# Version 2.1.1 — November 7, 2026
+
+A quick fix for 2.1.
+
+### Fixed
+- **Objects out of place and a crash on getting the Bee Mushroom.** A small number of the ready-made graphics added in 2.1 were built wrong, which could put things in the wrong place or crash the game the first time it needed them. Those have been taken out; the Vita now prepares them itself, correctly, the first time they're needed (mostly while a galaxy loads). Speed in play is the same as 2.1.
+
+**Updating?** Install the new VPK over the old one. Your saves and settings stay. If you're on 2.1, please update.
+
 # Version 2.1 — November 7, 2026
 
 The smooth-play update. Far fewer pauses while the game prepares new graphics.

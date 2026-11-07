@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v2.1",
+  "release": "galaxy-v2.1.1",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -19868,7 +19868,7 @@
     },
     {
       "path": "tests/test_release_metadata.py",
-      "sha256": "7b00c4e581ea0f851beab0a62a84f488c85b6c70494c0a3b5d52e5f3011f52ce"
+      "sha256": "31a81eba34b340e8fdb90d2d36953a9a2aee16d1dbe81b1102852a3019e5a7a8"
     },
     {
       "path": "tests/test_title_art.py",
@@ -22364,7 +22364,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "7f3af3d8cae96966bb14fcd7947238e9d5168715eaa9e71e1559eaae5d4acf5d"
+      "sha256": "f876e7c38a8e1994c1bf61c2a1396e93131994fa7f3a234362f5ee447c7ba880"
     },
     {
       "path": "vita/vgx-game/coldtrace_export.cpp",
