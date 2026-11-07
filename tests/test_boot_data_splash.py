@@ -44,6 +44,7 @@ namespace loading::direct { void* g_base = &pixel; void Close() {} }
 namespace vgx::backend {
 unsigned WarmPending() { return 0; }
 unsigned WarmTotal() { return 0; }
+bool WarmCapacityYielded() { return false; }  // (no warm-up pending here: NoteTitleVisible never asks)
 void SetWarmBudget(double) {}
 }
 namespace splash {
@@ -101,7 +102,7 @@ class BootDataSplashTests(unittest.TestCase):
         code = code.replace("@SECONDS@", function(host, "long ReadSeconds(const char* name, long fallback)"))
         for tag, signature in (
             ("FAIL", "void Fail(const char* what)"),
-            ("TITLE", "void NoteTitleVisible(const char* how)"),
+            ("TITLE", "void NoteTitleVisible(const char* how, bool genuineTitle = false)"),
             ("SERVICE", "void Service(uint64_t minGapUs = 0)"),
             ("BRIDGE", 'extern "C" int port_boot_data_error(const char* message)'),
         ):

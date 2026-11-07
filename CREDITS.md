@@ -17,6 +17,15 @@
   [Third-party Notices](THIRD_PARTY_NOTICES.md).
 - **Real-ESRGAN (xinntao):** the upscaling model the optional HD texture
   builder downloads (BSD-3-Clause; not bundled).
+- **Producdevity:** fixes and features ported from Producdevity's fork of the
+  1.1 release (released into the public domain): the right stick's Camera /
+  Pointer setting, gravity and collision search savings, the effect animation
+  lookup, inline vector helpers, the movie decoder core fix and the movie rule
+  of automatic quality, the deferred CPU clock request; Mario hurt again when
+  an enemy lets him go, hidden-star launch stars, the second render size, the
+  warm-up list after an update, rear touch aiming after the Settings menu, the
+  render-target pool, CMPR weights in the HD texture builder, and the Star Bit
+  reach setting.
 
 Nintendo and the original developers keep their rights to the game, its
 artwork and its trademarks. This is an unofficial fan project, not affiliated

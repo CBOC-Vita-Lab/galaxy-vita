@@ -1,26 +1,26 @@
 {
   "schemaVersion": 2,
-  "releaseId": "galaxy-v1.2",
-  "version": "1.2",
-  "date": "2026-10-31",
+  "releaseId": "galaxy-v2.0",
+  "version": "2.0",
+  "date": "2026-11-07",
   "titleId": "SMGV00001",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "91a72785f79068ba2fb2da74b08751cbad38e07c72618c960863a18835ad2969",
-    "runtimeSha256": "b2aa158dc2d13c584f776e9bbc7e1f36248cfe579eded40129feddc01cb48f4c"
+    "sha256": "8fa38c852cf3fb211ad1b2ddd16f4a5d1ea9a08df2521c8d0119b2cb6aef9aef",
+    "runtimeSha256": "8512cfc6bd12f5d1571c4405e1157138b82901d956ea32474409fa56001c313e"
   },
   "source": {
-    "revision": "0a5bdf6b5fb8caa72fabb3126d582a3736c1cc66",
+    "revision": "PENDING-COMMIT",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {
-    "driver": "python3 -I tools/vgx_build/build.py all --pgo-profile tools/pgo/smg.profdata.gz",
+    "driver": "tools/vgx_build stages (source, lto, runtime+link) with the PGO profile; the console-tested build r100",
     "PORT_RUNTIME_DIAGNOSTICS": 0,
-    "PORT_LOGGING": 0,
+    "PORT_LOGGING": 1,
     "PORT_SILENT_STDIO": true,
     "gameLTO": "ThinLTO + profile-guided (tools/pgo/smg.profdata.gz), ld.lld -r --lto-O2, emulated TLS, -fno-math-errno",
     "rendererOpt": "-O3",
-    "vitaGL": "nhustdx (tools/vitagl/build-release.sh): upstream 9bf3e3f + patches 0001-0012, GXM_STATE_CACHE, DRAW/INDICES/SAMPLERS speed options"
+    "vitaGL": "cdbba42 + tools/vitagl/patches 0001-0019 (SHADER_CACHE SHARK_LOG LOG_ERRORS STORE_DEPTH_STENCIL SKIP_SPLASHSCREEN STRICT_DRAW_COMPLIANCE, ring 8 MiB, RAM shader reader)"
   },
   "toolchain": {
     "clang": "18.1.3",
@@ -35,10 +35,10 @@
   "verification": {
     "hostTests": "python3 -m unittest discover -s tests; the tools/test_*.sh host suites",
     "emulator": "Vita3K (correctness only): boot, title, warm-up of the shader list, the packaged seed read in place",
-    "earlierConsoleRuns": "Two test builds from this source line ran on a PS Vita on 23 Oct 2026 (automatic quality before and after the calm rules)",
+    "earlierConsoleRuns": "The 1.3 test builds r21-r97 ran on the same Vita from 4 to 6 Nov 2026",
     "physicalVita": true,
     "desktopInstaller": false,
-    "consoleRuns": "31 Oct 2026 on a PS Vita: 1.0 vs 1.2 on the same scripted routes in 11 galaxies, tours through all 45 galaxies in one session, a fresh-install start (title in 13 s) and Locked 30; the final build boots in 12.6 s and ran Matter Splatter"
+    "consoleRuns": "6-7 Nov 2026 on a PS Vita (500 MHz, CapUnlocker): Good Egg, Beach Bowl, Honeyhive and Bowser's Star Reactor at zoom 1.0/1.5/2.0 in Quality, Performance and Locked 30 (docs/PERFORMANCE.md); console verify modes of every memo (0 mismatches); a 45-galaxy shader tour; the final package installed on the console with the card's shader cache set aside: compiled shaders read from the package in place; no crash dumps in any run"
   },
   "publicReleaseAccepted": false
 }

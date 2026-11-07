@@ -9,9 +9,16 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <unordered_map>
 #include <vector>
+
+// (GXV_STUTTER_LOG in vgx_backend_gl.cpp) the front end's time spent decoding and converting textures for upload, in microseconds,
+// read by the back end's 5-s "stutter-5s:" line (any thread; relaxed).
+static std::atomic<uint64_t> g_texDecodeUs{0};
+extern "C" uint64_t vgx_tex_decode_us(void) { return g_texDecodeUs.load(std::memory_order_relaxed); }
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak)); // the basic log, when the platform layer has one
 
 namespace vgx {
 
@@ -75,6 +82,37 @@ uint64_t g_evicted = 0, g_evictedBytes = 0, g_overBudgetFrames = 0;
 // Uploads by what the back end is handed (totals over the run, for the report).
 uint64_t g_dxtUploads = 0, g_dxtBytes = 0, g_rgbaUploads = 0, g_rgbaBytes = 0, g_cmprDecoded = 0, g_cmprRgbaBytes = 0;
 uint64_t g_laUploads = 0, g_laBytes = 0;
+uint64_t g_dxt5Uploads = 0, g_dxt5Bytes = 0, g_t16Uploads = 0, g_t16Bytes = 0; // GXV_CMPRA, GXV_TEX16
+uint64_t g_fmtUploads[16] = {}, g_fmtBytes[16] = {};                           // by GX format: uploads and the bytes the back end was given
+// GXV_TEXFMT_LOG=<seconds> (default 0 = off; GXV_TEX16 or GXV_CMPRA alone make it 30): at most that often, and only after an upload, one basic-log
+// line "texture uploads by GX format:" with the totals so far per GX format (uploads, MB handed to the back end) and per upload format, and the MB
+// the back end holds now. For telling how much of the texture memory (and texture-read traffic) each format and the two switches account for.
+inline void TexFormatLogMaybe() {
+    static const long every = [] {
+        const long v = EnvInt("GXV_TEXFMT_LOG", 0);
+        return v > 0 ? v : ((EnvInt("GXV_TEX16", 0) != 0 || EnvInt("GXV_CMPRA", 0) != 0) ? 30L : 0L);
+    }();
+    if (every <= 0 || !port_log_summary) return;
+    static auto last = std::chrono::steady_clock::now() - std::chrono::hours(1);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(every)) return;
+    last = now;
+    static const char* const kFmt[16] = {"I4", "I8", "IA4", "IA8", "RGB565", "RGB5A3", "RGBA8", "?7", "C4", "C8", "C14X2", "?B", "?C", "?D", "CMPR", "?F"};
+    char line[640];
+    int n = std::snprintf(line, sizeof line, "texture uploads by GX format:");
+    for (int i = 0; i < 16 && n > 0 && n < static_cast<int>(sizeof line); ++i)
+        if (g_fmtUploads[i])
+            n += std::snprintf(line + n, sizeof line - n, " %s %llu (%.1f MB)", kFmt[i], static_cast<unsigned long long>(g_fmtUploads[i]), g_fmtBytes[i] / 1048576.0);
+    if (n > 0 && n < static_cast<int>(sizeof line))
+        std::snprintf(line + n, sizeof line - n,
+                      "; as DXT1 %llu (%.1f MB), RGBA8 %llu (%.1f MB, of them CMPR %.1f MB), LA88 %llu (%.1f MB), DXT5 from CMPR %llu (%.1f MB, GXV_CMPRA), "
+                      "16-bit %llu (%.1f MB, GXV_TEX16); %.1f MB held now",
+                      static_cast<unsigned long long>(g_dxtUploads), g_dxtBytes / 1048576.0, static_cast<unsigned long long>(g_rgbaUploads), g_rgbaBytes / 1048576.0,
+                      g_cmprRgbaBytes / 1048576.0, static_cast<unsigned long long>(g_laUploads), g_laBytes / 1048576.0,
+                      static_cast<unsigned long long>(g_dxt5Uploads), g_dxt5Bytes / 1048576.0, static_cast<unsigned long long>(g_t16Uploads),
+                      g_t16Bytes / 1048576.0, g_liveBytes / 1048576.0);
+    port_log_summary("%s", line);
+}
 // The textures of the HD pack's list, by texture id (IsCharaTexture; ids are handed out in order and never reused).
 std::vector<uint8_t> g_charaTex;
 inline void SetCharaTexture(uint32_t texId, bool on, bool player = false) {
@@ -231,7 +269,7 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
         if (levels > full) levels = full;
     }
     // GXV_NOMIP=1 (diagnostic): never use mip levels.
-    static const bool noMip = EnvInt("GXV_NOMIP", 0) != 0;
+    const bool noMip = VGX_KNOB(EnvInt("GXV_NOMIP", 0) != 0) != 0;
     bool wantMips = levels > 1 && out.minFilter >= FILT_NEAR_MIP_NEAR && !noMip;
     if (!wantMips) {
         levels = 1;
@@ -298,6 +336,14 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
         e.contentHash = XXH3_64bits(o.data, size);
     }
     if (upload) {
+        // (GXV_STUTTER_LOG) the decode and conversion below, timed
+        struct DecodeTimer {
+            std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+            ~DecodeTimer() {
+                const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+                if (us > 0) g_texDecodeUs.fetch_add(static_cast<uint64_t>(us), std::memory_order_relaxed);
+            }
+        } decodeTimer;
         const backend::Caps& caps = backend::GetCaps();
         TexUpload up;
         up.texId = e.texId;
@@ -322,7 +368,12 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
         // a level uses the one thing DXT1 renders differently (see CmprToDxt1).
         //   GXV_DXT1=0  always decode;  =2  DXT1 for those textures too (their transparent
         //   texels become transparent black: dark fringes where they are filtered)
-        static const bool dxtAll = EnvInt("GXV_DXT1", 1) == 2;
+        const bool dxtAll = VGX_KNOB(EnvInt("GXV_DXT1", 1) == 2) != 0;
+        // GXV_CMPRA=1 (default 0; the Strikers port's 1.3 MSC_VGX_CMPRA: colours can move a little): those textures go as DXT5 (CmprToDxt5)
+        // instead of being decoded: 8 bits per texel instead of 32, and a quarter of the texture reads' traffic. Only where the chain
+        // needs no completing (Caps::mipClamp: the console) or there is no chain; non-power-of-two sizes are still decoded (see below).
+        const bool cmprA = VGX_KNOB(EnvInt("GXV_CMPRA", 0) != 0) != 0;
+        bool dxt5 = false;
         bool dxt = !hd && fmt == 0xE && caps.dxt1;
         // (vitaGL stores compressed textures swizzled; for sizes that are not powers of two it
         // takes another path that has not been read through: those are decoded on the console)
@@ -337,12 +388,28 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
             uint32_t w = o.width, h = o.height;
             for (uint32_t l = 0; l < authored; ++l) {
                 up.levels.emplace_back(Dxt1Size(w, h));
-                if (!CmprToDxt1(src, w, h, up.levels.back().data(), dxtAll)) { dxt = false; break; }
+                if (!CmprToDxt1(src, w, h, up.levels.back().data(), dxtAll)) {
+                    dxt = false;
+                    dxt5 = cmprA && caps.dxt5 && (caps.mipClamp || !wantMips);
+                    break;
+                }
                 src += TexLevelSize(w, h, fmt);
                 w = w > 1 ? w / 2 : 1;
                 h = h > 1 ? h / 2 : 1;
             }
-            if (!dxt) {
+            if (dxt5) { // (GXV_CMPRA: the same levels as DXT5)
+                up.levels.clear();
+                src = data;
+                w = o.width;
+                h = o.height;
+                for (uint32_t l = 0; l < authored; ++l) {
+                    up.levels.emplace_back(Dxt5Size(w, h));
+                    CmprToDxt5(src, w, h, up.levels.back().data());
+                    src += TexLevelSize(w, h, fmt);
+                    w = w > 1 ? w / 2 : 1;
+                    h = h > 1 ? h / 2 : 1;
+                }
+            } else if (!dxt) {
                 up.levels.clear();
                 authored = levels;
                 ++g_cmprDecoded;
@@ -350,6 +417,8 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
         }
         if (hd) {
             // (up was filled by the hook: its own mip chain, sampled with a mip filter below)
+        } else if (dxt5) {
+            up.format = TF_DXT5;
         } else if (dxt) {
             up.format = TF_DXT1;
             if (wantMips && !caps.mipClamp) {
@@ -404,6 +473,19 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
                     lw = nw; lh = nh;
                 }
             }
+            // GXV_TEX16=1|2 (default 0; the Strikers port's 1.3 MSC_VGX_TEX16): a decoded texture whose texels all fit a 16-bit format goes in
+            // that format: half the memory and half the texture reads' traffic (RGB565 sources always; RGB5A3, palettes and I4 when they fit:
+            // decided from the texels, whatever the GX format). 1 = textures without mipmaps; 2 = mipmapped too (565 and 4444 only when vitaGL
+            // makes the levels; its generated levels then round to the same bits). The GPU expands 5 bits to c / 31, not to the 8-bit replica
+            // over 255: under half a step of 255, so an output can differ by one level at most. Not for the authored I4 chain (its own upload).
+            const long tex16 = static_cast<long>(VGX_KNOB(EnvInt("GXV_TEX16", 0)));
+            if (tex16 && (tex16 >= 2 || !wantMips) && !up.preserveI4Mips && caps.tex16) {
+                const uint8_t f16 = Rgba16Format(up.levels, !up.genMips);
+                if (f16) {
+                    for (std::vector<uint8_t>& lv : up.levels) PackRgba16(lv, f16);
+                    up.format = f16;
+                }
+            }
         }
         up.authored = static_cast<uint8_t>(authored < up.levels.size() ? authored : up.levels.size());
         e.mipmapped = wantMips || hd;
@@ -414,8 +496,13 @@ static bool ResolveTextureFull(int texMap, TexBind& out, uint16_t& width, uint16
             if (up.genMips) bytes += bytes / 3;
             if (hd) { ++g_hdUploads; g_hdBytes += bytes; g_hdLive += bytes; e.hd = true; }
             else if (up.format == TF_DXT1) { ++g_dxtUploads; g_dxtBytes += bytes; }
+            else if (up.format == TF_DXT5) { ++g_dxt5Uploads; g_dxt5Bytes += bytes; }
+            else if (up.format >= TF_RGB565) { ++g_t16Uploads; g_t16Bytes += bytes; }
             else if (up.format == TF_LA88) { ++g_laUploads; g_laBytes += bytes; }
             else { ++g_rgbaUploads; g_rgbaBytes += bytes; if (fmt == 0xE) g_cmprRgbaBytes += bytes; }
+            ++g_fmtUploads[fmt & 15u];
+            g_fmtBytes[fmt & 15u] += bytes;
+            TexFormatLogMaybe(); // (GXV_TEXFMT_LOG: the basic log's "texture uploads by GX format" line)
             ++stats::Cur().texUploads;
             stats::Cur().texUploadBytes += bytes;
             stats::TexLive(e.bytes ? 0 : 1, static_cast<int64_t>(bytes) - e.bytes);
@@ -465,11 +552,11 @@ struct TexMemo {
 TexMemo g_texMemo[256];
 uint64_t g_texMemoHits = 0, g_texMemoChecked = 0, g_texMemoBad = 0;
 int TexMemoMode() {
-    static const int m = [] {
+    const int m = static_cast<int>(VGX_KNOB([] {
         int v = static_cast<int>(EnvInt("GXV_TEXMEMO", 1));
         if (v == 2 && !diag::kEnabled) v = 1;
         return v;
-    }();
+    }()));
     return m;
 }
 inline void TexRegs(int m, uint32_t r[5]) {
@@ -509,6 +596,24 @@ inline bool TexMemoHit(const TexMemo& t, int m, const uint32_t r[5], TexBind& ou
 }
 } // namespace
 
+// GXV_FE_PREFETCH (vgx_draw.cpp ResolvePrefetch): the memo slots of `texMaps` for their registers as they are now (step 1), then (2)
+// the cache entry and the generation counter a hit checks. Only reads.
+void TexMemoPrefetch(uint8_t texMaps, int step) {
+    if (TexMemoMode() != 1 || g_texVerify) return;
+    for (uint32_t mm = texMaps; mm; mm &= mm - 1) {
+        const int m = __builtin_ctz(mm);
+        uint32_t r[5];
+        TexRegs(m, r);
+        const TexMemo& t = g_texMemo[TexMemoSlot(r)];
+        if (step == 1) {
+            FePrefetchLines(&t, sizeof t, 3);
+            continue;
+        }
+        if (!t.valid || !t.e || std::memcmp(t.regs, r, sizeof r) != 0) continue;
+        FePrefetchLines(t.e, sizeof(Entry), 2);
+        if (t.size) GuestWriteGenerationPrefetch(t.data, t.size);
+    }
+}
 void TexMemoCounters(uint64_t out[3]) { out[0] = g_texMemoHits; out[1] = g_texMemoChecked; out[2] = g_texMemoBad; }
 bool ResolveTexture(int texMap, TexBind& out, uint16_t& width, uint16_t& height) {
     const int mode = TexMemoMode();
@@ -631,6 +736,13 @@ void TexCacheReport(FILE* f) {
                  static_cast<unsigned long long>(g_dxtUploads), g_dxtBytes / 1048576.0, static_cast<unsigned long long>(g_rgbaUploads),
                  g_rgbaBytes / 1048576.0, static_cast<unsigned long long>(g_cmprDecoded), g_cmprRgbaBytes / 1048576.0);
     if (g_laUploads) std::fprintf(f, "texture uploads: %llu as LA88 (%.1f MB)\n", static_cast<unsigned long long>(g_laUploads), g_laBytes / 1048576.0);
+    if (g_dxt5Uploads) std::fprintf(f, "texture uploads: %llu CMPR as DXT5 (%.1f MB, GXV_CMPRA)\n", static_cast<unsigned long long>(g_dxt5Uploads), g_dxt5Bytes / 1048576.0);
+    if (g_t16Uploads) std::fprintf(f, "texture uploads: %llu in 16 bits (%.1f MB, GXV_TEX16)\n", static_cast<unsigned long long>(g_t16Uploads), g_t16Bytes / 1048576.0);
+    {
+        static const char* const kFmt[16] = {"I4", "I8", "IA4", "IA8", "RGB565", "RGB5A3", "RGBA8", "?7", "C4", "C8", "C14X2", "?B", "?C", "?D", "CMPR", "?F"};
+        for (int i = 0; i < 16; ++i)
+            if (g_fmtUploads[i]) std::fprintf(f, "texture uploads by GX format: %s %llu (%.1f MB uploaded)\n", kFmt[i], static_cast<unsigned long long>(g_fmtUploads[i]), g_fmtBytes[i] / 1048576.0);
+    }
     if (g_hdUploads)
         std::fprintf(f, "texture uploads: %llu replaced by HD textures (%.1f MB; %.1f MB alive now)\n", static_cast<unsigned long long>(g_hdUploads),
                      g_hdBytes / 1048576.0, g_hdLive / 1048576.0);

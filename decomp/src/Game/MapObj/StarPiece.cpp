@@ -1095,6 +1095,10 @@ void StarPiece::tryGotJudge() {
 
     if (mGettableDelayCounter < 0) {
         bool isPointing = MR::isStarPointerPointing1Por2P(this, "\x8e\xe3", false, false);
+#ifdef TARGET_PC
+        // (the port's Star Bit reach, pause menu: Select; level 1, the default, is the game's own and adds nothing)
+        isPointing = isPointing || MR::isStarPointerPointingStarPieceAssist(this);
+#endif
         MR::getStarPointerLastPointedPort(this);
 
         if (isPointing == true) {

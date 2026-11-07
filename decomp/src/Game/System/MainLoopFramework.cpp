@@ -552,6 +552,33 @@ namespace {
 #if defined(TARGET_PC)
 // The deferred wait (GXV_DRAWDONE_DEFER). `point`: 0 before a GXSetDrawDone, 1 at the start of GameSystem::update, 2 at the start of
 // GameSystem::calcAnim. Game thread only.
+// GXV_DRAWDONE_DEFER 3 and 4: the drawn turn's flushes (the far models, the material lists and the view pass made just before its
+// picture) write the half of each double buffer the front end is not reading; a view matrix or material list written anywhere else
+// (an object that calls viewCalc in its own movement or calcAnim, NormalMapBase, ModelHolder, Unizo; EarthenPipe's lists) waits
+// for the front end first, so it never overwrites what the last picture still reads. Counted for the log.
+static int sFlushScope = 0;
+static unsigned sOutsideWaits = 0;
+extern "C" void port_gx_flush_scope(int on) { sFlushScope = on; }
+extern "C" int port_gx_in_flush_scope(void) { return sFlushScope; }
+extern "C" int port_gx_drawdone_defer_mode(void);
+extern "C" int port_gx_drawdone_pending(void);
+extern "C" void port_log_summary(const char* fmt, ...);
+extern "C" void port_gx_view_write_from(void* from);
+extern "C" void port_gx_view_write(void) { port_gx_view_write_from(__builtin_return_address(0)); }
+extern "C" void port_gx_view_write_from(void* from) {
+    if (sFlushScope || port_gx_drawdone_defer_mode() < 3 || !port_gx_drawdone_pending()) {
+        return;
+    }
+    ++sOutsideWaits;
+    // Who (the first ones, and every 1024th): the caller's address, with this function's own for the module's slide.
+    if (sOutsideWaits <= 24 || (sOutsideWaits & 0x3FF) == 0) {
+        port_log_summary("drawdone-defer: outside write from %p (port_gx_view_write_from at %p)", from, (void*)&port_gx_view_write_from);
+    }
+    port_gx_drawdone_settle(0);
+    if ((sOutsideWaits & 0x3FF) == 1) {
+        port_log_summary("drawdone-defer: %u waits for the front end by a view or list write outside the drawn turn's flush", sOutsideWaits);
+    }
+}
 extern "C" void port_gx_drawdone_settle(int point) {
     if (!port_gx_drawdone_must_wait(point)) {
         return;

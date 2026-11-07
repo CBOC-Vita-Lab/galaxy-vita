@@ -184,4 +184,11 @@ public:
     /* 0x80 */ StarPointerTarget* mStarPointerTarget;
     /* 0x84 */ ActorLightCtrl* mActorLightCtrl;
     /* 0x88 */ ActorPadAndCameraCtrl* mCameraCtrl;
+#ifdef TARGET_PC
+    bool mStaleAnim = false;  // (GXV_ANIM_LOD) joints not computed since a far turn without a picture; listed for the next drawn turn
+    bool mStaleXLatch = false;  // (GXV_ANIM_LOD) the XanimePlayer's _88 as the last left-out calcAnim found it (LiveActor.cpp)
+    u8 mLogicFreeJoints = 0;    // (GXV_ANIM_LOD_FREE) 1: nothing but the picture reads this model's joints (set by the class; in the
+                                // padding before mLodRadius: the size is unchanged)
+    f32 mLodRadius = -1.0f;     // (GXV_ANIM_LOD_OFFSCREEN) the model's bounding radius at scale 1 (<0: not known yet; 0: never off-screen)
+#endif
 };

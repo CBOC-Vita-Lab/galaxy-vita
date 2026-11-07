@@ -12,6 +12,9 @@ public:
 
     virtual void updateMtx(const TPos3f& rMtx);
     virtual bool calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPosition) const;
+#ifdef TARGET_PC
+    virtual f32 calcReach(TVec3f* pCentre) const;
+#endif
 
     void setPlane(const TVec3f& rPlaneUp, const TVec3f& rPlanePos);
     void setRangeBox(const TPos3f& rMtx);

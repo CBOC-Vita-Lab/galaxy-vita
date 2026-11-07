@@ -1,0 +1,102 @@
+vgx uniform shadows (Galaxy back end, GXV_UNI_SHADOW; agent be8): vglGetUniformShadow gives the addresses in a program's vertex /
+fragment default uniform shadow buffers of an F32 four-component uniform (vec4, vec4 array, mat4) and how many bytes belong to it;
+vglUniformShadowWritten sets the dirty flags and forgets the program's uniform-ring copy for the stages a caller wrote there, as
+glUniform* does (vgl_fill_uniform_data / vgl_note_unif_write). Nothing changes unless a caller uses the two calls.
+Applies after 0014 (and after the shader-cache reader's changes to custom_shaders.c).
+
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -676,6 +676,74 @@
+ #define get_uniform_from_ptr(ptr, offs) (-ptr)
+ #endif
+ 
++// ---- vgx uniform shadows (Galaxy GXV_UNI_SHADOW; nothing changes unless a caller uses the two calls below)
++// glUniform4fv / glUniformMatrix4fv (transpose GL_FALSE) on an F32 four-component uniform end in one copy of 16 bytes an element
++// to u->vptr and u->fptr (vgl_fill_uniform_data / vglSetUniformData), the dirty flag of each stage written and the forgetting of
++// the program's ring copy (vgl_note_unif_write). A caller that keeps its own copy of what it gave can compare against these
++// buffers and write only what changed, with one call for the dirty flags afterwards. Not with HAVE_GLSL_TEXTURE_SIZE nor the
++// fixed-function path (they write the buffers themselves), nor STRICT_UNIFORMS_COMPLIANCE locations with an element offset.
++GLboolean vglGetUniformShadow(GLuint prog, GLint location, void **vptr, void **fptr, uint32_t *bytes) {
++#if defined(HAVE_GLSL_TEXTURE_SIZE) || defined(HAVE_FFP_SHADER_SUPPORT)
++	return GL_FALSE;
++#else
++	if (!prog || prog > MAX_CUSTOM_PROGRAMS || location == -1 || location == 0 || !vptr || !fptr || !bytes)
++		return GL_FALSE;
++	program *p = &progs[prog - 1];
++	if (p->status != PROG_LINKED)
++		return GL_FALSE;
++	int offs = 0;
++	uniform *u = (uniform *)get_uniform_from_ptr(location, &offs);
++	if (offs != 0 || !u || u->type != UNIFORM_DATA || !u->ptr)
++		return GL_FALSE;
++	if (sceGxmProgramParameterGetType(u->ptr) != SCE_GXM_PARAMETER_TYPE_F32 || sceGxmProgramParameterGetComponentCount(u->ptr) != 4)
++		return GL_FALSE;
++	uint32_t room = sceGxmProgramParameterGetArraySize(u->ptr) * 16;
++	if (!room)
++		room = 16;
++	// (the uniform must be this program's: its addresses lie in this program's buffers; what is left of each buffer bounds it)
++	if (u->vptr) {
++		const uint8_t *b = (const uint8_t *)p->unif_vbuffer, *a = (const uint8_t *)u->vptr;
++		if (!b || a < b || a >= b + p->vshader->unif_buf_size)
++			return GL_FALSE;
++		if ((uint32_t)(b + p->vshader->unif_buf_size - a) < room)
++			room = (uint32_t)(b + p->vshader->unif_buf_size - a);
++	}
++	if (u->fptr) {
++		const uint8_t *b = (const uint8_t *)p->unif_fbuffer, *a = (const uint8_t *)u->fptr;
++		if (!b || a < b || a >= b + p->fshader->unif_buf_size)
++			return GL_FALSE;
++		if ((uint32_t)(b + p->fshader->unif_buf_size - a) < room)
++			room = (uint32_t)(b + p->fshader->unif_buf_size - a);
++	}
++	if (!u->vptr && !u->fptr)
++		return GL_FALSE;
++	*vptr = u->vptr;
++	*fptr = u->fptr;
++	*bytes = room;
++	return GL_TRUE;
++#endif
++}
++
++void vglUniformShadowWritten(GLuint prog, uint32_t stages) {
++	if (!(stages & 3))
++		return;
++	// (as vgl_fill_uniform_data: the stages written are dirty for the current program ...)
++	if (stages & 1)
++		dirty_shader_vert_unifs = GL_TRUE;
++	if (stages & 2)
++		dirty_shader_frag_unifs = GL_TRUE;
++	// (... and as vgl_note_unif_write: the program's own ring copies are forgotten, or every program's when it is not current)
++	if (prog && prog == cur_program) {
++		program *p = &progs[prog - 1];
++		if (stages & 1)
++			p->ring_gen_v = 0;
++		if (stages & 2)
++			p->ring_gen_f = 0;
++	} else {
++		vgl_unif_epoch++;
++	}
++}
++
+ void release_shader(shader *s) {
+ 	// Deallocating shader and unregistering it from sceGxmShaderPatcher
+ 	if (s->prog) {
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1135,6 +1135,14 @@
+ #define VGL_DRAWCACHE_UNIREUSE 2
+ void vglSetDrawCaches(uint32_t flags);
+ void vglGetDrawCacheStats(uint32_t *stats);
++// vgx uniform shadows (custom_shaders.c; Galaxy GXV_UNI_SHADOW): vglGetUniformShadow gives, for a data uniform of program prog
++// that is an F32 vec4 (or a vec4 array, or a mat4), the address of its values in the program's vertex and fragment default
++// uniform shadow buffers (NULL for a stage that does not have it) and how many bytes from there belong to it; GL_FALSE for
++// anything else. A caller that writes there exactly what glUniform4fv / glUniformMatrix4fv would write calls
++// vglUniformShadowWritten with the stages it changed (1 vertex, 2 fragment) while prog is the current program: the same dirty
++// flags and ring-copy invalidation as glUniform*, without the per-call path.
++GLboolean vglGetUniformShadow(GLuint prog, GLint location, void **vptr, void **fptr, uint32_t *bytes);
++void vglUniformShadowWritten(GLuint prog, uint32_t stages);
+ 
+ // Get the compiled shader binary of a given GL shader.
+ void vglGetShaderBinary(GLuint index, GLsizei bufSize, GLsizei *length, void *binary);

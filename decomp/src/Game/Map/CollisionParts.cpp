@@ -10,6 +10,29 @@
 #include "Game/Util/MtxUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/TriangleFilter.hpp"
+#ifdef TARGET_PC
+#include "port/shadow_memo_hooks.h"
+#include <cstring>
+// shadowmemo2 (GXV_SHADOWMEMO): the writers of what a shadow's projection cast reads report their changes (port/shadow_memo_hooks.h).
+namespace {
+    struct PortMemoMtx {
+        f32 m[24];  // mBaseMatrix, mInvBaseMatrix before the write
+    };
+    inline void portMemoSave(const CollisionParts* pParts, PortMemoMtx* pOut) {
+        std::memcpy(pOut->m, &pParts->mBaseMatrix, sizeof(f32) * 12);
+        std::memcpy(pOut->m + 12, &pParts->mInvBaseMatrix, sizeof(f32) * 12);
+    }
+    void portMemoMtxDone(const CollisionParts* pParts, const PortMemoMtx& rWas) {
+        if (std::memcmp(rWas.m, &pParts->mBaseMatrix, sizeof(f32) * 12) == 0 && std::memcmp(rWas.m + 12, &pParts->mInvBaseMatrix, sizeof(f32) * 12) == 0) {
+            return;
+        }
+        const f32* now = reinterpret_cast< const f32* >(&pParts->mBaseMatrix);
+        const f32 wasTrans[3] = {rWas.m[3], rWas.m[7], rWas.m[11]};
+        const f32 nowTrans[3] = {now[3], now[7], now[11]};
+        port_shadowmemo_part(pParts, wasTrans, pParts->_D8, pParts->_CC, nowTrans, pParts->_D8, pParts->_CC);
+    }
+}  // namespace
+#endif
 
 void CollisionParts_FORCE_MATCH_SDATA2() {
     1.0f;
@@ -54,6 +77,11 @@ void CollisionParts::init(const TPos3f& rMatrix, HitSensor* pHitSensor, const vo
 
     updateBoundingSphereRange(scale);
     mKeeperIndex = keeperIndex;
+#ifdef TARGET_PC
+    if (port_shadowmemo_armed) {
+        port_shadowmemo_reshape();  // (its KCL and sensor are new: shadowmemo drops every memo)
+    }
+#endif
 }
 
 void CollisionParts::addToBelongZone() {
@@ -122,10 +150,22 @@ void CollisionParts::forceResetAllMtxAndSetUpdateMtxOneTime() {
 }
 
 void CollisionParts::resetAllMtxPrivate(const TPos3f& rMatrix) {
+#ifdef TARGET_PC
+    const bool memo = port_shadowmemo_armed != 0;
+    PortMemoMtx was;
+    if (memo) {
+        portMemoSave(this, &was);
+    }
+#endif
     mPrevBaseMatrix.setInline(rMatrix);
     mBaseMatrix.setInline(rMatrix);
     mMatrix.setInline(rMatrix);
     PSMTXInverse(mBaseMatrix.toMtxPtr(), mInvBaseMatrix.toMtxPtr());
+#ifdef TARGET_PC
+    if (memo) {
+        portMemoMtxDone(this, was);
+    }
+#endif
 }
 
 void CollisionParts::setMtx(const TPos3f& rMatrix) {
@@ -171,9 +211,21 @@ void CollisionParts::updateMtx() {
         _CE = false;
 
         if (_D4 < 2) {
+#ifdef TARGET_PC
+            const bool memo = port_shadowmemo_armed != 0;
+            PortMemoMtx was;
+            if (memo) {
+                portMemoSave(this, &was);
+            }
+#endif
             mPrevBaseMatrix.setInline(mBaseMatrix);
             mBaseMatrix.setInline(mMatrix);
             PSMTXInverse(mBaseMatrix.toMtxPtr(), mInvBaseMatrix.toMtxPtr());
+#ifdef TARGET_PC
+            if (memo) {
+                portMemoMtxDone(this, was);
+            }
+#endif
         }
     }
 }
@@ -228,8 +280,18 @@ void CollisionParts::updateBoundingSphereRange(TVec3f scale) {
 }
 
 void CollisionParts::updateBoundingSphereRangePrivate(f32 scale) {
+#ifdef TARGET_PC
+    const f32 wasRadius = _D8;
+#endif
     _DC = scale;
     _D8 = scale * mServer->mMaxVertexDistance;
+#ifdef TARGET_PC
+    if (port_shadowmemo_armed && std::memcmp(&wasRadius, &_D8, sizeof(f32)) != 0) {
+        const f32* base = reinterpret_cast< const f32* >(&mBaseMatrix);
+        const f32 trans[3] = {base[3], base[7], base[11]};
+        port_shadowmemo_part(this, trans, wasRadius, _CC, trans, _D8, _CC);
+    }
+#endif
 }
 
 const char* CollisionParts::getHostName() const {
@@ -474,7 +536,12 @@ void CollisionParts::projectToPlane(TVec3f* pProjected, const TVec3f& rPos, cons
     pProjected->set(projected);
 }
 
+#ifdef TARGET_PC
+u32 CollisionParts::checkStrikeLine(HitInfo* pHitInfo, u32 maxHits, const TVec3f& rPos, const TVec3f& rDirection, const TriangleFilterBase* pFilter,
+                                    bool nearestOnly) {
+#else
 u32 CollisionParts::checkStrikeLine(HitInfo* pHitInfo, u32 maxHits, const TVec3f& rPos, const TVec3f& rDirection, const TriangleFilterBase* pFilter) {
+#endif
     f32 distances[64];
     KC_PrismData* prisms[64];
     u8 classifications[64];
@@ -485,7 +552,11 @@ u32 CollisionParts::checkStrikeLine(HitInfo* pHitInfo, u32 maxHits, const TVec3f
     mInvBaseMatrix.mult(rPos + rDirection, localDirection);
     localDirection = localDirection - localPos;
     u32 count = 0;
+#ifdef TARGET_PC
+    mServer->checkArrow(localPos, localDirection, distances, classifications, &count, prisms, maxHits, nearestOnly);
+#else
     mServer->checkArrow(localPos, localDirection, distances, classifications, &count, prisms, maxHits);
+#endif
     u32 hitCount = 0;
 
     for (u32 i = 0; i < count; i++) {

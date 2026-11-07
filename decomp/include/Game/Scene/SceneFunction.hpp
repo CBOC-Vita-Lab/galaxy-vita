@@ -239,6 +239,10 @@ public:
     static void executeCalcAnimListOnPlayingMovie();
     static void executeCalcViewAndEntryList();
     static void executeCalcViewAndEntryList2D();
+#ifdef TARGET_PC
+    static void executeCalcViewAndEntryListPlayer();
+    static void executeCalcViewAndEntryListExceptPlayer();
+#endif
     static void executeDrawBufferListNormalOpaBeforeVolumeShadow();
     static void executeDrawBufferListNormalOpaBeforeSilhouette();
     static void executeDrawBufferListNormalOpa();
@@ -271,6 +275,10 @@ public:
     static void execute(MR::DrawType);
     static void entryDrawBuffer2D();
     static void entryDrawBuffer3D();
+#ifdef TARGET_PC
+    static void entryDrawBufferPlayer();
+    static void entryDrawBuffer3DExceptPlayer();
+#endif
     static void entryDrawBufferMirror();
     static void drawOpa(MR::DrawBufferType);
     static void drawXlu(MR::DrawBufferType);

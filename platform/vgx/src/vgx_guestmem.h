@@ -7,6 +7,8 @@ constexpr uint64_t kNotGuest = ~0ull;
 // Sum of the write-generation counters under [p, p+n); kNotGuest when the
 // range is not (entirely) inside registered guest RAM.
 uint64_t GuestWriteGeneration(const void* p, uint32_t n);
+// GXV_FE_PREFETCH: a cache hint for the counters GuestWriteGeneration(p, n) will read (the first and the last); nothing else.
+void GuestWriteGenerationPrefetch(const void* p, uint32_t n);
 bool IsGuestRam(const void* p, uint32_t n);
 bool HaveGuestRam(); // has the runtime registered its memory banks?
 // Changes whenever any write notification arrives (to detect a write that

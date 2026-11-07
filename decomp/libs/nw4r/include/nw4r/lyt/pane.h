@@ -52,6 +52,9 @@ namespace nw4r {
             virtual u8 GetVtxColorElement(u32) const;
             virtual void SetVtxColorElement(u32, u8);
             virtual Pane* FindPaneByName(const char*, bool);
+#ifdef TARGET_PC
+            Pane* FindPaneByNameSearch(const char*, bool);  // (the plain search under GXV_LC_PANEMEMO, lyt_pane.cpp)
+#endif
             virtual Material* FindMaterialByName(const char*, bool);
             virtual void BindAnimation(AnimTransform*, bool);
             virtual void UnbindAnimation(AnimTransform*, bool);
@@ -132,6 +135,12 @@ namespace nw4r {
             char mUserData[9];
             u8 mbUserAllocated;
             u8 mPadding;
+#ifdef TARGET_PC
+            // GXV_AC_PANEMTX (animcut, 6 Nov; lyt_pane.cpp): the bit patterns of the inputs of the mMtx that CalculateMtx made last
+            // (scale x/y after the location adjust, rotate x/y/z, translate x/y/z), valid when mPortMtxKeyOk is 1.
+            u32 mPortMtxKey[8];
+            u8 mPortMtxKeyOk = 0;
+#endif
         };
     };  // namespace lyt
 };  // namespace nw4r

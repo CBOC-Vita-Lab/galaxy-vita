@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "../../include/port/hot_knob.h"
 #if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(PORT_DSP_NO_NEON)
 #include <arm_neon.h>
 #endif
@@ -14,7 +15,7 @@ inline long EnvInt(const char* name, long fallback) {
 }
 inline int Mode() {
     // GXV_DSPNEON: 1 uses exact NEON PCM add/scale kernels; 2 compares to scalar and falls back on mismatch. Default off.
-    static const long mode = EnvInt("GXV_DSPNEON", 0);
+    const long mode = PORT_HOT_KNOB(long, EnvInt("GXV_DSPNEON", 0));  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h; every voice of every mixed sub-frame asks)
     return mode == 1 || mode == 2 ? static_cast<int>(mode) : 0;
 }
 inline int16_t Clamp(int32_t value) { return static_cast<int16_t>(value < -32768 ? -32768 : value > 32767 ? 32767 : value); }

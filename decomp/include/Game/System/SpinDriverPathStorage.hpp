@@ -59,6 +59,9 @@ public:
     /* 0x00 */ SpinDriverPathStorageScenario* mScenarioStorage;
     /* 0x04 */ s32 mNumScenarios;
     /* 0x08 */ const char* mGalaxyName;
+#ifdef TARGET_PC
+    s32 mNumEntries; // the entries mScenarioStorage has: every scenario of the galaxy, hidden stars included (mNumScenarios leaves them out)
+#endif
 };
 
 // NOTE/TODO: This dummy is here to ensure vtable alignment in GameDataAllGalaxyStorage.

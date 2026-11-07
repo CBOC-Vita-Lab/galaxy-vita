@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 
+#include "port/hot_knob.h"
 #include "port/port.h"
 #include "revolution/os.h"
 
@@ -75,9 +76,38 @@ void addRegion(uintptr_t base, uintptr_t alias, uint32_t physical, uint32_t size
     // Readers never see a partially initialized region; published entries are immutable.
     sRegionCount.store(count + 1, std::memory_order_release);
 }
+// GXV_LC_NATIVE (logiccut, 6 Nov; default 0): MEM1 and MEM2 (the game heaps, where nearly every pointer asked about lies) are
+// answered before the region scan. The scan's acquire load of the count is a `dmb ish` on the console, and the game thread asks
+// thousands of times a turn: J3DMaterial::getMaterialAnm (calcMaterial, entry/removeTevRegAnimator, per material), GX_PHY_ADDR
+// (GXSetArray, J3DShape::loadVtxArray, texture images, per shape drawn), DCFlushRange. The answer is the scan's: the two banks are
+// the first two regions, registered by port_mem_init before any other thread exists and never changed; regions never overlap
+// (addRegion), so a range of at least one byte inside a bank's base or alias range is in no other region, and the scan's first
+// match is that bank. A stale or zero snapshot (a thread that could see it before port_mem_init finished) only misses: the
+// scan answers. Zero-byte ranges always take the scan (one past a bank's end is also the start of the next region).
+struct FastBank { uintptr_t base, alias; uint32_t size; const Region* region; };
+FastBank sFastBank[2];
+bool lcNativeFast() {
+    return PORT_HOT_KNOB(int, [] { const char* e = getenv("GXV_LC_NATIVE"); return e && *e ? atoi(e) : 0; }()) != 0;
+}
+inline const Region* fastBankRegion(uintptr_t address, size_t bytes, uintptr_t* start) {
+    for (const FastBank& b : sFastBank) {
+        if (b.base && contains(b.base, b.size, address, bytes)) { if (start) *start = b.base; return b.region; }
+        if (b.alias && contains(b.alias, b.size, address, bytes)) { if (start) *start = b.alias; return b.region; }
+    }
+    return nullptr;
+}
+void noteFastBank(unsigned slot) {  // (port_mem_init, right after the bank's addRegion)
+    const unsigned n = sRegionCount.load(std::memory_order_acquire);
+    const Region& r = sRegions[n - 1];
+    sFastBank[slot] = {r.base, r.alias, r.size, &r};
+}
+
 const Region* nativeRegion(const void* p, size_t bytes, uintptr_t* start = nullptr) {
     const uintptr_t address = (uintptr_t)p;
     if (!address) return nullptr;
+    if (bytes != 0 && lcNativeFast()) {
+        if (const Region* r = fastBankRegion(address, bytes, start)) return r;
+    }
     const unsigned count = sRegionCount.load(std::memory_order_acquire);
     for (unsigned i = 0; i < count; ++i) {
         const Region& r = sRegions[i];
@@ -220,7 +250,9 @@ extern "C" int port_mem_init(void) {
     mapAt(scratch, 0x4000, -1);
 #endif
     addRegion(sMem1, alias1, 0, PORT_MEM1_SIZE, Mem1);
+    noteFastBank(0);
     addRegion(sMem2, alias2, 0x10000000u, PORT_MEM2_SIZE, Mem2);
+    noteFastBank(1);
     addRegion(scratch, 0, 0x30000000u, 0x4000, LockedCache);
 #if defined(__vita__)
     PortVitaImageSegment image[4]; uint32_t count = 0;

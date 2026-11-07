@@ -415,7 +415,7 @@ void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
     r.rect(76,165,808,3,gold);
     std::string title,body,detail,positive;
     switch(state.modal) {
-        case Modal::Discard:title="Discard changes?";body="Your saved settings will not change.";positive="Discard";break;
+        case Modal::Discard:title="Save your changes?";body="You changed settings since the last save.";break;
         case Modal::Restart:title="Apply and Restart?";body="Unsaved game progress will be lost.";detail="Saved choices apply together after restart.";positive="Save and Restart";break;
         case Modal::ResetProfile:title="Reset current profile?";body="Other profile and display settings will not change.";positive="Reset Profile";break;
         case Modal::Capture:title="Choose a control";body=Action(session,state.action);detail=state.candidate?"Waiting for release":"Waiting for button";break;
@@ -448,6 +448,13 @@ void ModalDraw(Raster& r,const UiState& state,const SettingsSession& session) {
             r.asset(104,369,28,kButtonCross);r.text(145,373,"Select",muted,180,true);
         } else r.text(104,298,"No buttons available",muted,748);
         r.asset(322,369,28,kButtonCircle);r.text(363,373,"Cancel",muted,420,true);
+    } else if(state.modal==Modal::Discard) {
+        static const char* const labels[3]={"Keep editing","Discard","Save"};
+        for(int i=0;i<3;++i) {
+            const int x=104+i*246;const bool sel=static_cast<int>(state.modalChoice)==i;
+            if(sel){r.rect(x,354,230,39,barColor);r.rect(x,354,3,39,cyan);}
+            r.text(x+19,359,labels[i],sel?white:muted,200);
+        }
     } else {
         int selected=state.modalChoice?478:104;r.rect(selected,354,278,39,barColor);r.rect(selected,354,3,39,cyan);
         r.text(123,359,"Cancel",state.modalChoice?muted:white,230);

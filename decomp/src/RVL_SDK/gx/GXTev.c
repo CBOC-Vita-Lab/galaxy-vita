@@ -396,6 +396,13 @@ void GXSetTevColor(GXTevRegID id, GXColor color) {
     SC_TEV_REGISTERH_SET_B8(regBG, (rgba >> 8) & 0xFF);
     SC_TEV_REGISTERH_SET_G8(regBG, (rgba >> 16) & 0xFF);
 
+#if defined(TARGET_PC)
+    if (__PortGXFx) {  // (GXV_FXMERGE: gathered with the particle loop's other calls, GXDisplayList.c)
+        __PortGXFxTevColor(regRA, regBG);
+        gx->bpSentNot = GX_FALSE;
+        return;
+    }
+#endif
     GX_WRITE_RA_REG(regRA);
     GX_WRITE_RA_REG(regBG);
     GX_WRITE_RA_REG(regBG);

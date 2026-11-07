@@ -1,4 +1,8 @@
 #include "Game/Player/MarioActor.hpp"
+#ifdef TARGET_PC
+#include <cstdlib>
+extern "C" void port_log_summary(const char* fmt, ...);
+#endif
 #include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 
@@ -291,11 +295,43 @@ void MarioActor::updateControllerSwing() {
     bool isCorePadSwing = !mMario->isSwimming() ? MR::isCorePadSwing(0) : MR::isCorePadSwingTrigger(0);
     _F20 = isCorePadSwing;
 
+#ifdef TARGET_PC
+    // A spin button pressed in the short pause after a jump (the game ignores a swing for 10 updates after A or B: on the Wii a
+    // shake that soon after the button is rare, with a button it is the natural way to jump and spin) is kept for the end of that
+    // pause and done then, instead of being dropped. Only a swing begun inside the jump's own pause (10 updates or less to go),
+    // so the longer pauses the game sets for its own reasons still drop it. GXV_SPIN_BUFFER=0: as on the Wii.
+    static const bool sSpinBuffer = [] { const char* e = getenv("GXV_SPIN_BUFFER"); return !e || e[0] != '0'; }();
+    static s32 sSpinPending = 0;
+    if (sSpinPending > 0) --sSpinPending;
+#endif
     if (_F1C != 0) {
+#ifdef TARGET_PC
+        if (sSpinBuffer && isCorePadSwing && F20 == 0 && _F1C <= 10) sSpinPending = _F1C + 2;
+#endif
         _F1C--;
     } else if (isCorePadSwing && F20 == 0) {
         _F00 = true;
+#ifdef TARGET_PC
+        sSpinPending = 0;
+    } else if (sSpinPending > 0) {
+        _F00 = true;
+        sSpinPending = 0;
+#endif
     }
+#ifdef TARGET_PC
+    // GXV_LOG_SPIN=1 (a test switch): one log line per A/B trigger and per swing the spin test reads (spin requested or swallowed
+    // by the A/B cooldown), with the game update it happened in.
+    {
+        static const int logSpin = [] { const char* e = getenv("GXV_LOG_SPIN"); return e && *e == '1' ? 1 : 0; }();
+        static unsigned updates = 0;
+        ++updates;
+        if (logSpin) {
+            if (checkButtonType(3, false) || checkButtonType(4, false)) port_log_summary("spin-test: update %u A/B trigger", updates);
+            if (isCorePadSwing && !F20) port_log_summary("spin-test: update %u swing edge -> %s (cooldown %d)", updates, _F00 ? "SPIN" : (sSpinPending ? "kept" : "swallowed"), (int)_F1C);
+            else if (_F00) port_log_summary("spin-test: update %u kept swing -> SPIN", updates);
+        }
+    }
+#endif
 
     if (isCorePadSwing && _946 > 10 && _F1C < 8) {
         _F1C = 8;

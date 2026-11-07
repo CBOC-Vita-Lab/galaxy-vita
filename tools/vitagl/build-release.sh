@@ -26,7 +26,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 fast=${FAST:-1}  # 1.2 ships nhustdx; FAST=0 (or the name nhustd) builds the 1.0/1.1 option set
 if [ -n "${1:-}" ]; then name=$1; elif [ "$fast" = 1 ]; then name=nhustdx; else name=nhustd; fi
 [ "$name" = nhustdx ] && fast=1
-options="DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP"
+# MASK_KEEP (patches/0018): compiled in, inert until the host calls vglSetMaskKeep(GL_TRUE) (GXV_VGL_MASKKEEP=1 in env.txt).
+# COLOR_LOAD_FROM (patches/0019): compiled in, inert until the host calls vglColorLoadFrom (GXV_VGL_LOADFROM=1 in env.txt).
+options="DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP MASK_KEEP COLOR_LOAD_FROM"
 [ "$fast" = 1 ] && options="$options DRAW_SPEEDHACK INDICES_SPEEDHACK SAMPLERS_SPEEDHACK GXM_STATE_CACHE HAVE_SCRATCH_MEMORY"
 options="$options ${VGL_EXTRA:-}"
 upstream=${VGL_UPSTREAM:?set VGL_UPSTREAM to a git clone of https://github.com/Rinnegatamante/vitaGL}

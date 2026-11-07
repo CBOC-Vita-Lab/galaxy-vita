@@ -22,7 +22,11 @@
 //   GXV_RIGIDMERGE_DLMAX=<n>    (with GXV_RIGIDMERGE) lists of up to n vertices without matrix indices stay in the arena, to join palette runs
 //   GXV_RIGIDMERGE_DLMAX=learn  (or GXV_RIGIDMERGE_DLLEARN=1) the same for lists of up to GXV_RIGIDMERGE_DLLEARN_MAX vertices (default 512), but a list
 //                               is copied only where that joins a run: see "learned copies" below
+//   GXV_DRAWREPLAY=1    (default) the "draw replay" below: a call that repeats the previous picture's call at the same place in the
+//                           picture goes to its cache entry without the lookups; 2: also hints the next call's entry; 0: off
 // Counters: per frame in the CSV (dlHit, dlBuild, dlRehash, dlBypass), totals in vgx_stats.txt.
+#include "vgx_workload.h"
+#include "vgx_fesplit.h"
 #include "vgx_guestmem.h"
 #include "vgx_state.h"
 
@@ -61,41 +65,48 @@ struct Run {
     uint32_t posMtxMax = 0, prims = 0;
 };
 
+// Per indexed attribute (POS, NRM, CLR0, CLR1, TEX0..7): the array a decode read, the span of it, and the span's write generation.
+struct ArrUse {
+    const uint8_t* p = nullptr;
+    uint32_t stride = 0;
+    uint32_t lo = 0, hi = 0;
+    uint64_t gen = 0;
+};
 struct Entry {
-    // ---- identity
+    // ---- what a hit reads (CallListBody, GXV_DRAWREPLAY), first and together: on the console a hit's time is mostly its cache
+    // misses, and the fields it reads were spread over some fourteen cache lines of 32 bytes.
+    // identity and policy
     const uint8_t* list = nullptr;
     uint32_t nbytes = 0;
-    uint8_t vcd[24] = {};          // (21 used; whole words, to compare them as such)
-    uint8_t fmtMask = 0;           // vertex formats the list's draws use
-    VtxAttrFmt vat[8][12] = {};    // rows of those formats (attributes POS..TEX7)
     uint32_t idxMask = 0;          // indexed attributes that were read
-    const uint8_t* arr[12] = {};
-    uint32_t arrStride[12] = {};
-    // ---- validity
-    uint64_t genList = 0;
-    uint64_t genArr[12] = {};
-    uint32_t lo[12] = {}, hi[12] = {};
-    uint64_t hash = 0;
-    // ---- content
-    std::vector<Seg> segs;
-    std::vector<Run> runs;         // once promoted
-    std::vector<uint8_t> verts;    // decoded vertices (handed to the back end when promoted)
-    std::vector<uint16_t> idx;     // only kept for GXV_HASH=2
-    std::vector<RowBox> rowBoxes;  // (GXV_CHARAA) model-space bounds of the vertices per position-matrix row, [0] = all (RowBoxesOf)
-    uint32_t totalVerts = 0;
-    uint32_t bufId = 0;            // static buffer in the back end (0: vertices are copied into the frame arena per use)
-    uint32_t bufBytes = 0;
-    bool promotable = false;       // the list as a whole is too large for the CPU-transform-and-merge path
-    bool rigidCopy = false;        // GXV_RIGIDMERGE_DLMAX keeps it in the arena (counted as a copy for a palette run)
-    // ---- learned copies (GXV_RIGIDMERGE_DLLEARN, see below)
-    bool copyable = false;         // the decoded vertices are kept after the promotion, so that a use can copy them into the arena
-    uint32_t keptBytes = 0;
-    uint32_t serial = 0;           // (staggers the probes; names the entry in the table of uses)
-    // ---- policy
-    uint64_t lastUse = 0;
+    uint8_t fmtMask = 0;           // vertex formats the list's draws use
     uint8_t fails = 0;             // consecutive content changes
     bool raced = false;            // a write over what this reads arrived while it was being built: rebuild on next use
+    bool promotable = false;       // the list as a whole is too large for the CPU-transform-and-merge path
+    bool rigidCopy = false;        // GXV_RIGIDMERGE_DLMAX keeps it in the arena (counted as a copy for a palette run)
+    bool copyable = false;         // (learned copies, GXV_RIGIDMERGE_DLLEARN, see below) the decoded vertices are kept after the promotion
+    uint32_t rpStamp = 0;          // (GXV_DRAWREPLAY) moves when the entry is built again or stops being the first variant of its list
+    uint32_t bufId = 0;            // static buffer in the back end (0: vertices are copied into the frame arena per use)
+    uint32_t totalVerts = 0;
+    uint64_t lastUse = 0;
+    // validity
+    uint64_t genList = 0;
+    uint8_t vcd[24] = {};          // (21 used; whole words, to compare them as such)
     Entry* next = nullptr;         // other variants of the same list
+    // content a hit emits
+    std::vector<Run> runs;         // once promoted
+    std::vector<RowBox> rowBoxes;  // (GXV_CHARAA) model-space bounds of the vertices per position-matrix row, [0] = all (RowBoxesOf)
+    ArrUse arr[12];                // (the indexed attributes: idxMask >> 9)
+    VtxAttrFmt vat[8][12] = {};    // rows of the formats in fmtMask (attributes POS..TEX7)
+    // ---- the rest
+    uint64_t hash = 0;
+    std::vector<Seg> segs;
+    std::vector<uint8_t> verts;    // decoded vertices (handed to the back end when promoted)
+    std::vector<uint16_t> idx;     // only kept for GXV_HASH=2
+    uint32_t bufBytes = 0;
+    uint32_t ticket = 0;           // (GXV_SPLIT_COPY) its last copies into the arena: split::Settle before verts change or go
+    uint32_t keptBytes = 0;        // (learned copies)
+    uint32_t serial = 0;           // (staggers the probes; names the entry in the table of uses)
 };
 
 // Per list: its variants (same bytes, different vertex state / arrays) and the
@@ -136,6 +147,8 @@ public:
     }
     bool empty() const { return live_ == 0; }
     size_t size() const { return live_; }
+    // (GXV_FE_PREFETCH) the slot a lookup of `key` reads first, or null
+    const void* HomeSlot(const uint8_t* key) const { return slots_.empty() ? nullptr : &slots_[Home(key)]; }
     V* Find(const uint8_t* key) {
         if (slots_.empty()) return nullptr;
         for (size_t i = Home(key);; i = (i + 1) & mask_) {
@@ -211,6 +224,10 @@ MapFront g_mapFront[256] = {};
 inline void MapFrontClear() {
     for (MapFront& f : g_mapFront) f.li = nullptr;
 }
+// (GXV_DRAWREPLAY, see "draw replay" below) moves whenever an entry is freed (evicted, unlinked; a list is put out of caching only
+// together with that): a record of the trace names an entry, and is used only while no entry was freed since it was made.
+uint32_t g_rpEpoch = 1;
+inline void RpBump() { ++g_rpEpoch; }
 struct Bypass {
     uint64_t until = 0;
     uint8_t level = 0; // each time a list proves volatile again it is left alone twice as long
@@ -297,6 +314,7 @@ void ReleaseBuffer(Entry& e) {
 }
 // Moves the entry's geometry into a static buffer of the back end.
 void Promote(Entry& e) {
+    split::Settle(e.ticket); // (GXV_SPLIT_COPY: the vertices may move to the back end below)
     // With absolute indices every primitive of the buffer is addressed from the buffer's
     // start: that needs one stride for all of them and 16 bits to be enough. (Lists with
     // more than one primitive are rare in this game; one that does not qualify stays in
@@ -369,8 +387,13 @@ void Promote(Entry& e) {
     buf.cmds.push_back(Cmd{CMD_BUF_UPLOAD, static_cast<uint32_t>(buf.bufUploads.size() - 1)});
 }
 
-void Init() {
-    if (g_mode >= 0) return;
+void InitSlow();
+// (the test inline, the reading out of line: CallList and CallListBody ask for every list, ~3,000 calls a picture)
+inline __attribute__((always_inline)) void Init() {
+    if (__builtin_expect(g_mode >= 0, 1)) return;
+    InitSlow();
+}
+__attribute__((noinline)) void InitSlow() {
     const char* m = std::getenv("GXV_DLCACHE");
     if (m && !std::strcmp(m, "verify")) g_mode = 2;
     else g_mode = (m && *m == '0') ? 0 : 1;
@@ -390,6 +413,7 @@ void Init() {
 // Walks a list that consists of draw commands (and padding) only. Fills
 // e.segs / e.verts / spans; false if the list holds anything else.
 bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
+    ++e.rpStamp; // (GXV_DRAWREPLAY: records of the entry as it was are void)
     const uint8_t* const list = p;
     const uint8_t* const end = p + nbytes;
     ReleaseBuffer(e);
@@ -413,7 +437,7 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     e.hash = XXH3_64bits(list, nbytes);
     uint64_t vertexBytes = 0;
     const Plan* plans[8] = {};
-    for (int i = 0; i < 12; ++i) { e.lo[i] = 0xFFFFFFFFu; e.hi[i] = 0; }
+    for (int i = 0; i < 12; ++i) { e.arr[i].lo = 0xFFFFFFFFu; e.arr[i].hi = 0; }
     while (p < end) {
         const uint8_t cmd = *p++;
         if (cmd == 0x00) continue;
@@ -447,8 +471,8 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
             for (int a = 9; a <= 20; ++a)
                 if (sp.mask & (1u << a)) {
                     e.idxMask |= 1u << a;
-                    if (sp.lo[a - 9] < e.lo[a - 9]) e.lo[a - 9] = sp.lo[a - 9];
-                    if (sp.hi[a - 9] > e.hi[a - 9]) e.hi[a - 9] = sp.hi[a - 9];
+                    if (sp.lo[a - 9] < e.arr[a - 9].lo) e.arr[a - 9].lo = sp.lo[a - 9];
+                    if (sp.hi[a - 9] > e.arr[a - 9].hi) e.arr[a - 9].hi = sp.hi[a - 9];
                 }
             e.segs.push_back(s);
             e.totalVerts += count;
@@ -462,16 +486,16 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     for (int a = 9; a <= 20; ++a)
         if (e.idxMask & (1u << a)) {
             const int i = a - 9;
-            e.arr[i] = g.arrays[a].data;
-            e.arrStride[i] = g.arrays[a].stride;
-            e.genArr[i] = GuestWriteGeneration(e.arr[i] + e.lo[i], e.hi[i] - e.lo[i]);
-            if (e.genArr[i] == kNotGuest) return false;
+            e.arr[i].p = g.arrays[a].data;
+            e.arr[i].stride = g.arrays[a].stride;
+            e.arr[i].gen = GuestWriteGeneration(e.arr[i].p + e.arr[i].lo, e.arr[i].hi - e.arr[i].lo);
+            if (e.arr[i].gen == kNotGuest) return false;
         }
     std::atomic_thread_fence(std::memory_order_acquire);
     for (int a = 9; a <= 20; ++a)
         if (e.idxMask & (1u << a)) {
             const int i = a - 9;
-            e.hash = XXH3_64bits_withSeed(e.arr[i] + e.lo[i], e.hi[i] - e.lo[i], e.hash);
+            e.hash = XXH3_64bits_withSeed(e.arr[i].p + e.arr[i].lo, e.arr[i].hi - e.arr[i].lo, e.hash);
         }
     // The range pass already visited the indices. Decode once, into one allocation,
     // with the generations and hash describing bytes no newer than this decode.
@@ -480,7 +504,7 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
     for (Seg& s : e.segs) {
         DecodeVertices(*plans[s.fmt], list + s.idxOffset, s.count, e.verts.data() + s.offset, nullptr);
         s.posMtxMax = LastDecodedPosMtxMax();
-        if (CharaAAMode()) RowBoxesOf(e.verts.data() + s.offset, s.count, s.stride, e.rowBoxes);
+        if (CharaAAMode() || EdgeAAMode() || StaticCullEnabled()) RowBoxesOf(e.verts.data() + s.offset, s.count, s.stride, e.rowBoxes); // (GXV_CHARAA, GXV_EDGE_AA's HUD bounds, GXV_STATICCULL)
     }
     // A list whose vertices all fit the CPU-transform path (a particle's quad, a glyph) stays
     // in the frame's arena, where draws that differ only in their matrix merge into one record;
@@ -503,7 +527,7 @@ bool Build(Entry& e, const uint8_t* p, uint32_t nbytes) {
 uint64_t ContentHash(const Entry& e) {
     uint64_t h = XXH3_64bits(e.list, e.nbytes);
     for (int a = 9; a <= 20; ++a)
-        if (e.idxMask & (1u << a)) h = XXH3_64bits_withSeed(e.arr[a - 9] + e.lo[a - 9], e.hi[a - 9] - e.lo[a - 9], h);
+        if (e.idxMask & (1u << a)) h = XXH3_64bits_withSeed(e.arr[a - 9].p + e.arr[a - 9].lo, e.arr[a - 9].hi - e.arr[a - 9].lo, h);
     return h;
 }
 
@@ -514,7 +538,7 @@ bool ReadGenerations(const Entry& e, uint64_t& genList, uint64_t genArr[12]) {
     bool ok = genList != kNotGuest;
     for (uint32_t m = (e.idxMask >> 9) & 0xFFFu; m; m &= m - 1) { // (the indexed attributes only)
         const int i = __builtin_ctz(m);
-        genArr[i] = GuestWriteGeneration(e.arr[i] + e.lo[i], e.hi[i] - e.lo[i]);
+        genArr[i] = GuestWriteGeneration(e.arr[i].p + e.arr[i].lo, e.arr[i].hi - e.arr[i].lo);
         ok = ok && genArr[i] != kNotGuest;
     }
     return ok;
@@ -527,7 +551,7 @@ bool SameState(const Entry& e) {
     for (uint32_t m = (e.idxMask >> 9) & 0xFFFu; m; m &= m - 1) { // (the indexed attributes only)
         const int i = __builtin_ctz(m);
         const ArrayRef& ar = g.arrays[9 + i];
-        if (e.arr[i] != ar.data || e.arrStride[i] != ar.stride || e.hi[i] > ar.size) return false;
+        if (e.arr[i].p != ar.data || e.arr[i].stride != ar.stride || e.arr[i].hi > ar.size) return false;
     }
     return true;
 }
@@ -577,16 +601,22 @@ void Emit(Entry& e, uint32_t nbytes) {
         if (learn) SetPendingStaticCopyable(false);
     } else {
         uint64_t bytes = 0;
+        // (GXV_SPLIT_COPY: the finishing thread makes the copies, from e.verts, which stay until Settle(e.ticket); EmitDraw copies a
+        // segment itself where the player reads its vertices)
+        const bool deferred = split::CopiesVertices();
         for (const Seg& s : e.segs) {
             uint8_t* out = BeginVertices(s.layoutMask, s.count);
             if (!out) continue; // (BeginVertices' guard refused the arena: this segment is not drawn)
-            std::memcpy(out, e.verts.data() + s.offset, static_cast<size_t>(s.count) * s.stride);
+            const uint8_t* const src = e.verts.data() + s.offset;
+            if (!deferred) std::memcpy(out, src, static_cast<size_t>(s.count) * s.stride);
             bytes += static_cast<uint64_t>(s.count) * s.stride;
             SetPendingPosMtxMax(s.posMtxMax);
-            EmitDraw(s.prim, s.layoutMask, s.count); // (GXV_CHARAA: bounds from the vertices themselves, few by construction)
+            // (GXV_CHARAA: bounds from the vertices themselves, few by construction)
+            EmitDraw(s.prim, s.layoutMask, s.count, 0xFFFFFFFFu, deferred ? src : nullptr);
             ++fr.primsDL;
             fr.vertsDL += s.count;
         }
+        if (deferred) e.ticket = split::Issued();
         if (learn || e.rigidCopy) {
             ++g_lc.copies;
             g_lc.copyBytes += bytes;
@@ -600,6 +630,8 @@ void Emit(Entry& e, uint32_t nbytes) {
 }
 
 void Free(Entry* e) {
+    split::Settle(e->ticket); // (GXV_SPLIT_COPY)
+    RpBump();
     for (Use& u : g_uses)
         if (u.e == e) u.e = nullptr;
     g_keptBytes -= e->keptBytes;
@@ -706,6 +738,11 @@ bool StaticBufferData(uint32_t bufId, const uint8_t*& vtx, const uint16_t*& idx)
 }
 
 uint64_t DlCacheLiveBytes() { return g_ctr.liveBytes; }
+// (GXV_FE_SPLIT: the branch counters, for the per-picture line of vgx_workload.h)
+void DlCacheBranchCounts(uint64_t out[7]) {
+    out[0] = g_ctr.hits; out[1] = g_ctr.rehashOk; out[2] = g_ctr.rehashChanged; out[3] = g_ctr.bypassed;
+    out[4] = g_ctr.builds; out[5] = g_ctr.uncacheable; out[6] = g_ctr.promoted;
+}
 uint64_t DlCacheStaticBytes() { return g_ctr.staticBytes; }
 
 void DlCacheReport(FILE* f) {
@@ -727,23 +764,252 @@ void DlCacheReport(FILE* f) {
                      g_keptBytes / 1048576.0, (unsigned long long)g_lc.keptLists);
 }
 
+// (GXV_FE_PREFETCH stage 3, GXV_DRAWREPLAY=2) what SameState, ReadGenerations and Emit read of an entry: the head of the entry, the indexed
+// attributes' array uses, and the first vertex format's row. Hints only (an entry the caller holds may be read: its fields are).
+static void RpHintEntry(const Entry* e) {
+    FePrefetchLines(e, 128, 4); // (the head, up to the array uses: about 100 bytes on the console)
+    for (uint32_t m = (e->idxMask >> 9) & 0xFFFu; m; m &= m - 1) FePrefetch(&e->arr[__builtin_ctz(m)]);
+    if (e->fmtMask) FePrefetchLines(&e->vat[__builtin_ctz(e->fmtMask)][0], sizeof e->vat[0], 2);
+}
+// (GXV_DRAWREPLAY=2) the same without reading the entry (a hint that waited for the entry would cost what it saves): its head, the
+// positions' array use and the first vertex format's row.
+static void RpHintHead(const Entry* e) {
+    FePrefetchLines(e, 128, 4); // (the head, up to the array uses: about 100 bytes on the console)
+    FePrefetchLines(&e->arr[0], sizeof e->arr[0], 2);
+    FePrefetchLines(&e->vat[0][0], sizeof e->vat[0], 2);
+}
 static uint32_t TinyListBytes() {
-    static const uint32_t n = static_cast<uint32_t>(EnvInt("GXV_DL_TINY", 64));
+    const uint32_t n = static_cast<uint32_t>(VGX_KNOB(static_cast<uint32_t>(EnvInt("GXV_DL_TINY", 64))));
     return n < 15 ? 15 : n;
 }
+// GXV_FE_PREFETCH (see "look-ahead" before ProcessStream in vgx_state.cpp): what CallList will read for `list`, hinted in stages
+// as the call comes nearer. A tiny list is parsed from its bytes (or replayed: state list); a larger one is first tried as a state
+// list (StateListPrefetch), then goes through the bypass map, the front, the list's bookkeeping and its first variant's entry,
+// whose generation counters and runs the hit reads. Only the front and the entries it points at are read to get there (an entry
+// of the front is valid while the front holds it: MapFrontClear empties it whenever one is erased).
+void CallListPrefetch(const uint8_t* list, uint32_t nbytes, int stage) {
+    Init();
+    if (g_mode == 0 || nbytes <= TinyListBytes()) {
+        if (stage == 1) FePrefetchLines(list, nbytes, 4);
+        if (g_mode != 0) StateListPrefetch(list, nbytes, stage); // (padded tiny material lists: StateListCall)
+        return;
+    }
+    StateListPrefetch(list, nbytes, stage);
+    const MapFront& mf = g_mapFront[(reinterpret_cast<uintptr_t>(list) >> 5) & 255u];
+    if (stage == 1) {
+        FePrefetch(&mf);
+        if (!g_bypass.empty()) FePrefetch(g_bypass.HomeSlot(list));
+        return;
+    }
+    if (!(mf.list == list && mf.li)) return;
+    if (stage == 2) {
+        FePrefetch(mf.li);
+        return;
+    }
+    const Entry* e = mf.li->head;
+    if (!e) return;
+    if (stage == 3) {
+        // (what SameState, ReadGenerations and Emit read first: identity, the first vertex format's row, the indexed arrays' bindings,
+        // spans and generations, the content vectors and the static buffer)
+        RpHintEntry(e);
+        return;
+    }
+    if (e->nbytes != nbytes) return;
+    GuestWriteGenerationPrefetch(list, nbytes);
+    for (uint32_t m = (e->idxMask >> 9) & 0xFFFu; m; m &= m - 1) {
+        const int i = __builtin_ctz(m);
+        if (e->arr[i].p && e->arr[i].hi > e->arr[i].lo) GuestWriteGenerationPrefetch(e->arr[i].p + e->arr[i].lo, e->arr[i].hi - e->arr[i].lo);
+    }
+    FePrefetchLines(e->runs.data(), static_cast<uint32_t>(e->runs.size() * sizeof(Run)), 4);
+    FePrefetchLines(e->rowBoxes.data(), static_cast<uint32_t>(e->rowBoxes.size() * sizeof(RowBox)), 2);
+}
+// ------------------------------------------------------------------------------------------------ draw replay (GXV_DRAWREPLAY)
+// A picture calls nearly the same lists in nearly the same order as the one before: the same models, shapes and materials, with new
+// matrices. Each call of a list larger than a tiny one took the same way to its cache entry: the state-list front and table (a
+// geometry list is looked up there first), the guest-RAM test, the bypass map, the map's front, the list's bookkeeping and its
+// chain of variants; about a dozen pointer-chasing loads into tables the game's turn has pushed out of the caches, before the hit
+// itself (the vertex state, the generation counters, the runs).
+// Here every such call of a picture is written down in call order (the "trace": the list, its size, and the entry it was a hit of).
+// The next picture walks the previous trace with a cursor: a call that is the next one of the trace (or one of the next eight, or,
+// after objects came or went, wherever the list was last called) goes straight to that entry, and only the hit's own tests are made:
+// the vertex state (SameState), the generations of the list and its arrays (ReadGenerations, unchanged), then the hit branch as it
+// is (the age, the sweep, the counters, the promotion test, Emit). What the skipped lookups would have found is guaranteed by two
+// marks: the record was made by a hit (or build) of the entry while it was the first variant of its list and not raced; the entry's
+// rpStamp moves when it is built again or another variant is put before it, and g_rpEpoch moves when any entry is freed (a list is put
+// out of caching, bypass, only together with freeing its entry). With both unchanged the list has the same first variant and no
+// bypass, so the normal path's walk would stop at the entry exactly when SameState holds. A list the entry's generations say is
+// unchanged holds the entry's draw commands, so the state-list fast hit, which the normal path tries first, would have declined it
+// (a state-list entry of the same address was parsed from other bytes: state commands). Any doubt (no record, a mark moved, another
+// vertex state, a moved generation, the verify mode) takes the normal path, which also makes the new record. The output is the normal path's.
+// The trace's own cost: ~16 bytes appended per call, the compare at the cursor, and once a picture the swap of two vectors.
+//   GXV_DRAWREPLAY=0  off;  1 (default) on;  2 on, and the next record's entry is hinted to the cache (PLD) as a call is replayed
+namespace {
+struct RpRec {
+    const uint8_t* list;
+    Entry* e;        // the entry the call was a hit (or build) of; null: the call went another way (state list, bypass, ...)
+    uint32_t nbytes;
+    uint32_t stamp;  // the entry's rpStamp when it was recorded
+    uint32_t epoch;  // g_rpEpoch when it was recorded
+};
+std::vector<RpRec> g_rpOld, g_rpNew; // the previous picture's trace, this picture's so far
+uint32_t g_rpCur = 0;                // the cursor in g_rpOld
+uint64_t g_rpFrame = ~0ull;
+constexpr uint32_t kRpWindow = 8, kRpMapBits = 12;
+uint32_t g_rpMap[1u << kRpMapBits];  // list -> 1 + the index of its last call in g_rpOld (0: none); made at the first need of a picture
+bool g_rpMapMade = false;
+struct RpCounters { uint64_t hits = 0, misses = 0, realigned = 0, recorded = 0, calls = 0; } g_rp;
+// (the call in progress: the entry the normal path ended at, for the record)
+Entry* g_rpOutE = nullptr;
+uint64_t g_lastSweep = 0; // (CallListBody's sweep schedule)
+inline int RpMode() {
+    const int m = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_DRAWREPLAY", 1))));
+    return m;
+}
+inline uint32_t RpSlot(const uint8_t* list) {
+    return (static_cast<uint32_t>(reinterpret_cast<uintptr_t>(list) >> 5) * 2654435761u) >> (32 - kRpMapBits);
+}
+inline void RpFrame() {
+    const uint64_t frame = CurrentFrame();
+    if (frame == g_rpFrame) return;
+    g_rpFrame = frame;
+    g_rpOld.swap(g_rpNew);
+    g_rpNew.clear();
+    g_rpCur = 0;
+    g_rpMapMade = false;
+}
+// The record of the previous trace this call repeats, or null. The cursor moves past it.
+inline const RpRec* RpFind(const uint8_t* list, uint32_t nbytes) {
+    const uint32_t n = static_cast<uint32_t>(g_rpOld.size());
+    const uint32_t end = g_rpCur + kRpWindow < n ? g_rpCur + kRpWindow : n;
+    for (uint32_t i = g_rpCur; i < end; ++i) {
+        const RpRec& r = g_rpOld[i];
+        if (r.list == list && r.nbytes == nbytes) {
+            if (i != g_rpCur) ++g_rp.realigned;
+            g_rpCur = i + 1;
+            return &r;
+        }
+    }
+    if (!n) return nullptr;
+    if (!g_rpMapMade) {
+        g_rpMapMade = true;
+        std::memset(g_rpMap, 0, sizeof g_rpMap);
+        for (uint32_t i = 0; i < n; ++i) g_rpMap[RpSlot(g_rpOld[i].list)] = i + 1;
+    }
+    const uint32_t k = g_rpMap[RpSlot(list)];
+    if (k && g_rpOld[k - 1].list == list && g_rpOld[k - 1].nbytes == nbytes) {
+        ++g_rp.realigned;
+        g_rpCur = k;
+        return &g_rpOld[k - 1];
+    }
+    return nullptr;
+}
+// The age and the sweep, as CallListBody has them before its lookup.
+inline uint64_t AgeAndSweep(uint64_t frame) {
+    const uint64_t age = AgeOf(frame);
+    if (age - g_lastSweep >= 120) { g_lastSweep = age; Sweep(frame, age); }
+    return age;
+}
+// The replay of a recorded hit: true when it was one (and is done), false when the normal path must run (nothing was changed but
+// the age and the sweep, which the normal path does as the first thing after its lookups anyway, idempotently).
+bool RpReplay(const RpRec& r, uint32_t nbytes, workload::FeScope& cls) {
+    Entry& e = *r.e;
+    if (FeCutHint()) {
+        // (GXV_FECUT_HINT, vgx_state.h: what the hit reads after its tests, from the entry's head: the runs Emit walks, the bounds the
+        // static cull and CharaNote read (separate blocks), and the list's generation counter, which ReadGenerations reads first)
+        FePrefetchLines(e.runs.data(), static_cast<uint32_t>(e.runs.size() * sizeof(Run)), 4);
+        FePrefetchLines(e.rowBoxes.data(), static_cast<uint32_t>(e.rowBoxes.size() * sizeof(RowBox)), 2);
+        GuestWriteGenerationPrefetch(r.list, nbytes);
+    }
+    SyncVertexArrays(); // (as CallListBody before its lookup: SameState reads g.arrays)
+    if (!SameState(e)) return false;
+    uint64_t gl, ga[12] = {};
+    if (!ReadGenerations(e, gl, ga)) return false;
+    // (no acquire fence here with GXV_FE_KNOBS=1: a replayed hit reads no guest bytes after the generations, only the entry's own
+    // decode; a miss goes the normal way, which reads the generations again and fences before it hashes or decodes guest memory)
+    knob::HitFence();
+    if (gl != e.genList) return false;
+    for (uint32_t m = (e.idxMask >> 9) & 0xFFFu; m; m &= m - 1)
+        if (ga[__builtin_ctz(m)] != e.arr[__builtin_ctz(m)].gen) return false;
+    const uint64_t frame = CurrentFrame();
+    const uint64_t age = AgeAndSweep(frame);
+    if (r.epoch != g_rpEpoch) return false; // (the sweep freed something: the normal path decides)
+    // ---- CallListBody's hit branch
+    const bool afterChange = e.fails != 0;
+    e.lastUse = age;
+    e.fails = 0;
+    ++g_ctr.hits;
+    ++stats::Cur().dlHit;
+    g_ctr.hitVerts += e.totalVerts;
+    if (!afterChange && !e.bufId && e.promotable && g_static) Promote(e);
+    if (cls.slot >= 0) cls.slot = workload::FeGeomHit;
+    (void)nbytes;
+    Emit(e, nbytes);
+    return true;
+}
+} // namespace
+
+void DrawReplayCounters(uint64_t out[4]) { out[0] = g_rp.hits; out[1] = g_rp.misses; out[2] = g_rp.realigned; out[3] = g_rp.recorded; }
+void DrawReplayCounters5(uint64_t out[5]) { out[0] = g_rp.hits; out[1] = g_rp.misses; out[2] = g_rp.realigned; out[3] = g_rp.recorded; out[4] = g_rp.calls; }
+
+static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope& cls);
+// (GXV_FXMERGE, vgx_state.cpp FxCall) whether CallList(list, nbytes) goes straight to ProcessStream(list, nbytes) after its Init and
+// SyncVertexArrays: the tiny-list branch of CallListBody, for a list that is not a padded state list. The tests are CallList's and
+// CallListBody's own, in their order: CallList takes CallListBody whenever the tiny branch's test holds.
+bool CallListIsTinyStream(const uint8_t* list, uint32_t nbytes) {
+    Init();
+    if (!(g_mode == 0 || nbytes <= TinyListBytes() || TraceFrame())) return false;
+    return !(g_mode != 0 && (nbytes == 32 || nbytes == 64) && (reinterpret_cast<uintptr_t>(list) & 31u) == 0 && list[0] == 0x61 && !TraceFrame());
+}
 void CallList(const uint8_t* list, uint32_t nbytes) {
+    // (GXV_FE_SPLIT: the branch taken decides the slot; FeOther until one is known)
+    workload::FeScope cls(workload::FeOther);
+    Init();
+    if (RpMode() == 0 || g_mode != 1 || nbytes <= TinyListBytes() || TraceFrame()) {
+        CallListBody(list, nbytes, cls);
+        return;
+    }
+    // ---- draw replay
+    RpFrame();
+    ++g_rp.calls;
+    if (const RpRec* r = RpFind(list, nbytes)) {
+        if (r->e && r->epoch == g_rpEpoch && r->e->rpStamp == r->stamp) {
+            const RpRec rec = *r;
+            if (RpMode() == 2 && g_rpCur < g_rpOld.size() && g_rpOld[g_rpCur].e && g_rpOld[g_rpCur].epoch == g_rpEpoch) RpHintHead(g_rpOld[g_rpCur].e);
+            if (RpReplay(rec, nbytes, cls)) {
+                ++g_rp.hits;
+                g_rpNew.push_back(rec);
+                return;
+            }
+            ++g_rp.misses;
+        }
+    }
+    g_rpOutE = nullptr;
+    CallListBody(list, nbytes, cls);
+    // (a hit or build of the entry that is the first variant of its list, not raced: see the note above)
+    g_rpNew.push_back(RpRec{list, g_rpOutE, nbytes, g_rpOutE ? g_rpOutE->rpStamp : 0u, g_rpEpoch});
+    if (g_rpOutE) ++g_rp.recorded;
+}
+static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope& cls) {
     Init();
     // (a list of a few dozen bytes, one particle quad for instance, is decoded faster than its
     // cache entry is checked)
     if (g_mode == 0 || nbytes <= TinyListBytes() || TraceFrame()) {
+        if (cls.slot >= 0) cls.slot = workload::FeTiny;
         SyncVertexArrays();
+        // Small padded material lists can reuse state ops; tiny draw lists still decode directly.
+        if (g_mode != 0 && (nbytes == 32 || nbytes == 64) &&
+            (reinterpret_cast<uintptr_t>(list) & 31u) == 0 && list[0] == 0x61 && !TraceFrame() &&
+            StateListCall(list, nbytes)) return;
         ProcessStream(list, nbytes);
         return;
     }
     // A material list seen before and unchanged: replayed at once (the geometry cache never takes state lists).
     // (first: a hit is a list in guest RAM, its generation was read there; a replay reads no vertex array but through
     // the indexed loads, which bring their own arrays up to date)
-    if (StateListFastHit(list, nbytes)) return;
+    if (StateListFastHit(list, nbytes)) {
+        if (cls.slot >= 0) cls.slot = workload::FeMatHit;
+        return;
+    }
     SyncVertexArrays();
     if (!IsGuestRam(list, nbytes)) {
         ProcessStream(list, nbytes);
@@ -751,10 +1017,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
     }
     const uint64_t frame = CurrentFrame();
     const uint64_t age = AgeOf(frame);
-    {
-        static uint64_t lastSweep = 0;
-        if (age - lastSweep >= 120) { lastSweep = age; Sweep(frame, age); }
-    }
+    if (age - g_lastSweep >= 120) { g_lastSweep = age; Sweep(frame, age); }
     if (!g_bypass.empty()) {
         const Bypass* b = g_bypass.Find(list);
         if (b) {
@@ -780,9 +1043,12 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
     } else if (e) {
         uint64_t gl, ga[12] = {};
         bool tracked = ReadGenerations(*e, gl, ga);
-        std::atomic_thread_fence(std::memory_order_acquire);
         bool same = tracked && gl == e->genList;
-        for (uint32_t m = (e->idxMask >> 9) & 0xFFFu; m && same; m &= m - 1) same = ga[__builtin_ctz(m)] == e->genArr[__builtin_ctz(m)];
+        for (uint32_t m = (e->idxMask >> 9) & 0xFFFu; m && same; m &= m - 1) same = ga[__builtin_ctz(m)] == e->arr[__builtin_ctz(m)].gen;
+        // The generations are read before any guest byte the hash (or a rebuild) reads: an acquire fence between them. A hit reads
+        // none (it emits the entry's own decode), so with GXV_FE_KNOBS=1 it has no fence (a barrier on the console's processor).
+        if (!same || g_mode == 2) std::atomic_thread_fence(std::memory_order_acquire);
+        else knob::HitFence();
         if (same && g_mode == 2 && ContentHash(*e) != e->hash) {
             ++g_ctr.staleNoNotify;
             VGX_LOG_N(32, "dl cache: list %p (%u bytes, %u verts) changed without a write notification\n", (const void*)list, nbytes, e->totalVerts);
@@ -797,6 +1063,8 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
             g_ctr.hitVerts += e->totalVerts;
             // Used again unchanged: worth a static buffer (no per-frame copy, no index generation).
             if (!afterChange && !e->bufId && e->promotable && g_static) Promote(*e);
+            if (cls.slot >= 0) cls.slot = workload::FeGeomHit;
+            if (e == li.head) g_rpOutE = e; // (GXV_DRAWREPLAY: recorded)
             Emit(*e, nbytes);
             return;
         }
@@ -804,7 +1072,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
             // A write landed in the same 4 KiB as something this entry uses, but not on it.
             const bool afterChange = e->fails != 0;
             e->genList = gl;
-            std::memcpy(e->genArr, ga, sizeof ga);
+            for (uint32_t m = (e->idxMask >> 9) & 0xFFFu; m; m &= m - 1) e->arr[__builtin_ctz(m)].gen = ga[__builtin_ctz(m)];
             e->lastUse = age;
             e->fails = 0;
             ++g_ctr.rehashOk;
@@ -812,6 +1080,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
             g_ctr.hitVerts += e->totalVerts;
             // After a real edit, wait for another reuse instead of uploading on an alternating edit/noise cycle.
             if (!afterChange && !e->bufId && e->promotable && g_static) Promote(*e);
+            if (e == li.head) g_rpOutE = e; // (GXV_DRAWREPLAY: recorded)
             Emit(*e, nbytes);
             return;
         }
@@ -855,6 +1124,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
             li.lastNewVariant = frame;
             li.streak = 1;
         }
+        if (li.head) ++li.head->rpStamp; // (GXV_DRAWREPLAY: no longer the first variant)
         e = new Entry();
         e->next = li.head;
         li.head = e;
@@ -866,6 +1136,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
     e->list = list;
     e->nbytes = nbytes;
     std::memcpy(e->vcd, g.vcd, 21);
+    split::Settle(e->ticket); // (GXV_SPLIT_COPY: Build rewrites the vertices)
     const bool pure = Build(*e, list, nbytes);
     g_ctr.liveBytes += e->verts.capacity();
     const bool ok = pure;
@@ -878,7 +1149,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
             int nUsed = 0;
             used[nUsed++] = {e->list, e->nbytes};
             for (int a = 9; a <= 20; ++a)
-                if (e->idxMask & (1u << a)) used[nUsed++] = {e->arr[a - 9] + e->lo[a - 9], e->hi[a - 9] - e->lo[a - 9]};
+                if (e->idxMask & (1u << a)) used[nUsed++] = {e->arr[a - 9].p + e->arr[a - 9].lo, e->arr[a - 9].hi - e->arr[a - 9].lo};
             e->raced = GuestWritesTouch(epoch0, epoch1, used, nUsed);
         }
     }
@@ -896,6 +1167,7 @@ void CallList(const uint8_t* list, uint32_t nbytes) {
     ++g_ctr.builds;
     ++stats::Cur().dlBuild;
     g_ctr.builtVerts += e->totalVerts;
+    if (e == li.head && !e->raced) g_rpOutE = e; // (GXV_DRAWREPLAY: recorded)
     Emit(*e, nbytes);
 }
 

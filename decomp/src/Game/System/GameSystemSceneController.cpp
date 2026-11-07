@@ -27,6 +27,9 @@
 
 #if defined(__vita__)
 extern "C" void port_debug_dump_threads(void);
+// (platform/src/port/perf.cpp) the stage being loaded, for the renderer's stage warm-up (GXV_STAGEWARM)
+extern "C" void port_scene_load_begin(const char* stage);
+extern "C" void port_scene_load_end(void);
 #endif
 
 namespace {
@@ -142,6 +145,9 @@ void GameSystemSceneController::initializeScene() {
     SingletonHolder< HeapMemoryWatcher >::get()->createSceneHeapOnGameHeap();
     SingletonHolder< HeapMemoryWatcher >::get()->setCurrentHeapToSceneHeap();
     updateSceneControlInfo();
+#if defined(__vita__)
+    port_scene_load_begin(mCurrSceneControlInfo.mStage);
+#endif
     MR::setRandomSeedFromStageName();
 
     if (mScenarioSelectScene->isActive()) {
@@ -159,6 +165,7 @@ void GameSystemSceneController::initializeScene() {
     MR::clearFileLoaderRequestFileInfo(mIsResetProcessing);
     SingletonHolder< HeapMemoryWatcher >::get()->checkRestMemory();
 #if defined(__vita__)
+    port_scene_load_end();
     port_log("native-scene initialize-body complete");
 #endif
 }
@@ -360,9 +367,32 @@ void GameSystemSceneController::exeWaitDrawDoneScene() {
     requestChangeNerve(pNerve);
 }
 
+#ifdef TARGET_PC
+extern "C" void port_view_flush(int drop);
+extern "C" void port_gx_drawdone_settle(int point);
+extern "C" void port_dl_flush_stale(int drop);
+extern "C" void port_anim_flush_stale(int drop);
+extern "C" void port_anim_memo_drop(void);  // (GXV_ANIM_MEMO: decomp/src/Game/LiveActor/ModelManager.cpp)
+extern "C" void port_anim_prof_drop(void);  // (GXV_ANIM_PROF: platform/src/port/perf.cpp)
+extern "C" void port_raster_image_drop(void);  // (MarioActorSpecialDraw.cpp: its scene copy of the picture)
+extern "C" void port_heap_guard_check(const char* when);  // (GXV_HEAP_GUARD: platform/src/os/os_thread.cpp)
+#endif
+
 void GameSystemSceneController::exeDestroyScene() {
     if (mSpine->mStep == 0) {
         mIntermissionScene->setCurrentSceneControllerState("[destroy Scene: %s]", mCurrSceneControlInfo.mScene);
+#ifdef TARGET_PC
+        // (GXV_DRAWDONE_DEFER: the front end may still be on the scene's last picture, and its draw-sync callbacks reach scene
+        // objects (TalkPeekZ: a crash at a stage entry with mode 4 on 3 Nov): it finishes before anything of the scene goes)
+        port_gx_drawdone_settle(0);
+        port_anim_flush_stale(1);  // (GXV_ANIM_LOD, GXV_DL_LAZY) the scene's actors and models go with its heap: forget them
+        port_dl_flush_stale(1);
+        port_view_flush(1);
+        port_anim_memo_drop();  // (the scene's models go: their joint copies with them)
+        port_anim_prof_drop();
+        port_raster_image_drop();  // (its buffer is in the scene's heap)
+        port_heap_guard_check("scene destroy");  // (GXV_HEAP_GUARD: port-side storage that would outlive the heap about to go)
+#endif
         MR::startFunctionAsyncExecute(MR::Functor(this, &GameSystemSceneController::destroyScene), 17, "\x83\x56\x81\x5b\x83\x93\x94\x6a\x8a\xfc");
     }
 

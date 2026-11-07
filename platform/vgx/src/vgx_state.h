@@ -31,6 +31,8 @@ bool FixLodBias();
 bool FixTevIn();
 // FixTevIn(), or GXV_FS_HALF=1 / 3: State::tevOor is kept up to date (and is part of the key hash).
 bool TevOorTracked();
+// GXV_VS_TRIM (read once, default 0): State::ltCos1 / ltDist1 are kept up to date (and are part of the key hash).
+bool VsTrimTracked();
 bool StaticCrowdEnabled();
 void QueueCrowdSnapshot(const staticcrowd::Tag* tags, uint32_t count, bool valid);
 void ResetCrowdTags();
@@ -185,6 +187,9 @@ struct State {
     uint8_t tevColDirty = 0xFF;
     // GXV_FIX_TEVIN (and GXV_FS_HALF=1 / 3: TevOorTracked): 1 while a TEV colour register (PREV, REG0..2, any component) is outside 0..255; part of the shader key hash (FsKey::inWrap).
     uint8_t tevOor = 0;
+    // GXV_VS_TRIM (VsTrimTracked): bit l = light l's cos attenuation (XF light words 4..6) is exactly (1, 0, 0) / its distance attenuation
+    // (words 7..9) is; kept by WriteXFWord, part of the key hash (VsKey::ltCos1 / ltDist1). 0 with the switch off.
+    uint8_t ltCos1 = 0, ltDist1 = 0;
     bool layoutDirty = true;  // VCD / VAT
     uint32_t vcdGen = 0;      // counts the changes of the vertex descriptor (FoldGuess)
     uint8_t texSlotDirty = 0xFF; // which texmaps' bindings (or what they resolve to) may have changed
@@ -230,6 +235,15 @@ uint32_t ProcessStream(const uint8_t* data, uint32_t nbytes, bool inList = true)
 bool StateListCall(const uint8_t* list, uint32_t nbytes);
 bool StateListFastHit(const uint8_t* list, uint32_t nbytes);  // (CallList's shortcut for the common case)
 void StateListCounters(uint64_t out[5]); // hits, builds, refused, verify checks, verify mismatches
+// (the "fe cuts" workload line) material lists replayed by StateListFastHit; of the delta replays, those in the compact layout
+// (GXV_FECUT_SLHOT); two words unused
+void FeCutCounters(uint64_t out[4]);
+void SlDeltaCounters(uint64_t out[5]); // (GXV_SLDELTA) replays by the register deltas; =2: compared with SlReplay, mismatching; lists compiled, refused
+void StateListFastCounters(uint64_t out[3]); // (GXV_SLFAST) StateListFastHit's replays found by the front, by the table; of them, rewrites with the same bytes
+// (GXV_DRAWREPLAY, vgx_dlcache.cpp) calls replayed from the previous picture's trace, records found that failed a test, records found away from
+// the cursor, hits recorded by the normal path; (5) and the list calls the trace saw
+void DrawReplayCounters(uint64_t out[4]);
+void DrawReplayCounters5(uint64_t out[5]);
 // The fecache switches' counters, for the host's status line (totals since start):
 void RegShadowCounters(uint64_t out[2]);      // GXV_REGSHADOW=2: writes checked, mismatching
 void RigidMergeCounters(uint64_t out[2]);     // GXV_RIGIDMERGE: palette runs made, draws that joined one (since the start)
@@ -244,6 +258,43 @@ void BpArraySync(int cpIndex);           // g.arrays[] from CP 0xA0+n / 0xB0+n
 void SyncVertexArraysSlow();
 inline void SyncVertexArrays() { if (g.cpArrayStale & 0x0FFF) SyncVertexArraysSlow(); } // before anything reads g.arrays[POS..TEX7]
 void CallList(const uint8_t* list, uint32_t nbytes); // a display list in guest RAM: through the geometry cache (vgx_dlcache.cpp)
+bool CallListIsTinyStream(const uint8_t* list, uint32_t nbytes); // (GXV_FXMERGE) CallList would parse it at once with ProcessStream
+// (GXV_FXMERGE, vgx_state.cpp FxMergeRun) commands, items, list calls, calls that went the short way, of them with the decode reused,
+// calls that went through CallList
+void FxMergeCounters(uint64_t out[6]);
+// ---- GXV_FE_PREFETCH (look-ahead cache hints; see "look-ahead" before ProcessStream in vgx_state.cpp)
+// A data-cache hint (PLD on ARM): never faults, never changes a value; only when the line arrives.
+inline void FePrefetch(const void* p) { __builtin_prefetch(p, 0, 3); }
+// The first `maxLines` 32-byte lines (the console's L1 / L2 line) of [p, p + bytes).
+inline void FePrefetchLines(const void* p, uint32_t bytes, uint32_t maxLines) {
+    if (!p || !bytes) return;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    uint32_t n = static_cast<uint32_t>(((a & 31u) + bytes + 31u) >> 5);
+    if (n > maxLines) n = maxLines;
+    const uint8_t* q = reinterpret_cast<const uint8_t*>(a & ~static_cast<uintptr_t>(31));
+    for (uint32_t i = 0; i < n; ++i) FePrefetch(q + i * 32u);
+}
+// GXV_FECUT_HINT (read once; default 0: off): cache hints for what a cached call reads next, issued from what the call itself has just
+// loaded, never ahead of it and never by loading anything more: a material hit hints its delta (all of it, at most 24 lines) as soon as
+// its entry's first line is read, before it looks up the generation counter; a same-bytes rewrite hints the first lines of the list and of
+// the copy it compares; a replayed geometry hit hints its runs, its bounds and its list's generation counter before it compares the vertex
+// state. The delta, the runs and the bounds are separate blocks of memory the game's turn has pushed out of the caches: demand loads
+// fetch them one line at a time as the loop reaches them, the hints let several lines arrive at once. Values never change (PLD never
+// faults and is never read); only the time the loads take. (GXV_FE_PREFETCH, which lost on the console, parsed the stream ahead and
+// loaded the tables of calls up to four ahead to find their entries: those loads missed themselves; these hints cost 2-30 instructions.)
+inline bool FeCutHint() { return VGX_KNOB(EnvInt("GXV_FECUT_HINT", 0) != 0) != 0; }
+int FePrefetchDepth(); // GXV_FE_PREFETCH (read once): how many CALL_DL ahead the top-level stream is looked at (0: off)
+// What CallList of `list` will read, hinted in four stages as the call comes nearer (stage 1: four calls ahead ... 4: the next one).
+// Each stage reads only what is the player's own and valid (front tables, entries) and issues hints; a stage may run without the
+// earlier ones. (vgx_dlcache.cpp; the state-list part in vgx_state.cpp, the generation counters in vgx_guestmem.cpp)
+void CallListPrefetch(const uint8_t* list, uint32_t nbytes, int stage);
+void StateListPrefetch(const uint8_t* list, uint32_t nbytes, int stage);
+// The shader-key memo set (then the keys) and the texture-binding memo slots (then their entries) that the next draw's resolution
+// reads, for the registers as they are now (vgx_draw.cpp, vgx_texcache.cpp). Called before each top-level CALL_DL.
+void ResolvePrefetch();
+void TexMemoPrefetch(uint8_t texMaps, int step);
+void FePrefetchCounters(uint64_t out[2]); // (since the start) top-level CALL_DLs; of them, those whose next call was hinted one call ahead
+void VarFrontCounters(uint64_t out[2]);   // GXV_VARFRONT (vgx_draw.cpp NoteVariant): variants found in front of the seen-sets, not found
 void DlCacheReport(FILE* f);
 uint64_t DlCacheLiveBytes();   // decoded vertices the front end keeps for cached lists (a count the player thread updates; readable elsewhere for logs)
 uint64_t DlCacheStaticBytes(); // bytes of the static buffers the back end holds for promoted lists
@@ -266,7 +317,9 @@ uint8_t* BeginVertices(uint32_t layoutMask, uint32_t count);
 // `foldedFrom`: the vertices were decoded into the layout FoldGuess chose (`layoutMask`, with both colour slots)
 // instead of the stream's own (`foldedFrom`). When the draw turns out not to fold, nothing is drawn and the
 // arena is as it was before BeginVertices; the result is false then, and the caller decodes again, plainly.
-bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t foldedFrom = 0xFFFFFFFFu);
+// `copyFrom` (GXV_SPLIT_COPY): the vertices are not written yet but are a copy of these bytes (split::CopiesVertices), which stay as
+// they are until split::Settle(split::Issued()) after the call returns.
+bool EmitDraw(uint8_t gxPrim, uint32_t layoutMask, uint32_t count, uint32_t foldedFrom = 0xFFFFFFFFu, const uint8_t* copyFrom = nullptr);
 // The layout to decode the next draw's vertices into: with both colour slots when the last draws folded their
 // registers (a particle run) and the next is small enough to, so that EmitDraw need not lay them out again.
 // `layoutMask` itself when no guess is made.
@@ -301,6 +354,10 @@ uint32_t SoftXformLimit(); // primitives up to this many vertices may be transfo
 bool StaticBufferData(uint32_t bufId, const uint8_t*& vtx, const uint16_t*& idx);
 void QueueCopyTex(const void* dest, bool clear);
 void QueueCopyDisp(bool clear);
+// GXV_SHADOWFILL_BOUNDS (vgx_draw.cpp, "shadow fill bounds"): on (read once), and (tests) totals since the start: silhouette fills
+// left out, scissored, left whole; alpha captures made a fill of 0, and of those the ones not made at all (the texture held 0).
+bool ShadowFillOn();
+void ShadowFillCounters(uint64_t out[5]);
 // Ends the frame on the player's side: closes the command buffer and hands it
 // to the back end. `direct`: the caller is the render thread (the back end is
 // run in place); otherwise the buffer goes through SubmitToBackend.
@@ -374,20 +431,33 @@ bool IsPlayerTexture(uint32_t texId);
 
 // ---- edge smoothing of the characters and key items (GXV_CHARAA, vgx_draw.cpp "character edge smoothing")
 int CharaAAMode(); // GXV_CHARAA, read once: 0 off, 1 on, 2 on with the smoothed areas tinted (diagnostic)
+// GXV_EDGE_AA (vgx_draw.cpp, "whole-picture edge smoothing"), read once: 0 off, 1 on, 2 tinted (diagnostic), 3 left half only
+int EdgeAAMode();
+// GXV_EDGE_AA totals since the start: display copies, smoothed whole, HUD rectangles handed over, given up (HUD area), HUD draws measured
+void EdgeCounters(uint64_t out[5]);
 // The model-space bounds of a cached list's vertices by position-matrix row (vgx_dlcache.cpp computes them once per list;
 // the first is all vertices whatever their row, for draws with one matrix).
 struct RowBox {
     float mn[3], mx[3];
     uint32_t row;
     float c[3] = {}, r = 0; // the bounding sphere of mn..mx (what the projection uses: RowBoxesOf keeps it up to date)
+    uint32_t drawn = 0;     // ([0] only, GXV_STATICCULL) the list has been drawn once since it was built (its first use is never culled)
 };
 // Before EmitStaticRun / EmitDraw of a cached list: its bounds (n boxes; the next emitter call consumes them).
 void SetPendingBounds(const RowBox* boxes, uint32_t n);
 void RowBoxesOf(const uint8_t* verts, uint32_t count, uint32_t stride, std::vector<RowBox>& out); // (appends; out[0] = all)
+// GXV_STATICCULL (vgx_draw.cpp, "static runs outside the view"): a static run whose list's bounds are outside the clip volume is
+// not drawn. Enabled: the display-list cache works the bounds out for every list it builds. Counters since the start: static
+// runs tested, culled, and the vertices of the culled ones.
+bool StaticCullEnabled();
+void StaticCullCounters(uint64_t out[3]);
 void CharaMarker(uint32_t kind); // PORT_GX_MARK_* arriving in the stream (BP 0xFF, see WriteBP)
 constexpr uint32_t kPresentAllowedMarker = 0x10;
 constexpr uint32_t kPresentSuppressedMarker = 0x11;
 void PresentationMarker(uint32_t kind);
+// GXV_PRESENT_SYNC (vgx_galaxy.cpp port_vgx_present_turn): the vblank of the turn whose draws follow, in bits 8-23 of the value.
+constexpr uint32_t kPresentStampMarker = 0x12;
+void PresentationStamp(uint32_t vblank16);
 // Totals since the start: display copies, of them with rectangles, character draws, of them without usable bounds, HUD draws
 // measured, rectangles handed to the back end, their EFB pixels, frames over GXV_CHARAA_AREA, rectangles dropped by clearing
 // copies, pieces lost to HUD cuts, rectangles too small to smooth (GXV_CHARAA_MIN).

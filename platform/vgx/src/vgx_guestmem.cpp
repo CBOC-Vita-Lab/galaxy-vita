@@ -70,6 +70,15 @@ uint64_t GuestWriteGeneration(const void* ptr, uint32_t n) {
     for (uint32_t i = first; i <= last; ++i) sum += b->gen[i].load(std::memory_order_relaxed);
     return sum; // counters only grow, so the sum changes whenever one of them does
 }
+void GuestWriteGenerationPrefetch(const void* ptr, uint32_t n) {
+    if (n == 0) return;
+    const uint8_t* p = static_cast<const uint8_t*>(ptr);
+    const Bank* b = FindBankReader(p, n);
+    if (!b) return;
+    const uint32_t first = static_cast<uint32_t>(p - b->base) >> kShift, last = static_cast<uint32_t>(p - b->base + n - 1) >> kShift;
+    __builtin_prefetch(&b->gen[first], 0, 3);
+    if (last != first) __builtin_prefetch(&b->gen[last], 0, 3);
+}
 bool IsGuestRam(const void* ptr, uint32_t n) { return FindBankReader(static_cast<const uint8_t*>(ptr), n ? n : 1) != nullptr; }
 bool HaveGuestRam() { return g_numBanks != 0; }
 uint64_t GuestWriteEpoch() { return g_epoch.load(std::memory_order_acquire); }

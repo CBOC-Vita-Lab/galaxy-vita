@@ -72,8 +72,8 @@ void Step(UiState&, const UiInput&, uint64_t);
 void Draw(const UiState&, const SettingsSession&, Surface, uint64_t);
 // The Display page's rows, in order, and what each shows. The text is all static or built in the view's own buffer: drawing a
 // frame allocates nothing.
-constexpr unsigned kDisplayRows=13;
-enum DisplayRow : unsigned { RowPreset, RowRate, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowSharpness, RowHdTextures, RowEffects, RowDepthOfField, RowCorePlan, RowMotion, RowLanguage };
+constexpr unsigned kDisplayRows=18;
+enum DisplayRow : unsigned { RowPreset, RowRate, RowSpeed, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowSharpness, RowHdTextures, RowEffects, RowDepthOfField, RowCorePlan, RowRenderer, RowOverlap, RowMaterials, RowFarAnimation, RowMotion, RowLanguage };
 struct RowView { const char* label=""; char value[72]={}; const char* help1=""; const char* help2=""; };
 void DisplayRowView(const UiState&, unsigned row, RowView&);
 // Controls page rows: row 0 the profile, then one per action, then kControlExtras options: pointer aiming, Tilt with, Tilt sensitivity.

@@ -30,6 +30,15 @@ void port_host_heap_log(const char* when);
 void port_host_alloc_scope_enter(void);
 void port_host_alloc_scope_leave(void);
 
+// GXV_HEAP_GUARD=1 (default 0, read once): a diagnostic for port-side storage that must outlive a scene. A container (or a pointer
+// to a buffer) is registered once, see PORT_HEAP_GUARD / PORT_HEAP_GUARD_PTR in port/host_vector.h; port_heap_guard_check then
+// reports, in the basic log, each registered storage that lies inside the game's heaps (port_is_game_heap_ptr) when it is called.
+// GameSystemSceneController::exeDestroyScene calls it just before the scene's heap goes. Registration needs no heap; with the switch
+// off both calls do next to nothing.
+typedef const void* (*PortHeapGuardFn)(void* context);  // the address of the storage now held (null: none)
+void port_heap_guard_register(const char* name, PortHeapGuardFn fn, void* context);
+void port_heap_guard_check(const char* when);
+
 #ifdef __cplusplus
 }
 

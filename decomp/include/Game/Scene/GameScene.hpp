@@ -57,6 +57,11 @@ public:
     bool isDrawMirror() const;
     void stageClear();
     inline bool isPlayMovie() const;
+#ifdef TARGET_PC
+    s32 pauseFreezeStep() const;
+    void capturePauseFreeze() const;
+    void drawPauseFreeze() const;
+#endif
 
     u32 _14;
     GameSceneScenarioOpeningCameraState* mScenarioCamera;  // 0x18
@@ -65,4 +70,9 @@ public:
     GameStageClearSequence* mStageClearSeq;                // 0x24
     bool mDraw3D;                                          // 0x28
     u8 _29;
+#ifdef TARGET_PC
+    // PETARI_PAUSE_FREEZE (GameScene.cpp): the pause menu's frozen 3D picture, drawn from one capture.
+    mutable s32 mPauseFreezePictures;  // pictures drawn since the pause menu opened (0: not frozen)
+    mutable u32 mPauseFreezeSizeGen;   // the renderer's picture-size generation at the last capture
+#endif
 };

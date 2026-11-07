@@ -110,8 +110,10 @@ def _cmpr_blocks(d, nb):
     p0 = _rgb565(c0).astype(np.int32)
     p1 = _rgb565(c1).astype(np.int32)
     gt = (c0 > c1)[..., None]
-    p2 = np.where(gt, (2 * p0 + p1) // 3, (p0 + p1) // 2)
-    p3 = np.where(gt, (p0 + 2 * p1) // 3, 0)
+    # GX's weights, 5/8 and 3/8 (not S3TC's 2/3 and 1/3), and its transparent entry keeps the average colour (as the game's own
+    # decoder, platform/vgx/src/vgx_texdecode.cpp, and Dolphin's; from Producdevity's fork, f8db449)
+    p2 = np.where(gt, (5 * p0 + 3 * p1) // 8, (p0 + p1) // 2)
+    p3 = np.where(gt, (3 * p0 + 5 * p1) // 8, (p0 + p1) // 2)
     p2[..., 3] = 255
     p3[..., 3] = np.where(gt[..., 0], 255, 0)
     pal = np.stack([p0, p1, p2, p3], 2).astype(np.uint8)  # (nb, 4 sub, 4 colours, 4)

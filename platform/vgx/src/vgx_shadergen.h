@@ -45,8 +45,20 @@ struct FsKey {
         uint8_t pad[2] = {};
     } stage[16];
     struct Ind {
+        // pad[0] (GXV_IND_VS, IndVsPair): 1 = the vertex shader writes this lookup's coordinate already scaled (v_texN, a vec2, read by
+        // nothing else): the lookup is texture2D(u_texM, v_texN), a non-dependent read. 0 in every key made with the switch off.
         uint8_t texMap = 0, texCoord = 0, pad[2] = {};
     } ind[4];
+    uint8_t indVs(int i) const { return ind[i].pad[0]; }
+    // GXV_TEXVEC2 (TexVec2Pair): the texture coordinate varyings of the non-projective texgens are vec2 (v_texN.xy is all such a
+    // texgen's coordinate uses); kept in the padding of stage[0], 0 in every key made with the switch off (the text as always).
+    uint8_t texVec2() const { return stage[0].pad[0]; }
+    void setTexVec2(uint8_t on) { stage[0].pad[0] = on; }
+    // GXV_DISCARD_BLEND (vgx_draw.cpp RejectZeroFs): a fragment that fails the alpha test writes vec4(0) instead of being killed. Set
+    // only by the front end, only for a draw whose blend makes a zero source a no-op (RejectIsNoop); kept in the padding of stage[0],
+    // 0 in every key made with the switch off (the text as always).
+    uint8_t rejectZero() const { return stage[0].pad[1]; }
+    void setRejectZero(uint8_t on) { stage[0].pad[1] = on; }
 };
 
 struct VsKey {
@@ -87,6 +99,34 @@ struct VsKey {
     void setLp(uint8_t mode, uint8_t base, uint8_t amount, uint8_t texMask) {
         chan[0].pad[0] = mode; chan[0].pad[1] = base; chan[1].pad[0] = amount; chan[1].pad[1] = texMask;
     }
+    // GXV_VSOUT (VsOutPrune): what the fragment shader the draw is paired with never reads, so that the vertex shader neither
+    // computes nor writes it. Kept in the padding of chan[2] and chan[3]; all zero (every key made with the switch off) means
+    // "everything is read" and gives the text the generator always made.
+    //   outCol(ch): kOutRgb = v_colN.rgb not read, kOutA = v_colN.a not read, kOutGone = v_colN not declared at all (the varying is left out)
+    //   outTexOff(): bit i = v_texI not read (the varying is written as a constant: the fragment shader still declares it)
+    static constexpr uint8_t kOutRgb = 1, kOutA = 2, kOutGone = 4;
+    uint8_t outCol(int ch) const { return chan[2].pad[ch & 1]; }
+    uint8_t outTexOff() const { return chan[3].pad[0]; }
+    // GXV_TEXVEC2: bit i = v_texI is declared and written as a vec2 (its fragment shader's key has texVec2 and texgen i is not projective)
+    uint8_t texVec2Mask() const { return chan[3].pad[1]; }
+    void setTexVec2Mask(uint8_t m) { chan[3].pad[1] = m; }
+    void setOut(uint8_t col0, uint8_t col1, uint8_t texOff) { chan[2].pad[0] = col0; chan[2].pad[1] = col1; chan[3].pad[0] = texOff; }
+    // GXV_VS_TRIM (from the Strikers port's 1.3 MSC_VGX_VS_TRIM; BuildVsKey): facts about the lights of the draw, kept in the padding of
+    // tg[6] and tg[7] (0 in every key made with the switch off, and in every key without a lit channel: the text as always).
+    //   ltCos1(): bit l = light l's cos attenuation is exactly (1, 0, 0) (XF light words 4..6), so its spot polynomial is 1
+    //   ltDist1(): bit l = light l's distance attenuation is exactly (1, 0, 0) (words 7..9), so its distance divisor is 1
+    //   ltTrim(): the switch is on for this lit key: a light sum that provably stays >= 0 is clamped by min(x, 1) alone
+    uint8_t ltCos1() const { return tg[7].pad[0]; }
+    uint8_t ltDist1() const { return tg[7].pad[1]; }
+    uint8_t ltTrim() const { return tg[6].pad[0]; }
+    void setLtTrim(uint8_t cos1, uint8_t dist1) { tg[7].pad[0] = cos1; tg[7].pad[1] = dist1; tg[6].pad[0] = 1; }
+    // GXV_IND_VS (IndVsPair): texgen i (i < 6) feeds only indirect lookups and is written as a vec2 times the lookups' coordinate
+    // scale 2^-s, 2^-t (GXSetIndTexCoordScale, BP 0x25 / 0x26). Kept in the padding of tg[0..5]: pad[0] = 0x10 | s, pad[1] = t.
+    // 0 in every key made with the switch off (the text as always).
+    bool indScaled(int i) const { return i < 6 && (tg[i].pad[0] & 0x10u) != 0; }
+    uint8_t indScaleS(int i) const { return static_cast<uint8_t>(tg[i].pad[0] & 15u); }
+    uint8_t indScaleT(int i) const { return static_cast<uint8_t>(tg[i].pad[1] & 15u); }
+    void setIndScale(int i, uint8_t s, uint8_t t) { tg[i].pad[0] = static_cast<uint8_t>(0x10u | (s & 15u)); tg[i].pad[1] = static_cast<uint8_t>(t & 15u); }
 };
 
 // FsKey::fog bit: the (unclamped) fog factor is an affine function of clip w (perspective) or clip z (orthographic), made in
@@ -139,6 +179,10 @@ bool FsHalfEligible(const FsKey& key);
 void GenerateFragmentShaderPrecision(const FsKey& key, ShaderSource& out, bool half);
 // GXV_NODISCARD (read once, default 0): no `discard` in a fragment shader whose alpha test cannot fail.
 bool NoDiscard();
+// GXV_DISCARD_BLEND (read once, default 0): the alpha test of a draw whose blend function, colour mask and depth mask make a source of
+// vec4(0) leave the target as it is (no depth write; colour and alpha masked or blended with a destination factor that is 1 for a zero
+// source) is written without `discard`: a failing fragment outputs vec4(0) (FsKey::rejectZero). Exact; keeps hidden-surface removal.
+bool DiscardBlend();
 // Whether alpha compare (comp0 ref0 op comp1 ref1; GX encodings, op 0 AND 1 OR 2 XOR 3 XNOR) is true for every 8-bit alpha. A
 // negative ref means "not known" (only ALWAYS / NEVER and equal comparisons are then used).
 bool AlphaTestAlwaysPasses(uint32_t comp0, int ref0, uint32_t op, uint32_t comp1, int ref1);
@@ -157,6 +201,7 @@ constexpr uint32_t kShaderGenVersion = 2;
 bool UniformPacking();
 // Sizes in vec4 of what a shader with this key declares.
 int FsTevCount(const FsKey& k);  // u_tev
+uint32_t FsTexChannels(const FsKey& k); // texture channels read (ShaderSource::texChan, GXV_EFBSWAP2)
 int VsLightCount(const VsKey& k); // u_lt
 constexpr int kPalRowsFull = 96, kPalRowsShort = 60, kPalShortMaxRow = 27;
 // The small palette (GXV_PALROWS): position rows 0..11, then normal rows 0..11. J3D loads the matrices of a shape into
@@ -167,6 +212,79 @@ constexpr int PalRowsOfKey(int perVtxPos) { return perVtxPos == 3 ? kPalSmallK :
 // GXV_PALROWS (default 0): 1 = a draw whose vertices use no matrix row above 9 gets the small palette (24 vec4 instead of
 // 60 in the shader, the block, the upload and the console's uniform buffer); 2 = also count the rows draws use (census).
 long PaletteRowsMode();
+// GXV_VSOUT (read once, default 0): vertex shaders write only what their fragment shader reads.
+//   0 off: every vertex shader writes v_col0, v_col1 (vec4 each) and every texgen, whatever the fragment shader reads (as always).
+//   1 the front end marks in the vertex key (VsKey::setOut) the colour varyings, colour / alpha parts and texgens the paired fragment
+//     shader never reads (VsOutPrune), and the generator leaves them out: no output (or a constant), no lighting loop for them, no
+//     attribute read for them (a_col1 of a one-channel key is a constant vertex stream of its own on vitaGL's direct path).
+// Exact: the fragment shader's result depends only on the varyings and components it reads, and those are computed by the same text.
+long VsOutMode();
+// Marks in `vs` what `fs` does not read (vs and fs as BuildVsKey / BuildFsKey made them, for the same draw state). keepColours: the
+// draw may be drawn with the register-folding variant of `fs` (FsKey::regFromVtx = 3, which reads v_col0 and v_col1 whole): colours kept.
+// A pure function of the two keys, so the key memo stays valid. With nothing to leave out the key is not changed.
+void VsOutPrune(VsKey& vs, const FsKey& fs, bool keepColours);
+// GXV_TEXVEC2 (read once, default 0): 1 = a fragment key with a non-projective texgen is marked (FsKey::setTexVec2) and its texture
+// coordinate varyings v_texN of the non-projective texgens become vec2 in both shaders of the pair (VsKey::setTexVec2Mask): the
+// fragment shader reads only .xy of them, so their third component (always 1.0, or a post matrix's third row) is neither written,
+// stored, nor interpolated; a texture2D on such a coordinate takes the varying as it is. Exact (the same x and y everywhere).
+// Every fragment shader with a texgen changes text: the shipped compiled cache does not have them (compiled on first use).
+long TexVec2Mode();
+// Marks the pair (fs and vs as made for the same draw state; fs first): returns whether fs was changed.
+bool TexVec2Pair(FsKey& fs, VsKey& vs);
+// GXV_IND_VS (read once, default 0; vita/vgx-game/entry.cpp sets 1): the coordinate scale of an indirect lookup moves into the vertex
+// shader. Per pixel the fragment shader read texture2D(u_texM, uvN * u_tev[V_INDSCALE + i].xy): a dependent read (the coordinate is
+// computed), which the console's GPU cannot prefetch. When texgen N is non-projective, below 6, and read by nothing but indirect
+// lookups that all have the same scale, the vertex shader writes v_texN = coordinate * vec2(2^-s, 2^-t) (a vec2) and the lookup reads
+// the varying as it is. Exact: the scale is a power of two, and every step from the vertex value to the interpolated coordinate (the
+// products and sums of attribute set-up, perspective-correct interpolation, the divide) is a binary floating-point operation, which
+// commutes with a power-of-two factor bit for bit (barring overflow / values below 2^-126, which texture coordinates are not). Other
+// texgens and keys keep their text. bp25 / bp26: BP 0x25 / 0x26 (part of the key registers: vgx_state.cpp IsKeyBP).
+long IndVsMode();
+// Marks the pair (after TexVec2Pair, before VsOutPrune): returns whether anything was marked.
+bool IndVsPair(FsKey& fs, VsKey& vs, uint32_t bp25, uint32_t bp26);
+// GXV_FS_TRIM (read once, default 0; from the Strikers port's 1.3 MSC_VGX_FS_TRIM): fragment shaders without the clamps that cannot act.
+// The Vita's shader compiler keeps every clamp of the text, each a VMIN and a VMAX (about a fifth of a typical TEV shader). FsTrimAnalyse
+// follows the range of every TEV value through a key (texels, konst colours and the rasterised colours are 0..1; the TEV registers are
+// 0..1 unless FsKey::inWrap says one is outside 0..255, then -1024..1023 / 255; a register read through the TEVIN wrap is 0..1 again)
+// and says which side of which clamp can act; the generator leaves out the sides that cannot (one side: a max or a min; none: nothing),
+// the final clamp the same way, and the floor of an ordered alpha compare (floor(x) < n is x < n for a whole n). Every fragment
+// shader's text can change: adopt with a re-seeded shader pack. Near-exact: the bounds are real numbers, so a float rounding may leave a
+// value an ulp past one (where the clamp would have cut it), and with multisampling the colours interpolated at an edge pixel's
+// centre can lie outside the triangle's (outside 0..1). A half precision key (GXV_FS_HALF) is analysed for its error bound with the
+// clamps the trimmed text keeps, so its proof covers the trimmed text. -- Superseded (r88 console, Beach Bowl "static"): the trim
+// applies to FLOAT shaders only and takes no part in the precision decision; a key GXV_FS_HALF makes half (FsHalfEligible, the analysis
+// of the full text) keeps the full text byte for byte (see GenerateFragmentShader in vgx_shadergen.cpp for why).
+//   GXV_FS_TRIM=1 also makes the front end track TEV registers outside 0..255 (FsKey::inWrap bit 1, as GXV_FS_HALF does).
+long FsTrimMode();
+// GXV_FS_TRIM_PARTS=<bits> (read once, only with GXV_FS_TRIM=1; logged once, "fstrim:" basic-log line): which parts of the trim are made,
+// for bisecting on the console (r90: Beach Bowl speckle with every part on, with or without GXV_FS_HALF / GXV_VS_TRIM). A part left out
+// keeps the full text's operation; 0 is the full text byte for byte.
+//   1  colour: idle clamp sides of TEV colour stages (not in a key with a compare-mode stage unless 32 is set too)
+//   2  the floor of an ordered alpha compare (LESS, LEQUAL, GREATER, GEQUAL)
+//   4  the final wrap (vgx_wrap_final, GXV_TEVWRAP) left out where the final value is proven in 0..1
+//   8  alpha: idle clamp sides of TEV alpha stages
+//   16 idle sides of the final clamp (one vec4 operation: colour and alpha together)
+//   32 with 1: colour clamps also in a key with a compare-mode stage (whose R8 / GR16 / BGR24 compares read colour inputs and scale a
+//      difference by up to 2^24, so a rounding at 0 or 1 that a clamp would remove can decide them)
+// Default 1 (colour only: nothing that the alpha test, the depth / alpha writes or the blend's source alpha read); 63 = r76-r90 exactly.
+constexpr long kFsTrimColourClamps = 1, kFsTrimFloor = 2, kFsTrimFinalWrap = 4, kFsTrimAlphaClamps = 8, kFsTrimFinalClamp = 16,
+               kFsTrimCompareKeys = 32, kFsTrimAll = 63;
+constexpr long kFsTrimPartsDefault = kFsTrimColourClamps;
+long FsTrimParts();
+struct FsTrimClamp { bool lo = true, hi = true; }; // the side can act somewhere in the key's ranges
+struct FsTrimInfo { FsTrimClamp c[16], a[16], finC, finA; };
+void FsTrimAnalyse(const FsKey& k, FsTrimInfo& out);
+// The fragment shader of a key in the form given (tests: both forms in one process). half as GenerateFragmentShaderPrecision; a key
+// written in half is never trimmed (trim is then ignored).
+void GenerateFragmentShaderForm(const FsKey& key, ShaderSource& out, bool half, bool trim);
+// The same with the trim parts given (kFsTrim* bits; tests: every mask in one process). A half key is never trimmed.
+void GenerateFragmentShaderParts(const FsKey& key, ShaderSource& out, bool half, long parts);
+// GXV_VS_TRIM (read once, default 0; from the Strikers port's 1.3 MSC_VGX_VS_TRIM mode 1): vertex shaders without the light terms the
+// light registers make exactly 1 (VsKey::ltCos1 / ltDist1: a spot attenuation whose polynomial is (1, 0, 0) and whose divisor is
+// (1, 0, 0) is 1, the GXInitLightAttn(1, 0, 0, 1, 0, 0) of every actor light of the game), and a light sum that cannot be negative
+// clamped by min(x, 1) only. Exact for finite light data (GXV_LIGHTNORM=1, the default, zeroes the direction such a light's spot
+// term would multiply by 0). The front end keeps the facts with the light registers (State::ltCos1 / ltDist1, part of the key hash).
+long VsTrimMode();
 void GenerateFragmentShader(const FsKey& key, ShaderSource& out);
 void GenerateVertexShader(const VsKey& key, ShaderSource& out);
 

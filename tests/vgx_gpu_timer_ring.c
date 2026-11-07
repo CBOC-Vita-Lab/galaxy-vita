@@ -11,12 +11,13 @@ typedef unsigned SceSize;
 typedef struct { int unused; } SceGxmContext;
 typedef struct { volatile unsigned int *address; uint32_t value; } SceGxmNotification;
 typedef struct { uint32_t busy_us, span_us, tail_us; uint16_t scenes, timed; } vglRtGpuFrame;
+typedef struct { uint32_t seq, frame, tag, begin_us, submit_us, vdone_us, fdone_us; uint8_t timed, vtimed, pad0, pad1; } vglRtGpuScene; // (scene timers)
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define VGL_RT_GPU_TIMERS 8
 #define GPU_TIMERS
 
-static unsigned int notifications[65];
+static unsigned int notifications[129]; // query_fence, 64 fragment slots, 64 vertex slots (scene timers)
 static SceGxmNotification query_fence = { &notifications[0], 0 };
 static unsigned submitted, gpu_completed, waits, inject_count, stopped;
 static int drain;
@@ -58,7 +59,42 @@ static void sceGxmNotificationWait(const SceGxmNotification *n) {
     gpu_completed = 1;
 }
 
+// GXV_GPU_SCENES (gpu_timers.py vglRtSetupScenes / vglRtTagScene / vglRtReadScenes): tags follow the scene that begins after them,
+// both watchers stamp every scene, the reader returns each finished scene once, in order, with its frame and tag.
+static int scenes_test(void) {
+    vglRtSetRingGuard(1);
+    vglRtSetup(VGL_RT_GPU_TIMERS, 1, 1);
+    assert(vglRtSetupScenes(1, 1) == 1);
+    drain = 1;
+    // frame 0: scenes tagged 11, 12; an untagged display scene; frame 1: one scene tagged 21
+    const uint32_t tags[4] = {11, 12, 0, 21};
+    for (int i = 0; i < 4; ++i) {
+        if (tags[i]) vglRtTagScene(tags[i]);
+        vgl_rt_scene_begin();
+        ++query_fence.value;
+        vgl_rt_end_scene(NULL);
+        if (i == 2) vgl_rt_frame_end();
+    }
+    if (!setjmp(stop_watcher)) rt_vwatcher(0, NULL);
+    vglRtGpuScene out[8];
+    assert(vglRtReadScenes(out, 8) == 0); // (the fragment watcher has not seen them yet)
+    if (!setjmp(stop_watcher)) rt_watcher(0, NULL);
+    const uint32_t n = vglRtReadScenes(out, 8);
+    assert(n == 4);
+    for (uint32_t i = 0; i < n; ++i) {
+        assert(out[i].seq == i && out[i].tag == tags[i] && out[i].timed && out[i].vtimed);
+        assert(out[i].frame == (i < 3 ? 0u : 1u));
+        assert(out[i].vdone_us != 0 && out[i].fdone_us != 0 && out[i].begin_us != 0);
+        assert((int32_t)(out[i].submit_us - out[i].begin_us) > 0);
+    }
+    assert(vglRtReadScenes(out, 8) == 0);
+    assert(vglRtRingDrops() == 0);
+    printf("PASS: scene timers: 4 scenes read once, in order, with their frames and tags\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "scenes")) return scenes_test();
     assert(argc == 3);
     inject_count = (unsigned)strtoul(argv[1], NULL, 10);
     const int guard = atoi(argv[2]);

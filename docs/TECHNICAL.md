@@ -55,6 +55,8 @@ every switch keeps the older path reachable for comparison. The ones a player mi
 | `PETARI_SETTINGS_SE` | 1 | Its sounds. `0` silences them |
 | `PETARI_REAR_ACCUM` | 1 | Rear touch aiming adds up slow slides. `0`: only faster slides move the pointer |
 | `GXV_CHARAA` | 0 | Edge smoothing of the characters and key items only (FXAA in small boxes inside the final upscale, the HUD left alone). `1` on, `2` shows its coverage tinted red |
+| `GXV_EDGE_AA` | 0 | Edge smoothing of the whole picture in the present (FXAA 3.11 console, in place of the blit or sharpened upscale; the HUD drawn again unfiltered; off on the multisampled rungs). `1` on, `2` shows the pixels it changes tinted red, `3` on for the left half of the screen only (A/B screenshots) |
+| `GXV_PRESENT_FAST` | 0 | One-pass present (upscale + unsharp mask + edge smoothing) with non-dependent reads, half maths and no branch, in place of the sharpened upscale and of `GXV_EDGE_AA`'s FXAA program. `1`: 3 reads without edge smoothing (Strikers' FAST mask), `2`: 5 reads (today's mask exactly); with `GXV_EDGE_AA` both use a 5-read kernel that blends along horizontal / vertical edges (diagonals only at 960x544 1:1); the HUD drawn again plainly. `GXV_PRESENT_FAST_EDGE` / `_RAMP` (per mille, 100 / 150): where smoothing starts / is full |
 
 Developer switches (`GXV_*` in `platform/vgx/src/` and `platform/vgx/vita/vgx_host_galaxy_vita.cpp`,
 `PETARI_*` in `platform/src/`) are documented where they are read. Many have a verify mode
@@ -117,7 +119,12 @@ not console timings.
   A per-frame depth plan (`GXV_DEPTHPLAN`), swapping the EFB colour buffer instead of copying it
   (`GXV_EFBSWAP`), late direct passes (`GXV_PASSDIRECT2`) and a hoisted corner copy
   (`GXV_PASSHOIST`, only on whole render pixels) cut the number of scenes. The desktop build's
-  in-process verifier (`GXV_PASSVERIFY`) checks each change frame by frame.
+  in-process verifier (`GXV_PASSVERIFY`) checks each change frame by frame. `GXV_EFBSWAP2` extends
+  the swap to the two whole-screen captures every game picture makes with a format conversion (the
+  shadow-volume / silhouette alpha capture, A8, and the indirect-effect capture, RGB565) when the
+  frame's shaders read only channels the conversion leaves unchanged; a later frame that reads
+  another channel gets the buffer converted first. Two scenes fewer per picture
+  (`tools/test_vgx_efbswap2_gl.sh`).
 - Reduced-size additive effects (`GXV_FXHALF`) and half-size blur passes (`GXV_PASSHALF`) are in
   the source but **off** by default.
 - Half precision (fp16) fragment shaders (`GXV_FS_HALF`, **off** by default). `1`: only the shaders

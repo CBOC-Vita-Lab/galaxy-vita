@@ -20,6 +20,7 @@
 #include "port/queue_depth.h"
 #include "port/port.h"
 #include "port/diagnostics.h"
+#include "port/hot_knob.h"
 #include "port/qemu_hooks.h"
 #include "port/vclock.h"
 #include "port/settings_lifecycle.h"
@@ -44,8 +45,10 @@ extern "C" int64_t port_thread_cpu_us(void); // CPU time of the calling thread
 extern "C" void port_perf_game_totals(int64_t* workNs, uint32_t* frames, int64_t* cpuUs, int64_t* maxWorkNs); // port/perf.cpp
 extern "C" uint32_t port_frameskip_count(void);
 extern "C" int port_screen_quiet(void) __attribute__((weak));
+extern "C" int port_scene_loading_active(void) __attribute__((weak)); // (platform/src/port/perf.cpp: the game's loading thread runs)
 extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));
 extern "C" uint64_t port_autoq_picture_work_us(void) __attribute__((weak));  // optional 30 fps feasibility estimate (WP-B)
+extern "C" void port_autoq_front_picture(void) __attribute__((weak));     // automatic quality: the front end's CPU at each picture
 extern "C" void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8_t* rgba); // port/handheld_ui.cpp
 extern "C" bool port_handheld_texture_needs_rgba(uint64_t hash, uint32_t width, uint32_t height);
 #if defined(__vita__)
@@ -53,9 +56,12 @@ extern "C" int port_vita_pin_core(int core); // vita/runtime/memory.cpp
 extern "C" int port_vgx_vita_start(void); // vita/runtime: vitaGL, on the calling (render) thread
 extern "C" int port_vgx_vita_fixed_cap_supported(void) __attribute__((weak));
 extern "C" void port_vgx_vita_set_present_allowed(int allowed);
+extern "C" void port_vgx_vita_set_present_stamp(uint32_t stamp);  // GXV_PRESENT_SYNC: 0 none, else 1 << 31 | the turn's vblank
 extern "C" void port_vgx_vita_finish_unpresented_frame(void);
 extern "C" unsigned long long port_vgx_vita_game_swaps(void);
 extern "C" void port_vgx_vita_reset_present_slots(void);
+extern "C" uint32_t port_vgx_vita_vcount(void) __attribute__((weak));  // the display's vblank counter (GXV_PRESENT_SYNC)
+extern "C" int port_vgx_present_sync_mode(void);  // (below)
 extern "C" void port_vgx_vita_frame_done(void);
 extern "C" void port_vgx_vita_ready(void);          // the back end exists: the loading screen moves over to it
 extern "C" int port_vgx_vita_splash_active(void);   // 1 while the loading screen is up
@@ -68,12 +74,12 @@ extern "C" int port_vgx_vita_error_shown(void);     // 1 when a start-up failure
 extern "C" int port_vgx_vita_fail(const char* message);  // put a start-up failure on the loading screen (1: shown)
 extern "C" void port_vgx_vita_backend_failed(void); // the back end's own set-up failed: say so on the loading screen
 extern "C" int port_vita_core0_alone(void) __attribute__((weak)); // GXV_CORE0_ALONE (vita/runtime/memory.cpp)
+extern "C" int port_vita_thread_core3(int part, int planned) __attribute__((weak)); // the fourth core (vita/runtime/memory.cpp)
 #endif
 
 namespace vgx {
 bool LogEnabled() {
-    static const bool on = EnvInt("GXV_LOG", 0) != 0;
-    return on;
+    return PORT_HOT_KNOB(bool, EnvInt("GXV_LOG", 0) != 0);  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
 }
 // (FrontPresent's fall-back when no frame sink is set; the sink below always is)
 void SubmitToBackend(CmdBuf&) {}
@@ -89,7 +95,7 @@ std::atomic<bool> sActive{false};
 std::atomic<unsigned long long> sFramesQueued{0}, sFramesShown{0};
 std::atomic<unsigned> sPaceDivisor{2};
 std::atomic<uint64_t> sPaceBackendUs{0}, sPaceWaitUs{0};
-int PaceMode() {
+int PaceModeOnce() {
     // GXV_PACE=1: 30/20 display cadence with 60 Hz simulation; =2 also checks its countdown oracle. Default off.
     static const int mode = [] {
         // GXV_FPS_LIMIT=30 requests fixed 30-picture presentation, not slower simulation; default off.
@@ -106,6 +112,8 @@ int PaceMode() {
     }();
     return mode;
 }
+// (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h); PaceModeOnce's guarded static still works it out (and says so in the log) exactly once
+int PaceMode() { return PORT_HOT_KNOB(int, PaceModeOnce()); }
 unsigned long long GameSwapCount() {
 #if defined(__vita__)
     if (PaceMode() == 3) return port_vgx_vita_game_swaps();
@@ -131,7 +139,9 @@ int sPerfSeconds = 0;
 // GXV_CHARAA (vgx_draw.cpp, character edge smoothing): what the last window smoothed, per display copy (front end: frames with
 // character rectangles, character draws, rectangles and their EFB pixels; back end: rectangles drawn and the screen pixels
 // shaded a second time, presents skipped because the EFB is multisampled). Every perf window, when the switch is on.
+void EdgePerfLine();
 void CharaPerfLine() {
+    EdgePerfLine();
     if (vgx::CharaAAMode() == 0) return;
     static uint64_t lf[11] = {}, lb[4] = {};
     uint64_t f[11], b[4];
@@ -145,6 +155,26 @@ void CharaPerfLine() {
              (f[5] - lf[5]) / copies, (f[6] - lf[6]) / copies, (b[1] - lb[1]) / copies, (b[2] - lb[2]) / copies, (unsigned long long)(f[7] - lf[7]),
              (unsigned long long)(f[8] - lf[8]), (unsigned long long)(f[9] - lf[9]), (unsigned long long)(f[10] - lf[10]),
              (unsigned long long)(b[3] - lb[3]));
+    std::memcpy(lf, f, sizeof f);
+    std::memcpy(lb, b, sizeof b);
+}
+
+// GXV_EDGE_AA (vgx_draw.cpp, whole-picture edge smoothing): per perf window, the display copies, how many were smoothed whole, the
+// HUD rectangles drawn again plainly per smoothed copy, the copies given up because of the HUD's area, and the back end's skips
+// (multisampled EFB: rungs 7-8, already smooth; other: the shader did not build, or GXV_AUTOQ_EDGESTEP has it off under GPU load).
+void EdgePerfLine() {
+    if (vgx::EdgeAAMode() == 0) return;
+    static uint64_t lf[5] = {}, lb[4] = {};
+    uint64_t f[5], b[4];
+    vgx::EdgeCounters(f);
+    vgx::backend::EdgeAACounters(b[0], b[1], b[2], b[3]);
+    const double smoothed = b[0] - lb[0] ? static_cast<double>(b[0] - lb[0]) : 1.0;
+    const double copies = f[0] - lf[0] ? static_cast<double>(f[0] - lf[0]) : 1.0;
+    port_log("perf: edgeaa: %llu display copies, %llu marked for smoothing, %llu given up (HUD area), %.1f HUD draws per copy; back end: %llu presents "
+             "smoothed whole, %.2f HUD rectangles redrawn per smoothed present, %llu skipped (multisampled EFB), %llu skipped (shader, or the "
+             "controller's edge step: GXV_AUTOQ_EDGESTEP)",
+             (unsigned long long)(f[0] - lf[0]), (unsigned long long)(f[1] - lf[1]), (unsigned long long)(f[3] - lf[3]), (f[4] - lf[4]) / copies,
+             (unsigned long long)(b[0] - lb[0]), (b[1] - lb[1]) / smoothed, (unsigned long long)(b[2] - lb[2]), (unsigned long long)(b[3] - lb[3]));
     std::memcpy(lf, f, sizeof f);
     std::memcpy(lb, b, sizeof b);
 }
@@ -202,42 +232,52 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
     if (sPerfSeconds <= 0) return;
     if (!PORT_RUNTIME_DIAGNOSTICS) {
         // The player build's basic log (ux0:data/smg/log.txt): every GXV_PERF seconds (default 5) one line with the frame rate,
-        // the hitches (presents more than 100 ms apart: what a player feels as a stutter) and the picture size.
+        // job-completion gaps and the picture size. Fixed 30 counts only jobs that actually swapped;
+        // hidden completed jobs must not hide a long wait between visible pictures.
         const int64_t now = port_host_time_ns();
         static int64_t lastPresent = 0, longest = 0;
+        static unsigned long long lastSwaps = 0;
         static unsigned hitches = 0;
-        if (lastPresent) {
-            const int64_t gap = now - lastPresent;
-            if (gap > 100000000ll) ++hitches;
-            if (gap > longest) longest = gap;
+        const unsigned long long swaps = GameSwapCount();
+        if (PaceMode() != 3 || swaps != lastSwaps) {
+            if (lastPresent) {
+                const int64_t gap = now - lastPresent;
+                if (gap > 100000000ll) ++hitches;
+                if (gap > longest) longest = gap;
+            }
+            lastPresent = now;
         }
-        lastPresent = now;
+        lastSwaps = swaps;
         if (sPerf.t0 && now - sPerf.t0 < static_cast<int64_t>(sPerfSeconds) * 1000000000ll) return;
         PerfWindow w;
         int64_t unusedMax;
         port_perf_game_totals(&w.work, &w.frames, &w.gameCpu, &unusedMax);
         w.t0 = now;
         w.shown = sFramesShown.load(std::memory_order_relaxed);
-        w.swaps = GameSwapCount();
+        w.swaps = swaps;
         w.skipped = port_frameskip_count();
         if (sPerf.t0) {
             const double seconds = (now - sPerf.t0) / 1e9;
             int rw = 0, rh = 0, rs = 1;
             vgx::backend::QualityRungSize(rw, rh, rs);
-            // Shaders prepared since the last line (loaded from the ready-made cache or compiled; the ms tell which: a real compile of a new effect is a hitch, the package ships 1,131 ready ones).
-            static uint32_t lastCompiles = 0;
+            // Preparation includes cached loads and links, not just native compiler misses.
+            static uint32_t lastCompiles = 0, lastLinks = 0;
             static double lastShaderMs = 0;
             const vgx::backend::Stats bs = vgx::backend::GetStats();
             const unsigned compiles = bs.shaderCompiles - lastCompiles;
+            const unsigned links = bs.programLinks - lastLinks;
             const double compileMs = bs.shaderWorkMs - lastShaderMs;
             lastCompiles = bs.shaderCompiles;
+            lastLinks = bs.programLinks;
             lastShaderMs = bs.shaderWorkMs;
-            char compileNote[64] = "";
-            if (compiles) std::snprintf(compileNote, sizeof compileNote, "; %u shaders prepared (%.0f ms)", compiles, compileMs);
+            const unsigned warmLeft = vgx::backend::WarmPending();
+            char compileNote[144] = "";
+            if (compiles || links || compileMs > 0 || warmLeft)
+                std::snprintf(compileNote, sizeof compileNote, "; %u shaders prepared (%.0f ms); %u program links; warm %u left", compiles, compileMs, links, warmLeft);
             if (PaceMode() == 3) {
-                port_log_summary("fps: %.1f s: swap FPS %.1f; game %.1f turns/s; %u skipped; %u completed jobs; picture %dx%d%s%s",
+                port_log_summary("fps: %.1f s: swap FPS %.1f; game %.1f turns/s; %u skipped; %u completed jobs; %u swapped-job gaps over 100 ms (longest %.0f ms); picture %dx%d%s%s",
                                  seconds, (w.swaps - sPerf.swaps) / seconds, (w.frames - sPerf.frames) / seconds,
-                                 w.skipped - sPerf.skipped, static_cast<unsigned>(w.shown - sPerf.shown), rw, rh,
+                                 w.skipped - sPerf.skipped, static_cast<unsigned>(w.shown - sPerf.shown), hitches, longest / 1e6, rw, rh,
                                  rs > 1 ? (rs > 2 ? " 4x" : " 2x") : "", compileNote);
             } else port_log_summary("fps: %.1f s: shown %.1f fps; game %.1f turns/s; %u skipped; %u hitches over 100 ms (longest %.0f ms); picture %dx%d%s%s",
                              seconds, (w.shown - sPerf.shown) / seconds, (w.frames - sPerf.frames) / seconds, w.skipped - sPerf.skipped, hitches,
@@ -245,6 +285,9 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
             hitches = 0;
             longest = 0;
             CharaPerfLine();
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+            vgx::backend::DrawRejectReport();
+#endif
             static unsigned windows = 0;
             if (++windows % 6 == 0 && port_host_heap_summary) { port_host_heap_summary(); port_vgx_census_log("every 30 s"); }  // (every 30 s: the C heap's use, so a slow growth shows before it runs out)
         }
@@ -309,6 +352,9 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
         lastHits = hc.hits;
     }
     CharaPerfLine();
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    vgx::backend::DrawRejectReport();
+#endif
     {
         // Front-end split (GXV_SPLIT, vgx_fesplit.h): the finishing thread's CPU per frame, and how long the player waited for it.
         // ("caught up": the player's time at the frame ends, waiting for the finishing thread or doing what it had not done yet)
@@ -344,6 +390,20 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
         std::memcpy(last, c, sizeof c);
     }
     {
+        // GXV_FE_PREFETCH / GXV_VARFRONT (vgx): top-level CALL_DLs and how many of them had the next call hinted one call ahead (the
+        // look-ahead stops at immediate draws); new draw variants found in front of the warm-up list's seen-sets, and not found there
+        static uint64_t last[4] = {};
+        uint64_t c[4];
+        vgx::FePrefetchCounters(c);
+        vgx::VarFrontCounters(c + 2);
+        if (c[0] != last[0] || c[2] != last[2] || c[3] != last[3])
+            port_log("perf: fe-prefetch: %llu top-level display-list calls, %llu with the next one hinted ahead (GXV_FE_PREFETCH=%d); "
+                     "variant front %llu hits %llu misses",
+                     (unsigned long long)(c[0] - last[0]), (unsigned long long)(c[1] - last[1]), vgx::FePrefetchDepth(),
+                     (unsigned long long)(c[2] - last[2]), (unsigned long long)(c[3] - last[3]));
+        std::memcpy(last, c, sizeof c);
+    }
+    {
         // GXV_RIGIDMERGE: rigid draws made into one record with the matrix palette (nothing is printed while the switch is off)
         static uint64_t last[2] = {};
         uint64_t c[2];
@@ -351,6 +411,18 @@ void PerfFrame(int64_t execNs, uint32_t drawCalls) {
         if (c[0] != last[0] || c[1] != last[1])
             port_log("perf: rigidmerge: %llu palette runs, %llu draws joined them (draw calls saved)", (unsigned long long)(c[0] - last[0]),
                      (unsigned long long)(c[1] - last[1]));
+        std::memcpy(last, c, sizeof c);
+    }
+    {
+        // GXV_STATICCULL: static runs (the cached lists' static buffers: the map's shapes) outside the clip volume, not drawn
+        static uint64_t last[3] = {};
+        uint64_t c[3];
+        vgx::StaticCullCounters(c);
+        if (c[0] != last[0]) {
+            const double n = gf ? gf : 1;
+            port_log("perf: static cull: %.1f of %.1f static runs/frame outside the view, not drawn (%.0f%%, %.0f vertices/frame)",
+                     (c[1] - last[1]) / n, (c[0] - last[0]) / n, 100.0 * (c[1] - last[1]) / static_cast<double>(c[0] - last[0]), (c[2] - last[2]) / n);
+        }
         std::memcpy(last, c, sizeof c);
     }
     {
@@ -467,6 +539,7 @@ void ServiceSettingsHold(std::unique_lock<std::mutex>& lock) {
 void ExecuteJob(const vgx::CmdBuf& job, bool fixed) {
 #if defined(__vita__)
     if (fixed) port_vgx_vita_set_present_allowed(job.presentAllowed);
+    if (port_vgx_present_sync_mode()) port_vgx_vita_set_present_stamp(job.presentStamp);  // (GXV_PRESENT_SYNC: this picture's turn)
 #endif
     vgx::backend::Execute(job);
 #if defined(__vita__)
@@ -518,24 +591,29 @@ void RenderMain() {
         static const bool warmIdleOn = getenv("GXV_WARM_IDLE") && getenv("GXV_WARM_IDLE")[0] == '1';
         while (sJobs.empty()) {
             ServiceSettingsHold(lk);
-            const bool warm = warmIdleOn && vgx::backend::WarmPending() > 0;
+            const bool warm = warmIdleOn && vgx::backend::WarmPending() > 0 && !vgx::backend::WarmCapacityYielded();
+            // GXV_STAGEWARM_IDLE=1 (default 0): while the game's loading thread builds a stage, its recorded programs are linked here,
+            // between frames - links only, no draw and no delete (vgx_backend_gl.cpp, StageWarmIdle); the rest stays in the frames' slices.
+            const bool stage = port_scene_loading_active && port_scene_loading_active() && vgx::backend::StageWarmIdleWanted();
             if (!port_vgx_vita_splash_active()) {
                 // (a time limit, not an endless wait: Vita3K's emulation of the kernel's condition variables sometimes loses a
                 // wake-up, and with the queue cut to one frame the back end waits for every frame; the render stood still for good
                 // in three emulator runs, stall report: "waiting for a frame" while a frame was queued. The console has not shown it; this costs it nothing.)
-                if (sCv.wait_for(lk, std::chrono::milliseconds(warm ? 1 : 20), [] { return !sJobs.empty(); })) break;
-                if (warm) {
+                if (sCv.wait_for(lk, std::chrono::milliseconds(warm || stage ? 1 : 20), [] { return !sJobs.empty(); })) break;
+                if (warm || stage) {
                     lk.unlock();
-                    vgx::backend::WarmIdle();
+                    if (stage) vgx::backend::StageWarmIdle();
+                    if (warm) vgx::backend::WarmIdle();
                     lk.lock();
                 }
                 continue;
             }
-            if (sCv.wait_for(lk, std::chrono::milliseconds(warm ? 1 : 20), [] { return !sJobs.empty(); })) break;
+            if (sCv.wait_for(lk, std::chrono::milliseconds(warm || stage ? 1 : 20), [] { return !sJobs.empty(); })) break;
             lk.unlock();
-            if (warm) {
+            if (warm || stage) {
                 port_vgx_vita_idle_gap(80000u);
-                vgx::backend::WarmIdle();
+                if (stage) vgx::backend::StageWarmIdle();
+                if (warm) vgx::backend::WarmIdle();
             } else {
                 port_vgx_vita_idle();
             }
@@ -563,7 +641,10 @@ void RenderMain() {
             sBackSince.store(port_host_time_ns(), std::memory_order_relaxed);
             sBackStage.store(1, std::memory_order_relaxed);
         }
-        ExecuteJob(*job, PaceMode() == 3);
+        {
+            vgx::workload::Scope execution(vgx::workload::BackendExecute);
+            ExecuteJob(*job, PaceMode() == 3);
+        }
         if (tPace) {
             const int64_t cpuNow = port_thread_cpu_us();
             const uint64_t elapsed = static_cast<uint64_t>(port_host_time_ns() - tPace) / 1000;
@@ -772,6 +853,9 @@ void DisplayCopy() {
     const vgx::stats::Frame fs = vgx::stats::Cur();  // (FrontPresent resets it)
     vgx::FrontPresent(false, nullptr);
     vgx::workload::FrontPicture();
+    // (automatic quality's target mode: the front end is a stage of the picture's work, measured where it has a thread of its
+    // own; on the game thread its work is already in the game's turns)
+    if (port_autoq_front_picture && port_vgx_player()) port_autoq_front_picture();
     if (PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0) {
         sPlCpuUs.store(port_thread_cpu_us(), std::memory_order_relaxed);
         sPlRecords.fetch_add(fs.drawCalls, std::memory_order_relaxed);
@@ -815,12 +899,58 @@ void TexDump(const vgx::TexUpload& up, uint32_t gxFormat, uint64_t) {
 #if defined(__vita__)
 extern "C" int sceKernelChangeThreadPriority(int thid, int priority);
 extern "C" int sceKernelGetThreadCurrentPriority(void);
+extern "C" int sceKernelGetThreadId(void);
+extern "C" int sceKernelChangeThreadCpuAffinityMask(int thid, int mask);
+
+// The finishing thread on the fourth core (GXV_CORE3_SPLIT, port/core_layout.h): the system core may give an application only part of its
+// time, and the player waits for the finishing thread at every picture end (vgx_fesplit.cpp Drain: it takes over what the thread has not
+// started, but waits while the thread is in the middle of a batch). So while the thread is there it writes one basic-log line every ~5 s
+// (its CPU, the player's catch-up per picture: what to compare with a run without the switch), and port::cores::SplitGuard moves it back
+// to its planned core (and says so) when the catch-up stays over GXV_CORE3_SPLIT_GUARD_MS (default 3 ms per picture; 0 never).
+std::atomic<bool> sSplitOnCore3{false};
+int sSplitPlannedMask = 0;  // (written before sSplitOnCore3, on the finishing thread, which is also the only reader)
+void SplitCore3Tick() {
+    if (!sSplitOnCore3.load(std::memory_order_acquire)) return;
+    static port::cores::SplitGuard guard{static_cast<double>(vgx::EnvInt("GXV_CORE3_SPLIT_GUARD_MS", 3)), 0};
+    static int64_t windowStart = 0, lastCpu = 0, lastWait = 0;
+    static uint32_t lastFrames = 0, lastStolen = 0;
+    const int64_t now = port_host_time_ns();
+    int64_t cpu = 0, wait = 0;
+    uint32_t frames = 0;
+    vgx::split::Counters(cpu, wait, frames);
+    const uint32_t stolen = vgx::split::StolenOps();
+    if (!windowStart) {
+        windowStart = now; lastCpu = cpu; lastWait = wait; lastFrames = frames; lastStolen = stolen;
+        return;
+    }
+    if (now - windowStart < 5000000000ll) return;
+    const unsigned pictures = frames - lastFrames;
+    const double n = pictures ? pictures : 1.0, caughtUp = (wait - lastWait) / 1e6 / n;
+    if (port_log_summary)
+        port_log_summary("threads: core 3: finishing thread %u pictures in %.1f s, its cpu %.1f ms/picture; the player caught up with it for %.2f ms/picture, "
+                         "doing %.0f of its operations/picture itself", pictures, (now - windowStart) / 1e9, (cpu - lastCpu) / 1e3 / n, caughtUp,
+                         (stolen - lastStolen) / n);
+    windowStart = now; lastCpu = cpu; lastWait = wait; lastFrames = frames; lastStolen = stolen;
+    if (!guard.Feed(caughtUp, pictures)) return;
+    sSplitOnCore3.store(false, std::memory_order_relaxed);
+    const int back = sSplitPlannedMask ? sSplitPlannedMask : port::cores::kHelpers;
+    const int rc = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), back);
+    if (port_log_summary)
+        port_log_summary("threads: core 3: the player waited over %.1f ms/picture for the finishing thread twice in a row: it goes back to mask 0x%X (0x%X); "
+                         "GXV_CORE3_SPLIT_GUARD_MS=0 keeps it on the fourth core", guard.limitMs, static_cast<unsigned>(back), static_cast<unsigned>(rc));
+}
 #endif
 void SplitThreadInit(int core) {
     PORT_QEMU_THREAD("vgx-finish");
 #if defined(__vita__)
     // GXV_CORE0_ALONE=1: a finishing thread asked onto core 0 (GXV_SPLIT_CORE=0) goes to core 1 instead; core 0 is the game's.
-    if (port_vita_core0_alone && port_vita_core0_alone()) {
+    // GXV_SPLIT_CORE0=1 (read once, default 0; an experiment): it goes to core 0 all the same, where the game thread leaves more than
+    // half of every turn idle (r27: ~6.8 ms of 16.7), and the back end's core keeps the finishing thread's CPU. At its default priority
+    // (one step above class 3, which the game's and the renderer's threads share: 0x8F against 0x90) it runs in short bursts as soon
+    // as it has work, which the game thread waits out: the game's turn grows by about the finishing thread's CPU a picture. (Below the
+    // game's priority it would be preempted while holding the reader and the player would wait for it at the end of its picture: do not
+    // combine with a GXV_SPLIT_PRIO of 0x90 or more.)
+    if (port_vita_core0_alone && port_vita_core0_alone() && !(core == 0 && vgx::EnvInt("GXV_SPLIT_CORE0", 0) != 0)) {
         port::cores::Switches alone;
         alone.core0Alone = true;
         core = port::cores::SplitCore(alone, core);
@@ -830,8 +960,16 @@ void SplitThreadInit(int core) {
     long prio = vgx::EnvInt("GXV_SPLIT_PRIO", 0);
     if (prio == 0) prio = sceKernelGetThreadCurrentPriority() - 1; // (the renderer's threads have the class this thread has now)
     const int rc = prio >= 0x40 && prio <= 0xBF ? sceKernelChangeThreadPriority(0, static_cast<int>(prio)) : 0;
-    port_log("gx: front-end split: finishing thread on core %d%s, priority 0x%X%s", core, pin < 0 ? " (pinning refused)" : "",
-             sceKernelGetThreadCurrentPriority(), rc < 0 ? " (GXV_SPLIT_PRIO refused)" : "");
+    // GXV_CORE3_SPLIT=1 (or GXV_CORE3=1) with a proven fourth core: the thread moves on to the system core, which frees core 1 for the
+    // back end; refused or not honoured, it goes back to the core chosen above. SplitCore3Tick watches it there.
+    const int planned = core >= 0 && core <= 2 && pin >= 0 ? port::cores::kUser0 << core : 0;
+    const bool core3 = port_vita_thread_core3 && port_vita_thread_core3(3, planned) == port::cores::kSystem;
+    if (core3) {
+        sSplitPlannedMask = planned;
+        sSplitOnCore3.store(true, std::memory_order_release);
+    }
+    port_log("gx: front-end split: finishing thread on %s %d%s, priority 0x%X%s", core3 ? "the fourth core (planned core" : "core", core,
+             core3 ? ")" : pin < 0 ? " (pinning refused)" : "", sceKernelGetThreadCurrentPriority(), rc < 0 ? " (GXV_SPLIT_PRIO refused)" : "");
 #else
     (void)core;
     port_thread_class(3);
@@ -854,10 +992,11 @@ void RegisterMemory() {
 
 // The game's GX markers (PORT_GX_MARK_*, platform/include/port/compat.h) for the vgx front end, in the GX stream at the point
 // the game calls them: a write of BP register 0xFF, which the console's GPU does not have (vgx_state.cpp WriteBP). Only the
-// HUD's markers, and only with GXV_CHARAA on (vgx_draw.cpp, character edge smoothing: the HUD is never smoothed); otherwise
-// nothing is written and the stream is the game's own, byte for byte. Game thread (the GX library's FIFO writer).
+// HUD's markers, and only with GXV_CHARAA or GXV_EDGE_AA on (vgx_draw.cpp, character / whole-picture edge smoothing: the HUD is never
+// smoothed); otherwise nothing is written and the stream is the game's own, byte for byte. Game thread (the GX library's FIFO writer).
 extern "C" void port_vgx_marker(uint32_t kind) {
-    if ((kind != 1u && kind != 2u) || vgx::CharaAAMode() == 0) return; // (PORT_GX_MARK_HUD_BEGIN, _END)
+    const bool wanted = PORT_HOT_KNOB(bool, vgx::CharaAAMode() != 0 || vgx::EdgeAAMode() != 0);  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
+    if ((kind != 1u && kind != 2u) || !wanted) return; // (PORT_GX_MARK_HUD_BEGIN, _END)
     __PortGXFifo_u8(0x61);
     __PortGXFifo_u32((0xFFu << 24) | kind);
 }
@@ -915,6 +1054,38 @@ extern "C" int port_vgx_pace_turn(int allowed) {
         else port_log("pace: cadence oracle mismatches %llu", static_cast<unsigned long long>(reported));
     }
     return decision;
+}
+// GXV_PRESENT_SYNC (frame_pace.h PresentSync; read here and in vgx_host_galaxy_vita.cpp, which shows the pictures): 0 off, 1 measure
+// only (the "present:" line, pictures shown when ready as before), 2 pictures held to the vblank that matches their turn. Off on its
+// own while GXV_PACE / GXV_FPS_LIMIT=30 own the display's callback. Called by port/perf.cpp at every turn's frame-skip decision (game
+// thread): the turn's vblank, and for a turn that draws, that vblank (low 16 bits) into the GX stream ahead of its draws
+// (vgx_state.cpp WriteBP 0xFF -> the picture's CmdBuf::presentStamp -> the host's present hook).
+extern "C" int port_vgx_present_sync_mode(void) {
+    return PORT_HOT_KNOB(int, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
+        int m = static_cast<int>(vgx::EnvInt("GXV_PRESENT_SYNC", 0));
+        if (m < 0 || m > 2) m = 0;
+#if defined(__vita__)
+        if (!port_vgx_vita_vcount) m = 0;
+#else
+        m = 0;  // (the display callback is the Vita host's)
+#endif
+        if (m && PaceMode() != 0) m = 0;
+        return m;
+    }());
+}
+extern "C" void port_vgx_present_turn(int drawn) {
+#if defined(__vita__)
+    if (!port_vgx_present_sync_mode()) return;
+    static port::pace::TurnClock clock;
+    const uint32_t vblank = clock.Turn(port_vgx_vita_vcount());
+    if (drawn) {
+        // Same producer FIFO as the draw commands (as the fixed-30 marker above); the stamp rides in bits 8-23 of the BP value.
+        __PortGXFifo_u8(0x61);
+        __PortGXFifo_u32((0xFFu << 24) | ((vblank & 0xFFFFu) << 8) | vgx::kPresentStampMarker);
+    }
+#else
+    (void)drawn;
+#endif
 }
 // Frames the game has finished (display copies), whichever renderer is selected.
 #if defined(PORT_GX_VGX_ONLY)
@@ -993,6 +1164,11 @@ inline void FeRelease() { if (VclockFe() && sFeBusy.exchange(false)) port_vclock
 // game thread only
 uint32_t sGmEpoch = 0;
 size_t sGmPubOff = 0, sGmWakeOff = 0;
+// GXV_SEG_IDLE (see port_vgx_publish, flag 4): segment changes made at the game's idle points, and the ones made after a full segment,
+// with the game thread's time in those waits; reported on the basic log every ~10 s. Game thread only.
+struct SegCounters { uint32_t idle = 0, full = 0; int64_t fullNs = 0; };
+SegCounters sSeg, sSegReported;
+int64_t sSegReportAt = 0;
 
 void* PlayerMain(void*) {
 #if defined(__vita__)
@@ -1089,12 +1265,73 @@ extern "C" void port_vgx_stream_setup(uint8_t* seg0, uint8_t* seg1, size_t size)
     sSegSize = size;
 }
 
+// GXV_SEG_IDLE=<KiB> (default 128; 0: off, as before): the game changes segments at its idle points as well.
+//
+// The other segment is only taken while the player has done everything published (the bytes it has not parsed yet, an incomplete
+// command at most, are copied to the start of the other one). The test for it above (full || past half) is made right after a publish
+// that brought new bytes, which the player cannot have parsed yet, so in practice a segment was only ever changed when it was full,
+// and a full segment makes the game thread wait until the player has parsed everything up to its end. That happens in the middle of
+// the game's draw, while the front end is a good part of a picture behind it: the lit Comet Observatory (r47, r49) shows about 2.5
+// of these waits a second, 13-25 ms each (the "gx-publish-in-turn" row of GXV_WORKLOAD_PROBE): ~40 ms a second, 4 % of the game
+// thread, on the core that limits the picture rate, and a late picture each time.
+// With this switch the game calls port_vgx_publish with flag 4 at the start of every turn (__PortGXFifoIdlePoint, gx_fifo.cpp; from
+// GameSystem::frameLoop). If the segment holds at least <KiB>, and the player has done everything published before this call (it is
+// idle then: it reads nothing until sPubState changes, which only this thread writes), the segment is changed exactly as after a full
+// wait: what the player has not parsed (sPlRd up to the write position: the incomplete command, and any bytes not yet published) goes
+// to the start of the other segment, the epoch moves on, and the player starts there. The player is caught up at most turn starts
+// (it finishes a picture before the game's next drawn turn), so the segments change every picture or two and never fill; when the
+// player stays behind for a whole segment (~2 MiB, about ten pictures), the full wait is made as before. The command stream the
+// player parses is the same bytes in the same order (only where they lie changes), so pictures are identical.
+static size_t SegIdleBytes() {
+    return PORT_HOT_KNOB(size_t, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
+        const long kib = vgx::EnvInt("GXV_SEG_IDLE", 128);
+        return kib > 0 ? static_cast<size_t>(kib) << 10 : 0;
+    }());
+}
+extern "C" int port_vgx_seg_idle(void) { return SegIdleBytes() != 0 && sPlayerOn.load(std::memory_order_relaxed) ? 1 : 0; }
+// Moves on to the other segment, the player being idle with its read position at sPlRd; returns where writing continues.
+static uint8_t* SegSwitch(uint8_t* base, size_t off) {
+    const size_t rd = sPlRd.load(std::memory_order_acquire);
+    const size_t left = off - rd;
+    uint8_t* const next = sSegBase[(sGmEpoch + 1) & 1];
+    if (left) memcpy(next, base + rd, left);
+    ++sGmEpoch;
+    sGmPubOff = sGmWakeOff = left;
+    if (left) FeHold();
+    sPubState.store((static_cast<uint64_t>(sGmEpoch) << 32) | left, std::memory_order_release);
+    return next + left;
+}
+static void SegReport() {
+    if (!PORT_LOGGING || !port_log_summary) return;
+    const int64_t now = port_host_time_ns();
+    if (!sSegReportAt) { sSegReportAt = now; sSegReported = sSeg; return; }
+    if (now - sSegReportAt < 10000000000ll) return;
+    const SegCounters d{sSeg.idle - sSegReported.idle, sSeg.full - sSegReported.full, sSeg.fullNs - sSegReported.fullNs};
+    if (d.idle || d.full)
+        port_log_summary("stream: %.0f s: %u segment changes at the game's idle points (GXV_SEG_IDLE=%u KiB), %u after a full segment (the game waited %.0f ms in all)",
+                         (now - sSegReportAt) / 1e9, d.idle, static_cast<unsigned>(SegIdleBytes() >> 10), d.full, d.fullNs / 1e6);
+    sSegReportAt = now;
+    sSegReported = sSeg;
+}
+
 // flags: 1 the segment is full (the call waits for the player and moves to the other segment),
-// 2 the bytes end with a synchronisation command (draw done, draw-sync token).
+// 2 the bytes end with a synchronisation command (draw done, draw-sync token),
+// 4 an idle point of the game's (GXV_SEG_IDLE, above): the other segment is taken now if the player is idle and this one is used enough.
 // Returns where writing continues: wr, or a position in the other segment.
 extern "C" uint8_t* port_vgx_publish(uint8_t* wr, int flags) {
     uint8_t* const base = sSegBase[sGmEpoch & 1];
     const size_t off = static_cast<size_t>(wr - base);
+    if ((flags & 4) && !(flags & 1)) {
+        SegReport();
+        const size_t limit = SegIdleBytes();
+        // (the player has done everything published before this call: what it stored last, in this epoch, is sGmPubOff)
+        if (limit && off >= limit && sPlDone.load(std::memory_order_acquire) == ((static_cast<uint64_t>(sGmEpoch) << 32) | sGmPubOff)) {
+            ++sSeg.idle;
+            uint8_t* const at = SegSwitch(base, off);
+            if (at != sSegBase[sGmEpoch & 1]) WakePlayer(); // (bytes moved over, not all of them parsed or published yet: the player may be asleep)
+            return at;
+        }
+    }
     const uint64_t state = (static_cast<uint64_t>(sGmEpoch) << 32) | off;
     if (off != sGmPubOff) {
         sGmPubOff = off;
@@ -1107,6 +1344,7 @@ extern "C" uint8_t* port_vgx_publish(uint8_t* wr, int flags) {
         // that is not complete yet).
         const int64_t t0 = PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0 ? port_host_time_ns() : 0;
         vgx::workload::Scope observation(vgx::workload::PublishInTurn);
+        const int64_t tSeg = SegIdleBytes() ? port_host_time_ns() : 0; // (GXV_SEG_IDLE's report)
         while (sPlDone.load(std::memory_order_acquire) != state) {
             WakePlayer();
             // (real time, not port_host_sleep_ns: under the ARM harness's virtual clock that one
@@ -1114,19 +1352,13 @@ extern "C" uint8_t* port_vgx_publish(uint8_t* wr, int flags) {
             std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
         if (PORT_RUNTIME_DIAGNOSTICS && sPerfSeconds > 0) sGmWaitNs.fetch_add(port_host_time_ns() - t0, std::memory_order_relaxed);
+        if (tSeg) {
+            ++sSeg.full;
+            sSeg.fullNs += port_host_time_ns() - tSeg;
+        }
     }
     // Move to the other segment when the player has caught up and this one is half used.
-    if ((full || off > sSegSize / 2) && sPlDone.load(std::memory_order_acquire) == state) {
-        const size_t rd = sPlRd.load(std::memory_order_acquire);
-        const size_t left = off - rd;
-        uint8_t* const next = sSegBase[(sGmEpoch + 1) & 1];
-        if (left) memcpy(next, base + rd, left);
-        ++sGmEpoch;
-        sGmPubOff = sGmWakeOff = left;
-        if (left) FeHold();
-        sPubState.store((static_cast<uint64_t>(sGmEpoch) << 32) | left, std::memory_order_release);
-        return next + left;
-    }
+    if ((full || off > sSegSize / 2) && sPlDone.load(std::memory_order_acquire) == state) return SegSwitch(base, off);
     if ((flags & 2) || off - sGmWakeOff >= kWakeBytes) {
         sGmWakeOff = off;
         WakePlayer();
@@ -1194,6 +1426,7 @@ extern "C" void port_vgx_notify_write(const void* p, size_t n) {
 }
 
 extern "C" unsigned long long port_vgx_capture(const char* path, int) {
+    PortHostAllocScope hostAlloc;  // (the harness calls this on a game thread; sCapPath outlives any scene's heap)
     std::unique_lock<std::mutex> lk(sMtx);
     sCapPath = path;
     sCapDone = false;
@@ -1261,6 +1494,9 @@ extern "C" void port_gx_select_backend(void) {
     vgx::SetGuestHooks(hooks);
     vgx::SetFrameSink(&FrameSink);
     vgx::split::SetThreadInit(&SplitThreadInit);
+#if defined(__vita__)
+    vgx::split::SetThreadTick(&SplitCore3Tick);  // (does nothing unless the finishing thread went to the fourth core)
+#endif
     if (const char* sp = vgx::diag::Env("GXV_STATS"); sp && *sp) vgx::stats::SetDetailed(true);
     // GXV_TRACK=0: no memory tracking (every display list decoded and every bound texture
     // hashed on each use): to tell a caching fault from a rendering one.
@@ -1290,6 +1526,7 @@ extern "C" void port_gx_select_backend(void) { port_gx_use_recorder_backend(); }
 extern "C" int port_vgx_active(void) { return 0; }
 extern "C" size_t port_vgx_consume(const uint8_t*, size_t len) { return len; }
 extern "C" int port_vgx_player(void) { return 0; }
+extern "C" int port_vgx_seg_idle(void) { return 0; }
 extern "C" void port_vgx_stream_setup(uint8_t*, uint8_t*, size_t) {}
 extern "C" uint8_t* port_vgx_publish(uint8_t* wr, int) { return wr; }
 extern "C" void port_vgx_notify_write(const void*, size_t) {}

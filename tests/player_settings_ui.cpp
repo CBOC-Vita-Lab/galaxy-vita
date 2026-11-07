@@ -29,8 +29,32 @@ int main() {
     s.working.hdTextures=false;s.working.coreHelp=false;s.working.reducedMotion=true;s.working.language="French";Tap(s,Right);Tap(s,Right);
     assert(!s.working.hdTextures&&!s.working.coreHelp&&s.working.reducedMotion&&s.working.language=="French");s.working.hdTextures=true;s.working.coreHelp=true;s.working.reducedMotion=false;s.working.language="";
     Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Down);assert(s.row==RowRate);Tap(s,Right);assert(s.working.fpsLimit==30&&session.active.fpsLimit==0&&PresetOf(s.working)==Preset::BestPicture); // the rate is not in a preset
-    Tap(s,Right);assert(s.working.fpsLimit==0);Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Left);assert(s.working.fpsLimit==0);Tap(s,Right);assert(s.working.fpsLimit==30);
+    Tap(s,Down);assert(s.row==RowRate);
+    // Picture mode: Quality (default) -> Performance -> Locked 30 -> Quality. Performance reads as the Performance preset only with the
+    // preset's own rows; Quality and Locked 30 are not in a preset. Performance leaves Sharper and Anti-aliasing as they are (sizes above the
+    // standard one with room at 60 follow Sharper; multisampling is never used in it, which the Anti-aliasing row says).
+    assert(!s.working.performance60&&s.working.fpsLimit==0);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.label)=="Picture mode"&&std::string(rv.value).find("Quality")==0);}
+    Tap(s,Right);assert(s.working.performance60&&s.working.fpsLimit==0&&s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Auto&&session.active.fpsLimit==0&&!session.active.performance60&&PresetOf(s.working)==Preset::Custom);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value).find("Performance")==0&&std::string(rv.help1).find("60")!=std::string::npos);
+     DisplayRowView(s,RowAntiAliasing,rv);assert(std::string(rv.help1).find("no multisampling in Performance")!=std::string::npos);}
+    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==30);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value)=="Locked 30");}
+    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==0&&PresetOf(s.working)==Preset::BestPicture);
+    Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Left);assert(s.working.performance60&&s.working.fpsLimit==0);Tap(s,Left);assert(!s.working.performance60&&s.working.fpsLimit==0);
+    Tap(s,Left);assert(s.working.fpsLimit==30&&PresetOf(s.working)==Preset::BestPicture);   // Locked 30 itself is not in a preset
+    // The Performance preset selects Performance mode (and leaves Locked 30); the others go back to Quality, keeping a Locked 30.
+    s.row=RowPreset;Tap(s,Left);assert(PresetOf(s.working)==Preset::Performance&&s.working.performance60&&s.working.fpsLimit==0);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value).find("Performance")!=std::string::npos);DisplayRowView(s,RowSharper,rv);assert(std::string(rv.value)=="Off");}
+    Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture&&!s.working.performance60&&s.working.fpsLimit==0);
+    s.working.fpsLimit=30;Tap(s,Right);assert(PresetOf(s.working)==Preset::Balanced&&s.working.fpsLimit==30);Tap(s,Left);assert(PresetOf(s.working)==Preset::BestPicture&&s.working.fpsLimit==30);
+    s.working.fpsLimit=0;
+    // Every Display row has its words in every picture mode.
+    for(int mode=0;mode<3;++mode) {
+        s.working.fpsLimit=mode==2?30:0;s.working.performance60=mode==1;
+        for(unsigned row=0;row<kDisplayRows;++row) {RowView rv;DisplayRowView(s,row,rv);assert(rv.label[0]&&rv.value[0]&&rv.help1[0]);}
+    }
+    s.working.fpsLimit=0;s.working.performance60=false;s.row=RowRate;
     // Editing any covered row reads Custom; putting it back reads the preset again.
     struct Covered {unsigned row;const char* what;};
     for(const Covered c:{Covered{RowDynamic,"dynamic"},Covered{RowSharper,"sharper"},Covered{RowMario,"mario"},Covered{RowAntiAliasing,"aa"},Covered{RowSharpness,"sharpness"},Covered{RowEffects,"effects"},Covered{RowDepthOfField,"dof"}}) {
@@ -48,13 +72,18 @@ int main() {
     // The remaining rows toggle.
     s.row=RowHdTextures;Tap(s,Right);assert(!s.working.hdTextures);Tap(s,Left);assert(s.working.hdTextures);
     s.row=RowCorePlan;Tap(s,Accept);assert(!s.working.coreHelp);Tap(s,Accept);assert(s.working.coreHelp);
+    s.row=RowRenderer;Tap(s,Right);assert(!s.working.gxmDirect&&PresetOf(s.working)==Preset::BestPicture);Tap(s,Left);assert(s.working.gxmDirect);   // speed rows are not in a preset
+    s.row=RowOverlap;assert(s.working.logicOverlap&&s.working.overlapMax);Tap(s,Right);assert(s.working.logicOverlap&&!s.working.overlapMax);Tap(s,Right);assert(!s.working.logicOverlap);Tap(s,Right);assert(s.working.logicOverlap&&s.working.overlapMax);
+    s.row=RowMaterials;Tap(s,Accept);assert(!s.working.lazyMaterials);Tap(s,Accept);assert(s.working.lazyMaterials);
+    s.row=RowFarAnimation;Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Full);Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Aggressive);Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Reduced);Tap(s,Left);assert(s.working.farAnimation==FarAnimation::Aggressive);Tap(s,Right);
+    s.row=RowSpeed;Tap(s,Accept);assert(!s.working.fullSpeed&&PresetOf(s.working)==Preset::BestPicture);Tap(s,Accept);assert(s.working.fullSpeed);
     s.row=RowLanguage;Tap(s,Right);assert(s.working.language=="English");Tap(s,Left);assert(s.working.language.empty());Tap(s,Right);
     s.row=RowMotion;Tap(s,Accept);assert(s.working.reducedMotion);
     // Up and Down walk every row (settings, then the three commands) and wrap; the commands also move with Left and Right.
     s.row=0;Tap(s,Up);assert(s.row==kDisplayRows+2);Tap(s,Down);assert(s.row==0);for(unsigned i=0;i<kDisplayRows;++i)Tap(s,Down);assert(s.row==kDisplayRows);
     Tap(s,Right);assert(s.row==kDisplayRows+1);Tap(s,Right);assert(s.row==kDisplayRows+2);Tap(s,Right);assert(s.row==kDisplayRows);Tap(s,Left);assert(s.row==kDisplayRows+2);Tap(s,Left);Tap(s,Left);assert(s.row==kDisplayRows);
     Tap(s,Down);assert(s.row==kDisplayRows+1);Tap(s,Up);Tap(s,Up);assert(s.row==RowMotion+1);Tap(s,Up);assert(s.row==RowMotion);
-    Tap(s,Back);assert(s.modal==Modal::Discard&&s.modalChoice==0);Tap(s,Accept);assert(!s.done&&s.modal==Modal::None);Tap(s,Back);Tap(s,Right);Tap(s,Accept);assert(s.done&&!s.result.saved);
+    Tap(s,Back);assert(s.modal==Modal::Discard&&s.modalChoice==2);Tap(s,Left);Tap(s,Left);Tap(s,Accept);assert(!s.done&&s.modal==Modal::None);Tap(s,Back);Tap(s,Left);Tap(s,Accept);assert(s.done&&!s.result.saved);
     session=Session(OpenMode::Running);Begin(s,session);Arm(s);s.row=kDisplayRows+1;Input(s,Accept);assert(s.modal==Modal::Restart&&s.modalChoice==0);Input(s,Accept);assert(!s.saveRequested);Input(s);Tap(s,Accept);assert(s.modal==Modal::None&&!s.saveRequested);
     Tap(s,Accept);Tap(s,Right);Tap(s,Accept);assert(s.saveRequested&&s.pendingIntent==ExitIntent::Restart);
     Begin(s,session);Arm(s);s.row=kDisplayRows;Tap(s,Accept);assert(s.saveRequested&&s.pendingIntent==ExitIntent::Return);

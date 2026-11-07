@@ -3,13 +3,13 @@
 #include "vgx_autoq.h"
 #include <atomic>
 #include <cstring>
+#include "../../include/port/hot_knob.h"
 
 namespace vgx::resourceaudit {
 // GXV_RESOURCE_AUDIT=1: opt-in basic-log evidence, including quiet player builds.
 // Read once, default off; never changes resource, retry or render policy.
 inline bool Enabled() {
-    static const bool on = EnvInt("GXV_RESOURCE_AUDIT", 0) == 1;
-    return on;
+    return PORT_HOT_KNOB(bool, EnvInt("GXV_RESOURCE_AUDIT", 0) == 1);  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
 }
 
 inline void DriverMessage(const char* text) {

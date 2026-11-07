@@ -12,6 +12,15 @@
 //   GXV_DRAWDONE_DEFER=1   write the command and go on; wait at the start of the next turn's update() (draw of the next turn overlaps)
 //   GXV_DRAWDONE_DEFER=2   the same, but wait at the start of the next calcAnim(): update(), the game's logic, overlaps as well.  Riskier:
 //                          update() writes more of the memory the front end reads (display-list patches, textures made by the CPU)
+//   GXV_DRAWDONE_DEFER=3   (1.3) the wait only at the start of the next turn that draws (kDrawnTurn): the turns without a picture in
+//                          between do not wait at all.  They leave out the view pass (the draw matrices the front end reads by index,
+//                          GameScene::calcAnim) and the material lists (GXV_DL_LAZY=2), and the drawn turn makes both, from the same
+//                          state, after the wait and before its picture.  What update() and the joints write is the same as mode 2.
+//   GXV_DRAWDONE_DEFER=4   (1.3) pipelined: no wait before a picture either.  The drawn turn's own view pass is left out too, so each
+//                          model's view matrices and material lists are made once per picture, in the flush before it, into the half of
+//                          their double buffer the last picture does not read; the front end finishes picture N while the game draws
+//                          N+1, and the wait is made only before the next GXSetDrawDone.  A view pass or list made anywhere else waits
+//                          (port_gx_view_write).
 // Any other value is 0.  The wait is also made, whatever the mode, before the next GXSetDrawDone (the finish interrupts of two
 // commands must never be outstanding together: the flag GXWaitDrawDone watches is one bit).
 //
@@ -27,14 +36,14 @@ namespace port {
 namespace drawdone {
 
 // Points at which a deferred wait may have to be made, in the order a turn reaches them.
-enum Point : int { kSetDrawDone = 0, kUpdate = 1, kCalcAnim = 2 };
+enum Point : int { kSetDrawDone = 0, kUpdate = 1, kCalcAnim = 2, kDrawnTurn = 3 };
 
 // "0", "1", "2" give that mode; anything else (unset, empty, garbage, out of range) is 0.
 inline int ParseMode(const char* text) {
     if (!text || !*text) return 0;
     char* end = nullptr;
     const long v = strtol(text, &end, 0);
-    return (end && end != text && !*end && (v == 1 || v == 2)) ? static_cast<int>(v) : 0;
+    return (end && end != text && !*end && (v >= 1 && v <= 4)) ? static_cast<int>(v) : 0;
 }
 
 class Deferral {

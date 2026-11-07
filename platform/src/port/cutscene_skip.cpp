@@ -60,6 +60,7 @@ std::atomic<bool> sInjectA{false};
 std::atomic<bool> sMaskA{false};       // A reads as released until let go
 std::atomic<float> sProgress{0.0f};
 std::atomic<int64_t> sContextAt{0};    // last port_skip_context call
+std::atomic<bool> sMoviePlaying{false};
 std::atomic<unsigned> sSkips{0};       // skips triggered so far
 
 const char* kindName(int kind) {
@@ -110,11 +111,14 @@ extern "C" {
 
 void port_skip_set_hold_seconds(float seconds) { sHoldSeconds = seconds; }
 
+int port_skip_movie_playing(void) { return sMoviePlaying.load(std::memory_order_relaxed) ? 1 : 0; }
+
 void port_skip_context(int kind) {
     int64_t now = port_host_time_ns();
     bool held = port_input_real_a() != 0;
     bool resumed = contextStale(now);  // first update of a scene, or after a stall
     sContextAt.store(now);
+    sMoviePlaying.store(kind == PORT_SKIP_MOVIE, std::memory_order_relaxed);
 
     if (sForward.load()) {
         if (resumed) {

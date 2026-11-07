@@ -41,6 +41,9 @@ int port_zoom_menu_active(void) { return gZoomMenu; }
 int port_zoom_adjust(int) { return 15; }
 int port_rear_aim_enabled(void) { return gRearAim; }
 int port_rear_aim_toggle(void) { ++gToggles; gRearAim = !gRearAim; return gRearAim; }
+int port_stick_pointer_enabled(void) { return 0; }
+int port_stick_pointer_toggle(void) { return 0; }
+int port_star_bit_reach_next(void) { return 1; }
 }
 
 struct Contact { int id; float x, y; };
@@ -153,6 +156,37 @@ int main() {
     for (int t = 0; t < 100; t++) pad = poll({{15, 200 + t * 8.0f, 400}});
     assert(std::fabs(pad.pointerX - menuX) < 1e-6f);
 
-    std::puts("PASS: rear touch aiming (resting fingers ignored, tracked contact, no jumps, front wins, option and toggle)");
+    // 8. The Settings menu closes (its input reset) while two fingers rest on the back: a finger that then slides takes the
+    //    pointer; the resting fingers do not have to lift first, and they still do not take it.
+    gMenus = 0;
+    poll({});
+    port_vita_input_settings_rearm();
+    for (int t = 0; t < 30; t++) assert(!poll({{3, 300, 450}, {7, 1650, 500}}).pointerValid);
+    bool took = false;
+    for (int t = 0; t < 30 && !took; t++) took = poll({{3, 300, 450}, {7, 1650, 500}, {16, 900 + t * 8.0f, 400}}).pointerValid;
+    assert(took);
+    port_vita_input_settings_rearm();
+    for (int t = 0; t < 120; t++) assert(!poll({{3, 300 + t * 2.0f, 450}, {7, 1650, 500}}).pointerValid);  // (already down at the reset)
+
+    // 9. A quick slide right after the finger lands moves the pointer by all of it, the part before it took the pointer too.
+    for (int t = 0; t < 200; t++) poll({});
+    float x9 = 0;
+    for (int t = 0; t <= 50; t++) x9 = poll({{17, 600 + t * 8.0f, 400}}).pointerX;
+    for (int t = 0; t < 20; t++) x9 = poll({{17, 1000, 400}}).pointerX;
+    assert(std::fabs(x9 - 400 * 2.0f / 1100) < 0.01f);
+
+    // 10. A resting finger that creeps far enough to take the pointer starts it from where it is: no catch-up jump.
+    for (int t = 0; t < 200; t++) poll({});
+    float prev = -2;
+    for (int t = 0; t < 240; t++) {
+        pad = poll({{18, 600 + t * 0.25f, 400}});
+        if (!pad.pointerValid) continue;
+        assert(prev > -2 ? pad.pointerX - prev < 0.005f : std::fabs(pad.pointerX) < 0.005f);
+        prev = pad.pointerX;
+    }
+    assert(prev > -2);
+
+    std::puts("PASS: rear touch aiming (resting fingers ignored, tracked contact, no jumps, front wins, option and toggle, "
+              "aiming right after a reset, whole quick slides, no catch-up for a creeping finger)");
     return 0;
 }

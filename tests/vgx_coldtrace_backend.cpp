@@ -43,7 +43,7 @@ void Context() {
     const auto surface=eglCreatePbufferSurface(display,config,size);
     Require(context!=EGL_NO_CONTEXT && surface!=EGL_NO_SURFACE && eglMakeCurrent(display,surface,surface,context),"real GLES context current");
 }
-void Present(uint32_t,int,int,int,int) {
+bool Present(uint32_t,int,int,int,int) {
     ++presents;
     callsAtPresent=vgx::backend::C.glCalls;
 #if VGX_COLDTRACE
@@ -59,6 +59,7 @@ void Present(uint32_t,int,int,int,int) {
 #endif
         clockUs+=74000;
     }
+    return false;
 }
 #if VGX_COLDTRACE
 void Partition(const vgx::coldtrace::Span& span) {

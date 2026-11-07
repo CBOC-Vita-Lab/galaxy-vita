@@ -9,7 +9,7 @@
 //
 //   rung  size      samples  cost
 //   0     544x388   1        0.72   floor: only when the GPU is the limit AND a lower size shortens the frames
-//   1     592x422   1        0.86
+//   1     592x424   1        0.86
 //   2     640x456   1        1.00   start (today's picture)
 //   3     720x480   1        1.18
 //   4     800x504   1        1.38
@@ -145,6 +145,44 @@
 //     half-size effects and the cheaper background (GXV_AUTOQ_FXSTEP), the sizes down to 544x388, and 480x340 last. The emergency
 //     rung is allowed: 60 is the point of the mode, and a step below today that buys no GPU time is undone as in target 30;
 //   - the way back is the same (room at 16.7 ms for recoverHoldSec with GXV_AUTOQ_RECOVER).
+// The Settings' Performance mode (settings_launch.cpp, entry.cpp) runs it as "the best picture at the best rate", and the console
+// showed (1.2, 31 Oct) what a GPU-only reading of 60 does wrong: at the Comet Observatory the front end held the pictures at ~26 ms, the
+// GPU at 20 ms looked like the limit against 16.7 ms, and the mode went down to 544x388 / 480x340 for fewer pictures than Quality. So:
+//   - the front end is a stage (Config::frontStage, target 60 by default): the player thread stamps its CPU at each display copy
+//     (port_autoq_front_picture), and the GPU must be the largest of four stages to count as the limit; the floor census names it;
+//   - pictures, not GPU time: a series of steps below today's size is kept only when it shows pathRateFrac (3 %) more pictures; when the
+//     GPU is under the budget again or the floor rung is reached without them, the whole series goes back (blocked, and remembered
+//     with the scene for this visit and the next, maxBlockSec). No series starts when even the floor rung's GPU time (falling with the
+//     pixels) and the other stages could not show pathRateFrac more pictures (throughput: the console's pipeline is not quantized to
+//     whole retraces, a GPU at 24 ms a picture gives ~41 a second);
+//   - below today's size a step up comes when another stage holds the pictures above the budget and the GPU at the next size stays
+//     under freeClimbFrac (90 %) of it: a smaller picture that buys nothing is not kept;
+//   - the present's edge smoothing (GXV_AUTOQ_EDGESTEP, Config::edgeStep) is the first step at today's rung, before the cheaper background
+//     (GXV_AUTOQ_FXSTEP=3) and, for a severe overload only, half-size effects (GXV_AUTOQ_OVERLOAD=2), and the last one back; it costs
+//     2.2 ms of GPU a picture (r61) whatever the size, needs no new render target and freezes nothing. Mario's own edge smoothing below
+//     640x456 (GXV_CHARAA_AUTO) and the HUD are never touched;
+//   - sizes run from the screen's 960x544 (rung 6, only with clear room at 16.7 ms and within GXV_AUTOQ_FREE of the picture interval) down
+//     to 608x348 (rung 0 of the wide ladder, GXV_AUTOQ_MIN=0): no multisampling (GXV_AUTOQ_MSAA=0), no 536x304 emergency rung;
+//   - a CPU-limited scene keeps its size, and when 60 is out of reach the pacing shows an even 30 (GXV_STEADY30, port/frame_pace.h
+//     SteadyCadence; FrameTimes::cadence30): a window whose pictures came on that cadence is judged against 33.3 ms (DownBudgetMs), so a
+//     GPU that fits 33.3 ms loses nothing for the CPU's limit; the steady 30 reads this controller's stage hint (port_autoq_stages: GPU,
+//     the slowest per-picture stage, whether anything is left to lower) so that a scene the GPU limits is lowered first.
+//   - the way back on the steady 30 (Config::cadenceUp, GXV_AUTOQ_CADENCE_UP=1|0, default on in the back end, off in Config). The console
+//     (r98, Beach Bowl): the mode chased 60 down 720x404 -> 664x376 -> 608x348 (GPU 21-31 ms a picture), then the steady 30 engaged and
+//     every later window was 150 pictures on it, none late for the GPU, the GPU at 24-28 ms: it stayed at 608x348 with the cheaper
+//     background for the rest of the run, the same 30 a second as Quality (which holds 720x404 there) with a blurrier picture, because
+//     every way back (the climb, a step's room to go off) is judged against 16.7 ms and upTarget, which a scene on the steady 30 never
+//     meets. With the option a window mostly on the steady 30 (the test of DownBudgetMs) is also judged against 33.3 ms for the way back:
+//     the cadence holds (the mean picture interval within 3 % of 33.3 ms), no picture of the window came late for the GPU on it, and the
+//     GPU's predicted time at the next rung (busy x Cost(next) / Cost(now)) or without the step (busy x its ratio) and the other stages
+//     within cadenceUpFrac (90 %) of 33.3 ms. Only when 60 is out of reach whatever the size: even the floor rung's predicted GPU time
+//     (busy x Cost(minRung) / Cost(now)) or the other stages at 1000 / cadenceReachFps ms or more (22.2 ms: the steady 30 is released at an
+//     estimate of 45 a second, frame_pace.h kSteady30AboveFps), so a scene that could reach 60 at a smaller size keeps its way down. Never
+//     above today's rung (720x404 on the wide ladder): a size above it still needs clear room at 16.7 ms. The climb is the usual one (the
+//     room in a row of calm mode and recovery, the blocks; Why::CadenceUp) and a trial for holdTrialSec (8 s): pictures late for the GPU on
+//     the cadence (more than holdMissFrac of the trial's) or a GPU-limited window against 33.3 ms go back at once to the rung it came from
+//     and block the rung tried (blockSec, doubling; Why::CadenceBack). Steps down on the cadence are as before (DownBudgetMs); anisotropic
+//     filtering is not touched by it.
 // The pacing hint (port_autoq_picture_work_us) stays a 30 Hz feasibility cost in both targets (two turns): the 20/30 pacing of
 // GXV_PACE reads it against 30 Hz limits. The bounded slip (GXV_SLIP) is a 30-floor tool: it engages only when a pair of turns
 // does not fit two retraces (a game slower than 30 at full speed), where 60 is out of reach anyway, and it only paces turns, so
@@ -153,24 +191,23 @@
 // Floor protection by degrees (Config::fxStep / Config::bgStep, GXV_AUTOQ_FXSTEP=1|2, target mode, default off): the things
 // that mean least to a player go first, the picture size and the emergency rung last. The order of degrading is
 //   0. the multisampled rungs (7, 8), then the sizes above the game's own 640x456 (6..3): the ladder above, as before,
-//   1. at today's rung (2, 640x456), after fxHoldSec (2 s) of a GPU-limited miss: effects and blur at half size (the back
-//      end's GXV_FXHALF / GXV_PASSHALF as a state this controller flips; Controller::FxStepOn()),
-//   2. still GPU-limited, after fxHoldSec more: cheaper background (Controller::BgStepOn(); the back end samples the
-//      textures of everything that is not a character or key item with the nearest mip level between the mip levels, not
-//      the blend of two: half the texture fetches of a trilinear surface; only with GXV_AUTOQ_FXSTEP=2),
-//   3. then the picture size below the game's own (rungs 1, 0: 592x422, 544x388), by the old rules,
+//   1. at today's rung (2, 640x456), after fxHoldSec (2 s) of a GPU-limited miss: cheaper background (Controller::BgStepOn();
+//      only with GXV_AUTOQ_FXSTEP=2). Eligible depth-tested perspective draws without a recognized character/key-item texture
+//      sample the nearest mip level, not the blend of two; orthographic/unknown projections and render targets keep theirs,
+//   2. still GPU-limited, after fxHoldSec more: effects and blur at half size (the back end's GXV_FXHALF / GXV_PASSHALF as a
+//      state this controller flips; Controller::FxStepOn()). GXV_AUTOQ_FXSTEP=1 still tries only this step,
+//   3. then the picture size below the game's own (rungs 1, 0: 592x424, 544x388), by the old rules,
 //   4. last the 480x340 emergency rung.
 // Alongside (not a controller step): GXV_CHARAA_AUTO=1 draws the characters' edge smoothing (GXV_CHARAA's filter) for Mario's and
 // Luigi's own textures only, and only while the picture is below 640x456 (rungs 1, 0, emergency): the player stays crisp when the
 // rest of the picture softens, at the cost of the filter only where the picture is already cheaper (vgx_backend_gl.cpp PresentCharaAA).
 // GXV_CHARAA_AUTO=2 draws it at every rung whose picture is shown larger than it was drawn (all but 960x544) and is not multisampled.
-// Each step is judged like a step below today: after checkSec the GPU's mean busy time must be betterFrac shorter, else it is
-// switched off again (the next step is tried at once; this one is not tried again for blockSec, doubling), so a step that buys
-// nothing in a scene costs two seconds, not a lasting loss.
-// The way back is the reverse: 480x340 -> 544x388 -> 592x422 -> 640x456 by the old rules (the climb stops at today's rung while
-// a step is on); then, at today's rung, the cheaper background goes off after fxOffHoldSec (8 s) of predicted room (the GPU's
+// Each step has a GPU-timed trial after checkSec. No-gain trials roll back and block retries for blockSec, doubling;
+// a much heavier scene is treated as inconclusive and can retain the step. This is not a whole-pipeline CPU/cadence verdict.
+// The way back is the reverse: 480x340 -> 544x388 -> 592x424 -> 640x456 by the old rules (the climb stops at today's rung while
+// a step is on); then, at today's rung, half-size effects go off after fxOffHoldSec (8 s) of predicted room (the GPU's
 // busy time times the measured saving of the step, or fxRatio / bgRatio until one was measured, within upTarget of the budget,
-// and the other stages as well), then the half-size effects after another 8 s; only then may the picture size rise above
+// and the other stages as well), then the cheaper background after another 8 s; only then may the picture size rise above
 // today's. A step switched on again within a minute of being switched off blocks the next switching off for fxOffBlockSec
 // (20 s), doubling. Changes are at least 3 s apart, as for rungs. A CPU-limited stretch never starts a step (the GPU must be
 // the largest of the three stages by 5 % and near the budget: the rules for the emergency rung). A scene remembers the steps
@@ -189,10 +226,83 @@
 // Any change of rung, or a step below the top, has it off; a scene remembers it with its rung. Nothing else of the controller moves
 // for it: with the option off every decision is the one made without it.
 //
+// Play-time quality (four options, target mode, each default off in the code; with all four off every decision is the one made
+// without them; the Vita's entry.cpp turns them on). The console (r27, 4 Nov) showed the ladder's two failure modes in play:
+// (a) a step up to 880x520 taken in a fade that closed the screen before a drop-in, then a 3.7 s load inside the same stage (so the
+// scene memory kept the rung) and the drop-in's first seconds at 11-12 FPS before the overload stepped down; (b) after that, 592x422
+// for the remaining 2.5 minutes at 55 FPS, because the front end's own late pictures (5-9 every 5 s, none of them the GPU's) ended
+// every stretch of room before recoverHoldSec. And at 47 FPS a GPU allowed 70 % of the 33 ms budget (23 ms) is the limit itself.
+//   free     (Config::freeFrac, GXV_AUTOQ_FREE=<percent>): quality costs GPU time only, never pictures. A step up (a rung, or anisotropic
+//            filtering) must also leave the GPU's predicted busy time within freeFrac of the window's mean picture interval (the pace
+//            the CPU stages set), not only within upTarget of the budget; above today's rung, a GPU busy freeDownFrac (95 %) of the
+//            interval or more (the GPU is now what sets the pace) takes anisotropic filtering off after downHoldSec and the rung one
+//            step down after freeDownSec (6 s), the rung left blocked as after an overload (Why::FreeDown).
+//   wipe     (Config::wipe, GXV_AUTOQ_WIPE=1): a fade or wipe closing the screen (FrameTimes::wipe, not the pause menu) or a load (a gap
+//            over longGapMs, also within the same stage) leads into an area nobody has measured: it never steps up there, the room
+//            measured before it is forgotten, and a rung above today's goes back to today's while the screen is closed (Why::Wipe;
+//            no block). A new scene starts at most at today's rung. The pause menu (the same area afterwards) still steps up.
+//   lateRoom (Config::lateRoom, GXV_AUTOQ_LATEROOM=1): a single late picture ends a stretch of room only when its predicted work at the
+//            next rung does not fit (the GPU's, the game's or the renderer's), not merely because it came late: the front end's late
+//            pictures say nothing about the GPU. The window means must still keep the cadence (budget + 3 %).
+//   anisoRung (Config::anisoRung, GXV_AUTOQ_ANISO_RUNG=<rung>): anisotropic filtering may come on at this rung and above (default: the
+//            top rung only, as described above), by the same rules (room for anisoHoldSec, first given up, any change of rung has it
+//            off, a scene remembers it). It costs no frozen picture, so it is the cheapest visible gain at the rungs normal play holds.
+//
+// Severe overload in play (Config::overload, GXV_AUTOQ_OVERLOAD=1|2, target mode, default off; on in the Vita's entry.cpp). The user's
+// run on r41 (4 Nov 22:15, a drop-in at zoom 1.0): 8.9-9.8 FPS for 15 s and 20-37 FPS for a minute at 640x456, "late by GPU" in most
+// pictures, and the controller logged nothing. Why: every picture over outlierMs (100 ms) is taken for a one-off hitch and left out of
+// the windows, so at 9 FPS no window ever filled (and at 20-30 FPS the windows held only the lighter pictures); and the game's CPU
+// estimate (two turns, 28 ms and more in those pictures: the GPU's memory traffic slows the CPU too) failed "the GPU is the largest
+// stage by 5 %", so no window counted as GPU-limited either. With the option:
+//   - a picture over outlierMs whose GPU busy time is at least 75 % of its interval is the GPU's work, not a hitch: it is measured;
+//   - a window whose GPU time alone is over 110 % of the budget is GPU-limited whatever the game's estimate (the GPU alone misses it);
+//   - per picture, not per window: pictures in a row whose GPU busy time each reaches the budget, for overloadSec (1 s) with a mean of
+//     overloadFrac (125 %) of the budget or more (the 30 budget, 33.3 ms, in either target), take everything at once that the GPU
+//     time predicts is needed to fit 90 % of it:
+//     anisotropic filtering off, the cheaper background (if GXV_AUTOQ_FXSTEP has it), half-size effects (if FXSTEP has them, or
+//     with =2 for such an overload only) and the rung as far down as the prediction says (to the emergency rung at most), in ONE
+//     change (Why::Severe). A step below today is judged as any other (kept when it saved GPU time; undone otherwise). Another
+//     second of it goes further. At least 1 s and 6 pictures between two such steps. The way back is the usual one.
+//
 // Floor census (Controller::TakeFloor, target mode): for the basic log's "floor:" line, the pictures of a window, those later
 // than the budget (+3 %), the time they took, and for each late picture which stage was the largest.
+//
+// Quality mode judged by the pictures (Config::hold30, GXV_AUTOQ_HOLD30=1, default on in the back end for target 30 under the fixed 30
+// cap with a floor below 960x544, i.e. the Settings' Quality; off in Config, so every other configuration decides as before). The
+// console (r82, 6 Nov): the lit Comet Observatory pinned at 960x544 showed 147-151 of 150 pictures as 2-vblank holds (a steady 30) with
+// the GPU busy 32.5 ms against 33.3; unpinned, one window read the GPU at ~102 % and the overload rule took it to 784x440 for good
+// (Bowser 3 960 -> 784, Sea Slide 960 -> 720 likewise). Under the fixed cap the GPU timer also counts waits as busy time (r57: "122 %" in a
+// CPU-paced scene), so the GPU's busy share is no evidence of a miss. With the option, at target 30:
+//   - evidence is gathered in hold windows of holdWindowSec (2 s, ~60 pictures): the share of pictures on time (not later than the budget
+//     + 3 %, the floor census's test) and the share late for the GPU: the floor census blames the GPU (the largest stage, at least
+//     causeShare of the budget) AND every other measured stage (two game turns, the renderer, the front end) fitted the budget + 3 %, so
+//     a smaller picture could have brought that picture on time. A picture late for the game's CPU never counts against the size.
+//   - down: only after holdMissWindows (2) hold windows in a row each with more than holdMissFrac (3 %) of its pictures late for the GPU,
+//     one rung at a time (the rung left is blocked as after an overload). A window with >= 97 % on time can never count as a miss, whatever
+//     the GPU's busy share reads. The same evidence stands in for the GPU-limited test everywhere a step down reads it (anisotropic
+//     filtering off, the quality steps at today's rung, sizes below it); the "GPU sets the pace" rule (GXV_AUTOQ_FREE) does not step down,
+//     and a severe overload counts only pictures that were late for the GPU.
+//   - up: below the start rung, after holdClimbWindows (10, 20 s) hold windows in a row with no picture late for the GPU, at least
+//     holdOnTimeFrac (97 %) on time and the GPU's mean busy time within holdClimbGpuFrac (95 %) of the budget, a trial one rung up (the
+//     quality steps at today's rung go off first the same way). Every climb under the option is a trial for holdTrialSec (8 s): ONE miss
+//     window in it goes back to the rung it came from and blocks the rung tried (blockSec, doubling to maxBlockSec), so a failed climb is
+//     retried after 60, 120, 240, 480 s at most; the room-based climbs of the other rules stay as they were.
+//   - the present's edge smoothing first (with Config::edgeStep, GXV_AUTOQ_EDGESTEP=1, which Settings now sets in Quality too): at 960x544
+//     its pass costs ~3.4-3.7 ms of GPU a picture against ~0.9 ms for a plain blit (gpu960, r82), of ~32.5 ms in the lit hub. Under the
+//     option a GPU miss (the same holdMissWindows windows in a row) at ANY rung first turns it off at that rung (after anisotropic
+//     filtering, before any step or size), and only further misses with it off move the size. Its saving is measured: the GPU's mean
+//     over the miss windows before, against the first full hold window after. It comes back on only after holdClimbWindows calm windows
+//     AND when the GPU's mean now plus that saving fits holdClimbGpuFrac of the budget, and only at the start rung or where no climb is
+//     possible (the way back is the reverse of the way down: size first, edge smoothing after). Back on is a trial for holdTrialSec: ONE
+//     miss window turns it off again and blocks the next try for blockSec, doubling to maxBlockSec. The state is the controller's own
+//     (not a bit of Steps(): it survives changes of rung, so a climb back to 960x544 arrives with it off); a new scene starts with it on.
+//     Without the option the edge step stays one of the steps at today's rung, as in Performance mode.
 #pragma once
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include "../../include/port/hot_knob.h"
+#include "../../include/port/frame_pace.h"  // (kSteady30AboveFps: the steady 30's release, Config::cadenceReachFps)
 
 namespace vgx::autoq {
 
@@ -200,7 +310,7 @@ struct Rung {
     uint16_t w, h;   // render size for a 640x456 EFB
     uint8_t samples; // the EFB's samples a pixel (1: no multisampling)
 };
-inline constexpr Rung kLadder[] = {{544, 388, 1}, {592, 422, 1}, {640, 456, 1}, {720, 480, 1}, {800, 504, 1},
+inline constexpr Rung kLadder[] = {{544, 388, 1}, {592, 424, 1}, {640, 456, 1}, {720, 480, 1}, {800, 504, 1},
                                    {880, 520, 1}, {960, 544, 1}, {960, 544, 2}, {960, 544, 4}};
 inline constexpr int kRungs = static_cast<int>(sizeof kLadder / sizeof kLadder[0]);
 inline constexpr int kToday = 2;      // 640x456: the size of every build before automatic quality
@@ -208,8 +318,34 @@ inline constexpr int kTopSingle = 6;  // 960x544, the highest rung without multi
 inline constexpr int kBaseW = 640, kBaseH = 456;
 inline constexpr int kEmergency = -1, kNoRung = -2;
 inline constexpr Rung kEmergencySize{480, 340, 1};
+// GXV_WIDE_RUNGS=1: the rungs below 960x544 in the screen's shape (about 16:9) for the same number of pixels, instead of the
+// GameCube EFB's narrower shape that the screen then stretches sideways (640x456 -> 720x404): more detail across, fewer lines
+// down. The GPU cost follows the pixels (and, here, mostly the draws), so it is about the same. Every size the back end derives
+// already scales x and y separately (the top rung is 1.5 x 1.19 of the EFB), so nothing else changes. Same IDs, same samples.
+inline constexpr Rung kWideLadder[] = {{608, 348, 1}, {664, 376, 1}, {720, 404, 1}, {784, 440, 1}, {848, 480, 1},
+                                       {896, 512, 1}, {960, 544, 1}, {960, 544, 2}, {960, 544, 4}};
+inline constexpr Rung kWideEmergencySize{536, 304, 1};
+static_assert(sizeof kWideLadder == sizeof kLadder, "the wide ladder has the same rungs");
+// The image effects work in a corner of the EFB (a half or a quarter of it: 320x228, 160x114) and draw the saved corner back; the
+// corner must end on whole render pixels. At 592x422 the quarter ended at row 105.5 and at 608x346 at row 86.5, a pixel's centre,
+// where the copy that saves it and the draws over it can round to different rows (a line under Beach Bowl's star counter; fix
+// from Producdevity's fork, b89e421). So every size is a multiple of 4 both ways: 592x424, 608x348.
+constexpr bool CornersOnPixels() {
+    for (const Rung& r : kLadder)
+        if (r.w % 4 != 0 || r.h % 4 != 0) return false;
+    for (const Rung& r : kWideLadder)
+        if (r.w % 4 != 0 || r.h % 4 != 0) return false;
+    return kEmergencySize.w % 4 == 0 && kEmergencySize.h % 4 == 0 && kWideEmergencySize.w % 4 == 0 && kWideEmergencySize.h % 4 == 0;
+}
+static_assert(CornersOnPixels(), "every render size keeps the EFB's quarter on whole pixels");
+inline bool WideRungs() {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h): every rung lookup of the back end and the controller
+    return PORT_HOT_KNOB(bool, [] { const char* v = std::getenv("GXV_WIDE_RUNGS"); return v && std::atoi(v) == 1; }());
+}
 // Keep the public 0..8 rung IDs unchanged; the extra floor exists only in target mode.
-inline const Rung& RungAt(int rung) { return rung == kEmergency ? kEmergencySize : kLadder[rung]; }
+inline const Rung& RungAt(int rung) {
+    if (WideRungs()) return rung == kEmergency ? kWideEmergencySize : kWideLadder[rung];
+    return rung == kEmergency ? kEmergencySize : kLadder[rung];
+}
 inline double MsaaCost(int samples) { return samples >= 4 ? 1.9 : (samples >= 2 ? 1.3 : 1.0); }
 inline double Cost(int rung) {
     const Rung& r = RungAt(rung);
@@ -249,12 +385,17 @@ struct Config {
                                     // the window means still have to fit upTarget
     // GXV_AUTOQ_FXSTEP (target mode only; default off, and then every decision is the one made without these): half-size effects
     // and blur before the emergency rung, back off first when room returns (see above).
-    bool fxStep = false;         // step 1: effects and blur at half size
-    bool bgStep = false;         // step 2: cheaper background (after step 1 or, when that bought nothing, on its own)
+    bool fxStep = false;         // bit 1: effects and blur at half size (the only step in mode 1)
+    bool bgStep = false;         // bit 2: cheaper background, tried before bit 1 in mode 2
+    // GXV_AUTOQ_EDGESTEP=1 (target mode only; default off, and then every decision is the one made without it): the whole-picture edge
+    // smoothing of the present (GXV_EDGE_AA, the FXAA-style pass; ~2.2 ms of GPU time a picture with GXV_PRESENT_FAST) as the first
+    // step at today's rung, before the cheaper background and half-size effects, and the last one back (see "Performance mode").
+    bool edgeStep = false;       // bit 4: the present without edge smoothing
     double fxHoldSec = 2.0;      // GPU-limited at today's rung this long: a step goes on
     double fxOffHoldSec = 8.0;   // predicted room in a row before a step goes off
     double fxRatio = 1.3;        // GPU time without the step / with it, assumed until the step's own saving is measured
     double bgRatio = 1.1;
+    double edgeRatio = 1.12;     // (edge smoothing off: the display scene 4.5 -> 2.3 ms of about 18 ms, r61; assumed until measured)
     double fxOffBlockSec = 20.0; // after a switch on within fxRepeatSec of a switch off, no switching off for this long (doubling)
     double fxRepeatSec = 60.0;
     // GXV_AUTOQ_ANISO (target mode only; default off, and then every decision is the one made without it): anisotropic filtering above the
@@ -262,15 +403,55 @@ struct Config {
     bool aniso = false;
     double anisoHoldSec = 8.0;   // predicted room in a row (at the top rung) before it goes on
     double anisoRatio = 1.15;    // GPU time with it / without it, assumed (not measured on a console yet)
+    // Play-time quality (see above; all off by default, and then every decision is the one made without them)
+    double freeFrac = 0.0;       // GXV_AUTOQ_FREE: > 0, a step up keeps the predicted GPU busy time within this share of the picture interval
+    double freeDownFrac = 0.95;  // ... and above today's rung a GPU busy this share of the interval or more ...
+    double freeDownSec = 6.0;    // ... for this long steps one rung down (anisotropic filtering goes after downHoldSec)
+    bool newStage = false;       // GXV_AUTOQ_NEWSTAGE: a stage first named after its load's gap, with no remembered rung, starts at the start rung
+    bool wipe = false;           // GXV_AUTOQ_WIPE: fades, wipes and loads lead into an unmeasured area (no step up, back to today's rung)
+    bool lateRoom = false;       // GXV_AUTOQ_LATEROOM: a late picture whose work fits does not end a stretch of room
+    int anisoRung = kNoRung;     // GXV_AUTOQ_ANISO_RUNG: the lowest rung anisotropic filtering may be on at (kNoRung: maxRung only)
+    // Severe overload in play (see above; off by default, and then every decision is the one made without it)
+    bool overload = false;       // GXV_AUTOQ_OVERLOAD=1
+    bool overloadFx = false;     // GXV_AUTOQ_OVERLOAD=2: half-size effects for such an overload even when fxStep is off
+    double overloadSec = 1.0;    // pictures in a row each at the budget or over, this long ...
+    double overloadFrac = 1.25;  // ... with a mean GPU busy time this share of the budget or more
+    double overloadFit = 0.9;    // the share of the budget the prediction aims the GPU time at
     // A late picture (interval over budgetMs + 3 %) is blamed on a stage when that stage's work is at least this share of the budget
     double causeShare = 0.85;
     // Target mode: a step below today's size is kept only when the GPU's busy time fell by this share of the saving the sizes
     // predict (and by betterFrac at least); a step that bought nothing waits at most noGainUndoSec for a quiet moment to be undone.
     double gainShare = 0.5;
     double missGainFrac = 0.03;  // ... but while the floor is missed (pictures slower than the target), any saving of this much is kept
+    // The front end's CPU per picture (FrameTimes::frontRunUs) as a stage of the whole-picture work in the decisions (GXV_AUTOQ_FRONT):
+    // -1 (the default) in target 60 only, 1 in either target, 0 never. The floor census blames late pictures on it whenever it is measured.
+    int frontStage = -1;
+    double pathRateFrac = 0.03;  // target 60: a series of steps below must show this many more pictures, or it is undone as a whole
+    double freeClimbFrac = 0.9;  // below today, a step up while another stage holds the pictures and the GPU stays under this share of it
     double nothingFrac = 0.01;   // ... and a step undone then is remembered with the scene only when it saved less than this (nothing)
     double noGainUndoSec = 5.0;
     double belowCheckSec = 4.0;  // ... judged over this long (checkSec in the other modes): the GPU time of a water stage wanders
+    // Quality mode judged by the pictures (GXV_AUTOQ_HOLD30, target 30 only; off here, so every other configuration decides as before)
+    bool hold30 = false;
+    double holdWindowSec = 2.0;     // a hold window: the pictures of at least this long of play
+    double holdMissFrac = 0.03;     // a window misses when more than this share of its pictures were late for the GPU
+    int holdMissWindows = 2;        // misses in a row that step one rung down (one within a climb's trial)
+    double holdOnTimeFrac = 0.97;   // a calm window: at least this share on time, none late for the GPU ...
+    double holdClimbGpuFrac = 0.95; // ... and the GPU's mean busy time within this share of the budget
+    int holdClimbWindows = 10;      // calm windows in a row (20 s, as GXV_AUTOQ_RECOVER_SEC) before a climb trial below the start rung
+    double holdTrialSec = 8.0;      // after any climb: one miss window in this long goes back and blocks the rung tried
+    // The way back on Performance mode's steady 30 (GXV_AUTOQ_CADENCE_UP, target 60 only; off here, so every other configuration decides as
+    // before; see "Performance mode")
+    bool cadenceUp = false;
+    double cadenceUpFrac = 0.90;    // the predicted GPU time and the other stages within this share of 33.3 ms
+    double cadenceReachFps = port::pace::kSteady30AboveFps; // 60 out of reach: the floor rung's GPU or the other stages miss this rate
+    // GXV_AUTOQ_EDGECHECK=1|0 (target 60 with edgeStep only; off here, on in the back end): the edge step's GPU-timed trial is judged over
+    // edgeCheckSec instead of checkSec and kept when the GPU fell by the smaller of half its assumed saving (1 - 1 / edgeRatio) and
+    // edgeBetterFrac, instead of betterFrac (5 %): its ~12 % saving read as 5 % in a 2 s trial through the camera's noise (Good Egg,
+    // console)
+    bool edgeCheck = false;
+    double edgeCheckSec = 4.0;
+    double edgeBetterFrac = 0.03;
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
     static Config Legacy() {
         Config c;
@@ -305,15 +486,21 @@ struct FrameTimes {
     uint32_t gameRunUs = 0, gameTurns = 0; // target mode: cumulative CPU time/turns, unsigned wrap is intentional
     uint32_t gameFaults = 0;   // cumulative failed game-clock samples; a later valid turn must not hide one
     bool gameKnown = false;
+    uint32_t frontRunUs = 0, frontPictures = 0; // target mode: the front end's cumulative CPU time and pictures (wrap intentional)
+    bool frontKnown = false;   // ... known (a front end on its own thread that stamps its pictures)
+    bool cadence30 = false;    // target 60: the pacing's steady 30 (frame_pace.h SteadyCadence) shows the pictures every second turn
     bool paced = false;        // paced display callback: the late frame fence alone cannot measure GPU busy time
     bool timers = false;       // GPU timers clock: gpuBusyUs is used, gpuDoneUs is not
     bool busyKnown = false;    // ... a frame finished on the GPU since the previous present, and this is its busy time
     uint32_t gpuBusyUs = 0;
     bool quiet = false;        // calm mode: a quiet moment (pause menu, closed fade or wipe): not measured, a step up may be taken
+    bool wipe = false;         // ... the quiet moment is a closed fade or wipe (not the pause menu): Config::wipe
+    bool movie = false;        // calm mode: a movie is playing: not measured, and no change of size (forkB, from Producdevity's fork)
     uint32_t scene = 0;        // calm mode: the scene's key (0 = unknown)
 };
 
-enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain, AnisoOn, AnisoOff };
+enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain, AnisoOn, AnisoOff, Wipe, FreeDown, Severe,
+                           HoldMiss, HoldClimb, HoldBack, HoldEdgeOff, HoldEdgeOn, HoldEdgeBack, CadenceUp, CadenceBack };
 const char* WhyText(Why w);
 
 struct Change {
@@ -331,6 +518,8 @@ struct FloorWindow {
     uint64_t lateUs = 0;                   // the time those late pictures took: seconds below 30
     uint64_t worstUs = 0;                  // the longest late picture
     uint32_t gpu = 0, game = 0, renderer = 0, other = 0, unknown = 0; // late pictures by their largest stage
+    uint32_t front = 0;                    // ... the front end's CPU (when it is measured)
+    uint32_t cadence = 0;                  // pictures on Performance mode's steady 30 (judged against 33.3 ms, not 16.7)
     uint32_t stalls = 0;                   // intervals over gapResetMs (a load, a shader build): not in `late`
     uint64_t stallUs = 0;
     uint32_t quiet = 0;                    // pictures of quiet moments (pause menu, fades): not counted
@@ -359,11 +548,13 @@ public:
     double WindowWorkMs() const { return winWorkMs_; }
     double WindowGameMs() const { return winGameMs_; }
     double WindowBackendMs() const { return winBackendMs_; }
+    double WindowFrontMs() const { return winFrontMs_; } // the front end's CPU per picture (-1: not measured)
     unsigned Windows() const { return windows_; }
     // Floor protection by degrees: whether the back end should draw effects and blur passes at half size now (always false
     // without Config::fxStep), the last change of it, and how often it changed.
     bool FxStepOn() const { return (steps_ & 1) != 0; }
     bool BgStepOn() const { return (steps_ & 2) != 0; }
+    bool EdgeStepOn() const { return (steps_ & 4) != 0 || holdEdge_; } // (Config::edgeStep: the present without edge smoothing now)
     unsigned Steps() const { return steps_; }
     const Change& LastFxChange() const { return lastFx_; }
     unsigned FxChanges() const { return fxChanges_; }
@@ -374,6 +565,11 @@ public:
     bool AnisoOn() const { return aniso_; }
     const Change& LastAnisoChange() const { return lastAniso_; }
     unsigned AnisoChanges() const { return anisoChanges_; }
+    // The GPU's busy time a picture over the windows of checkSec after anisotropic filtering last came on, against the window before
+    // (diagnostics for Config::anisoRatio, which is assumed): returns true once per measurement.
+    bool TakeAnisoMeasure(double& beforeMs, double& afterMs);
+    // Play-time quality: the lowest rung anisotropic filtering may be on at.
+    int AnisoMinRung() const { return cfg_.anisoRung == kNoRung ? cfg_.maxRung : std::max(cfg_.anisoRung, cfg_.minRung < kToday ? kToday : cfg_.minRung); }
     unsigned Changes() const { return changes_; }
     const Config& Cfg() const { return cfg_; }
     // When the block on `rung` ends (microseconds on the frames' clock; 0: not blocked): diagnostics and tests.
@@ -395,6 +591,15 @@ private:
     uint64_t prevDone_ = 0, prevPresent_ = 0, prevRun_ = 0;
     uint32_t prevGameRun_ = 0, prevGameTurns_ = 0, prevGameFaults_ = 0;
     bool prevGameKnown_ = false;
+    uint32_t prevFrontRun_ = 0, prevFrontPictures_ = 0;
+    bool prevFrontKnown_ = false;
+    uint64_t frontRun_ = 0, frontPictures_ = 0; // window: the front end's CPU and pictures
+    uint32_t lastFrontUs_ = 0;                  // its last known CPU per picture (0: not known)
+    double winFrontMs_ = -1;
+    unsigned cadenceFrames_ = 0;                // window: pictures shown on the steady 30 (FrameTimes::cadence30)
+    int pathFrom_ = kNoRung;                    // target 60: the rung a series of steps below began at (kNoRung: none)
+    double pathInterval_ = 0;                   // ... and the mean picture interval before it (ms)
+    double belowInterval_ = 0;                  // the same for a step below waiting for a quiet moment
     // window accumulators
     uint64_t busy_ = 0, span_ = 0, present_ = 0, run_ = 0;
     unsigned frames_ = 0, busyN_ = 0;
@@ -411,6 +616,7 @@ private:
     unsigned boundFrames_ = 0;
     uint64_t settleUntil_ = 0;
     unsigned sinceChange_ = 1u << 30; // frames since the last change (minChangeFrames)
+    unsigned sinceLoad_ = 1u << 30;   // frames since the last load's gap (Config::newStage)
     // a step below today waiting to be judged
     bool checking_ = false;
     int checkFrom_ = kToday;
@@ -449,22 +655,77 @@ private:
     int Recall(uint32_t key, unsigned* fx = nullptr, int* floor = nullptr) const;  // kNoRung: unknown (the emergency rung is a valid remembered value)
     void RecallFloor(uint32_t key, uint64_t now);
     unsigned NextStep(uint64_t now) const;
+    unsigned RecoveryStep() const;
     void SetSteps(unsigned to, Why why, uint64_t now);
     void SetSceneSteps(unsigned to, uint64_t now);
-    bool StepsEnabled() const { return cfg_.fxStep || cfg_.bgStep; }
+    bool StepsEnabled() const { return cfg_.fxStep || cfg_.bgStep || cfg_.edgeStep || cfg_.overloadFx; }
     bool Target() const { return cfg_.targetFps != 0; }                  // a whole-picture target (30 or 60)
+    bool FrontStage() const { return Target() && (cfg_.frontStage > 0 || (cfg_.frontStage < 0 && cfg_.targetFps == 60)); }
     unsigned PictureTurns() const { return cfg_.targetFps == 60 ? 1u : 2u; } // 60 Hz game turns per picture of the target
-    unsigned StepMask() const { return (cfg_.fxStep ? 1u : 0u) | (cfg_.bgStep ? 2u : 0u); }
+    unsigned StepMask() const { return (cfg_.fxStep ? 1u : 0u) | (cfg_.bgStep ? 2u : 0u) | (cfg_.edgeStep ? 4u : 0u); }
+    static int StepIdx(unsigned bit) { return bit == 1u ? 0 : bit == 2u ? 1 : 2; } // (the step's slot in the arrays below)
+    double StepRatio(int idx) const { return idx == 0 ? cfg_.fxRatio : idx == 1 ? cfg_.bgRatio : cfg_.edgeRatio; }
+    // (target 60: the budget a window is judged against for a lower picture: 33.3 ms while the pacing shows a steady 30)
+    double DownBudgetMs() const;
+    // (target 60: most pictures of the window were on the steady 30, FrameTimes::cadence30)
+    bool CadenceWindow() const { return cfg_.targetFps == 60 && frames_ && cadenceFrames_ * 2 > frames_; }
+    // Config::cadenceUp: the stretch of room includes a window whose step up only the steady 30's 33.3 ms allowed; a climb so made is on
+    // trial
+    bool roomCadence_ = false;
+    bool picCadLateGpu_ = false;                // the picture handed to Add last: on the steady 30, late against 33.3 ms for the GPU
+    unsigned winCadLateGpu_ = 0;                // decision window: such pictures
+    int cadTrialFrom_ = kNoRung;                // a climb on the cadence on trial: the rung it came from ...
+    uint64_t cadTrialUntil_ = 0;                // ... until then
+    unsigned cadTrialPics_ = 0, cadTrialLate_ = 0; // ... its pictures on the cadence and those late for the GPU
+    bool cadTrialMiss_ = false;                 // ... it missed: back at the next change allowed
+    void Climb(int to, uint64_t now);           // a step up the room allowed (Why::Headroom, or Why::CadenceUp with its trial)
     void ForgetFxBlocks();
     void SetAniso(bool to, Why why, uint64_t now);
     void SetSceneAniso(bool to, uint64_t now);
-    unsigned Mem() const { return steps_ | (aniso_ ? 4u : 0u); } // what a scene remembers beside its rung (bit 2: anisotropic filtering)
+    static constexpr unsigned kAnisoMem = 8u;
+    unsigned Mem() const { return steps_ | (aniso_ ? kAnisoMem : 0u); } // what a scene remembers beside its rung (bit 3: anisotropic filtering)
     int FxRung() const { return cfg_.minRung > kToday ? cfg_.minRung : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
-    void FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
-                    uint64_t gpu, uint64_t game, uint64_t backend);
+    // (returns the late picture's stage: 0 GPU, 1 game, 2 renderer, 3 front end, 4 none of these, 5 not measured; -1 on time or not counted)
+    int FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
+                   uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown = false, uint64_t front = 0, bool cadence = false);
 public:
     unsigned QuietUps() const { return quietUps_; }
+    // Quality mode judged by the pictures (Config::hold30): the last closed hold window (diagnostics, tests): its pictures, those late,
+    // those late for the GPU (the size could have helped), and the hold windows in a row that missed / were calm.
+    struct HoldWindow { uint32_t pictures = 0, late = 0, lateGpu = 0; double gpuMs = 0; bool miss = false, calm = false; };
+    const HoldWindow& LastHold() const { return lastHold_; }
+    unsigned HoldWindows() const { return holdWindows_; }
+    int HoldMissRun() const { return missRun_; }
+    int HoldCalmRun() const { return calmRun_; }
+    bool HoldTrial(uint64_t now) const { return holdTrialFrom_ != kNoRung && now < holdTrialUntil_; }
+    // (Config::hold30 with edgeStep: the present's edge smoothing off by the rule above; its measured GPU saving, ms a picture, -1 unknown)
+    bool HoldEdgeOff() const { return holdEdge_; }
+    double HoldEdgeSavingMs() const { return edgeSave_; }
 private:
+    bool Hold30() const { return cfg_.hold30 && cfg_.targetFps == 30; }
+    // the picture handed to Add last (Config::hold30): measured, late, late for the GPU (every other stage fitted)
+    bool picLate_ = false, picLateGpu_ = false;
+    uint32_t winPics_ = 0, winLate_ = 0, winLateGpu_ = 0;      // decision window (ResetWindow)
+    double holdT_ = 0, holdGpuSum_ = 0;                         // hold window (ResetHolds)
+    uint32_t holdPics_ = 0, holdLate_ = 0, holdLateGpu_ = 0, holdGpuN_ = 0;
+    int missRun_ = 0, calmRun_ = 0;                             // hold windows in a row (ResetHolds)
+    HoldWindow lastHold_;
+    unsigned holdWindows_ = 0;
+    int holdTrialFrom_ = kNoRung;                               // a climb on trial: the rung it came from ...
+    uint64_t holdTrialUntil_ = 0;                               // ... until then
+    void HoldAccumulate(double dt, double gpuMs);
+    // the present's edge smoothing under Config::hold30 (see above)
+    bool holdEdge_ = false;                                     // off now
+    double missGpuSum_ = 0;                                     // GPU ms x pictures over the current run of miss windows (ResetHolds)
+    uint32_t missGpuN_ = 0;
+    double edgeBefore_ = 0;                                     // the GPU's mean over the miss windows before it went off
+    bool edgeMeasuring_ = false;                                // the first full hold window after it went off measures the saving
+    double edgeSave_ = -1;                                      // measured saving (ms; -1: not measured)
+    uint64_t edgeTrialUntil_ = 0;                               // back on: a trial until then
+    uint64_t edgeBlockedUntil_ = 0;                             // back on not before then (after a failed trial)
+    double edgeBlockLen_ = 0;
+    bool HoldEdgeRule() const { return Hold30() && cfg_.edgeStep; }
+    void SetHoldEdge(bool off, Why why, uint64_t now);
     unsigned quietUps_ = 0;
     // floor protection by degrees (Config::fxStep)
     unsigned steps_ = 0;                    // bit 0 half-size effects and blur, bit 1 cheaper background
@@ -474,13 +735,13 @@ private:
     bool fxEver_ = false;                   // a change was made: changes are spaced from lastFxAt_
     unsigned trial_ = 0;                    // the step (1, 2) whose trial is running; 0: none
     double fxBefore_ = 0, fxCheckT_ = 0, fxCheckSum_ = 0; // GPU ms before; trial time and sum of GPU ms x frames
-    double stepGain_[2] = {0, 0};           // measured saving of each step (0: not measured)
+    double stepGain_[3] = {0, 0, 0};        // measured saving of each step (0: not measured; StepIdx)
     unsigned fxCheckFrames_ = 0;
     double fxRoomT_ = 0, fxBoundKept_ = 0;
     double boundGpuSum_ = 0;                // GPU ms x frames over the unbroken GPU-limited stretch
     unsigned boundGpuFrames_ = 0;
-    uint64_t onBlockedUntil_[2] = {0, 0}, fxOffBlockedUntil_ = 0, lastFxOffAt_ = 0;
-    double onBlockLen_[2] = {0, 0}, fxOffBlockLen_ = 0;
+    uint64_t onBlockedUntil_[3] = {0, 0, 0}, fxOffBlockedUntil_ = 0, lastFxOffAt_ = 0;
+    double onBlockLen_[3] = {0, 0, 0}, fxOffBlockLen_ = 0;
     FloorWindow floor_;
     // anisotropic filtering at the top rung (Config::aniso)
     bool aniso_ = false;
@@ -490,6 +751,25 @@ private:
     uint64_t anisoBlockedUntil_ = 0;
     double anisoBlockLen_ = 0;
     double anisoRoomT_ = 0;                 // seconds of predicted room in a row for it
+    // its GPU cost as measured (diagnostics only: no decision reads these)
+    double anisoBefore_ = 0, anisoSum_ = 0, anisoT_ = 0;
+    unsigned anisoFrames_ = 0;
+    bool anisoMeasuring_ = false, anisoMeasured_ = false;
+    double anisoAfterMs_ = 0, anisoBeforeMs_ = 0;
+    double lastGpuMs_ = 0;                  // the GPU's busy time a picture in the last window (target mode)
+    // play-time quality
+    double freeOverT_ = 0;                  // seconds the GPU has set the pace (Config::freeFrac)
+    // severe overload (Config::overload): the unbroken run of pictures whose GPU busy time reaches the budget
+    double ovT_ = 0, ovGpuSum_ = 0;
+    unsigned ovN_ = 0;
+    uint64_t ovLastAt_ = 0;                 // when the last such step was taken
+    bool SevereStep(uint64_t now, double meanGpuMs);
+    // (a severe overload is one against the 30 floor in either target: Performance mode's 16.7 ms is not what makes it severe)
+    double SevereBudgetMs() const { return std::max(cfg_.budgetMs, 1000.0 / 30.0); }
+    bool AnisoRungOk(int rung) const { return rung >= AnisoMinRung() && rung <= cfg_.maxRung; }
+    // (a change of rung keeps it only when it is the old top-rung option and the rung is the top: any change has it off otherwise)
+    bool AnisoKeptAt(int rung) const { return cfg_.anisoRung == kNoRung && rung == cfg_.maxRung; }
+    int WipeCap(int rung) const { return cfg_.wipe && rung > std::max(kToday, cfg_.minRung) ? std::max(kToday, cfg_.minRung) : rung; }
 };
 
 // The log of automatic quality: the Vita's port_log (the console's log file; the back end's stderr goes nowhere there),

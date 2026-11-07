@@ -417,6 +417,16 @@ extern "C" int port_settings_startup(int argc, char** argv) {
     // A pad on a PS TV, with the profile never chosen by hand, plays with the PlayStation profile (R2 shoots, right stick aims).
     port::settings::ApplyPadDefaults(sActiveConfig, port_vita_input_external_pad() != 0);
     sOverrides = ApplyStartup(sActiveConfig, true);
+    {
+        // The Picture mode and what it set (the basic log: a console run shows which mode it is and what env.txt changed of it).
+        auto env = [](const char* k) { const char* v = std::getenv(k); return v ? v : "-"; };
+        const bool locked = sActiveConfig.fpsLimit == 30 || sActiveConfig.fpsLimit == kSteady30;
+        port_log_summary("settings: picture mode %s: GXV_FPS_LIMIT=%s GXV_AUTOQ_TARGET=%s GXV_AUTOQ_MAX=%s GXV_AUTOQ_MSAA=%s GXV_AUTOQ_EDGESTEP=%s "
+                         "GXV_AUTOQ_LOCKED30_FLOOR=%s GXV_AUTOQ_LOCKED30_START=%s GXV_STEADY30=%s; %u env.txt override(s)",
+                         locked ? "Locked 30" : sActiveConfig.performance60 ? "Performance" : "Quality", env("GXV_FPS_LIMIT"), env("GXV_AUTOQ_TARGET"),
+                         env("GXV_AUTOQ_MAX"), env("GXV_AUTOQ_MSAA"), env("GXV_AUTOQ_EDGESTEP"), env("GXV_AUTOQ_LOCKED30_FLOOR"), env("GXV_AUTOQ_LOCKED30_START"),
+                         env("GXV_STEADY30"), static_cast<unsigned>(sOverrides.size()));
+    }
     std::string error;
     const unsigned profile = sActiveConfig.profile == port::controls::ProfileId::Handheld ? 0 : 1;
     if (!port::controls::SetActiveMapping(sActiveConfig.profiles[profile], sActiveConfig.profile, port::controls::NominalCaps(sActiveConfig.profile), error))

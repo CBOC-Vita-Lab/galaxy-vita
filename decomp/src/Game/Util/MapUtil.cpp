@@ -31,6 +31,11 @@ void MapUtil_FORCE_MATCH_SDATA2() {
     (void)5000.0f;
 }
 
+#ifdef TARGET_PC
+extern "C" int port_ray_nearest_mode(void);  // (platform/src/port/perf.cpp)
+extern "C" void port_ray_nearest_verified(int mismatching);
+#endif
+
 namespace {
     u32 getStrikeInfoNumCategory(s32 category) NO_INLINE;
     bool getFirstPolyOnLineCategoryExceptActor(TVec3f*, Triangle*, const TVec3f&, const TVec3f&, const LiveActor*, s32) NO_INLINE;
@@ -45,9 +50,39 @@ namespace {
 
     bool getFirstPolyOnLineCategory(TVec3f* pPos, Triangle* pTriangle, const TVec3f& rStart, const TVec3f& rDirection,
                                     const TriangleFilterBase* pTriangleFilter, const CollisionPartsFilterBase* pPartsFilter, s32 category) {
+#ifdef TARGET_PC
+        // (port) Only the nearest hit is kept, so without a triangle filter the walk along the line may end at it
+        // (KCollisionServer::checkArrow's nearestOnly). PETARI_RAY_NEAREST=0 walks the whole line as before; 2 does both and
+        // compares the polygons found ("rays:" lines).
+        const int nearestMode = pTriangleFilter == nullptr ? port_ray_nearest_mode() : 0;
+        CollisionParts* nearestParts = nullptr;
+        u32 nearestIdx = 0;
+        TVec3f nearestPos(0.0f, 0.0f, 0.0f);
+        if (nearestMode == 2) {
+            u32 n = MR::getCollisionDirector()->getCategoryKeeper(category)->checkStrikeLine(rStart, rDirection, 0, pPartsFilter, nullptr, true);
+            f32 best = 1000000.0f;
+            for (u32 i = 0; i < n; i++) {
+                const HitInfo* pCandidate = getStrikeInfoCategory(category, i);
+                if (best > pCandidate->_60) {
+                    best = pCandidate->_60;
+                    nearestParts = pCandidate->mParentTriangle.mParts;
+                    nearestIdx = pCandidate->mParentTriangle.mIdx;
+                    nearestPos = pCandidate->mHitPos;
+                }
+            }
+        }
+        u32 count = MR::getCollisionDirector()->getCategoryKeeper(category)->checkStrikeLine(rStart, rDirection, 0, pPartsFilter, nullptr,
+                                                                                            nearestMode == 1);
+#else
         u32 count = MR::getCollisionDirector()->getCategoryKeeper(category)->checkStrikeLine(rStart, rDirection, 0, pPartsFilter, nullptr);
+#endif
         const HitInfo* pHit;
         if (count == 0) {
+#ifdef TARGET_PC
+            if (nearestMode == 2) {
+                port_ray_nearest_verified(nearestParts != nullptr);
+            }
+#endif
             return false;
         }
 
@@ -65,6 +100,15 @@ namespace {
             }
         }
 
+#ifdef TARGET_PC
+        if (nearestMode == 2) {
+            const HitInfo* pFull = nearest == -1 ? nullptr : getStrikeInfoCategory(category, nearest);
+            port_ray_nearest_verified(pFull == nullptr ? nearestParts != nullptr
+                                                       : pFull->mParentTriangle.mParts != nearestParts || pFull->mParentTriangle.mIdx != nearestIdx ||
+                                                             pFull->mHitPos.x != nearestPos.x || pFull->mHitPos.y != nearestPos.y ||
+                                                             pFull->mHitPos.z != nearestPos.z);
+        }
+#endif
         if (nearest == -1) {
             return false;
         }

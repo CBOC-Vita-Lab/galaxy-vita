@@ -43,6 +43,12 @@ class PlayerAuditTests(unittest.TestCase):
         for name in ("vgx_draw.cpp", "vgx_state.cpp", "vgx_dlcache.cpp", "vgx_texcache.cpp", "vgx_bpsync.cpp", "vgx_stats.cpp",
                      "vgx_texdecode.cpp", "vgx_shadergen.cpp"):
             text = re.sub(r"//[^\n]*", "", (VGX_SRC / name).read_text())
+            # (log-only timers, never per draw: the shadow-fill summary once a picture, the upload-format log and the decode timer
+            # of a texture upload for the stutter log)
+            for allowed_name, signature in (("vgx_draw.cpp", "void SfLog()"), ("vgx_texcache.cpp", "inline void TexFormatLogMaybe()"),
+                                            ("vgx_texcache.cpp", "struct DecodeTimer")):
+                if name == allowed_name and signature in text:
+                    text = text.replace(function_body(text, signature), "{}")
             self.assertIsNone(CLOCK_CALL.search(text), f"{name} reads a clock")
 
     def test_link_requires_pthread_cancel(self):

@@ -109,6 +109,19 @@ inline uint32_t BlendKey(const RenderState& rs) {
                      : 0u) |
            (rs.colorWrite ? 1u << 10 : 0u) | (rs.alphaWrite ? 1u << 11 : 0u) | (rs.dstAlphaZero ? 1u << 12 : 0u);
 }
+// GXV_DISCARD_BLEND (vgx_draw.cpp RejectZeroFs): whether a fragment whose output is vec4(0) leaves every value this render state lets
+// a draw write as it was, as a killed (`discard`) fragment does: no depth write (as the back end sets the mask: only with the test on);
+// colour and alpha each either masked, or blended by an equation that adds or reverse-subtracts the source term with a destination
+// factor that is 1 for a zero source (ONE, ONE_MINUS_SRC_ALPHA, ONE_MINUS_SRC_COLOR), alpha with the colour's factors (dstAlphaZero 0,
+// not the ZERO/ZERO or ONE/ZERO override). dst * 1 + 0 * sf = dst and dst * 1 - 0 * sf = dst exactly for any factor sf in 0..1.
+inline bool RejectIsNoop(const RenderState& rs) {
+    if (rs.depthTest && rs.depthWrite) return false;
+    if (!rs.colorWrite && !rs.alphaWrite) return true;
+    if (!rs.blend) return false;
+    const bool dstOne = rs.blendDst == BF_ONE || rs.blendDst == BF_INV_SRC_ALPHA || rs.blendDst == BF_INV_SRC_COLOR;
+    if (!dstOne || (rs.blendEq != BE_ADD && rs.blendEq != BE_REVSUB)) return false;
+    return !rs.alphaWrite || rs.dstAlphaZero == 0;
+}
 // CMD_VARIANT: this program will be drawn with this vertex layout, blend function and
 // colour mask. On the console a patched vertex program exists per (vertex shader, layout)
 // and a patched fragment program per (program, blend function, colour mask), and each is
@@ -134,12 +147,16 @@ struct DrawRec {
     // The record starts with a primitive that writes every pixel of `ex` whatever was there:
     // a rectangle over the whole viewport, no blending, no alpha test, no depth test.
     uint8_t cover = 0;
-    uint8_t pad0 = 0;
+    // GXV_SHADOWFILL_BOUNDS (vgx_draw.cpp, "shadow fill bounds"): 1 when abX..abH hold the EFB pixels the record can write,
+    // worked out from its vertices (or its list's bounds) when it was made because it writes alpha other than the constant 0.
+    // 0: not known (the extent below is all that is known). For the front end's bookkeeping only, not for drawing.
+    uint8_t ab = 0;
     // The EFB rectangle the record's pixels are known to stay inside: the scissor, or the
     // scissor cut to the viewport when the vertices are known not to leave it (on the
     // console, as on the Wii, only the scissor cuts; a desktop GL clips to the viewport).
     // For the front end's bookkeeping of what the EFB holds (pass isolation), not for drawing.
     int16_t exX = 0, exY = 0, exW = 0, exH = 0;
+    int16_t abX = 0, abY = 0, abW = 0, abH = 0; // (see ab)
     uint32_t layoutMask = 0;
     uint32_t vbuf = 0;      // 0: vertices / indices are in the frame's arenas; else a static buffer (BufUpload)
     // Where index value 0 of this draw is: bytes into the static vertex buffer, or into the
@@ -173,6 +190,15 @@ struct ShaderSource {
     // The back end uploads at most this much (and at most what the GL reports as active).
     uint8_t nMv = 0, nTm = 0, nPtm = 0, nPal = 0, nLt = 0;
     uint8_t nTev = 28; // fragment: size of u_tev
+    // Vertex (GXV_VSOUT, VsKey::setOut): colour varyings left out (bits 0, 1), a colour or alpha part not computed (bit 2), a texgen
+    // written as a constant (bit 3). 0 for every key made with the switch off. (Census only: GXV_GPU_SCENES' line.)
+    uint8_t outPruned = 0;
+    // GXV_FS_TRIM (fragment: clamp sides and alpha-test floors left out) / GXV_VS_TRIM (vertex: light terms and clamp sides left out): how
+    // many, at most 255. 0 for every shader made with the switches off. (Census only: GXV_GPU_SCENES' line.)
+    uint8_t trimOps = 0;
+    // Fragment (GXV_EFBSWAP2): the texture channels the shader reads, bit 4 * texmap + channel (0 r, 1 g, 2 b, 3 a), after the
+    // TEV swap tables; an indirect lookup counts as all four. All bits set: not known (every channel read).
+    uint32_t texChan = 0xFFFFFFFFu;
     std::string text;
 };
 
@@ -181,7 +207,12 @@ enum : uint8_t {
     TF_RGBA8 = 0, // 4 bytes per texel, R first, top row first
     TF_DXT1 = 1,  // S3TC DXT1 blocks (8 bytes each, row-major), as GL_COMPRESSED_RGBA_S3TC_DXT1_EXT takes them
     TF_LA88 = 2,  // 2 bytes per texel, luminance then alpha, sampling as (L,L,L,A); no mipmaps
-    TF_DXT5 = 3,  // S3TC DXT5 blocks (16 bytes each, row-major): only the HD replacements (vgx_hdtex.cpp)
+    TF_DXT5 = 3,  // S3TC DXT5 blocks (16 bytes each, row-major): the HD replacements (vgx_hdtex.cpp), and CMPR with transparent texels (GXV_CMPRA)
+    // GXV_TEX16 (from the Strikers port's 1.3 MSC_VGX_TEX16): 2 bytes per texel, little-endian 16-bit words, uploaded with internal format =
+    // format so that vitaGL keeps the words as they are (textures.c fast_store) and picks the GXM 16-bit format
+    TF_RGB565 = 4,   // GL_UNSIGNED_SHORT_5_6_5 (red in the top bits): SCE_GXM_TEXTURE_FORMAT_U5U6U5_RGB
+    TF_RGBA5551 = 5, // GL_UNSIGNED_SHORT_5_5_5_1: U5U5U5U1_RGBA; never with genMips (vitaGL has no transfer format for its mips)
+    TF_RGBA4444 = 6, // GL_UNSIGNED_SHORT_4_4_4_4: U4U4U4U4_RGBA
 };
 struct TexUpload {
     uint32_t texId = 0;
@@ -229,6 +260,15 @@ struct CopyTexCmd {
     bool fill = false;           // the source rectangle is known to hold the constant colour fillRgba: no read of the EFB is needed
     float fillRgba[4] = {};
     bool clearElided = false;    // clear.enable was switched off by the front end: the rectangle already held these values
+    // GXV_EFBSWAP2 (MarkSwapCopies in vgx_draw.cpp): every draw (and atlas copy) of this frame that samples the copy before the
+    // texture is written again reads only channels the conversion leaves as they are (mat row = that channel, add 0), so the
+    // EFB's own colour buffer can stand for the converted copy. The back end converts it after all (RawConvert) before a later
+    // frame's draw that reads another channel.
+    bool swapOk = false;
+    // GXV_EFBSWAP2_PREDICT (MarkSwapCopies): the copy has the swap's shape and its own frame's readers would allow it, but a draw
+    // EARLIER in this frame read the texture's previous picture in a channel the conversion changes: the next frame will most
+    // likely do the same and the back end would have to convert the buffer then (RawConvert). swapOk is left false (census only).
+    bool swapPredictedNo = false;
     // Not 0: the source is rectangle `src` of this texture (srcTexW x srcTexH, same units as
     // `src`), not the EFB: a picture of a copy atlas (PassCmd::atlasTex). Such a copy ends
     // no pass and has no clear.
@@ -252,6 +292,12 @@ struct CopyDispCmd {
     // (backend::PresentCharaAA). 0: nothing to smooth, no pass.
     uint8_t charaN = 0;
     EfbRect chara[kCharaBoxes];
+    // GXV_EDGE_AA (vgx_draw.cpp, "whole-picture edge smoothing"): the present smooths the whole picture (backend::PresentEdgeAA)
+    // and then draws these rectangles (EFB pixels, the HUD's draws, padded and merged) again plainly over it, so no HUD pixel is
+    // ever filtered. edge false: no whole-picture pass for this copy (switch off, or the HUD covers too much of it).
+    bool edge = false;
+    uint8_t hudN = 0;
+    EfbRect hud[kCharaBoxes];
 };
 // An offscreen pass, found by the front end (IsolatePasses in vgx_draw.cpp).
 // The draws between CMD_PASS_BEGIN and the next CMD_COPY_TEX (which has
@@ -343,6 +389,7 @@ struct CmdBuf {
     std::vector<VariantCmd> variants;
     uint64_t frame = 0; // presented-frame number this buffer belongs to (diagnostics)
     bool presentAllowed = true; // immutable while this buffer is owned by the backend
+    uint32_t presentStamp = 0;  // GXV_PRESENT_SYNC: 0 none, else 1 << 31 | the vblank (low 16 bits) of the turn that drew it
     // The shader warm-up list's replay (CMD_SHADER / CMD_PROGRAM / CMD_VARIANT only) when the host has asked for it to be done in
     // slices over the frames that follow instead of in this one (SetShaderWarmupDeferred). They are kept apart from `cmds` so that
     // the passes that insert and remove commands there cannot move them.
@@ -363,6 +410,7 @@ struct CmdBuf {
     }
     void clear() {
         presentAllowed = true;
+        presentStamp = 0;
         cmds.clear(); draws.clear(); uploads.clear(); shaders.clear(); copyTex.clear();
         copyDisp.clear(); targets.clear(); bufUploads.clear(); passes.clear(); vtx.clear(); idx.clear(); uni.clear();
         vtxChunks.clear(); variants.clear();
@@ -388,8 +436,10 @@ void RequestCapture(bool enable); // read back the next display copy
 // end's thread at every display copy, before the copy's clear, with the EFB
 // framebuffer object still bound: its name, and the copy rectangle in
 // render-target pixels. The EFB is stored top row first: GL row 0 is the top
-// row of the picture.
-using PresentHook = void (*)(unsigned efbFramebuffer, int x, int y, int width, int height);
+// row of the picture. Return true only when the hook transitioned away from the
+// EFB scene, so the next EFB use starts a new scene. Suppressed presents return
+// false. This is a scene-boundary certificate, not GPU completion.
+using PresentHook = bool (*)(unsigned efbFramebuffer, int x, int y, int width, int height);
 void SetPresentHook(PresentHook hook);
 // Automatic quality (dynamic resolution, vgx_autoq.h): a host whose present hook swaps calls this right after the
 // swap, on the back end's thread. The GPU clock then knows the frame's last scene and times its completion.
@@ -402,6 +452,8 @@ int QualityTopRung();
 // (tests) Floor protection by degrees (vgx_autoq.h) set by hand for the next frame: effects and blur passes at half size, the
 // cheaper background. The controller stops being the one to set them only if it is off (tests run without one).
 void DebugSetQualitySteps(bool fxHalf, bool cheapBackground);
+// (tests) The present without its edge smoothing (GXV_AUTOQ_EDGESTEP's step), as the controller would set it; latched at the next frame.
+void DebugSetEdgeStep(bool off);
 // Anisotropic filtering as the top step of the quality ladder (vgx_autoq.h, GXV_AUTOQ_ANISO). The host that has vitaGL's anisotropic
 // switch (a build with ANISO_SWITCH: vglSetAnisotropicFilter) hands it over before the first frame; the back end calls it on its own
 // thread between frames with the minification filter value to use for trilinear textures (2 or 3), or 0 for none, and sets every
@@ -409,6 +461,13 @@ void DebugSetQualitySteps(bool fxHalf, bool cheapBackground);
 // Without a hook GXV_AUTOQ_ANISO is ignored.
 using AnisoHook = void (*)(unsigned filter);
 void SetAnisotropicHook(AnisoHook hook);
+// GXV_VGL_LOADFROM (vitaGL patches/0019, COLOR_LOAD_FROM): asks the GL to make the next scene begun on the framebuffer bound for
+// drawing load its colour from texture `tex` (same size and format) instead of its own buffer; true when armed. The host sets it
+// (vglColorLoadFrom); without one the back end draws the EFB's old picture back with a quad as before.
+using ColorLoadHook = bool (*)(unsigned tex);
+void SetColorLoadHook(ColorLoadHook hook);
+// (tests) GXV_VGL_LOADFROM: GXV_EFBSWAP buffers handed to the next scene's colour load instead of a quad.
+unsigned DebugEfbLoadFroms();
 bool AnisotropicOn(); // in force for the frame being drawn
 // (tests) Anisotropic filtering set by hand for the next frame (filter 2 or 3): as the controller's, through the same hook.
 void DebugSetAnisotropic(bool on, unsigned filter = 2);
@@ -426,6 +485,13 @@ int EfbSamples();
 void DebugDrawEfbTriangle(const float rgba[4]);
 // (tests) GXV_EFBSWAP copies made so far.
 unsigned DebugEfbSwaps();
+// (tests) Of those, GXV_EFBSWAP2's (a conversion the samplers do not see), and the ones converted later (RawConvert).
+unsigned DebugEfbSwapsPartial();
+unsigned DebugRawConverts();
+// (tests) GXV_EFBSWAP2_HOLD: conversion swaps refused because their texture needed a later conversion recently.
+unsigned DebugEfbSwapHolds();
+// (tests) EFB buffers that became a texture's own storage at an ordinary copy into it (no allocation: AdoptEfbBuffer).
+unsigned DebugEfbAdopts();
 // The display copy's picture (rectangle x, y, w, h of the EFB target, render pixels) drawn into framebuffer `fbo` at
 // (dx, dy, dw, dh) with bilinear filtering and an unsharp mask of `amount` (after the Strikers port's PIC_SMOOTH); flipY:
 // the quad's bottom edge shows the picture's last row. False when the shader did not build (no GL state touched: the
@@ -438,10 +504,30 @@ float SharpenAmount(int w, int h, int dw, int dh);
 // (CopyDispCmd::chara) are smoothed, in the display's own scene. Returns the rectangles drawn (0: nothing was drawn, nothing
 // of the GL state touched: no rectangles, a multisampled EFB, or the shader did not build).
 int PresentCharaAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY);
+// GXV_EDGE_AA: called by the present hook INSTEAD of PresentSharpened / the host's blit and PresentCharaAA, with the same
+// arguments: when this display copy is to be smoothed whole (CopyDispCmd::edge, the EFB not multisampled, the shaders built) the
+// picture is drawn with the edge filter (FXAA 3.11 "console": five fetches at coordinates the vertex shader computed, four more on an
+// edge; on flat pixels the sharpened upscale's unsharp mask at `amount`, from the same fetches) and the HUD rectangles are drawn again
+// as PresentSharpened draws them. True: the picture is complete (the caller draws nothing more). False: nothing was drawn and no GL
+// state was touched (the caller presents as before).
+bool PresentEdgeAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY);
+// Builds the edge filter's programs now (Init, while the loading screen is up) when GXV_EDGE_AA is on: the shader is not in the
+// package's compiled cache, so its first build ever (libshacccg) must not fall into play.
+void WarmEdgeAA();
+// GXV_EDGE_AA totals since the start: presents smoothed whole, HUD rectangles drawn again, presents skipped (multisampled EFB),
+// presents skipped for another reason (shader not built).
+void EdgeAACounters(uint64_t& presents, uint64_t& hudRects, uint64_t& msaaSkips, uint64_t& otherSkips);
+// GXV_PRESENT_FAST=1|2 (vgx_backend_gl.cpp, "the fast present"): PresentSharpened and PresentEdgeAA draw the one-pass present (upscale,
+// unsharp mask and, for PresentEdgeAA, the edge term, all with non-dependent reads) in place of their own programs. Totals since the start:
+// fast presents, of those with the edge term, HUD rectangles drawn again plainly.
+void PresentFastCounters(uint64_t& presents, uint64_t& smoothed, uint64_t& hudRects);
 // Totals since the start: presents with rectangles drawn, rectangles, screen pixels shaded, presents skipped (multisampled EFB).
 void CharaAACounters(uint64_t& presents, uint64_t& boxes, uint64_t& pixels, uint64_t& msaaSkips);
 // (tests) Scenes the last executed frame began, as the back end counts them for vitaGL (a new target, or the present).
 unsigned DebugLastFrameScenes();
+// (tests) GXV_PX_* totals since the start: draws left out (GXV_PX_NOOP), clears without their colour, without their depth, left out
+// whole (GXV_PX_DEADCLEAR), scissor changes not made (GXV_PX_SCISSOR).
+void DebugPxCuts(uint64_t& noop, uint64_t& clearColour, uint64_t& clearDepth, uint64_t& clearWhole, uint64_t& scissorKept);
 // (tests) The pixels of the back end's texture texId as RGBA8 rows in GL order (bottom row first) and its size; false
 // when there is no such texture. Back-end thread, between frames.
 bool DebugReadTexture(uint32_t texId, std::vector<uint8_t>& rgba, int& width, int& height);
@@ -453,6 +539,9 @@ bool DebugRungFits(int rung, double& needMiB, double& freeMiB, int& current, dou
 // Host-harness fast-forward: while set, draw commands are dropped (uploads,
 // shader compiles, copies and clears still run).
 void SetSkipDraws(bool skip);
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+void DrawRejectReport();
+#endif
 // Progress display while shaders are being compiled. On the console a shader takes
 // 0.3 to 1 s the first time (GLSL -> Cg -> the system's compiler); a frame that needs
 // several (the first frame of a start with the warm-up list: all of them) would leave
@@ -493,9 +582,17 @@ void SetProgressHostDraws(bool hostDraws);
 // work left (shader 10, program 2, variant 1) and WarmTotal what was queued in all; either may be read from any thread.
 void SetWarmBudget(double budgetMs);
 unsigned WarmPending();
+// Pending optional work yielded to native program capacity, not completed work.
+bool WarmCapacityYielded();
 // One slice of the warm-up between two frames (the render thread only, with nothing to draw): while the game loads it hands over
 // a frame about every 70 ms and the back end is idle in between, so a slice per frame left most of the time unused.
 void WarmIdle();
+// (GXV_STAGEWARM, vgx_backend_gl.cpp) the stage warm-up: the draw variants left in the queue of the stage being loaded or played
+// (any thread); whether a slice between frames has work (programs of the queue not linked yet, or a stage being loaded that has no
+// queue yet); and that slice, which only links (no draw, no delete; both render thread only, called while the game's loading thread runs).
+unsigned StageWarmPending();
+bool StageWarmIdleWanted();
+void StageWarmIdle();
 unsigned WarmTotal();
 // How the slices went: their number, the longest one and all of them together (ms).
 void WarmSliceStats(unsigned& slices, double& worstMs, double& totalMs);
@@ -518,6 +615,8 @@ struct Caps {
     bool mipClamp = false; // send only the authored levels of a mip chain (GXV_MIPCLAMP)
     bool la88 = false;     // non-mipmapped I/IA uploads (GXV_LA88, default on for Vita)
     bool authoredI4Mips = false; // default-off, requires the Vita host's synchronized authored upload
+    bool dxt5 = false;     // takes TF_DXT5 uploads of CMPR textures (GXV_CMPRA; the GL back end decodes them where the GL has no DXT5)
+    bool tex16 = false;    // takes TF_RGB565 / TF_RGBA5551 / TF_RGBA4444 uploads (GXV_TEX16)
 };
 const Caps& GetCaps();
 }

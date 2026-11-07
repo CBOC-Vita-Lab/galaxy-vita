@@ -72,7 +72,7 @@ target_include_directories(galaxy_native PRIVATE "${root}/platform/include" "${r
 target_include_directories(galaxy_native PRIVATE "${root}/platform/vgx/src" "${root}/vita/runtime")
 target_compile_features(galaxy_native PRIVATE cxx_std_20)
 target_compile_options(galaxy_native PRIVATE -O2 -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb
-    -fsigned-char -fshort-wchar -fno-fast-math -ffunction-sections -fdata-sections)
+    -fsigned-char -fshort-wchar -fno-builtin-wcslen -fno-fast-math -ffunction-sections -fdata-sections)
 set_source_files_properties(entry.cpp settings_runtime.cpp title_art_runtime.cpp PROPERTIES COMPILE_OPTIONS "-fno-short-enums")
 set_source_files_properties(main.cpp PROPERTIES COMPILE_OPTIONS "-fshort-enums")
 # The SDK converter appends SCE metadata to RX before the next load segment.
@@ -101,7 +101,7 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 # the game makes the loading-screen, Settings and bubble pictures from the player's own title screen on the first start
 # (title_art_runtime.cpp, docs/ASSETS.md).
 set(sys "${CMAKE_CURRENT_SOURCE_DIR}/sce_sys")
-vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 01.20 NAME "Super Mario Galaxy"
+vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 02.00 NAME "Super Mario Galaxy"
     FILE "${sys}/icon0.png" sce_sys/icon0.png
     FILE "${sys}/pic0.png" sce_sys/pic0.png
     FILE "${sys}/livearea/contents/bg.png" sce_sys/livearea/contents/bg.png

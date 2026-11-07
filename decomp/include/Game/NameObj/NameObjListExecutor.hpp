@@ -36,6 +36,10 @@ public:
     void executeCalcAnim(int category);
     void entryDrawBuffer2D();
     void entryDrawBuffer3D();
+#ifdef TARGET_PC
+    void entryDrawBufferPlayer();
+    void entryDrawBuffer3DExceptPlayer();
+#endif
     void entryDrawBufferMirror();
     void drawOpa(int drawBufferType);
     void drawXlu(int drawBufferType);

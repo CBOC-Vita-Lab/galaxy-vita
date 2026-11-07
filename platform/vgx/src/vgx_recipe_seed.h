@@ -131,7 +131,8 @@ inline bool Parse(const std::vector<uint8_t>& bytes, List& out) {
             parsed.fs.push_back(k);
         } else {
             std::memcpy(r.v, p, size);
-            if (r.v[0] >= parsed.vs.size() || r.v[1] >= parsed.fs.size()) return false;
+            if (r.v[0] >= parsed.vs.size() || r.v[1] >= parsed.fs.size() ||
+                parsed.vs[r.v[0]].numTexGens != parsed.fs[r.v[1]].numTexGens) return false;  // (a pair no draw makes)
             if (r.type == 3) {
                 if (!pairs.insert((r.v[0] << 16) | r.v[1]).second) return false;
             } else if (r.v[2] > 0xFFF || r.v[3] > 0x1FFF || !variants.insert(Variant(r.v[0], r.v[1], r.v[2], r.v[3])).second) return false;

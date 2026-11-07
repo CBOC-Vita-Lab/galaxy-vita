@@ -1,0 +1,74 @@
+diff -ruN a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -733,6 +733,61 @@
+ #define VGL_MASK_KEEP(ds) (ds)
+ #endif
+ 
++#ifdef COLOR_LOAD_FROM
++// COLOR_LOAD_FROM (Galaxy port, patch 0019): the next scene begun on the bound draw framebuffer loads its colour tiles from another
++// texture of the same size and format instead of from its own colour buffer, and stores them into its own buffer as always. GXM
++// fills the tiles of a scene that is not cleared from the colour surface's background texture (SceGxmColorSurface::backgroundTex,
++// which sceGxmColorSurfaceInit points at the surface's own data); for that one scene a copy of the surface is handed to
++// sceGxmBeginScene with its background texture's data pointing at the other buffer. The host's GXV_EFBSWAP hands the EFB's
++// colour buffer to a copy texture and continues on a fresh buffer: with this the fresh buffer starts with the old picture by the
++// scene's own tile load (a load the scene makes anyway), instead of a full-screen quad drawing it back.
++// vglColorLoadFrom(tex) arms it for the framebuffer bound for drawing now and returns GL_TRUE, or GL_FALSE (nothing armed) when
++// the texture differs in size or format, the framebuffer has no colour texture, or multisampling is on. Armed for one scene
++// begin only (scene_reset's); binding or attaching does not disarm it, a begin on another framebuffer does. Counter:
++// vglGetColorLoadsFrom().
++static framebuffer *vgl_color_load_fb = NULL;
++static void *vgl_color_load_src = NULL;
++static uint32_t vgl_color_loads_from = 0;
++uint32_t vglGetColorLoadsFrom(void) { return vgl_color_loads_from; }
++GLboolean vglColorLoadFrom(GLuint tex_id) {
++	vgl_color_load_fb = NULL;
++	vgl_color_load_src = NULL;
++	framebuffer *fb = active_write_fb;
++	if (!fb || !fb->tex || tex_id == 0 || tex_id >= TEXTURES_NUM || msaa_mode != SCE_GXM_MULTISAMPLE_NONE)
++		return GL_FALSE;
++	texture *t = &texture_slots[tex_id];
++	if (t == fb->tex || !t->status)
++		return GL_FALSE;
++	uint32_t w = 0, h = 0;
++	vglGetTexSizes(&t->gxm_tex, &w, &h);
++	if (w != fb->width || h != fb->height || vglGetTexFormat(&t->gxm_tex) != vglGetTexFormat(&fb->tex->gxm_tex))
++		return GL_FALSE;
++	void *src = vglGetTexData(&t->gxm_tex);
++	if (!src)
++		return GL_FALSE;
++	vgl_color_load_fb = fb;
++	vgl_color_load_src = src;
++	return GL_TRUE;
++}
++static SceGxmColorSurface *vgl_color_load(framebuffer *fb) {
++	static SceGxmColorSurface surface; // (alive until the scene ends: the next arming comes after it)
++	if (!vgl_color_load_src || vgl_color_load_fb != fb) {
++		vgl_color_load_fb = NULL;
++		vgl_color_load_src = NULL;
++		return &fb->colorbuffer;
++	}
++	surface = fb->colorbuffer;
++	sceGxmTextureSetData(&surface.backgroundTex, vgl_color_load_src);
++	vgl_color_load_fb = NULL;
++	vgl_color_load_src = NULL;
++	vgl_color_loads_from++;
++	return &surface;
++}
++#define VGL_COLOR_LOAD(fb) vgl_color_load(fb)
++#else
++#define VGL_COLOR_LOAD(fb) (&(fb)->colorbuffer)
++#endif
++
+ GLboolean scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
+ 		// The attempts of this frame are used up: nothing is touched, nothing is submitted
+@@ -839,7 +894,7 @@
+ 			int r = sceGxmBeginScene(gxm_context, 0, active_write_fb->target,
+ #endif
+ 					NULL, NULL, NULL,
+-					&active_write_fb->colorbuffer,
++					VGL_COLOR_LOAD(active_write_fb),
+ 					VGL_MASK_KEEP(active_write_fb->depthbuffer_ptr));
+ #ifdef LOG_ERRORS
+ 			if (r)

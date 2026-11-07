@@ -24,6 +24,14 @@
 //                 ("fesplit: MISMATCH"), a summary every 600 frames. The split's output is what is drawn.
 //   GXV_SPLIT_CORE=<n>  core of the finishing thread (Vita; default 1, the back end's); -1: not pinned
 //   GXV_SPLIT_PRIO=<n>  its priority (Vita; default one step above the back end's: see vgx_galaxy.cpp, SplitThreadInit)
+//   GXV_SPLIT_COPY=1   (from Producdevity's fork; default 0) the display-list cache's vertex copies into the frame's arena are
+//                      made by the finishing thread (the player reserves the room and sends OP_COPY); the player still copies
+//                      them itself where it reads them (edge/character bounds, shadow-fill bounds, lines, texture baking,
+//                      register folding, small-draw bounds). A cache entry is not rebuilt, promoted or freed before its last
+//                      copy is done (Settle). Off with GXV_SPLIT=2.
+//   GXV_SPLIT_POLL_US=<n>  (from Producdevity's fork; default 0 = off) while the player builds a frame, the finishing thread
+//                      looks for work every n microseconds (0..2000) instead of being woken by the player every 16 jobs:
+//                      a wake-up is a kernel call on the player. Same operations, same order.
 // The split is off while a diagnostic that inspects the moved work per draw is on (GXV_STATS detail,
 // GXV_TRACE, GXV_TRACE_DRAWS, GXV_MERGEFAST=2, GXV_SOFTNEON=2).
 #pragma once
@@ -66,11 +74,13 @@ struct DrawJob {
     uint8_t gxPrim = 0, prim = 0, cover = 0;
     uint8_t prevIsDraw = 0; // (split) the command before this draw's placeholder is a draw's
     uint8_t copyable = 0;   // static, GXV_RIGIDMERGE_DLLEARN: the list's vertices are also kept on the CPU (a copy in the arena could join a palette run)
-    uint8_t pad[2] = {};
+    uint8_t ab = 0;         // GXV_SHADOWFILL_BOUNDS: abX..abH are the draw's pixels (DrawRec::ab)
+    uint8_t pad[1] = {};
     uint32_t layoutMask = 0, count = 0, idxCount = 0;
     // dynamic: where the vertices are (absolute indices: chunk and first vertex; else the byte offset) and their stride
     uint32_t chunk = 0, first = 0, vtxStart = 0, stride = 0;
     int16_t exX = 0, exY = 0, exW = 0, exH = 0;
+    int16_t abX = 0, abY = 0, abW = 0, abH = 0; // (see ab)
     // static: the record's geometry
     uint32_t vbuf = 0, vtxOffset = 0, idxOffset = 0, vtxFirst = 0;
     // dynamic, GXV_RIGIDMERGE: the vertex shader of the draw's key with the matrix palette (0xFFFF: the draw may not join a palette run), and
@@ -124,6 +134,13 @@ void Proj(bool stale);
 uint64_t Mtx(uint16_t vsId, const VsKey& vs, bool soft, bool stale);
 void Light(uint16_t vsId, const VsKey& vs, bool stale);
 void Tev(uint16_t fsId, const FsKey& fs, const uint16_t texW[8], const uint16_t texH[8], bool fold, bool stale);
+// GXV_SPLIT_COPY: whether the display-list cache's vertices are copied into the arena by the finishing thread this frame (Copy).
+bool CopiesVertices();
+// The pending vertices at byte `offset` are a copy of `bytes` bytes at `src`, which must stay as they are until Settle(Issued())
+// (called after the draw was sent) returns.
+void Copy(size_t offset, const uint8_t* src, uint32_t bytes);
+uint32_t Issued();
+void Settle(uint32_t ticket);
 // The pending vertices at byte `offset` (count, layout) are to be transformed with the current position matrix.
 void Xform(size_t offset, uint32_t count, uint32_t layoutMask);
 // A draw: returns the index its placeholder (Cmd{CMD_DRAW, index}) carries.
@@ -135,9 +152,16 @@ void BeforeArenaGrow(const std::vector<uint8_t, NoInitAlloc<uint8_t>>& vtx, size
 void FinishFrame(CmdBuf& buf);
 // (host) Called on the finishing thread when it starts: pinning, priority.
 void SetThreadInit(void (*fn)(int core));
+// (host) Called on the finishing thread about every 500 ms while it is idle (it holds no reader then): the host's check of where the
+// thread runs (vgx_galaxy.cpp: the fourth core's guard). Not called while the thread has work.
+void SetThreadTick(void (*fn)());
 // (any thread, for the perf line) The finishing thread's CPU time (sampled when it goes idle), the player's time spent
 // waiting for it (at frame ends and arena growth), and the frames finished split; all since the start.
 void Counters(int64_t& finisherCpuUs, int64_t& playerWaitNs, uint32_t& frames);
+// (player) GXV_FXJOIN: jobs that went out in runs of two or more (OP_JOBS), and those runs; since the start.
+void FxJoinCounters(uint64_t out[2]);
+// (GXV_FECUT_KEYID) shader keys handed to the finishing thread: fragment keys sent whole, by id; vertex keys sent whole, by id
+void KeyIdCounters(uint64_t out[4]);
 // (any thread) Operations the player ran itself at frame ends because the finishing thread was behind (since the start).
 uint32_t StolenOps();
 // (player, GXV_RIGIDMERGE_DLLEARN) the join log of the frame FinishFrame finished (see FinishCtx::joinLog).

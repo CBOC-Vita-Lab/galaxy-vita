@@ -52,6 +52,14 @@ void DiskTorusGravity::updateMtx(const TPos3f& rMtx) {
     mWorldRadius = mRadius * worldScale;
 }
 
+#ifdef TARGET_PC
+// (an accepted position is within the range of a point of the ring, whose points are within the radius of the centre)
+f32 DiskTorusGravity::calcReach(TVec3f* pCentre) const {
+    *pCentre = mTranslation;
+    return mRange < 0.0f ? -1.0f : __builtin_fabsf(mWorldRadius) + mRange + mDistant;
+}
+#endif
+
 bool DiskTorusGravity::calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPos) const {
     TVec3f relativePosition;
     relativePosition = rPos - mTranslation;

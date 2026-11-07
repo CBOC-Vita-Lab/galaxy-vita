@@ -220,6 +220,9 @@ namespace {
     }
 };  // namespace
 
+#ifdef TARGET_PC
+bool port_dl_defer(LiveActor*, ModelManager*);
+#endif
 namespace MR {
     bool isExistIndirectTexture(const LiveActor* pActor) {
         const char* name = "IndDummy";
@@ -1615,6 +1618,13 @@ namespace MR {
     }
 
     void updateMaterial(LiveActor* pActor) {
+#ifdef TARGET_PC
+        // (GXV_DL_LAZY=2: made once, just before the next picture, like every other list; EarthenPipe::control asked every turn and
+        // was the last front-end wait of each picture in GXV_DRAWDONE_DEFER=4)
+        if (port_dl_defer(pActor, pActor->mModelManager)) {
+            return;
+        }
+#endif
         pActor->mModelManager->updateDL(true);
     }
 

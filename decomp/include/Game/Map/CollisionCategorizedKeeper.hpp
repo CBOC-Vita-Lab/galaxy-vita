@@ -25,7 +25,11 @@ public:
     s32 checkStrikePoint(const TVec3f&, HitInfo*);
     s32 checkStrikeBall(const TVec3f&, f32, bool, const CollisionPartsFilterBase*, const TriangleFilterBase*);
     s32 checkStrikeBallWithThickness(const TVec3f&, f32, f32, const CollisionPartsFilterBase*, const TriangleFilterBase*);
+#ifdef TARGET_PC
+    s32 checkStrikeLine(const TVec3f&, const TVec3f&, s32, const CollisionPartsFilterBase*, const TriangleFilterBase*, bool nearestOnly = false);
+#else
     s32 checkStrikeLine(const TVec3f&, const TVec3f&, s32, const CollisionPartsFilterBase*, const TriangleFilterBase*);
+#endif
     u32 createAreaPolygonList(Triangle*, u32, const TVec3f&, const TVec3f&);
     u32 createAreaPolygonListArray(Triangle*, u32, TVec3f*, u32);
     bool isSphereOverlappingWithBox(const TVec3f&, const TVec3f&, const TVec3f&, f32);

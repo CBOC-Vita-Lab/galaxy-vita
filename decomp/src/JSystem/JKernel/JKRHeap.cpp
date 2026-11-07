@@ -305,12 +305,12 @@ extern "C" void port_irq_poll_at(void* site);
 #include <stdlib.h>
 
 // (PETARI_NEWPOLL=0 leaves the safe point out, for tests)
+#include "port/hot_knob.h"
 static bool newPollOn() {
-    static const bool on = [] {
+    return PORT_HOT_KNOB(bool, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h): every game-heap `new`
         const char* e = getenv("PETARI_NEWPOLL");
         return !(e && *e == '0');
-    }();
-    return on;
+    }());
 }
 
 #if defined(__vita__)

@@ -1,0 +1,269 @@
+vgx draw caches (Galaxy back end, GXV_VGL_FRAGMEMO / GXV_VGL_UNIREUSE): a per-program memo of patched fragment programs by
+(blend info, output format, multisample mode), and the re-use of a program's last uniform-ring copy while its uniform values and
+the uniform pool generation are unchanged. Both off until vglSetDrawCaches turns them on; vglGetDrawCacheStats gives counters.
+Applies after 0013; tools/vitagl/fbo_msaa.py, gpu_timers.py and build-vitagl.sh's source patches apply unchanged after it.
+
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index d62601e..20e90a7 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -137,15 +137,14 @@ char vgl_file_cache_path[256];
+ 	}
+ 
+ #ifndef HAVE_FFP_SHADER_SUPPORT
++// (vgx draw caches, VGL_DRAWCACHE_UNIREUSE: vgl_upload_vert_unifs / vgl_upload_frag_unifs, after the program struct)
+ #define upload_uniforms() \
+ 	if (p->vert_uniforms && dirty_shader_vert_unifs) { \
+-		void *buffer = vglReserveVertexUniformBuffer(p->vshader->unif_buf_size); \
+-		vgl_fast_memcpy(buffer, p->unif_vbuffer, p->vshader->unif_buf_size); \
++		vgl_upload_vert_unifs(p); \
+ 		dirty_shader_vert_unifs = GL_FALSE; \
+ 	} \
+ 	if (p->frag_uniforms && dirty_shader_frag_unifs) { \
+-		void *buffer = vglReserveFragmentUniformBuffer(p->fshader->unif_buf_size); \
+-		vgl_fast_memcpy(buffer, p->unif_fbuffer, p->fshader->unif_buf_size); \
++		vgl_upload_frag_unifs(p); \
+ 		dirty_shader_frag_unifs = GL_FALSE; \
+ 	} \
+ 	if (p->vert_ubos) { \
+@@ -222,7 +221,7 @@ char vgl_file_cache_path[256];
+ 	if ((p->blend_info.raw != blend_info.raw) || (is_fbo_float != p->is_fbo_float)) { \
+ 		p->is_fbo_float = is_fbo_float; \
+ 		p->blend_info.raw = blend_info.raw; \
+-		rebuild_frag_shader(p->fshader->id, &p->fprog, (SceGxmProgram *)p->vshader->prog, is_fbo_float ? SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4 : SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4); \
++		vgl_patch_frag_program(p, is_fbo_float ? SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4 : SCE_GXM_OUTPUT_REGISTER_FORMAT_UCHAR4); \
+ 	} \
+ 	sceGxmSetFragmentProgram(gxm_context, p->fprog);
+ 	
+@@ -289,6 +288,7 @@ shark_opt compiler_opts = SHARK_OPT_FAST;
+ GLuint cur_program = 0; // Current in use custom program (0 = No custom program)
+ 
+ #define VGL_DIRECT_VPROGS 8
++#define VGL_FRAG_MEMO 4
+ static const vglDirectLayout *direct_layout = NULL; // vglDrawElementsDirect: the layout of the draw in progress
+ static vbo *direct_vbo = NULL;
+ static uint32_t direct_base = 0;
+@@ -378,6 +378,15 @@ typedef struct {
+ 	uint32_t direct_key[VGL_DIRECT_VPROGS];
+ 	SceGxmVertexProgram *direct_vprog[VGL_DIRECT_VPROGS];
+ 	uint8_t direct_next;
++	// vgx draw caches (vglSetDrawCaches): fragment programs patched for this program (blend info, target mode) ...
++	uint32_t frag_memo_blend[VGL_FRAG_MEMO];
++	uint8_t frag_memo_mode[VGL_FRAG_MEMO];
++	SceGxmFragmentProgram *frag_memo_prog[VGL_FRAG_MEMO];
++	uint8_t frag_memo_next;
++	// ... and the uniform-ring copies of its default uniform buffers made by its last uploads (valid while the pool generation
++	// and the write epoch they were made in are current and no uniform of this program has been written since)
++	void *ring_v, *ring_f;
++	uint32_t ring_gen_v, ring_gen_f, ring_epoch_v, ring_epoch_f;
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ 	uint32_t vertex_layout_version;
+ #endif
+@@ -499,6 +508,134 @@ static inline __attribute__((always_inline)) void vertex_layout_setup_ptrs(progr
+ static shader *shaders[MAX_CUSTOM_SHADERS];
+ static program progs[MAX_CUSTOM_PROGRAMS];
+ 
++// ---- vgx draw caches (vglSetDrawCaches; all off unless the caller turns them on: stock behaviour)
++// VGL_DRAWCACHE_FRAGMEMO: setup_frag_program asks sceGxmShaderPatcherCreateFragmentProgram for a new patched fragment program
++// every time a program is drawn with another blend info / target format / multisample mode than its last draw (a program used
++// alternately with two blends, or in the EFB and in a texture pass, pays the patcher's lookup on every switch). The patcher
++// returns the same object for the same arguments (it is reference counted and vitaGL never releases these), so each program
++// remembers the last VGL_FRAG_MEMO it was given, by (blend info, mode), and takes one from there; the patcher is asked only for
++// a combination the program has not kept. The memo is emptied when the program is created or linked (as direct_vprog).
++// VGL_DRAWCACHE_UNIREUSE: upload_uniforms reserves a new piece of the uniform ring and copies the program's whole default uniform
++// buffer into it whenever the dirty flag is set, and glUseProgram sets it on every program switch, so a program drawn again with
++// unchanged values (A, B, A) copies its whole buffer again. The ring is only written at reservations and a piece is never
++// written again before the pool rolls over (gxm_utils.c; with UNIFORM_PINGPONG the other arena is only written at the next
++// rollover), so the piece the program's last upload made still holds exactly its values until (1) one of its uniforms is
++// written (vgl_note_unif_write: the program's own copy is forgotten; a write that cannot be placed in the current program's
++// buffers forgets every program's copies), or (2) the pool rolls over (vgl_unif_pool_gen). Until then the program's default
++// uniform buffer is pointed at that piece again (sceGxmSet*DefaultUniformBuffer, and vgl_def_*_buf, so a rollover and the
++// internal clears and blits restore it as before) instead of being copied. Not with HAVE_GLSL_TEXTURE_SIZE (draws write the
++// texture sizes into the fragment buffer) nor the fixed-function uniform path.
++static uint32_t vgl_drawcache_flags = 0;
++static uint32_t vgl_unif_epoch = 1;
++static uint32_t vgl_dc_stats[8] = {0}; // patched, memo hits, vertex copies, vertex re-uses, fragment copies, fragment re-uses, vertex bytes, fragment bytes
++
++void vglSetDrawCaches(uint32_t flags) {
++#if defined(HAVE_GLSL_TEXTURE_SIZE) || defined(HAVE_FFP_SHADER_SUPPORT)
++	flags &= ~VGL_DRAWCACHE_UNIREUSE;
++#endif
++	if ((flags & VGL_DRAWCACHE_UNIREUSE) && !(vgl_drawcache_flags & VGL_DRAWCACHE_UNIREUSE))
++		vgl_unif_epoch++; // (copies made while it was off are not trusted)
++	vgl_drawcache_flags = flags;
++}
++
++void vglGetDrawCacheStats(uint32_t *stats) {
++	for (int i = 0; i < 8; i++)
++		stats[i] = vgl_dc_stats[i];
++}
++
++static inline __attribute__((always_inline)) void vgl_reset_draw_caches(program *p) {
++	vgl_memset(p->frag_memo_prog, 0, sizeof(p->frag_memo_prog));
++	p->frag_memo_next = 0;
++	p->ring_v = p->ring_f = NULL;
++	p->ring_gen_v = p->ring_gen_f = 0;
++}
++
++static inline __attribute__((always_inline)) void vgl_patch_frag_program(program *p, SceGxmOutputRegisterFormat fmt) {
++	if (!(vgl_drawcache_flags & VGL_DRAWCACHE_FRAGMEMO)) {
++		rebuild_frag_shader(p->fshader->id, &p->fprog, (SceGxmProgram *)p->vshader->prog, fmt);
++		vgl_dc_stats[0]++;
++		return;
++	}
++	uint8_t mode = fmt == SCE_GXM_OUTPUT_REGISTER_FORMAT_HALF4 ? 1 : 0;
++#ifdef FBO_MSAA
++	mode |= (uint8_t)(cur_msaa << 1);
++#else
++	mode |= (uint8_t)(msaa_mode << 1);
++#endif
++	for (int k = 0; k < VGL_FRAG_MEMO; k++) {
++		if (p->frag_memo_prog[k] && p->frag_memo_blend[k] == blend_info.raw && p->frag_memo_mode[k] == mode) {
++			p->fprog = p->frag_memo_prog[k];
++			vgl_dc_stats[1]++;
++			return;
++		}
++	}
++	SceGxmFragmentProgram *fp = NULL;
++	rebuild_frag_shader(p->fshader->id, &fp, (SceGxmProgram *)p->vshader->prog, fmt);
++	vgl_dc_stats[0]++;
++	if (!fp)
++		return; // (patching failed, already logged: the program keeps the fragment program it had, nothing is remembered)
++	p->fprog = fp;
++	const uint8_t k = p->frag_memo_next;
++	p->frag_memo_blend[k] = blend_info.raw;
++	p->frag_memo_mode[k] = mode;
++	p->frag_memo_prog[k] = fp;
++	p->frag_memo_next = (k + 1) % VGL_FRAG_MEMO;
++}
++
++// A uniform write (vgl_fill_uniform_data) to the data at vptr / fptr: the ring copies that no longer hold the program's values.
++static inline __attribute__((always_inline)) void vgl_note_unif_write(const void *vptr, const void *fptr) {
++	program *cp = cur_program ? &progs[cur_program - 1] : NULL;
++	if (cp) {
++		const uint8_t *vb = (const uint8_t *)cp->unif_vbuffer, *fb = (const uint8_t *)cp->unif_fbuffer;
++		const GLboolean v_ok = !vptr || (vb && (const uint8_t *)vptr >= vb && (const uint8_t *)vptr < vb + cp->vshader->unif_buf_size);
++		const GLboolean f_ok = !fptr || (fb && (const uint8_t *)fptr >= fb && (const uint8_t *)fptr < fb + cp->fshader->unif_buf_size);
++		if (v_ok && f_ok) {
++			if (vptr)
++				cp->ring_gen_v = 0;
++			if (fptr)
++				cp->ring_gen_f = 0;
++			return;
++		}
++	}
++	vgl_unif_epoch++; // (a uniform of another program: every program's copies are forgotten)
++}
++
++static inline __attribute__((always_inline)) void vgl_upload_vert_unifs(program *p) {
++	const uint32_t size = p->vshader->unif_buf_size;
++	if ((vgl_drawcache_flags & VGL_DRAWCACHE_UNIREUSE) && p->ring_v && p->ring_gen_v == vgl_unif_pool_gen && p->ring_epoch_v == vgl_unif_epoch) {
++		vgl_def_vert_buf = p->ring_v;
++		vgl_def_vert_buf_size = size;
++		sceGxmSetVertexDefaultUniformBuffer(gxm_context, p->ring_v);
++		vgl_dc_stats[3]++;
++		return;
++	}
++	void *buffer = vglReserveVertexUniformBuffer(size);
++	vgl_fast_memcpy(buffer, p->unif_vbuffer, size);
++	p->ring_v = buffer;
++	p->ring_gen_v = vgl_unif_pool_gen; // (read after the reservation: a rollover inside it has already counted)
++	p->ring_epoch_v = vgl_unif_epoch;
++	vgl_dc_stats[2]++;
++	vgl_dc_stats[6] += size;
++}
++
++static inline __attribute__((always_inline)) void vgl_upload_frag_unifs(program *p) {
++	const uint32_t size = p->fshader->unif_buf_size;
++	if ((vgl_drawcache_flags & VGL_DRAWCACHE_UNIREUSE) && p->ring_f && p->ring_gen_f == vgl_unif_pool_gen && p->ring_epoch_f == vgl_unif_epoch) {
++		vgl_def_frag_buf = p->ring_f;
++		vgl_def_frag_buf_size = size;
++		sceGxmSetFragmentDefaultUniformBuffer(gxm_context, p->ring_f);
++		vgl_dc_stats[5]++;
++		return;
++	}
++	void *buffer = vglReserveFragmentUniformBuffer(size);
++	vgl_fast_memcpy(buffer, p->unif_fbuffer, size);
++	p->ring_f = buffer;
++	p->ring_gen_f = vgl_unif_pool_gen;
++	p->ring_epoch_f = vgl_unif_epoch;
++	vgl_dc_stats[4]++;
++	vgl_dc_stats[7] += size;
++}
++
+ #ifdef HAVE_SHARK_LOG
+ static char *shark_log = NULL;
+ #endif
+@@ -2320,6 +2457,7 @@ GLuint glCreateProgram(void) {
+ 			vgl_memset(progs[i].direct_key, 0, sizeof(progs[i].direct_key));
+ 			vgl_memset(progs[i].direct_vprog, 0, sizeof(progs[i].direct_vprog));
+ 			progs[i].direct_next = 0;
++			vgl_reset_draw_caches(&progs[i]);
+ #ifdef ENABLE_LEGACY_PIPELINE
+ 			progs[i].attr_mode = VGL_ATTRIB_REGULAR;
+ #endif
+@@ -2564,6 +2702,7 @@ void glLinkProgram(GLuint progr) {
+ 	vgl_memset(p->direct_key, 0, sizeof(p->direct_key));
+ 	vgl_memset(p->direct_vprog, 0, sizeof(p->direct_vprog));
+ 	p->direct_next = 0;
++	vgl_reset_draw_caches(p);
+ #if defined(HAVE_VERTEX_LAYOUT_CACHE) && !defined(STRICT_DRAW_COMPLIANCE) && !defined(DRAW_SPEEDHACK)
+ 	p->vertex_layout_version = ++vertex_program_layout_current_ver;
+ #endif
+@@ -3016,6 +3155,7 @@ GLint glGetUniformLocation(GLuint prog, const GLchar *name) {
+ }
+ 
+ #define vgl_fill_uniform_data(p, type, size, count) { \
++	vgl_note_unif_write(u->vptr, u->fptr); \
+ 	if (count == 1 && size >= 1 && size <= 4 && offs == 0 && (type == SCE_GXM_PARAMETER_TYPE_F32 || type == SCE_GXM_PARAMETER_TYPE_S32)) { \
+ 		const SceGxmParameterType dst_type = sceGxmProgramParameterGetType(u->ptr); \
+ 		if (dst_type == type) { \
+diff --git a/source/utils/gxm_utils.c b/source/utils/gxm_utils.c
+index 0e671c9..025db9b 100644
+--- a/source/utils/gxm_utils.c
++++ b/source/utils/gxm_utils.c
+@@ -288,6 +288,7 @@ void *vglReserveUniformCircularPoolBuffer(uint32_t size) {
+ 	uint32_t reserved_size = VGL_ALIGN(size, 16);
+ 	if (reserved_size > UNIFORM_CIRCULAR_POOL_SIZE - unif_idx) {
+ 		vglRolloverUniformPool(size, reserved_size);
++		vgl_unif_pool_gen++; // (pieces reserved before this may be written again: custom_shaders.c VGL_DRAWCACHE_UNIREUSE)
+ 	}
+ 	void *r = unif_pool + unif_idx;
+ 	unif_idx += reserved_size;
+@@ -521,3 +522,5 @@ void vglSetUniformData(uint8_t *uniformBuffer, const SceGxmParameterType t, cons
+ 		}
+ 	}
+ }
++
++uint32_t vgl_unif_pool_gen = 1; // uniform pool rollovers + 1 (vglReserveUniformCircularPoolBuffer)
+diff --git a/source/utils/gxm_utils.h b/source/utils/gxm_utils.h
+index 25837da..efcbe35 100644
+--- a/source/utils/gxm_utils.h
++++ b/source/utils/gxm_utils.h
+@@ -28,6 +28,7 @@ extern void *vgl_def_frag_buf;
+ extern void *vgl_def_vert_buf;
+ extern uint32_t vgl_def_frag_buf_size;
+ extern uint32_t vgl_def_vert_buf_size;
++extern uint32_t vgl_unif_pool_gen; // counts uniform pool rollovers (custom_shaders.c VGL_DRAWCACHE_UNIREUSE)
+ extern SceGxmContext *gxm_context;
+ 
+ void vglSetupUniformCircularPool(void);
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 2e93bb0..de4b9a4 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1127,6 +1127,14 @@ typedef struct {
+ 	uint16_t offset[16];
+ } vglDirectLayout;
+ GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idx_offset, GLuint vbo_name, uint32_t base, const vglDirectLayout *layout);
++// vgx draw caches (custom_shaders.c; all off by default): VGL_DRAWCACHE_FRAGMEMO keeps each program's patched fragment programs
++// by blend info and target mode, VGL_DRAWCACHE_UNIREUSE points a program whose uniforms did not change at the ring copy of its
++// last upload instead of copying its default uniform buffers again. vglGetDrawCacheStats fills 8 running counters: fragment
++// programs patched, memo hits, vertex buffer copies, vertex re-uses, fragment copies, fragment re-uses, vertex bytes, fragment bytes.
++#define VGL_DRAWCACHE_FRAGMEMO 1
++#define VGL_DRAWCACHE_UNIREUSE 2
++void vglSetDrawCaches(uint32_t flags);
++void vglGetDrawCacheStats(uint32_t *stats);
+ 
+ // Get the compiled shader binary of a given GL shader.
+ void vglGetShaderBinary(GLuint index, GLsizei bufSize, GLsizei *length, void *binary);

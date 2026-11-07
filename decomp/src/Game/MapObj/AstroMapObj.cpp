@@ -9,6 +9,10 @@
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+#include <cstdlib>
+#include <cstring>
+#endif
 
 namespace {
     s32 sAstroPathAppearStep = 90;
@@ -158,10 +162,36 @@ bool AstroMapObj::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pRecei
     return false;
 }
 
+#ifdef TARGET_PC
+namespace {
+    // PETARI_ASTRO_DEAD_LIGHT (port option; 0 = the original Wii look; the Vita sets 30 by default, vita/vgx-game/entry.cpp). The Observatory's base models
+    // (AstroBaseA, AstroBaseCenterA, ...) hold their "Revival" BRK at frame 0 until enough Grand Stars are back
+    // (AstroMapObjFunction, getNumGrandStarForRevival). Frame 0 is authored near black (AstroBaseA's floors: C0 120, C1 30,
+    // konst alpha 40 against 254 / 127 / 179 revived; AstroBaseCenterA's WhiteMetalMat_v: C0 = C1 = 0, konst 5), and the
+    // GX result of those materials at that frame is about 0..20 / 255: the dark floors are what the original shows, not a
+    // rendering error. 1..100 = how far into the Revival colour animation (in percent of its length) a not yet revived
+    // base model is held instead, for players who want them lighter; only the BRK moves (geometry, texture scroll and
+    // visibility keep the original not-revived state), and the revival demo still plays the BRK from frame 0.
+    int astroDeadLight() {
+        static const int sValue = [] {
+            const char* e = std::getenv("PETARI_ASTRO_DEAD_LIGHT");
+            const int v = e != nullptr ? std::atoi(e) : 0;
+            return v < 0 ? 0 : v > 100 ? 100 : v;
+        }();
+        return sValue;
+    }
+}  // namespace
+#endif
+
 void AstroMapObj::setStateDead() {
     setStateDoorOpenOrClose();
     MR::tryStartAllAnim(this, "Revival");
     MR::setAllAnimFrameAndStop(this, "Revival", 0.0f);
+#ifdef TARGET_PC
+    if (astroDeadLight() > 0 && _CC != nullptr && std::strncmp(_CC, "AstroBase", 9) == 0 && MR::isExistBrk(this, "Revival")) {
+        MR::setBrkFrameAndStop(this, MR::getBrkFrameMax(this) * (static_cast< f32 >(astroDeadLight()) / 100.0f));
+    }
+#endif
     setStateDoorOpenOrClose();
     if (mRotator) {
         endMapPartsFunctions();

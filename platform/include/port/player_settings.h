@@ -7,7 +7,7 @@
 
 namespace port::settings {
 constexpr size_t kDocumentLimit = 16384;
-// Config::fpsLimit: 0 up to 60, 30 fixed 30, kSteady30 adaptive pacing with dynamic quality aimed at 30.
+// Config::fpsLimit: 0 Quality or Performance (Config::performance60), 30 Locked 30; kSteady30 (1.1's Steady 30) is read as Locked 30.
 constexpr int kSteady30 = -30;
 enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
 // Picture and speed choices of the Display page (all optional keys of the file: absent means the default). Each maps to existing
@@ -15,7 +15,8 @@ enum class AutoQuality : uint8_t { Default, Enabled, Disabled };
 enum class AntiAliasing : uint8_t { Auto, Off };
 enum class Sharpness : uint8_t { Auto, Off, Strong };
 enum class EffectsQuality : uint8_t { Adaptive, Full };
-// Keys: above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, motion_level,
+enum class FarAnimation : uint8_t { Reduced, Full, Aggressive };
+// Keys: perf_mode, above_native, mario_first, anti_aliasing, picture_sharpness, hd_textures, effects_quality, depth_of_field, core_plan, gxm_renderer, logic_overlap, material_updates, far_animation, game_speed, motion_level,
 // motion_source. (Every optional
 // key sorts before "schema" and "reduced_motion" stays the last line of a fresh file, so a cut-short write is still caught as incomplete.)
 // The Preset row is not stored: it is read from the rows a preset covers (Dynamic resolution, Sharper when possible, Prioritize
@@ -23,7 +24,15 @@ enum class EffectsQuality : uint8_t { Adaptive, Full };
 enum class Preset : uint8_t { BestPicture, Balanced, Performance, Custom };
 struct Config {
     uint32_t version = 1;
+    // The Display page's Picture mode row (ApplyStartup maps it to start-up switches):
+    //   Quality      fpsLimit 0, performance60 off (the default): a steady 30 (the fixed 30 cap) at up to the screen's 960x544, the
+    //                picture size giving way first (not below the game's standard size) when a scene would fall under 30;
+    //   Performance  fpsLimit 0, performance60 on: aims for 60 (GXV_AUTOQ_TARGET=60): under GPU load edge smoothing, the cheaper
+    //                background and then the picture size give way (to 608x346 at most); where the CPU cannot come near 60 the
+    //                pictures come at an even 30 (GXV_STEADY30). Optional key perf_mode;
+    //   Locked 30    fpsLimit 30: the fixed 30 cap with the full 960x544 picture (never smaller), anti-aliased when there is room.
     int fpsLimit = 0;
+    bool performance60 = false;
     AutoQuality autoQuality = AutoQuality::Default;
     controls::ProfileId profile = controls::ProfileId::Handheld;
     std::string language;
@@ -41,7 +50,17 @@ struct Config {
     bool hdTextures = true;                // hd_textures (matters only when the HD pack is installed)
     EffectsQuality effects = EffectsQuality::Adaptive; // effects_quality
     bool depthOfField = true;              // depth_of_field: the game's own depth-of-field blur
-    bool coreHelp = true;                  // core_plan: Auto (true) lets disc read-ahead and a movie decoder use the system core
+    bool coreHelp = true;                  // core_plan: Auto (true) lets disc read-ahead and a movie decoder use the system core, and
+                                           // puts vitaGL's collector and the audio mixer on core 1 (off the GX front end's core 2)
+    // 1.3 speed rows (each maps to one start-up switch; all on by default, Off returns that part to 1.2's behaviour):
+    bool gxmDirect = true;                 // gxm_renderer (direct | standard): GXV_GXM_DIRECT, one direct vitaGL call per scene draw
+    bool logicOverlap = true;              // logic_overlap (1 | 0 | max): GXV_DRAWDONE_DEFER=2 (game logic overlaps the front end) vs 1
+    bool overlapMax = true;                // logic_overlap=max: GXV_DRAWDONE_DEFER=3, turns without a picture never wait (needs logicOverlap)
+    bool lazyMaterials = true;             // material_updates (per_picture | every_turn): GXV_DL_LAZY=2 vs 0
+    FarAnimation farAnimation = FarAnimation::Reduced; // far_animation (reduced | full | aggressive): GXV_ANIM_LOD, GXV_ANIM_LOD_DIST
+    // game_speed (full | smooth): Full keeps the game at 60 turns a second wherever the CPU allows, skipping pictures (GXV_SLIP=0,
+    // PETARI_FRAMESKIP=5); Smooth is 1.2's trade (up to 20 % slower game for steadier pictures, GXV_SLIP=1, 3 skips in a row).
+    bool fullSpeed = true;
     // Tilt levels (Star Ball, ray surfing): how far the lean is scaled, on a 1 to 10 scale (5 is the game's own, unchanged steering, 1 half and
     // 10 double; platform/include/port/tilt_gain.h), and whether the left stick steers them instead of the console's motion sensor.
     // Optional keys motion_level and motion_source (sensor | stick); a 1.2 beta file's motion_gain (a percentage) is read as the nearest level.

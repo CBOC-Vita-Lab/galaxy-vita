@@ -15,13 +15,33 @@ that exact library.
    bounded retry then fail-stop) and `0010` (depth/stencil creation returns a checked result, frees only its
    own unsubmitted partial allocations and never publishes an incomplete surface). Host tests:
    `tools/test_vitagl_scene_fail.sh --vitagl-source <patched tree>`.
+   `0013` (the direct draw, vglDrawElementsDirect) and `0014` (the vgx draw caches, off unless the back end turns them on with
+   `vglSetDrawCaches`: each program keeps the fragment programs the shader patcher made for it by blend and target mode, and a
+   program whose uniforms did not change points sceGxm at the uniform-ring copy of its last upload instead of copying its default
+   uniform buffers again after a program switch; `GXV_VGL_FRAGMEMO`, `GXV_VGL_UNIREUSE`, default on). Host test of 0014:
+   `tools/test_vgl_drawcache.sh --vitagl-source <patched tree>`.
+   `0015` (vgx uniform shadows, nothing changes unless called: `vglGetUniformShadow` gives where a program keeps an F32 vec4 /
+   vec4 array / mat4 uniform, `vglUniformShadowWritten` sets the dirty flags and forgets the ring copy as `glUniform*` does; the
+   back end's `GXV_UNI_SHADOW=1`, default off). Host test of the back end's use: `tests/vgx_uni_shadow.cpp`.
+   `0018` (`MASK_KEEP`, needs the `DEPTH_HINT` and `MASK_SKIP` options): a framebuffer-object scene that does not load its
+   depth/stencil surface and begins with the scissor test off starts with the surface's background mask set, and the full-target
+   quad `update_scissor_test` draws to set the mask everywhere is left out (`vglSetMaskKeep(GL_TRUE)`, the host's `GXV_VGL_MASKKEEP=1`,
+   default off; while off the background mask stays clear, as `MASK_SKIP` assumes; `vglGetMaskKeeps()` counts the quads left out).
+   Its gxm.c part is the depth/stencil argument of the framebuffer object's `sceGxmBeginScene` (after `apply_depth_hint`, which
+   build-vitagl.sh inserts), so the patch applies to the upstream tree before the option scripts run.
+   `0019` (`COLOR_LOAD_FROM`, applies after `0018`): `vglColorLoadFrom(tex)` makes the next scene begun on the bound framebuffer
+   load its colour tiles from texture `tex` (same size and format, no MSAA) through the colour surface's background texture, and
+   store them into its own buffer as usual: the host's `GXV_EFBSWAP` hands the EFB's colour buffer to a copy texture and continues
+   on a fresh one, which then starts with the old picture by the scene's own tile load instead of a full-screen quad
+   (`GXV_VGL_LOADFROM=1`, default off; `vglGetColorLoadsFrom()` counts them). UNTESTED on hardware.
 3. **[gpu_timers.py](gpu_timers.py)**: `GPU_TIMERS`, the per-scene GPU time the automatic picture
-   quality reads, and `ANISO_SWITCH` (off unless the game asks for it; it acts when a texture's filters are set, in
+   quality reads (since 5 Nov also the per-scene vertex and fragment completion for the back end's `GXV_GPU_SCENES=1`:
+   `vglRtSetupScenes`, `vglRtTagScene`, `vglRtReadScenes`, off until called; host test `tools/test_vgx_gpu_timer_ring.sh`), and `ANISO_SWITCH` (off unless the game asks for it; it acts when a texture's filters are set, in
    `vglSetTexMipFilter`, and may be changed while the game runs: `GXV_AUTOQ_ANISO`).
 4. **[fbo_msaa.py](fbo_msaa.py)**: `FBO_MSAA`, multisampling per framebuffer object, for the automatic
    anti-aliasing.
 5. **[build-vitagl.sh](build-vitagl.sh)** with the options `DEPTH_HINT UNIFORM_PINGPONG ALIGNED_POOL
-   GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP` on top of the base set
+   GPU_TIMERS ANISO_SWITCH FBO_MSAA DEPTH_SAMPLE MASK_SKIP MASK_KEEP COLOR_LOAD_FROM` on top of the base set
    (`HAVE_SHADER_CACHE HAVE_SHARK_LOG LOG_ERRORS STORE_DEPTH_STENCIL SKIP_SPLASHSCREEN
    STRICT_DRAW_COMPLIANCE`, `-O3 -ffast-math`, Cortex-A9 NEON, hard float). `ALIGNED_POOL`, `DEPTH_HINT`,
    `UNIFORM_PINGPONG`, `DEPTH_SAMPLE` and `MASK_SKIP` are source patches the script applies to its own

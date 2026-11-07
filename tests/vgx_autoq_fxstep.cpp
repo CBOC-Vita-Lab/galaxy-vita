@@ -5,11 +5,11 @@
 //    legacy rules, fence and GPU-timer clocks, calm and target 30) hash to the same golden digests. With the option on but
 //    outside target mode nothing changes either (the step belongs to the whole-picture target), and in target mode a trace
 //    that never needed the step makes the same changes as without it.
-// 2. A heavy GPU stretch at today's rung reaches the half-size effects, then the cheaper background, before any picture size
+// 2. A heavy GPU stretch at today's rung reaches the cheaper background, then the half-size effects, before any picture size
 //    below today's, and those before the 480x340 emergency rung; a scene whose effects hold no saving gets the step undone
 //    (blocked) and the next one tried; a scene a step is enough for never needs a smaller picture.
-// 3. The way back is the reverse: the emergency rung first, then the sizes up to today's, the cheaper background off, the
-//    half-size effects off, then the picture size above today's; no step is on above today's rung (checked at every picture
+// 3. The way back is the reverse: the emergency rung first, then the sizes up to today's, the half-size effects off, the
+//    cheaper background off, then the picture size above today's; no step is on above today's rung (checked at every picture
 //    of every run).
 // 4. No oscillation: a stationary borderline scene and an alternating scene switch the step rarely, never closer than 3 s.
 // 5. A CPU-limited stretch (the game's two turns, the renderer, an unmeasured stage, an unknown game clock) starts no step and
@@ -277,6 +277,8 @@ int main(int argc, char** argv) {
     std::printf("option off: the decisions are those of the controller before the option\n");
     Check(Digest(Config(), 15) == kGoldenCalm, "calm rules: every change of 28 seeded traces is unchanged");
     Check(Digest(Config::Legacy(), 15) == kGoldenLegacy, "legacy rules: the same traces give the same changes");
+    Check(Digest(Target(true, true, false), 15) == 0xdbd77a1e61fdbf3dull,
+          "mode 1: all seeded rung-decision traces retain their pre-reorder digest");
     {
         Config on;
         on.fxStep = on.bgStep = true;
@@ -292,7 +294,7 @@ int main(int argc, char** argv) {
         Check(fx > 0 || a == b, "target 30: traces that never needed the step make the same changes");
     }
 
-    std::printf("a heavy GPU stretch: half-size effects, cheaper background, then the picture size, then the emergency rung\n");
+    std::printf("a heavy GPU stretch: cheaper background, half-size effects, then the picture size, then the emergency rung\n");
     {
         Load heavy;
         heavy.pixGpuMs = 80; // 83 ms at 640x456; the steps bring it to 53 ms, the smaller pictures to 35 ms at 480x340
@@ -303,41 +305,58 @@ int main(int argc, char** argv) {
         const int offEm = off.Index('R', 0, kEmergency), onEm = on.Index('R', 0, kEmergency);
         const int fx = on.Index('F'), bg = on.Index('B'), firstDown = on.Index('R');
         Check(off.Count('F') + off.Count('B') == 0 && offEm >= 0, "without the option: no step, the emergency rung is taken");
-        Check(fx >= 0 && bg > fx && firstDown > bg && onEm > firstDown, "with the option: effects half size, then cheaper background, then a smaller picture, then 480x340");
+        Check(bg >= 0 && fx > bg && firstDown > fx && onEm > firstDown, "mode 2: cheaper background, then effects half size, then a smaller picture, then 480x340");
         Check(fx >= 0 && on.ev[fx].from == kToday && on.ev[bg].from == kToday, "the steps start at today's rung (640x456)");
-        Check(fx >= 0 && on.ev[fx].t >= 1.9, "the first step waits fxHoldSec (2 s) of a GPU-limited miss");
-        Check(bg > fx && on.ev[bg].t - on.ev[fx].t >= 3.0, "the second step comes at least 3 s after the first (judged first)");
+        Check(bg >= 0 && on.ev[bg].t >= 1.9, "the first step waits fxHoldSec (2 s) of a GPU-limited miss");
+        Check(fx > bg && on.ev[fx].t - on.ev[bg].t >= 3.0, "the second step comes at least 3 s after the first (judged first)");
         Check(onEm >= 0 && offEm >= 0 && on.ev[onEm].t - off.ev[offEm].t <= 25.0, "the steps delay the emergency rung by no more than 25 s when they are not enough");
         Check(on.Count('R') <= 6 && on.Count('F') + on.Count('f') + on.Count('B') + on.Count('b') <= 2, "no oscillation under a lasting overload");
         Check(!on.invariantBroken && !off.invariantBroken, "no step is on above today's rung");
     }
     {
         Load enough;
-        enough.pixGpuMs = 36; // 39 ms at 640x456, 27.9 ms with the effects at half size
+        enough.pixGpuMs = 36; // 39 ms at 640x456, 27.9 ms with the cheaper background
+        enough.bgGain = 1.4;
         Sim off(Target(false), 12, 0.05), on(Target(true), 12, 0.05);
         off.Run(enough, 120);
         on.Run(enough, 120);
         if (verbose) { off.Print("without the option"); on.Print("with the option"); }
         Check(off.Index('R', 0, 1) >= 0, "without the option: the picture shrinks below 640x456");
-        Check(on.Count('F') == 1 && on.Count('B') == 0 && on.Count('R') == 0 && on.ctl.Current() == kToday && on.ctl.FxStepOn(),
-              "with the option: half-size effects are enough: the picture stays at 640x456, no cheaper background, no smaller picture");
+        Check(on.Count('B') == 1 && on.Count('F') == 0 && on.Count('R') == 0 && on.ctl.Current() == kToday && on.ctl.BgStepOn(),
+              "mode 2: cheaper background is enough: the picture stays at 640x456, no half-size effects, no smaller picture");
         Check(on.lateFrames < off.lateFrames + 400, "the step does not lengthen the time below 30 in a way that matters");
-        const int fx = on.Index('F');
-        Check(fx >= 0 && on.ev[fx].t >= 1.9 && on.ev[fx].t <= 6.0, "the step waits fxHoldSec (2 s) of a GPU-limited miss");
+        const int bg = on.Index('B');
+        Check(bg >= 0 && on.ev[bg].t >= 1.9 && on.ev[bg].t <= 6.0, "the step waits fxHoldSec (2 s) of a GPU-limited miss");
         Check(on.ctl.LastFxChange().why == Why::FxOn, "the change is recorded with its reason");
+
+        Sim compatible(Target(true, true, false), 12, 0.05);
+        compatible.Run(enough, 120);
+        Check(compatible.Count('F') == 1 && compatible.Count('B') == 0 && compatible.Count('R') == 0 && compatible.ctl.Steps() == 1,
+              "mode 1 compatibility: half-size effects alone still keep the native picture");
     }
     {
         Load none;
         none.pixGpuMs = 36;
-        none.fxGain = 1.0; // a scene with no effects to halve ...
-        none.bgGain = 1.5; // ... but with background textures that cost
+        none.bgGain = 1.0; // a scene whose background filtering buys nothing ...
+        none.fxGain = 1.5; // ... but with effects that cost
         Sim on(Target(true), 13, 0.03);
         on.Run(none, 120);
-        if (verbose) on.Print("no saving from the effects, a good one from the background");
-        const int fx = on.Index('F'), undo = on.Index('f'), bg = on.Index('B');
-        Check(fx >= 0 && undo > fx && on.ev[undo].why == Why::FxNoGain, "effects that buy no speed are undone after their trial (reason: no gain)");
-        Check(bg > undo && on.ctl.BgStepOn() && !on.ctl.FxStepOn(), "... and the cheaper background is tried next, and kept");
-        Check(on.Count('F') == 1 && on.Count('R') == 0, "... the undone step is not tried again while blocked, and the picture keeps its size");
+        if (verbose) on.Print("no saving from the background, a good one from the effects");
+        const int bg = on.Index('B'), undo = on.Index('b'), fx = on.Index('F');
+        Check(bg >= 0 && undo > bg && on.ev[undo].why == Why::FxNoGain, "background filtering that buys no speed is undone after its trial (reason: no gain)");
+        Check(fx > undo && on.ctl.FxStepOn() && !on.ctl.BgStepOn(), "... and half-size effects are tried next, and kept");
+        Check(on.Count('B') == 1 && on.Count('R') == 0, "... the undone background step is not retried while blocked, and the picture keeps its size");
+    }
+    {
+        Load noFx;
+        noFx.pixGpuMs = 52;
+        noFx.fxGain = 1.0;
+        Sim on(Target(true), 130, 0.0);
+        on.Run(noFx, 40);
+        const int bg = on.Index('B'), fx = on.Index('F'), undo = on.Index('f');
+        Check(bg >= 0 && fx > bg && undo > fx && on.ev[undo].why == Why::FxNoGain,
+              "a failed second half-FX trial follows the background trial and rolls back its own bit");
+        Check(on.ctl.BgStepOn() && !on.ctl.FxStepOn(), "a failed half-FX trial preserves the beneficial background bit");
     }
     {
         Load none;
@@ -347,9 +366,9 @@ int main(int argc, char** argv) {
         Sim on(Target(true), 14, 0.03);
         on.Run(none, 120);
         if (verbose) on.Print("no saving from either step");
-        const int undoB = on.Index('b'), rung = on.Index('R'), em = on.Index('R', 0, kEmergency);
-        Check(on.Count('F') == 1 && on.Count('B') == 1 && undoB >= 0, "two steps that buy nothing are each tried once and undone");
-        Check(rung > undoB && em > rung, "... and the picture size follows, the emergency rung last");
+        const int undoB = on.Index('b'), undoF = on.Index('f'), rung = on.Index('R'), em = on.Index('R', 0, kEmergency);
+        Check(on.Count('F') == 1 && on.Count('B') == 1 && undoB >= 0 && undoF > undoB, "two steps that buy nothing are each tried once and undone in order");
+        Check(rung > undoF && em > rung, "... and the picture size follows, the emergency rung last");
         Check(!on.ctl.FxStepOn() && !on.ctl.BgStepOn(), "... with both steps off");
     }
 
@@ -378,12 +397,70 @@ int main(int argc, char** argv) {
         std::printf("   recover %s:\n", recover ? "on" : "off");
         Check(reachedEmergency, "the heavy stretch ends with both steps on at the emergency rung");
         Check(exitEm >= 0 && reachedToday >= exitEm, "the emergency rung is left first, the picture climbs back to 640x456");
-        Check(bgOff > reachedToday && fxOff > bgOff, "then the cheaper background goes off, then the half-size effects");
-        Check(firstAbove > fxOff, "the picture size rises above 640x456 only after both steps went off");
+        Check(fxOff > reachedToday && bgOff > fxOff, "then half-size effects go off, then the cheaper background");
+        Check(firstAbove > bgOff, "the picture size rises above 640x456 only after both steps went off");
         Check(bgOff >= 0 && s.ev[bgOff].from == kToday && fxOff >= 0 && s.ev[fxOff].from == kToday, "the steps go off at today's rung");
         Check(!s.invariantBroken, "no step is on above today's rung");
         Check(s.ctl.Current() > kToday && s.ctl.Steps() == 0, "in the end: a higher rung than 640x456, steps off");
         Check(s.Count('F') == 1 && s.Count('B') == 1, "each step went on once");
+    }
+
+    {
+        Config c = Target(true);
+        c.minRung = c.maxRung = kToday;
+        Sim s(c, 25, 0.0);
+        Load heavy;
+        heavy.pixGpuMs = 80;
+        s.Run(heavy, 40);
+        Check(s.ctl.Steps() == 3, "recovery-ratio setup: both bits are on at native size");
+        Load marginal;
+        marginal.fixedGpuMs = 0;
+        marginal.pixGpuMs = 32;
+        const double from = s.t;
+        s.Run(marginal, 100);
+        Check(s.Index('f', from) < 0 && s.Index('b', from) < 0 && s.ctl.Steps() == 3,
+              "recovery predicts removing FX (32/1.12 exceeds 70% budget), not the cheaper BG ratio");
+        marginal.pixGpuMs = 24;
+        s.Run(marginal, 40);
+        Check(s.Index('f', from) >= 0 && s.Index('b', from) < 0 && s.ctl.Steps() == 2,
+              "more room restores FX first but keeps BG whose full cost still exceeds the margin");
+    }
+    {
+        Config c = Target(true);
+        c.minRung = c.maxRung = kToday;
+        Sim s(c, 26, 0.0);
+        Load noGain;
+        noGain.pixGpuMs = 36;
+        noGain.fxGain = noGain.bgGain = 1;
+        s.Run(noGain, 40);
+        Check(s.Count('B') == 1 && s.Count('F') == 1 && s.ctl.Steps() == 0,
+              "both no-gain bits remain independently blocked before cooldown expiry");
+        s.Run(noGain, 70);
+        const int firstB = s.Index('B'), firstF = s.Index('F');
+        const int retryB = firstB >= 0 ? s.Index('B', s.ev[firstB].t + 1) : -1;
+        const int retryF = firstF >= 0 ? s.Index('F', s.ev[firstF].t + 1) : -1;
+        Check(retryB >= 0 && retryF > retryB && s.ev[retryB].t - s.ev[firstB].t >= 60 && s.ev[retryF].t - s.ev[firstF].t >= 60,
+              "cooldown expiry retries BG before FX without swapping their independent block indices");
+    }
+    for (unsigned bit : {1u, 2u}) {
+        Config c = Target(true);
+        c.fxStep = bit == 1;
+        c.bgStep = bit == 2;
+        Load heavy;
+        heavy.pixGpuMs = 36;
+        heavy.fxGain = heavy.bgGain = 1.5;
+        Load light;
+        Sim s(c, 27, 0.0);
+        s.Run(heavy, 30, 0, 711);
+        Check(s.ctl.Steps() == bit, "single-bit scene setup retains the existing FX/BG mask identity");
+        s.Frame(light, false, 722, 2500000);
+        s.Run(light, 3, 0, 722);
+        s.Frame(heavy, false, 711, 2500000);
+        Check(s.ctl.Steps() == bit, "scene restore preserves a standalone FX or BG bit, not its priority number");
+        const double from = s.t;
+        s.Run(light, 60, 0, 711);
+        Check(s.ctl.Steps() == 0 && s.Index(bit == 1 ? 'f' : 'b', from) >= 0,
+              "a restored standalone bit recovers using its own gain index");
     }
 
     std::printf("no oscillation\n");
@@ -654,20 +731,7 @@ int main(int argc, char** argv) {
                       s.ctl.Current(), s.lateFrames);
         Check(s.ctl.Current() == kEmergency && !noGain, line);
         Check(s.lateFrames <= 30 && late > 0, "... where the floor is met");
-        // the same scene in Performance mode (60), against its own budget: the floor is missed all the way, every step kept
-        Config p = Target(true);
-        p.targetFps = 60;
-        p.budgetMs = 1000.0 / 60.0;
-        Load lighter = beach;
-        lighter.gameMs = 6;       // (one turn's CPU at 60: game 3 ms, renderer 3 ms)
-        lighter.fixedGpuMs = 12.5;
-        lighter.pixGpuMs = 6.5;   // 19 ms at 640x456, 16.2 at 480x340
-        Sim q(p, 94, 0.05);
-        q.Run(lighter, 120);
-        noGain = false;
-        for (const Event& e : q.ev) noGain |= e.kind == 'R' && e.why == Why::NoGain;
-        if (verbose) q.Print("the same in Performance mode");
-        Check(q.ctl.Current() == kEmergency && !noGain, "... and in Performance mode (60) against 16.7 ms");
+        // (the same in Performance mode: tests/vgx_autoq_60.cpp, whose model shows a picture at every retrace)
     }
     {
         // The scene remembers it: a stage whose GPU time does not change with the picture at all (key 333), another stage, the

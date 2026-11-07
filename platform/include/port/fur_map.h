@@ -14,19 +14,19 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "hot_knob.h"
 
 namespace port {
 namespace fur {
 
 inline bool Enabled() {
-    static const bool on = [] {
+    return PORT_HOT_KNOB(bool, [] {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
         const char* v = std::getenv("GXV_FIX_FURMAP");  // unset, empty or not a number: stays on
         if (!v || !*v) return true;
         char* end = nullptr;
         const long parsed = std::strtol(v, &end, 0);
         return end == v || *end ? true : parsed != 0;
-    }();
-    return on;
+    }());
 }
 
 // Texel `index` of a 16-bit-per-texel image gets v, in console byte order (`bigEndian`) or in the host's.

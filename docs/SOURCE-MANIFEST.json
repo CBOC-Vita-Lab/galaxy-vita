@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v1.2",
+  "release": "galaxy-v2.0",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -12,7 +12,7 @@
     },
     {
       "path": "CMakeLists.txt",
-      "sha256": "1f37a6029323eefa2a65376c825b575be89bbaec7fb33b23336387b9e3236ae7"
+      "sha256": "c7840f2aa99090f644a8e8158b851d95eccdbb48ce41416496e618398386a358"
     },
     {
       "path": "LICENSE",
@@ -24,11 +24,11 @@
     },
     {
       "path": "armhf/CMakeLists.txt",
-      "sha256": "913f6d6ee5b82458537dd03c164cf979b3b3d52997bf39059d7f7c7473d2ff4e"
+      "sha256": "f48ccae60bb933fdc7d67c9c775e6fafd41e0c19feb808c683ccec1e68deb5a4"
     },
     {
       "path": "armhf/glstub/GLES2/gl2.h",
-      "sha256": "249e71ed051a204e8f4cc236b7c3eaae7daab926b38d5b5945e894ac25e5a172"
+      "sha256": "0995d9e2e9ffd572c400091b9698826b645c60620cfff80e01ca857348230260"
     },
     {
       "path": "armhf/glstub/GLES2/gl2ext.h",
@@ -123,12 +123,16 @@
       "sha256": "e2a9471959fd72e1517da716103eaccc0cdb0392b29c86b41cf5dc3d53804321"
     },
     {
+      "path": "decomp/include/Game/Animation/XanimeSpecWalk.hpp",
+      "sha256": "d6675eee19aceb5b0bc696d4a8a8545162d80c1baa83ba6c0d4c576bb0cb46bc"
+    },
+    {
       "path": "decomp/include/Game/AreaObj.hpp",
       "sha256": "a69f4bf643f2c043d55e5a60248101e1fc9f6427fd88d2515dd64ac396d3c8b1"
     },
     {
       "path": "decomp/include/Game/AreaObj/AreaForm.hpp",
-      "sha256": "4dba93f0eb45773c9cffda030918335a7941e00ee89a2fc346f68fe2a45cab13"
+      "sha256": "a4e581570d8f780084f27b93d1c54aa6aa12cae0e1d23cc029da78fcbde11d41"
     },
     {
       "path": "decomp/include/Game/AreaObj/AreaObj.hpp",
@@ -1804,7 +1808,7 @@
     },
     {
       "path": "decomp/include/Game/Effect/SyncBckEffectInfo.hpp",
-      "sha256": "152c6b1a8aeb3077751b51edd297ac75d714d5a740321bad75986589ee5a5005"
+      "sha256": "15955b354db401dc0b9c9d62304532ddaab8b5d323c478b84da3ced0cfaef879"
     },
     {
       "path": "decomp/include/Game/Enemy.hpp",
@@ -2292,15 +2296,15 @@
     },
     {
       "path": "decomp/include/Game/Gravity/CubeGravity.hpp",
-      "sha256": "22ca0fcbcd9f2c55705a2ca19f3a2b6a9ee732240ea912c5f98014c31e86e032"
+      "sha256": "1ea3c8ea270aafaabea5468d38f44bf5fc584a06df1cc820da2d1c62b447a82e"
     },
     {
       "path": "decomp/include/Game/Gravity/DiskGravity.hpp",
-      "sha256": "8f07d726b6bd50e8fc97aaccfc294aafc4ada36ef5aa1209a516f8c69328fc5b"
+      "sha256": "78619aeb4612314111abca96755944a5f794c928561486a36b9f32972d98b9cc"
     },
     {
       "path": "decomp/include/Game/Gravity/DiskTorusGravity.hpp",
-      "sha256": "4671ac28b664676d6ccd74d5cbc0ec9123db0bd8eb6d8c0fb6f6f973a88abd73"
+      "sha256": "28cd6570f7001091441395092974867e93d6d70a7ea1c72d793adaf7b6c27317"
     },
     {
       "path": "decomp/include/Game/Gravity/GlobalGravityObj.hpp",
@@ -2320,23 +2324,23 @@
     },
     {
       "path": "decomp/include/Game/Gravity/ParallelGravity.hpp",
-      "sha256": "e81075ccf93ae8ad1fbb344b737bab54b1fd8f78ce36c21f7fd0b7c79ea2f29f"
+      "sha256": "de896673bb7a8c3fd827921800d2d571ba91397c5b23255bfc3a0c5978b51e8b"
     },
     {
       "path": "decomp/include/Game/Gravity/PlanetGravity.hpp",
-      "sha256": "d86f650300dff16e2ffb449156b94f8f528a75821912aef7a7495b7ce5034a39"
+      "sha256": "f239d448fa672c9d84c7a6bc089a6298d38434d53eff7585323386c6637e6467"
     },
     {
       "path": "decomp/include/Game/Gravity/PlanetGravityManager.hpp",
-      "sha256": "b7ce50c1f53263579802374135007900656a781162452d304a588d6b1c61c1e8"
+      "sha256": "1e496eda8243149b6e8b241160895253b3bac396848287e57af31adcfdff8235"
     },
     {
       "path": "decomp/include/Game/Gravity/PointGravity.hpp",
-      "sha256": "e6c7a1817f88500bbf06a26708b0272a82331c08ec380a654ca9a4aaa0a14ff1"
+      "sha256": "bb184440c260709d7921e317d61a679261fa8ffc6eadacc696c19b8efb2852cc"
     },
     {
       "path": "decomp/include/Game/Gravity/SegmentGravity.hpp",
-      "sha256": "58f22ab6690dbbf927b5c16712b9ed871503dc2699b70b5086cd79b66c932000"
+      "sha256": "aa6a38948bbc875bef603d7ca1f66351b34cd760d5db30990e45327735cd5e59"
     },
     {
       "path": "decomp/include/Game/Gravity/WireGravity.hpp",
@@ -2448,7 +2452,7 @@
     },
     {
       "path": "decomp/include/Game/LiveActor/LiveActor.hpp",
-      "sha256": "7a6bd75b7058a4987772525068d7b6b984094a789c79e91030b1b9e5a433e3df"
+      "sha256": "489ac030c63c37658d12c5d583d6a03d4b53b16184fa9cae281893a9112576f4"
     },
     {
       "path": "decomp/include/Game/LiveActor/LiveActorFlag.hpp",
@@ -2468,7 +2472,7 @@
     },
     {
       "path": "decomp/include/Game/LiveActor/MaterialCtrl.hpp",
-      "sha256": "413b0a7529cf19c123beb3fce0f54f606e60f7037c7f6cb7649a6c5d435dba7e"
+      "sha256": "6a94295c10e69241cdcc66f0ecd1e68b73d4cc3feaaf86f15a1e710bc28dd554"
     },
     {
       "path": "decomp/include/Game/LiveActor/MessageSensorHolder.hpp",
@@ -2488,7 +2492,7 @@
     },
     {
       "path": "decomp/include/Game/LiveActor/ModelManager.hpp",
-      "sha256": "0743be3cfc6b0206dea6cecbe850731c6d0b1330dea02df1ae5289aaf2af5cb1"
+      "sha256": "dd5e4d08cf668aac572e4a389743b9896e2c9574507cda95f9aa57abc0b53d11"
     },
     {
       "path": "decomp/include/Game/LiveActor/ModelObj.hpp",
@@ -2512,7 +2516,7 @@
     },
     {
       "path": "decomp/include/Game/LiveActor/ShadowController.hpp",
-      "sha256": "f21a101b34180d6dce745127872cdfc626a619bdf64b59630f533ab648da573f"
+      "sha256": "bc0a0f74b2c751a270a3ea7e87f382de4ffa0c6b050213b72e6efedd0d4e3ffd"
     },
     {
       "path": "decomp/include/Game/LiveActor/ShadowDrawer.hpp",
@@ -2612,7 +2616,7 @@
     },
     {
       "path": "decomp/include/Game/Map/CollisionCategorizedKeeper.hpp",
-      "sha256": "95ee29392cb00abe12c4caf2875f340a6c190e0457e4d0455c0fcb2977dd19a9"
+      "sha256": "c932917f8618d3c39954921efc3e2f7de8f4dd96cc8279b703fec2d157859c24"
     },
     {
       "path": "decomp/include/Game/Map/CollisionCode.hpp",
@@ -2624,7 +2628,7 @@
     },
     {
       "path": "decomp/include/Game/Map/CollisionParts.hpp",
-      "sha256": "78fddef5ff2c328150c550883da2bae1bfab818583de28f218eb588a19ecc32c"
+      "sha256": "8f145d5ac3b96984f818589dbd8f63b0c3e1a19bba1838b39183d14127ea70a1"
     },
     {
       "path": "decomp/include/Game/Map/FIleSelectItem.hpp",
@@ -2692,7 +2696,7 @@
     },
     {
       "path": "decomp/include/Game/Map/KCollision.hpp",
-      "sha256": "5530c3f81668867f182e24a0c35130e75ac9b6022f4251f114d61d02814ecd1f"
+      "sha256": "9fba0d4cddf4d933049f2573144f053a1a86544fbe383dd42330db5f3362237c"
     },
     {
       "path": "decomp/include/Game/Map/KoopaBattleMapCoinPlate.hpp",
@@ -4612,7 +4616,7 @@
     },
     {
       "path": "decomp/include/Game/NameObj/NameObjListExecutor.hpp",
-      "sha256": "5ae08439f2bd2273d2e6e2587d62c91d3287049f813976bcb2fe1ebf3e850869"
+      "sha256": "60c70ad8251f09c6c5c3fbe8021f6edcedefb8bbfd3e968f63b1d47156410197"
     },
     {
       "path": "decomp/include/Game/NameObj/NameObjRegister.hpp",
@@ -4908,7 +4912,7 @@
     },
     {
       "path": "decomp/include/Game/Player/RushEndInfo.hpp",
-      "sha256": "52162aba8f4d3e1db38f02ac136b9c5740f6fe61be0627f5611fef89fc60a76e"
+      "sha256": "91bbc062118cd2448de4eecde0c6cf4d0726b819699bc39f895709cf92c382b8"
     },
     {
       "path": "decomp/include/Game/Player/TornadoMario.hpp",
@@ -5076,7 +5080,7 @@
     },
     {
       "path": "decomp/include/Game/Scene/GameScene.hpp",
-      "sha256": "dc7456b02494135d6f63b777e3fc748bd46517f271ec5dbab6a96aab9c43bb6c"
+      "sha256": "4c293c8a99892e31a0a2a52e7d791911623923c45c838cb55e8cc52b648d9ffa"
     },
     {
       "path": "decomp/include/Game/Scene/GameSceneFunction.hpp",
@@ -5140,7 +5144,7 @@
     },
     {
       "path": "decomp/include/Game/Scene/SceneFunction.hpp",
-      "sha256": "a9e8ab73fe71288db1e650d5b0ff72b77428f5f365462bdf1bcf0b0b90346990"
+      "sha256": "0e4c27742d529982ce75793ca760f521a5a8efca26b1528ce94c5cb40366dcc5"
     },
     {
       "path": "decomp/include/Game/Scene/SceneNameObjListExecutor.hpp",
@@ -5652,7 +5656,7 @@
     },
     {
       "path": "decomp/include/Game/Screen/StarPointerTarget.hpp",
-      "sha256": "499cd69e5d9a664345a7a5a4f38c18651a6e2df149ec57a141fb1f2299b62d5d"
+      "sha256": "f994fb756903334010798dbac696cc212886ac3604442ce548863ca72a36a7a8"
     },
     {
       "path": "decomp/include/Game/Screen/SubMeterLayout.hpp",
@@ -5796,7 +5800,7 @@
     },
     {
       "path": "decomp/include/Game/System/DrawBuffer.hpp",
-      "sha256": "45329aa64df240b2adfd3b6b9624ff49a9693a63ab756877ed6f5895bb27ac86"
+      "sha256": "e3c7e6726ea1e8ca0cc561121f84f0ba5da10b7da34c6274ad3d39764c492ef3"
     },
     {
       "path": "decomp/include/Game/System/DrawBufferExecuter.hpp",
@@ -5808,7 +5812,7 @@
     },
     {
       "path": "decomp/include/Game/System/DrawBufferHolder.hpp",
-      "sha256": "05a3360c55d405a288d01105c35e0fea9f3d84cf4b378cb4612a55f4ff4351c5"
+      "sha256": "7d9b4a5121578a019887bab2c19647100c30b54f52f81b3365870a6573ec5719"
     },
     {
       "path": "decomp/include/Game/System/DrawSyncManager.hpp",
@@ -6072,7 +6076,7 @@
     },
     {
       "path": "decomp/include/Game/System/SpinDriverPathStorage.hpp",
-      "sha256": "2fcd10c8d71ea4dbd990cc621df53adf1b109f9990cbcc04566ac630b77de682"
+      "sha256": "5eaefd0e0312dc78ee5c216f044c0f467618a574a6d8ceb0911b9774e869b37e"
     },
     {
       "path": "decomp/include/Game/System/StageResultSequenceChecker.hpp",
@@ -6220,7 +6224,7 @@
     },
     {
       "path": "decomp/include/Game/Util/Color.hpp",
-      "sha256": "423216469cd5bc98e785a82402688996545bbc0f1168b8ab2cfa8f0da95ab66a"
+      "sha256": "3dd6c793e45a103e9c671f7cfc36bc662bf7331a9a019c852e41198001fe9a63"
     },
     {
       "path": "decomp/include/Game/Util/DemoUtil.hpp",
@@ -6452,7 +6456,7 @@
     },
     {
       "path": "decomp/include/Game/Util/StarPointerUtil.hpp",
-      "sha256": "6658e5addcadcf9c9dd4d9a6a0cd831197b16350119ab3999bda58a9725f844a"
+      "sha256": "0584436eb10fbfa0c870e303def335a2be2e49f3058862e68bec20e3059f4216"
     },
     {
       "path": "decomp/include/Game/Util/StringUtil.hpp",
@@ -6564,7 +6568,7 @@
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphAnimator/J3DMtxBuffer.hpp",
-      "sha256": "2d8a62c4b71cc0c800e713930e2dcc11f5e84649fa3372540a62f9f43759c88e"
+      "sha256": "eb9502f957d766f2fa7ca7fc6e4241e68f263252372392f4891257564a622831"
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphAnimator/J3DMtxCalc.hpp",
@@ -6588,7 +6592,7 @@
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DFifo.hpp",
-      "sha256": "af0bb5630652556f2b7ec9b2283e10012acad79d54eebda0adaf69b58aef0054"
+      "sha256": "c5edcdb900584bd844d3d064d26fbfe6eb4e2edd17fc49de30f133374759cbd8"
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DGD.hpp",
@@ -6604,7 +6608,11 @@
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DPacket.hpp",
-      "sha256": "271b9d14432b1aafa3b0fc66150c93728b0fb1c3e41a5b6c41602d6e1d0a2335"
+      "sha256": "146a733329baa192e374ce1d0f52fd441e902fa374bb3941930bcefdefa15f8f"
+    },
+    {
+      "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DPortDL.hpp",
+      "sha256": "36acf8de5dfccaccf7ed9b0e80858f2fbc1af65b41856818615a564d6de29219"
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DShape.hpp",
@@ -6624,7 +6632,7 @@
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DSys.hpp",
-      "sha256": "7289ea4222c05e016a9f5507036f9fcd1630e7d5026c05c24edaf6baebbe476c"
+      "sha256": "555569ca44bbffce84e2b2006a848a2cff536faf215327e3a7b2ac6a1f230d16"
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/J3DGraphBase/J3DTevs.hpp",
@@ -7176,7 +7184,7 @@
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/JParticle/JPAEmitter.hpp",
-      "sha256": "1f305dcbadd4242cf8a66fb82b284547f31a0f914ffb73076e89313d2b2399f8"
+      "sha256": "5fc7e7e38ec7232385ddd0a61ef988a6608eca9aa93382b0bb209b727c1bca07"
     },
     {
       "path": "decomp/libs/JSystem/include/JSystem/JParticle/JPAEmitterCallBack.hpp",
@@ -8336,7 +8344,7 @@
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/gx/GXRegs.h",
-      "sha256": "25b7c741d4d479b450f646631309701cfffe2efb78886a75a56d2386e0c7e95e"
+      "sha256": "f0e67c6c6dd08b720ce75b53706097098615b461887c496bac8b41b089ed63fa"
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/gx/GXStruct.h",
@@ -8360,7 +8368,7 @@
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/gx/GXVert.h",
-      "sha256": "9e063ca4d97a23bd637baa18e94125cb90d9a7b6914533d766cdfa25d191e9c2"
+      "sha256": "1f8153952b7407e4c48f4c75ed45dab615bb9c23530198f9fbdabe149b351298"
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/gx/shortcut_bp_reg.h",
@@ -8456,7 +8464,7 @@
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/mtx.h",
-      "sha256": "b0b70f85ecb3584e6c35da965a8165f5c994ce6f13475ccf166a2f4d74cb4075"
+      "sha256": "604c2c6f8839404f5291f806e7fa9853df5279b91641f0bb9351dd2146991ee5"
     },
     {
       "path": "decomp/libs/RVL_SDK/include/revolution/nand.h",
@@ -9088,7 +9096,7 @@
     },
     {
       "path": "decomp/libs/nw4r/include/nw4r/lyt/pane.h",
-      "sha256": "cf8e7187e8668c69bef6485dda6ecf6ec91abbc5ce33d597945dfa14b8b14b13"
+      "sha256": "f4cac8f5f019275eba824ea77833de11f3e41281c2d17c270594ab877b427179"
     },
     {
       "path": "decomp/libs/nw4r/include/nw4r/lyt/picture.h",
@@ -9260,7 +9268,7 @@
     },
     {
       "path": "decomp/src/Game/AreaObj/AreaForm.cpp",
-      "sha256": "f45e61cc27a5902bbedd948ca5e4302f85f1a992c89458ed8cdae1aceef88432"
+      "sha256": "1ddb32670d3ee5fa2af11bc6a519ce9abecc47fc217c688bba99a02884909410"
     },
     {
       "path": "decomp/src/Game/AreaObj/AreaFormDrawer.cpp",
@@ -9268,7 +9276,7 @@
     },
     {
       "path": "decomp/src/Game/AreaObj/AreaObj.cpp",
-      "sha256": "5ad833601ba9cebf115b53530077ee868de64ddbd52870aaa327450a4ff87cc3"
+      "sha256": "fc7b0ee3fb94422e1e832fd08a71e3abac404628d18ea68b0e61c673f30a4c4f"
     },
     {
       "path": "decomp/src/Game/AreaObj/AreaObjContainer.cpp",
@@ -10932,7 +10940,7 @@
     },
     {
       "path": "decomp/src/Game/Effect/SyncBckEffectInfo.cpp",
-      "sha256": "f2c8c576269c6ed4d45330cebe6f0a0c63db04b99882086ef4dbcb896829dcf2"
+      "sha256": "3beb77e4bb8781ca1f8f2e26ff6b17d226b7cfba698f467974e35010d507d2c5"
     },
     {
       "path": "decomp/src/Game/Enemy/AnimScaleController.cpp",
@@ -11368,7 +11376,7 @@
     },
     {
       "path": "decomp/src/Game/Enemy/WaterBazooka.cpp",
-      "sha256": "7378247ee9351fd58a789c8d01bbf426707b32d72c5104872c0bfa7cead77863"
+      "sha256": "b9297ca9e105f8205b4cac55d1a3fee131fa93caa1bb9e43355dac500b91c8d3"
     },
     {
       "path": "decomp/src/Game/Enemy/WaterBazookaCapsule.cpp",
@@ -11412,23 +11420,23 @@
     },
     {
       "path": "decomp/src/Game/Gravity/CubeGravity.cpp",
-      "sha256": "99e9d14497ab2816a3790800aafc3a96718d178c26f3ce318176dd40faccb6cc"
+      "sha256": "27dd44302372b091968454e132ea7295a7ab47d68f32bd14d790644bd84325b1"
     },
     {
       "path": "decomp/src/Game/Gravity/DiskGravity.cpp",
-      "sha256": "d7a3d0806b761697986770b52de31db6daeb593353663fc09261df9c59b472d0"
+      "sha256": "dc2c3d534a1fa400ec3691355482133351aa8cfd388c236e06374ab5d2337885"
     },
     {
       "path": "decomp/src/Game/Gravity/DiskTorusGravity.cpp",
-      "sha256": "bf90c85574f8044ea3e0820e752788ad4809fe2033b773177dc5f15a5667c3f7"
+      "sha256": "a3da52d2e0a779f882300b43967d23b7b6008a76e21a12bcaa1b7636902eb1aa"
     },
     {
       "path": "decomp/src/Game/Gravity/GlobalGravityObj.cpp",
-      "sha256": "39db50205e63788b230efc85400f95362b690f354febfd477ecb8c51e5101336"
+      "sha256": "ccfbf2631f470b9320447514605c3a22bba788a0c21b1410b00ed33e0c65582f"
     },
     {
       "path": "decomp/src/Game/Gravity/GraviryFollower.cpp",
-      "sha256": "a8f794a871d64306845dca8d7645637e3c8b419f2681c94a2057ba2b9df68a86"
+      "sha256": "c77b16404d7ab379eb5ed49c2a9df606be2388074c21a7edaa0d21c11c501599"
     },
     {
       "path": "decomp/src/Game/Gravity/GravityCreator.cpp",
@@ -11440,23 +11448,23 @@
     },
     {
       "path": "decomp/src/Game/Gravity/ParallelGravity.cpp",
-      "sha256": "56766acdc201f03d8758bc9f9e6bb7b9170f1a4eed262b8d96d1f8aa5bb171f1"
+      "sha256": "46cffacedaa6391da43f88defb1c3e20746e2ebad8e91942641d9a58b168128f"
     },
     {
       "path": "decomp/src/Game/Gravity/PlanetGravity.cpp",
-      "sha256": "3e4e96585bd58207d259cebeb7856f3ab750419be18abe32623b0748afb10c6e"
+      "sha256": "8f52977107017e1873bcf0df1ddda8d71d5d8982cf23e75bb844e53392a7b755"
     },
     {
       "path": "decomp/src/Game/Gravity/PlanetGravityManager.cpp",
-      "sha256": "9cfb3913d2e3951edf5c870ea45dda83f0b0b325207c524d68e2ed9f9a1aaccd"
+      "sha256": "0af3fe9356c9f7623684f4f7c8ff3cb3cb86d14e6a954025517cf93f4fedb0c1"
     },
     {
       "path": "decomp/src/Game/Gravity/PointGravity.cpp",
-      "sha256": "00c06b6b6e7508140c210df894c63a9cb8cab147e0d62cf833439f98353544b4"
+      "sha256": "f77d263d2f6e004d30d74438a394376569c4599a77215117e4946a8941294a0d"
     },
     {
       "path": "decomp/src/Game/Gravity/SegmentGravity.cpp",
-      "sha256": "2e31a8f08a5eef113de187db7a78f15c65455a827821eda2c9af9d5dab81b8c7"
+      "sha256": "262415aecb6092cabaad289766eb9fdb81470ed8a4a8e7145418ca5e3ade3b1a"
     },
     {
       "path": "decomp/src/Game/Gravity/WireGravity.cpp",
@@ -11524,7 +11532,7 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/ClippingJudge.cpp",
-      "sha256": "b6a8332882e7550366e0c247b5225e6986ce3c8850a99b49e4a3603ef1928655"
+      "sha256": "a82ce00a6eaaa88e10766cdbaa643d8c6052aa0847dfb8f779688e057fd2fbd0"
     },
     {
       "path": "decomp/src/Game/LiveActor/DisplayListMaker.cpp",
@@ -11564,7 +11572,7 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/LiveActor.cpp",
-      "sha256": "d5c29c64ffa3e1a6014cb0b336bf1197d220dd273dd150569cd1de07395e5a04"
+      "sha256": "18b5bd5a45065e3840a58f3c1e4638ca272dd9a955bb61a9ca6607d5ee565501"
     },
     {
       "path": "decomp/src/Game/LiveActor/LiveActorFlag.cpp",
@@ -11584,7 +11592,7 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/MaterialCtrl.cpp",
-      "sha256": "864d9d6cc9e7456d811973711c0cba05e46f40e3d47b75ec38c7855def86f31a"
+      "sha256": "ee1a2d9d29bc3a297edade842c0d03e008766d980502921b46ebd1e9c38ba919"
     },
     {
       "path": "decomp/src/Game/LiveActor/MessageSensorHolder.cpp",
@@ -11604,7 +11612,7 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/ModelManager.cpp",
-      "sha256": "5dcd7b3bbe8c43e9675cb45a8df26013c1f82ebb4d261fd2df668ab260096ff3"
+      "sha256": "255abbc086ef0703f920d03c461e4d43d22806e28c35942196b54bcdc19854d8"
     },
     {
       "path": "decomp/src/Game/LiveActor/ModelObj.cpp",
@@ -11624,11 +11632,11 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/SensorHitChecker.cpp",
-      "sha256": "5b1191c04f2bd03d75b080a706aa5fb19ec61861b40a93bce2fa461cecf55121"
+      "sha256": "5efb54dacaaa56f091c1a197252cfff970cdfd636bcc04f60f048af0acf8e41b"
     },
     {
       "path": "decomp/src/Game/LiveActor/ShadowController.cpp",
-      "sha256": "08c71b9bd16a1284de0d6afa7530d1e5e8bead06fce62e3446d55fb385193a28"
+      "sha256": "680b477529cc944eaae8ec94eaae05b570e751ba581ce3c49e06519a37f31d41"
     },
     {
       "path": "decomp/src/Game/LiveActor/ShadowDrawer.cpp",
@@ -11724,7 +11732,7 @@
     },
     {
       "path": "decomp/src/Game/Map/CollisionCategorizedKeeper.cpp",
-      "sha256": "ba710723ff2448cc87567623b8c2b34307b1c58ccb1780894fd0c0cd76fe048f"
+      "sha256": "ebe8420e4ee0d3fcf89be7cec35c32ced7172cfc1b10c1cc43d1f00c1a6d0d97"
     },
     {
       "path": "decomp/src/Game/Map/CollisionCode.cpp",
@@ -11736,7 +11744,7 @@
     },
     {
       "path": "decomp/src/Game/Map/CollisionParts.cpp",
-      "sha256": "04a341212dc92df29588a2e2a113ada26573a130eda7201a015e27001a8f4891"
+      "sha256": "5501ab17572f834f5f772165f31ef333beb0f31086c089c8535360afc8ff5504"
     },
     {
       "path": "decomp/src/Game/Map/FileSelectCameraController.cpp",
@@ -11800,7 +11808,7 @@
     },
     {
       "path": "decomp/src/Game/Map/KCollision.cpp",
-      "sha256": "10392d0a940cc8dd4004c1acd33ef9471a6a14701df4efc044856b7f1c9a14be"
+      "sha256": "f766de40b6fbcad0a8b0e778f20629ce7d13622190d593e06b59b1a49c0ee9c3"
     },
     {
       "path": "decomp/src/Game/Map/KCollisionPlus.cpp",
@@ -11844,7 +11852,7 @@
     },
     {
       "path": "decomp/src/Game/Map/LightFunction.cpp",
-      "sha256": "75d632188d13f78c1c7e4c6713cb26f0a4e2f7280781bfe423326c3b0dcdca8d"
+      "sha256": "790615341b4fe3e920bc3169b660187cff816f8ac92e1448a8639dd7d335e63b"
     },
     {
       "path": "decomp/src/Game/Map/LightPointCtrl.cpp",
@@ -12116,7 +12124,7 @@
     },
     {
       "path": "decomp/src/Game/MapObj/AstroMapObj.cpp",
-      "sha256": "648510b4da54a8e799e05a2ae3c8d5e3ce7e8ff7227ef7e23c1c58bc2c216260"
+      "sha256": "e214d06f221554ccf631ae344eb1463d275208c54a1b8885784b2fb8978304e5"
     },
     {
       "path": "decomp/src/Game/MapObj/AstroMapObjFunction.cpp",
@@ -12740,7 +12748,7 @@
     },
     {
       "path": "decomp/src/Game/MapObj/MarioLauncherAttractor.cpp",
-      "sha256": "6c86eee973253db97ca46a923147ed9abd784138ed4404dd3617b484500df538"
+      "sha256": "6ab1f8c0a461697fae27b5290f16bec31b23e8d07fbe4cb49e680cf737fd0036"
     },
     {
       "path": "decomp/src/Game/MapObj/MechaKoopaPartsArm.cpp",
@@ -12792,7 +12800,7 @@
     },
     {
       "path": "decomp/src/Game/MapObj/NormalMapBase.cpp",
-      "sha256": "ce3a0d324ed74db274b23b888e0206aaf0afd7582137c0f6d333612ebd93ad5a"
+      "sha256": "09d7fa81ebb7dec58aaa0e57eb6668c24c559446d76b30ba19afc6af03f5259d"
     },
     {
       "path": "decomp/src/Game/MapObj/NormalMapTestObj.cpp",
@@ -12852,7 +12860,7 @@
     },
     {
       "path": "decomp/src/Game/MapObj/PlantGroup.cpp",
-      "sha256": "8aff3600e45bbcf8608c6f7a8d7dc71d4c9bf5d2e55492790763bf6c9fcf56aa"
+      "sha256": "b5adbd89d5bd33af93235517c83e51ded8f79f034866afb451ceba4a122ee9b3"
     },
     {
       "path": "decomp/src/Game/MapObj/PlantPoint.cpp",
@@ -13156,7 +13164,7 @@
     },
     {
       "path": "decomp/src/Game/MapObj/StarPiece.cpp",
-      "sha256": "3622877e1b052786b3e903ea375600d6b88a3a83b5b4d3421ee2d97d7594264b"
+      "sha256": "fe6e04344ba76d6023f08b58f1b50c5015170b64e2a25c53c4ebe565859773dd"
     },
     {
       "path": "decomp/src/Game/MapObj/StarPieceDirector.cpp",
@@ -13664,7 +13672,7 @@
     },
     {
       "path": "decomp/src/Game/NameObj/NameObjCategoryList.cpp",
-      "sha256": "b62623d2d99d2660bb4881e078e7473cbd33532f3f8423d6cf4df2e5b01490cb"
+      "sha256": "7cac8d064b9b80c52f2a25f680290f89add5c3d229f8b1b4442747c9cb7e5afd"
     },
     {
       "path": "decomp/src/Game/NameObj/NameObjExecuteHolder.cpp",
@@ -13688,7 +13696,7 @@
     },
     {
       "path": "decomp/src/Game/NameObj/NameObjListExecutor.cpp",
-      "sha256": "52b7486b8c90ab3375b484fb0ee83937e73c19a96cbed921aa59e0df95e27c80"
+      "sha256": "c4d1be4540899b814cacbdb05a4a2ac3d4a130b056c37bb4dfbec2bbf734e4f6"
     },
     {
       "path": "decomp/src/Game/NameObj/NameObjRegister.cpp",
@@ -13716,7 +13724,7 @@
     },
     {
       "path": "decomp/src/Game/Player/J3DModelX.cpp",
-      "sha256": "0094be94fd799af0a303e09ffea85c6f0eba19a30d559b4e82a1809a9ad9cfa6"
+      "sha256": "fed05f02520de8517a7afc58d51b714101e444546a46b9ee5b2e5f3bfe1e5d4e"
     },
     {
       "path": "decomp/src/Game/Player/JetTurtleShadow.cpp",
@@ -13796,7 +13804,7 @@
     },
     {
       "path": "decomp/src/Game/Player/MarioActorPad.cpp",
-      "sha256": "9f1acf9124e3d1fff2d33bafcb0947f884dfafc16bc150c1ab64effbfad74bf2"
+      "sha256": "d2d6f5ff8cca01ab8f3d4027943c3a3d505b835070c3ffce13f964b1a7e85607"
     },
     {
       "path": "decomp/src/Game/Player/MarioActorParts.cpp",
@@ -13824,7 +13832,7 @@
     },
     {
       "path": "decomp/src/Game/Player/MarioActorSpecialDraw.cpp",
-      "sha256": "74afb86055eb0fc0ff110b58b047eb3b38c90b125636aeef76bfb0559f9fe8f1"
+      "sha256": "71c1139cac4b8bde074234ad9cdf1edd3933ac1f18dcdeadf38a4e5029558fc9"
     },
     {
       "path": "decomp/src/Game/Player/MarioActorTakeMsg.cpp",
@@ -14272,7 +14280,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/GameScene.cpp",
-      "sha256": "7d7f6a533abf21e7a799030342c66b63753f59988d0195841162a356de153b76"
+      "sha256": "8b4af05d096fa92ce6426cd365670511e5e46688ee6242197f1e9715d6af5b92"
     },
     {
       "path": "decomp/src/Game/Scene/GameSceneFunction.cpp",
@@ -14328,7 +14336,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/SceneExecutor.cpp",
-      "sha256": "ac7d7b0639ad83f5687dc419e845243bc81ee7ebc70b70e672476a273b0009d7"
+      "sha256": "ee64c50ee303707d66a383b497007df9deac96091c935b71173954ab765859aa"
     },
     {
       "path": "decomp/src/Game/Scene/SceneFactory.cpp",
@@ -14336,7 +14344,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/SceneFunction.cpp",
-      "sha256": "c5cc22855ccf73a5f8fdf042812998b4395fb62035901cd221e155b29b5a1e9f"
+      "sha256": "5d9f0879726e1414d2a82236fbfd90e41e5e91929fe38a33c0555aa4f60fcb82"
     },
     {
       "path": "decomp/src/Game/Scene/SceneNameObjListExecutor.cpp",
@@ -14844,7 +14852,7 @@
     },
     {
       "path": "decomp/src/Game/Screen/StarPointerTarget.cpp",
-      "sha256": "3b0dcf8bf0859b7a830f8d6f23e0bf2487432dcfc5a64fdef7bfd9be57dbc58f"
+      "sha256": "0aceb56d6588d2510da5c88b7761e0e6bf656b3f46547e3251c8dcd98597fc76"
     },
     {
       "path": "decomp/src/Game/Screen/SubMeterLayout.cpp",
@@ -14872,7 +14880,7 @@
     },
     {
       "path": "decomp/src/Game/Screen/THPSimplePlayerWrapper.cpp",
-      "sha256": "557ca53a9a760d14f0f15d64ad64c4830ef75263b20686d351872c80f647c59e"
+      "sha256": "f1ac65cb4b8810037d27d5d29c73da162b8ba9981edcce02914a8cdcc58e9012"
     },
     {
       "path": "decomp/src/Game/Screen/TimeLimitLayout.cpp",
@@ -14984,7 +14992,7 @@
     },
     {
       "path": "decomp/src/Game/System/DrawBuffer.cpp",
-      "sha256": "5d6e8bb02bf651650646c686d878d2bb01a874f997e1fa1215b41570f7e04373"
+      "sha256": "10354f176cef9816a8c873554408d2f043027cd9dc9872b7029f75bb03e97f8c"
     },
     {
       "path": "decomp/src/Game/System/DrawBufferExecuter.cpp",
@@ -14992,15 +15000,15 @@
     },
     {
       "path": "decomp/src/Game/System/DrawBufferGroup.cpp",
-      "sha256": "30f4d3b829fd12c09b6d2e5157b6281953ab7d4df30d092103cbf3efac2e8ca6"
+      "sha256": "1fa175836efbe4243763c18102b1f1565c6d99cc7811f2e73ee5f7bcd7e6126e"
     },
     {
       "path": "decomp/src/Game/System/DrawBufferHolder.cpp",
-      "sha256": "fec9dd0892c162ddde50cc9a505eb9e8c742f6b8d8a2d6106550e42ce6531af2"
+      "sha256": "ddd3637b6cafbd2d29b9f7331fa4b2c5fc7187a333333d39be3b57b291c70004"
     },
     {
       "path": "decomp/src/Game/System/DrawSyncManager.cpp",
-      "sha256": "ffd9038f98e3bc59e168e58f735fb89f6dc2865483b88380d9a47a5714e86064"
+      "sha256": "952a29c43e9f29e8c956c8d3f557cf3d87fee35addeff10a0803389a5a3fc6db"
     },
     {
       "path": "decomp/src/Game/System/FileHolder.cpp",
@@ -15104,7 +15112,7 @@
     },
     {
       "path": "decomp/src/Game/System/GameSystem.cpp",
-      "sha256": "732ad5d355eb5d7768ba9023965c0074346b46155c15ffc727e36e97fbeb3a5d"
+      "sha256": "f0f3c1114f38b03edbadf7cecf1e3197d5282f4c6b1a6062fa8a847558f6bd83"
     },
     {
       "path": "decomp/src/Game/System/GameSystemDimmingWatcher.cpp",
@@ -15140,7 +15148,7 @@
     },
     {
       "path": "decomp/src/Game/System/GameSystemSceneController.cpp",
-      "sha256": "27ae098b14f3c908d5e18a541c591a37b3c7e0fad8541a35c99097f8e1b7ff26"
+      "sha256": "50f0c6e769792ab240243e274d37375fdda88c83abea364ff3befad8435168c4"
     },
     {
       "path": "decomp/src/Game/System/GameSystemStationedArchiveLoader.cpp",
@@ -15172,7 +15180,7 @@
     },
     {
       "path": "decomp/src/Game/System/MainLoopFramework.cpp",
-      "sha256": "845b765ee2d2b5ea450c03b772a1b952e956827fa1fd82bee1b3d2dd5c9bcaa3"
+      "sha256": "c1387f0d312aa0633a40db6d608447076137e6ceb65218353fd8e876c8879b81"
     },
     {
       "path": "decomp/src/Game/System/MessageHolder.cpp",
@@ -15200,7 +15208,7 @@
     },
     {
       "path": "decomp/src/Game/System/Overwrite.cpp",
-      "sha256": "10b8cc659ff5b2b1e62e967d22209cb8aa46908a84560219612ef2992d21237c"
+      "sha256": "720d38a0f3869e139d1c23423d8cf7f8d9ed3b334b4d97351cce5f54bbbd4353"
     },
     {
       "path": "decomp/src/Game/System/PauseButtonCheckerInGame.cpp",
@@ -15256,7 +15264,7 @@
     },
     {
       "path": "decomp/src/Game/System/SpinDriverPathStorage.cpp",
-      "sha256": "cae16b1a3eb53d5c5f5ef6c5ae764c0f3ace2af70ff9a36ac2a5d8926a62696a"
+      "sha256": "3fdee91cc45977d586b1763bc6f724b6f2e4c31ec849e36117af63871274eef6"
     },
     {
       "path": "decomp/src/Game/System/StageResultSequenceChecker.cpp",
@@ -15504,7 +15512,7 @@
     },
     {
       "path": "decomp/src/Game/Util/LiveActorUtil.cpp",
-      "sha256": "f88207e81cde25d29fb4eaca7bfa4e62bedf40458950b9f26b5dc3109f7519b3"
+      "sha256": "c18f1d227be1d6e839300ea60a09935f72a5d6f017b33d5296290d914766aa4d"
     },
     {
       "path": "decomp/src/Game/Util/MapPartsUtil.cpp",
@@ -15512,7 +15520,7 @@
     },
     {
       "path": "decomp/src/Game/Util/MapUtil.cpp",
-      "sha256": "dc058a02ea3f2bfe597be0c6f861df0d7e4c192e3e5f96e13ca7b510d339f217"
+      "sha256": "6c1ead35f72e8990ba642b54b95cd07be7603a8c35ab0cea4f8555c9c808eaba"
     },
     {
       "path": "decomp/src/Game/Util/MathUtil.cpp",
@@ -15528,7 +15536,7 @@
     },
     {
       "path": "decomp/src/Game/Util/ModelUtil.cpp",
-      "sha256": "512218b126e406fc77fa3e6ad2832ff42f248f97f6c46a9927540e4748ce882c"
+      "sha256": "46b43c29f43768a50be7c5f36881a213d4345085c3b8dfb0d2325a3b24a32cd7"
     },
     {
       "path": "decomp/src/Game/Util/MtxUtil.cpp",
@@ -15608,7 +15616,7 @@
     },
     {
       "path": "decomp/src/Game/Util/StarPointerUtil.cpp",
-      "sha256": "f5b42990564475279b64678216043e84e65597ce7f896b4adca60a1a50e6e5fe"
+      "sha256": "982bba28f8fca6ddfe42491f8db05eede7ff36deafda524676ceb60fd79ef05a"
     },
     {
       "path": "decomp/src/Game/Util/StringUtil.cpp",
@@ -15668,7 +15676,7 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DAnimation.cpp",
-      "sha256": "84feb69cfe1864e1860354e7a91f07544fe68b0564db26068f2845cc1203b48b"
+      "sha256": "b7edc22238e5fd211604a1a581a6a47390b1c350597bde9d8de77f36b3a45c88"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DCluster.cpp",
@@ -15692,7 +15700,7 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DModel.cpp",
-      "sha256": "7f22d7a0c5429663d6ff05a831e32cf09dc5db821aae0cd447ce0d711436ef91"
+      "sha256": "b5e302583a0e67a7999f89ae9d473634a09bc2dfcf7695f55ab20d6b989e0c60"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DModelData.cpp",
@@ -15700,7 +15708,7 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DMtxBuffer.cpp",
-      "sha256": "a131ba9eb9dd1999ab91ba4a847b5d6c21c3a2ed8be36ee267f60734af520fc3"
+      "sha256": "e898ca95b6fb5566637f2467a3ee289ad96b9e4679884b7d8917dae4f039ca15"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphAnimator/J3DShapeTable.cpp",
@@ -15716,7 +15724,7 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphBase/J3DGD.cpp",
-      "sha256": "cba8a083658cd4275fc4fbdbb23eaa4f1e79af408ac9a769a78aabe18beb1cd7"
+      "sha256": "755fa5f9fdf2c51c304d4f788d6412b2c785797050a02efdae54c739a0babb6a"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphBase/J3DMatBlock.cpp",
@@ -15728,11 +15736,11 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphBase/J3DPacket.cpp",
-      "sha256": "f54a1521243a20bcb4598803b0278aeab5e2057d31fc4369fcd4d2d2ec01b727"
+      "sha256": "650da331a407f2055b9f55718be8e8b4ac64f507c60659398d80282faa437f53"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphBase/J3DShape.cpp",
-      "sha256": "3dda82aee75b0296e659a19388f7914890995c177f0367d88b846a9b2cbbd54b"
+      "sha256": "6257af8299bb6537cb58a7a3c0acf3733da93e64533a2721c1bf42678b3222dc"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphBase/J3DShapeDraw.cpp",
@@ -15780,7 +15788,7 @@
     },
     {
       "path": "decomp/src/JSystem/J3DGraphLoader/J3DModelLoader.cpp",
-      "sha256": "a2c42b54ada5525663dfb2a40652faf6340341d34cb87faece12910375ba66b4"
+      "sha256": "ca2612bfd75060e4ce754210e53fbbd0d9a74abd73494c02c53b826302e84b7f"
     },
     {
       "path": "decomp/src/JSystem/J3DGraphLoader/J3DModelLoaderCalcSize.cpp",
@@ -15804,7 +15812,7 @@
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAISeMgr.cpp",
-      "sha256": "48f90b1f1f2ce7e106361aa9f23f7b040c35e2d71cdbdbd60ffbb1384cf581b5"
+      "sha256": "5c3b44ec337801b4a689df4d0a145876c09df6448be474544687ef29d0759928"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAISeq.cpp",
@@ -15816,11 +15824,11 @@
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAISeqMgr.cpp",
-      "sha256": "d68cfa5ed0fa9d1cf832e0f15e707f1dabbb52e8e07903fe9cac1b3ef6c34889"
+      "sha256": "58024cca706b0ee90647f23d540043e63412c3c13a3ad6957e76affac8aefb7a"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAISound.cpp",
-      "sha256": "5a34a53ef5275e606fac808039bfe18de804ee62e4203f7cd61dff4ee9631f49"
+      "sha256": "5bbbf23550925d942896195a10e6b4b5c2ecb27bcc9b52614ed7f6f244cc2807"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAISoundChild.cpp",
@@ -15852,7 +15860,7 @@
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JAIStreamMgr.cpp",
-      "sha256": "a9652d625b527aac2be67c614602f8344cab14f7c9dc998dbf5eda60bc455105"
+      "sha256": "4fb618cc1978999dfd4e3b8fbbb1c94cc2ee9e566005fc9efa7089a3f9b76c0b"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JASAiCtrl.cpp",
@@ -15868,7 +15876,7 @@
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JASAudioThread.cpp",
-      "sha256": "148d48a548fc7c8262cf639749f08dc9df6d040cfacc1489c1595ffd93991671"
+      "sha256": "b06c416e56fe5bb1f0eea53e94223feed165a1a4bb6c89f36468e244b9c075d7"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JASBNKParser.cpp",
@@ -15988,7 +15996,7 @@
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JASTrack.cpp",
-      "sha256": "97164eba50e2a64bb25fc8f114674020e052dd23870468531a5508dda1dca726"
+      "sha256": "8008a5046423722dd967ee0826656c7a481386515a049f85582257b38dd6f941"
     },
     {
       "path": "decomp/src/JSystem/JAudio2/JASTrackPort.cpp",
@@ -16160,7 +16168,7 @@
     },
     {
       "path": "decomp/src/JSystem/JKernel/JKRHeap.cpp",
-      "sha256": "8684b55268b55bab24a18b6946483caac96aa7817dae0d14104a444538959adb"
+      "sha256": "9e952d16d9fe0ea482a1118ff0ee10073d46eab2a9e031d64bb46738f75311c0"
     },
     {
       "path": "decomp/src/JSystem/JKernel/JKRMemArchive.cpp",
@@ -16236,7 +16244,7 @@
     },
     {
       "path": "decomp/src/JSystem/JParticle/JPAResource.cpp",
-      "sha256": "70719508174dfaba17127c48a5cbfb9144a65981322d1f52faa3e0913d993e42"
+      "sha256": "561d5852ae912df200b6fe4655f5a38fc79cc6d85aac4cdaa14552d0e155205f"
     },
     {
       "path": "decomp/src/JSystem/JParticle/JPAResourceLoader.cpp",
@@ -17592,7 +17600,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/gd/GDBase.c",
-      "sha256": "a8fd9cc681bd76733b66a0ec15fb8ec5a8e6b29ddc3e1165c2ab24e8edad77b0"
+      "sha256": "17e2df8911fb2a5ed89d4be64cd2bad5953b23d92ea79841c3ac901d9669893b"
     },
     {
       "path": "decomp/src/RVL_SDK/gd/GDGeometry.c",
@@ -17632,7 +17640,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXDisplayList.c",
-      "sha256": "e8c5e5e21716e845c515269379d5e37ec23dd568da04a672aeb9fc7e42b010a2"
+      "sha256": "2e2b889dc38064b4c5e89156e24083204c3017768c0388199abdaf0d9d4b504d"
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXFifo.c",
@@ -17652,7 +17660,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXLight.c",
-      "sha256": "924c5c60f461dee38c8e496b7154e037a4d7fef80b48c37b790ed28ac98acfc8"
+      "sha256": "0e2a154b97df732ce30053ba0c3ade0a9a41b870b097890742ddd2a502efe48b"
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXMisc.c",
@@ -17668,7 +17676,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXTev.c",
-      "sha256": "e2bcafe26a8a4008e0134512bb0b156a6ae1ce58323a4f70c4158a7b20d971c8"
+      "sha256": "915844690922616c291f9a2795582b88b965004b8623e0e9d48b0e54b8f7a3bc"
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXTexture.c",
@@ -17676,7 +17684,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/gx/GXTransform.c",
-      "sha256": "4e6c6ec6f3c97d6e867335cb1f0a7ca741a1ea0686ec9414d91c46ebfd55edb2"
+      "sha256": "cf81b2444d803a616ea64bdc6734cb2d796920785abc8621698127d6308d7792"
     },
     {
       "path": "decomp/src/RVL_SDK/ipc/ipcMain.c",
@@ -17920,7 +17928,7 @@
     },
     {
       "path": "decomp/src/RVL_SDK/os/OSMutex.c",
-      "sha256": "e5b935ec858d247cf646b917a91f88357bb9af7514a8e2469e2c2ea14bdd7ee0"
+      "sha256": "7fab5ba573849e8801411a88469918a93b889a6ff53030fbdc0552084b70ba3b"
     },
     {
       "path": "decomp/src/RVL_SDK/os/OSNandbootInfo.c",
@@ -18360,7 +18368,7 @@
     },
     {
       "path": "decomp/src/nw4r/lyt/lyt_pane.cpp",
-      "sha256": "ce1bbfe86025e198c51fb5f5d6ed620dc65fe64c4d4787a7df39d45f66f509b9"
+      "sha256": "84188b9798678f34ff17fb342d66600e86e4f32b5287693f881d1ee91cafeee1"
     },
     {
       "path": "decomp/src/nw4r/lyt/lyt_picture.cpp",
@@ -18475,12 +18483,16 @@
       "sha256": "8ceeff353458cb809b162c32d9caf868b16ba3642e21a19d9bd9c48ea1424e16"
     },
     {
+      "path": "platform/include/port/audio_cpu1.h",
+      "sha256": "a50d705545b2e17eb4eddb8399a98bd457d084c964926148b506fa3a36f99d58"
+    },
+    {
       "path": "platform/include/port/boot_dialog.h",
       "sha256": "129f8dee1149016b1c2d8aa36be3f4250b4ece87a0eeeb73ad241d644472fbba"
     },
     {
       "path": "platform/include/port/compat.h",
-      "sha256": "8bd2f6ca633e279efad28197f3486ba8cda83414e800ece6ce73ac78a84a75ec"
+      "sha256": "75d789c54ba7360c1e5b331a7e5035cf5268c97145387cbb56cfadfc6fb17f5a"
     },
     {
       "path": "platform/include/port/control_bindings.h",
@@ -18488,11 +18500,11 @@
     },
     {
       "path": "platform/include/port/core_layout.h",
-      "sha256": "020193a7452140a6488888fc1d07b584df2a0acc1a4491790e321040ae1ed2f3"
+      "sha256": "cecd496beb889b53455bccd66967e53c4f379a42b2ffef1d2afb82f2c9a3e640"
     },
     {
       "path": "platform/include/port/depth_of_field.h",
-      "sha256": "6d295602b2a114a2ece55da0a30cb44a7ba9bbcfb4db28687d262ad49874221e"
+      "sha256": "7c4f50eed144b6fdd2a19e069a04898a3fb7f44362381a8bcff12f4a2053f270"
     },
     {
       "path": "platform/include/port/diagnostics.h",
@@ -18500,15 +18512,15 @@
     },
     {
       "path": "platform/include/port/drawdone_defer.h",
-      "sha256": "804751f1d9af3c84a884ae4a6a2ab3004e490490a05d31df59762aa92fbd762e"
+      "sha256": "ebba3a682d566dfb83855937d7278e2ae691f6096d761e402761c9fc67f0546b"
     },
     {
       "path": "platform/include/port/frame_pace.h",
-      "sha256": "46a1d04f1392559a12b013019c4e5e9b99d2ac1851d0599584a5761a79639346"
+      "sha256": "e407883d8e4dd21c51ac7640ecbcb344aa3b0e5e0e5d2b663b0a57bec77950c1"
     },
     {
       "path": "platform/include/port/fur_map.h",
-      "sha256": "6651f5bf200ef9181835109b520edfd91d38abc5cebe3c526a8714950b766f30"
+      "sha256": "798918cea18a1a70552277c6aa1823b05cb815984dab778b87819fc1532ffcbb"
     },
     {
       "path": "platform/include/port/game_progress.h",
@@ -18519,12 +18531,24 @@
       "sha256": "f3c56e8368202fc984e8b956a76e4e97df3819d65ea4bc6ceedad4c94cf0acbc"
     },
     {
+      "path": "platform/include/port/grav_memo.h",
+      "sha256": "59c393ea7e05d854518c90b6efa7391eff0111bfc0159ed348e437560ef749e3"
+    },
+    {
       "path": "platform/include/port/gx_fifo.h",
-      "sha256": "3f757f891d1c248bcaa6277bf2f7d5d36e690b2f594d8b0ff6eaa79cd08b80f6"
+      "sha256": "d940a225568a7e4c56af92169b5b0083e68da8172eb4484cacb7f7a67686a27e"
     },
     {
       "path": "platform/include/port/heap_routing.h",
-      "sha256": "1242d3ae77464deb48eae63976bc673fa33ea0311b0561d1beae14f698432135"
+      "sha256": "ee63d04308d252e2effc16b4d759c88013c8ada39a156493c0b5aeef760c84bd"
+    },
+    {
+      "path": "platform/include/port/host_vector.h",
+      "sha256": "fdf5c24be4c0b942d079ffde588d1e0ca06eb7ba13673d3c775c508cf115605a"
+    },
+    {
+      "path": "platform/include/port/hot_knob.h",
+      "sha256": "f5f216a402d6dec429e36f23514259d9181c50183696e0ec8c6d0a9757b0aac8"
     },
     {
       "path": "platform/include/port/input.h",
@@ -18533,6 +18557,18 @@
     {
       "path": "platform/include/port/input_script.h",
       "sha256": "45c545daa0d6cb4a82b41f506594267af1bba9b3ce61ab3fa46d6908d446ce49"
+    },
+    {
+      "path": "platform/include/port/key_search.h",
+      "sha256": "559fe3df51bafda012b3e7ffe88691f969b377d3e389539d0681f8734fa00171"
+    },
+    {
+      "path": "platform/include/port/light_memo.h",
+      "sha256": "58d36b664ed37c414ba6bf976fe94ce885a6826804e5a03ff59656d3e0c5a7d6"
+    },
+    {
+      "path": "platform/include/port/move_prof.h",
+      "sha256": "4ebd105680dfb27403e5be8a1c113a50a27038cbd4155872e47bf20ed4e6c2db"
     },
     {
       "path": "platform/include/port/msl_ext.hpp",
@@ -18547,8 +18583,28 @@
       "sha256": "bee1e6d1fd0b65b07dfc8cf814e06474ec252c96b4e63f8ed4fc8a6b32ee248f"
     },
     {
+      "path": "platform/include/port/pane_memo.h",
+      "sha256": "7a4d99bab0356be5c96a42c42d17a69fd79e5ae8ce480f40270a3ac68c7005d0"
+    },
+    {
+      "path": "platform/include/port/par_async.h",
+      "sha256": "8c5e442eaf5d0c28fc60a2a94b2a31bf883473df185ec0d5f93981d8f6be24e1"
+    },
+    {
+      "path": "platform/include/port/par_batch.h",
+      "sha256": "f77a22ddd8a85523fc35a4459d7cfd78ccbbad904a3ac58a115b96875d26e574"
+    },
+    {
+      "path": "platform/include/port/par_exec.h",
+      "sha256": "7c6d8f0cffd60467f635679be46a4a2f6138eedf3e6a290664386b56874768d9"
+    },
+    {
+      "path": "platform/include/port/par_spec.h",
+      "sha256": "cd133f593310f0174f6fa699056ffc9703cf0e206ef727afa5bac30043051a4b"
+    },
+    {
       "path": "platform/include/port/player_settings.h",
-      "sha256": "367b004aef73034b62680cce9987be3cbc87d65e62823d5567784d3ce97647f6"
+      "sha256": "5e672d04e5163132d8a31cc8eec9f90f4ac7067845916e3349671cb33b3077a9"
     },
     {
       "path": "platform/include/port/pointer_aim.h",
@@ -18556,7 +18612,7 @@
     },
     {
       "path": "platform/include/port/port.h",
-      "sha256": "2f23b3a565287963b916a6bf20eb1cd5a2654a31b54bcbaa3559e43036c895a1"
+      "sha256": "575e38010da6abf04f4373bb4635d284ce12099b5b2fac60c865d5c6d19f3de6"
     },
     {
       "path": "platform/include/port/ppc_intrinsics.h",
@@ -18576,7 +18632,7 @@
     },
     {
       "path": "platform/include/port/reduced_motion.h",
-      "sha256": "dcfbcdd6db7f5c63f67e42f2c4fac9371ddfdb6b09304ae42d6f1874b0609eef"
+      "sha256": "1121b0a180b8aa43c2e02504e3e644ccd542d9bfc1c6e99df885f43eeaa2f5aa"
     },
     {
       "path": "platform/include/port/resume.h",
@@ -18600,7 +18656,15 @@
     },
     {
       "path": "platform/include/port/settings_ui.h",
-      "sha256": "73fb3473dc8c62444fbe1137b4187a17d2c8722cf9737e0007ce82947703f75c"
+      "sha256": "976d84e992e105131b75b08718b6e024bfdb4841d24ed4ad19e731c5c600f72e"
+    },
+    {
+      "path": "platform/include/port/shadow_memo.h",
+      "sha256": "379b89a9266543b83a84443fc0b026e86090068d80596f46d9edfb3e409a45d8"
+    },
+    {
+      "path": "platform/include/port/shadow_memo_hooks.h",
+      "sha256": "9506ad42c21b3507ea801d8bb5fb15e2fe94e3fa5b2619a9f52afd6776875e4c"
     },
     {
       "path": "platform/include/port/tilt_gain.h",
@@ -18652,23 +18716,31 @@
     },
     {
       "path": "platform/src/audio/ai_dsp.cpp",
-      "sha256": "1ba4ad152c066721245d10af2cb96c73b12af92d059c2aecd63caa99a1b6827c"
+      "sha256": "d880ec7d61d78ecfc09e51205f9b711425ead79cb4a0206d2c3a89a6c6474949"
+    },
+    {
+      "path": "platform/src/audio/dsp_afc_kernel.h",
+      "sha256": "43267140c6541a290ffc086d3b11be8bf7b286f49b0335f7922c2938829f8136"
     },
     {
       "path": "platform/src/audio/dsp_fir_kernel.h",
-      "sha256": "5e20f97d913565ae19b0ce9a7bb7578aa5c791fb7673ee4fce42196c76aafb9e"
+      "sha256": "b6e024938c3c4471b50f00e34ba511d2ee0b98e87800e4d314af07dd08663922"
     },
     {
       "path": "platform/src/audio/dsp_mix_kernels.h",
-      "sha256": "6a04892162639844eaeeade17ab3cf0bf03072f936ee37c9900916a33b144519"
+      "sha256": "456738ccafcdf8025e1a0454db3526e9cc459aa0534a4be13af51c1c158c71cc"
     },
     {
       "path": "platform/src/audio/dsp_mixer.cpp",
-      "sha256": "f28c5af3e05297d7ebe68ca4cded072c59e92591080a05e570955b33db513478"
+      "sha256": "6c4d3512ce6114464609ba8bd74ef0199ba11f09c26fa5b5a9920c5f314560ad"
     },
     {
       "path": "platform/src/audio/dsp_ramp_kernel.h",
-      "sha256": "25f2b911cc9af87edc9cce365046b8a2d0097b2df3f7422a55f8976ad4f2389d"
+      "sha256": "3d913eede5f204005ffd1687b2c54f61c4b06f01df0e909a780b784b6f353b28"
+    },
+    {
+      "path": "platform/src/audio/dsp_resample_kernel.h",
+      "sha256": "0e52594c169b109b838e5b3f818cdab84bdc5cdb18430a4ac730424a02150528"
     },
     {
       "path": "platform/src/dvd/dol_data.cpp",
@@ -18696,7 +18768,7 @@
     },
     {
       "path": "platform/src/gx/gl_renderer.cpp",
-      "sha256": "0beeebfe2dbb3e2a68b375ed60277ecb6821152ee7c7029fbacac790afe2702a"
+      "sha256": "64b93e1c5d0f492f424f1c81822bedb891b1fb5c2cd7a6615376d56b1fe3bb8b"
     },
     {
       "path": "platform/src/gx/gl_renderer.h",
@@ -18740,7 +18812,7 @@
     },
     {
       "path": "platform/src/gx/gx_fifo.cpp",
-      "sha256": "e09797e4f217cc616c6ee1ac682b39ca1340765027133248b349a8c2633f18b6"
+      "sha256": "7d56d51d5fb3bf662fdccac9c2ad28a5b705235e1444858c33fa28cfdebe1870"
     },
     {
       "path": "platform/src/gx/gx_live.h",
@@ -18792,11 +18864,11 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "971c2807aa78b44c34da5a385e6f2e262756678029445bfd0a7c9513238204f8"
+      "sha256": "05deae9b97cd4b0c49876af7ddc23e4a6462215afc2392134f31684cafa90622"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
-      "sha256": "e9eee66fdb76bed7c84bb6349d6177722d2357376403eb5866c5712332d93361"
+      "sha256": "106735caab418d63d749c347125324c01d3844e7339d16563b6412702c592671"
     },
     {
       "path": "platform/src/gx/vita_efb.cpp",
@@ -18880,11 +18952,11 @@
     },
     {
       "path": "platform/src/os/os_mem.cpp",
-      "sha256": "7c051ab155c657dc3d1b8a4901a220b956a7915f520d31b3e93dae7fdafb614f"
+      "sha256": "c7d1d5930aa9154c9f256e05cb2f9b6d347061c42020491ec9a5891bb7606308"
     },
     {
       "path": "platform/src/os/os_thread.cpp",
-      "sha256": "f96b47efcfb0348d393d90c922e9015f1b411725e65e125ae49636fa6e0dc5be"
+      "sha256": "36a20f2c5a6b0e2670ade03f6d16a8848e43eb64a998dec737d84c506d713fa0"
     },
     {
       "path": "platform/src/port/boot.cpp",
@@ -18892,11 +18964,11 @@
     },
     {
       "path": "platform/src/port/cutscene_skip.cpp",
-      "sha256": "7e2737f0a94268b0ba218c0d923a1bc4eb6cd47a88558a8935ee630764d69e97"
+      "sha256": "e43a5dad872499169064493a694f8ccee537f26cab4cefc64492fe63812119d2"
     },
     {
       "path": "platform/src/port/drawdone_defer.cpp",
-      "sha256": "e757f5302167cfc8bf87a7a0e0b976c5b8afd8ad9f819eb238f6b25b10033383"
+      "sha256": "f5892875a2ff19013e4983dc3d6b6016699e98990600ec3e5e63e9f656b009cb"
     },
     {
       "path": "platform/src/port/handheld_art.inc",
@@ -18924,11 +18996,11 @@
     },
     {
       "path": "platform/src/port/perf.cpp",
-      "sha256": "6385234ad44ca998cb675e2e1b1bc82bf535b576b6ebe02b7e5a8286b43f7071"
+      "sha256": "badffa970f617418196bbc69381f58628db8a6c532039a696cb38a5939bda419"
     },
     {
       "path": "platform/src/port/phase_cpu.h",
-      "sha256": "cb905ef2956df2be97ef77e2214f4715b52270ad387f0d65017e3b1af9c503ee"
+      "sha256": "0282eb047289af34d56a799bdf22fa272dea014f6fa365f455567478c6046873"
     },
     {
       "path": "platform/src/port/romfont_stub.cpp",
@@ -18936,15 +19008,15 @@
     },
     {
       "path": "platform/src/port/settings_panel.cpp",
-      "sha256": "dac1c73af8d44d897f0edca6fed235881139d6d2509329573fd7a975fa3c30e6"
+      "sha256": "5110f8c68996aaff367ca9617ae74411b510f2153e5a3cd4d55afac9cbd08e8a"
     },
     {
       "path": "platform/src/port/settings_panel_plan.cpp",
-      "sha256": "4e63f9ef68a081fd953fe1e8a1fa91bed7c0d84f4494ef3bae0b6182dd1e1c59"
+      "sha256": "1ae5d4412e19154a9a8481cfcf87f3a059505123f63cf78176d32028cce235a4"
     },
     {
       "path": "platform/src/port/settings_panel_plan.h",
-      "sha256": "2b32eb16a5c2df9c0f1733bf12d1e1a3c3a984d5ab0e903ba4bb78e547130225"
+      "sha256": "0e8a0c122a8e9f84fd7935f146d2f3d01c5d5da79b80a07889480aae90cc158c"
     },
     {
       "path": "platform/src/port/wstring.cpp",
@@ -18956,7 +19028,7 @@
     },
     {
       "path": "platform/src/sdk/mtx.c",
-      "sha256": "caec742ddb84bf9971f8d71adc426eb2408a98f11c6b7f26d339104f44ec044a"
+      "sha256": "7c10f1c33ae6fb365e35562f97ac61d4d84eb84951566d3556c3d7487b0afdec"
     },
     {
       "path": "platform/src/sdk/stubs_misc.cpp",
@@ -18964,11 +19036,11 @@
     },
     {
       "path": "platform/src/sdk/thp_video.cpp",
-      "sha256": "41a342b6a043ce269f02f2cf7b45faded8b53d26e7f32c0b9abf8266b8f67d6e"
+      "sha256": "e031b3f1e73a510fee65e56f03f165b7a822db1cd2677cd68e3da6970c3ec50d"
     },
     {
       "path": "platform/src/settings/player_settings.cpp",
-      "sha256": "4ddc5698432c02d3b3e09c2c2a1539eae2a7543a1b62217fcd1bdbcd7e683a97"
+      "sha256": "574877020802fa635687a746ec4a1e939f76a77464819cc437f1df255f1b9003"
     },
     {
       "path": "platform/src/settings/settings_assets.inc",
@@ -18976,7 +19048,7 @@
     },
     {
       "path": "platform/src/settings/settings_draw.cpp",
-      "sha256": "519b957ec5712a3c0b78d52e4186a252d6fae22c6b43c300d7e41c15916250b3"
+      "sha256": "f1bb07df2737ec7d21a01acba0598d04e4a00cb9d008f6e75c264591afa2f036"
     },
     {
       "path": "platform/src/settings/settings_font.cpp",
@@ -18984,7 +19056,7 @@
     },
     {
       "path": "platform/src/settings/settings_launch.cpp",
-      "sha256": "4f917f11d8371e83af4192c021845914e783888cfe5ed44ee26a606cd33f3575"
+      "sha256": "e243292927918661bf4fd6287e89ad759e2b8c0ee7488b399c25bcd38db326e2"
     },
     {
       "path": "platform/src/settings/settings_playstation.inc",
@@ -18996,7 +19068,7 @@
     },
     {
       "path": "platform/src/settings/settings_ui.cpp",
-      "sha256": "6ccfd6c2377ea8372953bd8e93b740a66dd76203ebfbbdf678d21c0314df94b7"
+      "sha256": "2bf1d584f952c9d783fc5e76192da509075032a72761406e0895618a1fe20c09"
     },
     {
       "path": "platform/src/settings/settings_vita.inc",
@@ -19064,19 +19136,19 @@
     },
     {
       "path": "platform/vgx/src/vgx_autoq.cpp",
-      "sha256": "2e5d683453663d5e2d2b5a12e64345f3a7445f801f3f427617173e04dd0d8fd0"
+      "sha256": "78b921108e1a4f2aff2de4f44ba38f65b18b0dadfccd8be2e755499e496e94ce"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.h",
-      "sha256": "0f572b5bc1c55db417704e7c3e4bf9fc9c717abdb2630a0b8289e1f0774d4a73"
+      "sha256": "60694310b8b364ef7256075ebf6c01510d2cf8e224450893036778f4e787a5be"
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
-      "sha256": "5a5df33739d3659d1d63e89d14f6b9f82868babd0ae628b219e977e504e283b9"
+      "sha256": "b4cfc0092772be4151e6e8583e7b783fb6cfdb9498d35553aae056b3f8ba4973"
     },
     {
       "path": "platform/vgx/src/vgx_backend_null.cpp",
-      "sha256": "fd7b76dbbf9f87edf24d7e5b9ee42b2e398a45296604c52f246b65c93f575850"
+      "sha256": "45014b9cd80cb6cbba1bcda0cadccfa7f03a7f7446ec628bb26c53623b3de7c2"
     },
     {
       "path": "platform/vgx/src/vgx_bpsync.cpp",
@@ -19084,7 +19156,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_cmd.h",
-      "sha256": "7d6bbbb2e9ddc4d2c72187f6ecdccea91e84700149d79769f8075a67add08488"
+      "sha256": "a6bf20587f923fe9e6f5c98544bcdbc3399130962a178f0afcaf4afe42e3ead2"
     },
     {
       "path": "platform/vgx/src/vgx_coldtrace.h",
@@ -19100,7 +19172,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_common.h",
-      "sha256": "c9c70e94f73f2b9cccafbce4bcf2ed8f5007609dbf6b2539d935576f312d8f35"
+      "sha256": "80e087dda5ca6a41884f31f6b7f8a4271561ad17e2a9ee29a9a12ee25c4cb4a4"
     },
     {
       "path": "platform/vgx/src/vgx_copyvar.h",
@@ -19112,19 +19184,23 @@
     },
     {
       "path": "platform/vgx/src/vgx_dlcache.cpp",
-      "sha256": "ab38544538059fd646cced286318818b75aa5b65283b16907ff21fc298db5963"
+      "sha256": "caab374ac7374dc3918f592a86aba3edf73c4b3eff8e7defe02620801cabd093"
     },
     {
       "path": "platform/vgx/src/vgx_draw.cpp",
-      "sha256": "ba11b16b6aff315addc0c9f49d01c85655fc07466fa91c0bfd00467b4902049f"
+      "sha256": "8b7ba1852698fc2754a21234c99dbeb3ba8dc5fda98fad8bd0bfef4f687be2e8"
+    },
+    {
+      "path": "platform/vgx/src/vgx_draw_reject.h",
+      "sha256": "953abfd27e91f201b4a85e151dc2e6b76275bc63fae1f458b3a9d3ad9d814456"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.cpp",
-      "sha256": "6128bf4a4c5846b9d1d8fe97004381d68a8fe98942bddafa539a64383f941037"
+      "sha256": "440cc187aed25e577842dbc608707d40a518e8f7f2f5225ac469c288c4d1a931"
     },
     {
       "path": "platform/vgx/src/vgx_fesplit.h",
-      "sha256": "6ad37223e535e434ebc0af25c65e7082054fc5cc4124b776b8529f32590837d8"
+      "sha256": "40315ba42ed801ff752939d71eac74d28e4ba1bb29b0c0c3e580b9b6065d84aa"
     },
     {
       "path": "platform/vgx/src/vgx_fixes.h",
@@ -19132,11 +19208,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_guestmem.cpp",
-      "sha256": "e05e8103ce42659947eb7d2b83efa0e0b01b1065b9eaaaa66be3dc10b95b934e"
+      "sha256": "e36f0d7dcbfe7fc5c68cd6169c9c2db3de85146d2a9c5105434478ed82872040"
     },
     {
       "path": "platform/vgx/src/vgx_guestmem.h",
-      "sha256": "84e75492ef34e8102b6158cee85aa203759852bfa55084899c30d1a3e6882a61"
+      "sha256": "472c59511836ed0dd00d01d9b78d28f865c881297324be93f8beed9716b6044c"
     },
     {
       "path": "platform/vgx/src/vgx_hdtex.cpp",
@@ -19156,11 +19232,11 @@
     },
     {
       "path": "platform/vgx/src/vgx_recipe_seed.h",
-      "sha256": "4606ee7c1a582a69d50aadf96dbe1ffbdb14cf4975912ca5dffddd4212907091"
+      "sha256": "a726121ac3dda7c1ff105b037d98907b3d83a28da93953b1e398b0a0cd7a24bd"
     },
     {
       "path": "platform/vgx/src/vgx_resource_audit.h",
-      "sha256": "bd764a65a198f7a80c47b1ab8800774eb32c9fe4231e4b1eb1b2efd21363edf3"
+      "sha256": "de213e7a0231d7128c8dd658d48a077be14b106938916c0ad9123081009b30ec"
     },
     {
       "path": "platform/vgx/src/vgx_sanitize.h",
@@ -19168,19 +19244,19 @@
     },
     {
       "path": "platform/vgx/src/vgx_shadergen.cpp",
-      "sha256": "184558b5aa4390c60f9869617d83525997f1f15f709e6252df18c8b0454f35fc"
+      "sha256": "297833574b58e27a239eae444971ff970347eeb9739d35520a2b73e25cb8fef5"
     },
     {
       "path": "platform/vgx/src/vgx_shadergen.h",
-      "sha256": "1db265df273211cf081969deeda028d8ac6ca7f37770ae093837752b5312511f"
+      "sha256": "d7b193b8858730b01245393c1b315c085e3b3a4d691510b96876ef7435eb4ffe"
     },
     {
       "path": "platform/vgx/src/vgx_state.cpp",
-      "sha256": "7f057997cf0575f154ab2c2a35f5ddf08528981523a2f7ca236d6e82c90f20c2"
+      "sha256": "2117a3647ea6604afc7087999107f2400dc0acdfcd7bf45af5b67f461e1b5c61"
     },
     {
       "path": "platform/vgx/src/vgx_state.h",
-      "sha256": "deca6064c5a91f043ce92e840bee4418a7943b5621abc13fc1b67c2ebd6cec64"
+      "sha256": "021e2204cdbabb39bd86fb4daad86556f9521ba79d09a68d4d641e5cba50a968"
     },
     {
       "path": "platform/vgx/src/vgx_static_crowd.h",
@@ -19192,15 +19268,15 @@
     },
     {
       "path": "platform/vgx/src/vgx_texcache.cpp",
-      "sha256": "0328ed14424c6e03633de9719f066e73c752a7d62f0897c0f5d29ad4fd8c8ef7"
+      "sha256": "412ccef1354c8d053830bac411fca14bf9be908f58b4fa5ac2b65de6e8894dcc"
     },
     {
       "path": "platform/vgx/src/vgx_texdecode.cpp",
-      "sha256": "993c898b54d681704855aa4050ca114802fd94e2bc8a30b5b54394bd31272521"
+      "sha256": "b38c986dd81097d801593a704198b1d7cab2c84fa9168e479cda1d6fb8551fa0"
     },
     {
       "path": "platform/vgx/src/vgx_texdecode.h",
-      "sha256": "db34b6cd9aa4d63b511803e688608d3ab6e4b623d40d6e9a94e2ae7eaa23ed2a"
+      "sha256": "24cb4071b7fe801941f15724695fdae005f158481c65a60a732e314591c2fe89"
     },
     {
       "path": "platform/vgx/src/vgx_validate.h",
@@ -19212,7 +19288,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_workload.h",
-      "sha256": "4e094b9e6e3d535c4d0315cdf07917dde5de46cf7b9685eefae70b29790f849e"
+      "sha256": "441fb472a8210eba1526b14dcfeb3bad7e000e378f66f3bca5e5a644c479c356"
     },
     {
       "path": "platform/vgx/third_party/LICENSE",
@@ -19236,7 +19312,7 @@
     },
     {
       "path": "platform/vgx/vita/loading_screen.h",
-      "sha256": "b9910bff4c0bcbd78f6cef194c68191bf488073a1c822fad1c3c26cff1365e47"
+      "sha256": "53df3ff1825725259db22243b22f6d7864bc26dbda8bce1c2481acc833f6bb8c"
     },
     {
       "path": "platform/vgx/vita/vgx_boot_guard.h",
@@ -19252,7 +19328,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_core3_probe_vita.h",
-      "sha256": "5555cf5cb0a53743e8c389081ddbcba6a53de8d8efed2eb892cc9552fabbc7b3"
+      "sha256": "ca7b1b3e439f783ff972861bdb7abfb5ed9b0ffc45ca996f6b7d471cd4296710"
     },
     {
       "path": "platform/vgx/vita/vgx_display_rect.h",
@@ -19260,11 +19336,11 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "7173f9fd67ee3f800bc6956a8a3bf1b15e2df96945d07e576148e911d33589b0"
+      "sha256": "93a3c4b80284a68b7ec861edddd01ffaa8273c160cbe21b22749b3441487a289"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",
-      "sha256": "6b88e52ebedc3ca890096b30dd19f15d89a266e4ed00207bf8c58d786a0e048f"
+      "sha256": "0aa9a4743a66178d43ce713efc762d1cc0b552f009cdd81ff0a4d95bb113084f"
     },
     {
       "path": "platform/vgx/vita/vgx_shader_pack.h",
@@ -19273,6 +19349,10 @@
     {
       "path": "platform/vgx/vita/vgx_shader_reader.h",
       "sha256": "63ddce82bc683f7484eb517631a384d12150eb5f03d6c74c38737165f918fa3f"
+    },
+    {
+      "path": "tests/ac_pane_mtx.cpp",
+      "sha256": "639ccfe9f472693b471563fe32e1a992ecd6a8e622c1eeffe303ae6c85e421db"
     },
     {
       "path": "tests/anm_key_fixture.py",
@@ -19292,7 +19372,7 @@
     },
     {
       "path": "tests/autoq_clock_stubs/psp2/gxm.h",
-      "sha256": "b2bee7ec6b4821fdcd449cfeeedb13cba65ae9fce26d04279c084380cc97e148"
+      "sha256": "966b60f3112aa3b201da19dfdcc571de56263936d118cf8c23ec8f0fac9ecc80"
     },
     {
       "path": "tests/autoq_clock_stubs/psp2/kernel/processmgr.h",
@@ -19328,7 +19408,7 @@
     },
     {
       "path": "tests/core_layout_test.cpp",
-      "sha256": "9e130d5212bee375a2a22024f398854d00fc3e90cee8d93f0db7c194f5b1d229"
+      "sha256": "467ff70c6a9770af752fc1f256fa403c3a42fc50ee3992cc505c2145f5b16121"
     },
     {
       "path": "tests/depth_of_field.cpp",
@@ -19336,7 +19416,7 @@
     },
     {
       "path": "tests/dome_pointer_input.cpp",
-      "sha256": "a8ed0f776bb68ab9029d5277a6e03f350c4d54debbebba5757c97f51c80397fc"
+      "sha256": "d42cbbe97f7f767b2257f1c28b3ec6aea97fb38c2c730f1858e7b686e61a5473"
     },
     {
       "path": "tests/dome_zoom.cpp",
@@ -19352,11 +19432,11 @@
     },
     {
       "path": "tests/drawdone_defer.cpp",
-      "sha256": "8b74d1fbed0c9e4d3a16bcdff789fa0253bff229e088ddc6dd3802fec6f53d20"
+      "sha256": "c72aebf7c9682dd5e947e5b96fe01f154d09e3882e901e0a727ad27c52e66e2f"
     },
     {
       "path": "tests/dsp_async_mix.cpp",
-      "sha256": "fdac6d8f09b08f987f08012a1871bbd0bd245fd6d5a0130c270f1c50ada14065"
+      "sha256": "40fe6721f3f8d8f7d807fe5f79c7a902eb5e45b9d26f63ead69be70114d096c4"
     },
     {
       "path": "tests/dsp_fir_benchmark.cpp",
@@ -19387,6 +19467,10 @@
       "sha256": "1416f9aec10944ec0fd66722b071efff004a9f1ff39d9151824932f17c7ab844"
     },
     {
+      "path": "tests/dsp_voice_input.cpp",
+      "sha256": "9e8a2f483026972e900c33da9fa1089b68b4306c20d834b0b27534f89b8fc4e8"
+    },
+    {
       "path": "tests/dvd_errors.cpp",
       "sha256": "e451c774538cc09fcb6181dd2afd87a5045a3b37723e9904757478071916c664"
     },
@@ -19403,6 +19487,10 @@
       "sha256": "4a3f691860e3282aeb158d4ca5906384e996d2ee49cb8af912844afcac9e10b9"
     },
     {
+      "path": "tests/fifo_batch.cpp",
+      "sha256": "f77833b534fa5504de6a8707a51369b17dcc9c5bf2e758b298eb0009fc2095e7"
+    },
+    {
       "path": "tests/fur_map.cpp",
       "sha256": "204d26624683c42f3eb728c63976532fa965c6d1cbd78b4d80f9eef3acd6efee"
     },
@@ -19417,6 +19505,10 @@
     {
       "path": "tests/glibc_fabs_shim.h",
       "sha256": "f08f67b432f685986313447fb494990fdcd254fab9804d8e07a72840fe6d328c"
+    },
+    {
+      "path": "tests/gravity_reach.cpp",
+      "sha256": "578daceca2990b31871786060791aef085325c5f581f6d943db41765afa4ed9f"
     },
     {
       "path": "tests/gx_copy_pixels_benchmark.cpp",
@@ -19459,6 +19551,14 @@
       "sha256": "c97ee3de07df1ac6227c8f517904663e5397b0a69c08fb0b46af977b2796b6d8"
     },
     {
+      "path": "tests/hivelogic_cuts.cpp",
+      "sha256": "6a2ed26caf39708b4871a15aff92742bf2c2d81384c0545fe8d66476c0dccbe7"
+    },
+    {
+      "path": "tests/hot_knob.cpp",
+      "sha256": "bf8f39abf6ba925bf088fcb5a8e26282749487e88695afcff0d6c96f575c3a6e"
+    },
+    {
       "path": "tests/input_settings_rearm.cpp",
       "sha256": "267528f2c5c7688a4bc9fa4645a640732bf64eb4d6defe33df39dee1ee89b741"
     },
@@ -19467,12 +19567,48 @@
       "sha256": "161347161dd19fd75ca3e1306161fc8c5b840ee0526f06cf09bae2563fbdd7e6"
     },
     {
+      "path": "tests/j3d_envelope_neon.cpp",
+      "sha256": "2367e6e2fd43e6aa104700a7b77528a0bc66b82bc05b0199a22ff8acc6c43b88"
+    },
+    {
       "path": "tests/jai_stream_prepare.cpp",
       "sha256": "4961cb1bbcdfe442cce0e184453ecbc9ff3458bdba9a64c7c98d2171fed724a6"
     },
     {
+      "path": "tests/jpa_look.cpp",
+      "sha256": "c451218f643076570d76007d0f1ffae4cf762d5141bbde7bf0fcb6b29244c9d3"
+    },
+    {
+      "path": "tests/jpa_look_stubs.cpp",
+      "sha256": "e212d694d21af8eb3c107923c5d713d02d5aa363c4b4570f33f817690ecbe8bf"
+    },
+    {
+      "path": "tests/lc_keysearch.cpp",
+      "sha256": "1c6c9ce621955ad2d5c7754ec0c7af933ecebec8c7262baf55982e63e101a413"
+    },
+    {
+      "path": "tests/lc_native_fast.cpp",
+      "sha256": "0c74e836297e2a71e36ad4ce5f56bf8f00950b328a795b94bc2378ebcd1f6c6c"
+    },
+    {
+      "path": "tests/lc_pane_memo.cpp",
+      "sha256": "2ca057b14891c6ef4be2d9392c8ceac1ec8f9561d17852d623d6d1d9f7160521"
+    },
+    {
+      "path": "tests/lc_yield.cpp",
+      "sha256": "6fafe189a6a12f1d140cc256577e10c1e6ccb2af35e8d3916eda768fcbb8f4bc"
+    },
+    {
+      "path": "tests/light_dedup.cpp",
+      "sha256": "a726ba5b204b5236ef47c1f751d7513841dd75a0db05ea0e62aa67a9e046b5b0"
+    },
+    {
       "path": "tests/loading_artwork.cpp",
       "sha256": "824485b05ed1853ab97d16cbc99cbf7218a01bda924e1422ac9fac573e38cc1c"
+    },
+    {
+      "path": "tests/mo_grav_memo.cpp",
+      "sha256": "f03c5fef501c85ea89eb60a731774b127833a3cf3b19a8cca89b06e9ad23f6a4"
     },
     {
       "path": "tests/mtx_profile.cpp",
@@ -19485,6 +19621,26 @@
     {
       "path": "tests/mtx_profile_reference.c",
       "sha256": "a8e16069ceb9f423db9e7cb3e87529dea00756ccddb21b618314de45ceda2a8a"
+    },
+    {
+      "path": "tests/neon_shim_f32.h",
+      "sha256": "d740a3398898ae549fb6cbb2383061d83598653db100ef7c1b1e86bd1ff0cbeb"
+    },
+    {
+      "path": "tests/os_audio_cpu1.cpp",
+      "sha256": "4656051ea5bcaaf574252a5b14b8151f07f5fcfea4f0e11dd19073078c83dbfa"
+    },
+    {
+      "path": "tests/os_audio_cpu1_load.cpp",
+      "sha256": "77e894f8d65ae6d8b8cc1cb682d595a7e544aac0be1fd568485e556339177494"
+    },
+    {
+      "path": "tests/os_audio_hold.cpp",
+      "sha256": "6c87cf49daf750df4b18adc33ae685750c8dd3dbe98b414ebcb6f761d430e92d"
+    },
+    {
+      "path": "tests/os_audio_hold_threads.cpp",
+      "sha256": "440d2394d2af6a310a54ffe44c2359d8893ce9152d0e95717e18d383fed44648"
     },
     {
       "path": "tests/os_irq.cpp",
@@ -19511,12 +19667,40 @@
       "sha256": "a5f4ccf225c4c75a197041339c62ae97e1d78d9e74088ce88e0c2e953aa8e27f"
     },
     {
+      "path": "tests/par_anim_walk.cpp",
+      "sha256": "3ecbba0485aff3a8328866df9a405588e17c44680ae37ad87a02ee5210cf6697"
+    },
+    {
+      "path": "tests/par_anim_walk_stubs.cpp",
+      "sha256": "5701c8685cbd5ca32e2b05fae98aee2b0b74b03738ab15b976e7891695d05efb"
+    },
+    {
+      "path": "tests/par_exec_view.cpp",
+      "sha256": "f9add08776b354bd29ed5d64499862695b68fbd3e6a126cd9a9d5cb015e28611"
+    },
+    {
+      "path": "tests/par_exec_view_stubs.cpp",
+      "sha256": "13750f4ea3ee573c42f5670c4664ae471e89bc79069cde144e38ba64a00a8422"
+    },
+    {
+      "path": "tests/par_stubs/psp2/kernel/processmgr.h",
+      "sha256": "0c81d7af47585e1ffe0edcc1f15d93d00ded0ff5cdb64593a62abfc6da083257"
+    },
+    {
+      "path": "tests/par_stubs/psp2/kernel/threadmgr.h",
+      "sha256": "51369a0dfbfcec50f52d1401c40422c729e758294f5a4f48d765ac64e7a59482"
+    },
+    {
+      "path": "tests/par_view_async.cpp",
+      "sha256": "26a19c0a24faa7dc2276e029821b354b8aa4447850638523d4fb2c16a211fb09"
+    },
+    {
       "path": "tests/phase_cpu.cpp",
       "sha256": "8a6932eaa698cc7e060f75f1233abfba41ebbfe64c1ce07698115c0b87323e4a"
     },
     {
       "path": "tests/player_settings_config.cpp",
-      "sha256": "c3463d3db594e18c796fe279dd2b8c13975bb55d1dfec2cd49361c3a672feeea"
+      "sha256": "246a87014e46711d70420cb998b04eefb956260253e4b043816d01d9b12a4e20"
     },
     {
       "path": "tests/player_settings_files.h",
@@ -19532,7 +19716,7 @@
     },
     {
       "path": "tests/player_settings_launch.cpp",
-      "sha256": "cb2bb1cd4f7013265aa06bf2152983a9289ab51772f3cc3ed27263e96e7a1f09"
+      "sha256": "b5bb98a70f17ac322716bd33c549ef695d6cfae4fe1b971e819cecd4764adf2c"
     },
     {
       "path": "tests/player_settings_pad.cpp",
@@ -19540,15 +19724,19 @@
     },
     {
       "path": "tests/player_settings_store.cpp",
-      "sha256": "413ff580e2fe3bf4205bdddcb95ab3c708c6eb62bb9977a4d24b70b3d6138edd"
+      "sha256": "62b3e20d224da168bb567eda2151a66b124dcf9db4c06e685b9a11da33ba4be8"
     },
     {
       "path": "tests/player_settings_ui.cpp",
-      "sha256": "de601ce2e6f4e03017c2c66798969a54af78badeb6abf622f9761ce37652b19e"
+      "sha256": "9fc43c11765457f6de0825063bf63f13f7b0025e1c5ce8fdc08ad96d872f6750"
     },
     {
       "path": "tests/pointer_aim.cpp",
       "sha256": "7eadbd5e25d079d64119cfb0f072cdc53b3c6cd157e7105a2cc2076dffa7dbc5"
+    },
+    {
+      "path": "tests/present_sync_model.cpp",
+      "sha256": "afab3d8b86a74c650e683b7c60c688db9ef36acb13543244887dcc569a5e1731"
     },
     {
       "path": "tests/queue_depth_test.cpp",
@@ -19615,8 +19803,20 @@
       "sha256": "4b565284b0c771fe41c389d9ac3aef5db628a78d573dbdeb1e7eb2b655e48786"
     },
     {
+      "path": "tests/shadowmemo_test.cpp",
+      "sha256": "36dde3b30c0dd01da0f91c1c067941de75cdd261230e2707c9fd81f722df7301"
+    },
+    {
+      "path": "tests/skip_maxstep_model.cpp",
+      "sha256": "fef6b4463eaa4d89bb1667df910e4af6afa421ac6498f12f1d4e79c2497dbd72"
+    },
+    {
+      "path": "tests/slip_trace.cpp",
+      "sha256": "3ed9f66152661e3abf38f2dd8b2e36b2b67627d66b42744501f232b84e458add"
+    },
+    {
       "path": "tests/spin_detect.cpp",
-      "sha256": "994aadcc33b77d01634c4758a7d8d43af46964e352accda8db725ee36e29edbf"
+      "sha256": "cdc39ba956667b14625a6683724350591c2afb0feeacea5f99f8c7bf68486ded"
     },
     {
       "path": "tests/spin_detect_stubs/Game/System/WPad.hpp",
@@ -19624,15 +19824,19 @@
     },
     {
       "path": "tests/spin_paths.cpp",
-      "sha256": "47196d1d0fb2e60e63234ee33f0cf76e90eb9388a9133cb968ddbdb293d48bcb"
+      "sha256": "6be8b4ce7d818de124d6f6567b239e946cf268825683f52ee61052bb82ab6da7"
+    },
+    {
+      "path": "tests/steady_cadence_model.cpp",
+      "sha256": "c59448e708c1ad8be589776b8ee46aff3aeffb99854cc052d17e21dd0cef24c4"
     },
     {
       "path": "tests/tap_clean.cpp",
-      "sha256": "b445f2e626510d2925fb8b10c1f07eda7167695dd1fbc2df488fa6866f85a950"
+      "sha256": "a8e428b05452851cad2d8c05b8d486a4dbc93065efbf112b8cb071d9caa9de9a"
     },
     {
       "path": "tests/test_boot_data_splash.py",
-      "sha256": "58d6e47de8e0a3f061aad77391d823fe8689e9b67ac1274541047c169442fa57"
+      "sha256": "c7340744d073d3c54621508814fadd5ea868cf941fa377d9e4fb984b1f903b9d"
     },
     {
       "path": "tests/test_cook_ank1.py",
@@ -19652,7 +19856,7 @@
     },
     {
       "path": "tests/test_player_audit.py",
-      "sha256": "9b9ce93a42374ea4d38167d218b2ace54b1b1c71ad117bb7c55cb9d6e9b7c72c"
+      "sha256": "383fe87ad30d6729b5f424395c20a64b9e297bc89328d6c26c07da7b3a6e1788"
     },
     {
       "path": "tests/test_player_settings_assets.py",
@@ -19676,11 +19880,11 @@
     },
     {
       "path": "tests/test_vita_boot_dialog.py",
-      "sha256": "2f2287c993ac7fc83d4e2a53c2be37f8dbd57508b100e140772a81f460cffb31"
+      "sha256": "28925edb369b45cca05cb6e30b8f03b3615c3a38e723462ce432532aca77016a"
     },
     {
       "path": "tests/test_vita_boot_guard.py",
-      "sha256": "79091b0a2f24445a014a5df89f87c7767b619f3276bbdf8dc9fffe5aa1a1bd56"
+      "sha256": "cf258e4b4a97cf8e2df6fec95108eca0034a5b1c686fedf223865c33325907bc"
     },
     {
       "path": "tests/test_vita_boot_watch.py",
@@ -19719,6 +19923,22 @@
       "sha256": "36f692c3e5239b0597c5f2e379398c37f24e8f6b45b3d8edf5c5b914a0f6c7bf"
     },
     {
+      "path": "tests/vgl_drawcache_test.cpp",
+      "sha256": "01ff92afa559dcae1cf4f7a83956db2aa024b694702257989fb0bedc29de65f7"
+    },
+    {
+      "path": "tests/vgx_anim_family_hooks.cpp",
+      "sha256": "02138e35062f3bbbea4ad3eedfa2472ba9595cdca4347475be54b3b40ebc291b"
+    },
+    {
+      "path": "tests/vgx_anim_hooks.cpp",
+      "sha256": "e2e79b8ca46a56fad2a1ff6dafd36fd63e8ad1e97f1b09708da19c1078b1f17e"
+    },
+    {
+      "path": "tests/vgx_anim_material_hooks.cpp",
+      "sha256": "75e0b0edfb039db3354b077efaffb5d26f21d51693dca741df7de6b0e6311fe2"
+    },
+    {
       "path": "tests/vgx_aniso_gl_test.cpp",
       "sha256": "aa3c3920375d45c91e3ea13e80994865a4269012af78ea89aa30cef83f97a9b7"
     },
@@ -19728,11 +19948,15 @@
     },
     {
       "path": "tests/vgx_autoq_60.cpp",
-      "sha256": "831b5aa4db40696e1b608eb08a13f7d8c903d9ebfc44add9806849a50512d326"
+      "sha256": "26eccd5ae7d74a74b1a9fddea04859667f868be698264a1fffa88e269194f161"
     },
     {
       "path": "tests/vgx_autoq_aniso.cpp",
       "sha256": "e9fee6d4745d865de97f9f4c8213e9bd64c635dfb24b041b6608c4d77cbf8d5b"
+    },
+    {
+      "path": "tests/vgx_autoq_cadence.cpp",
+      "sha256": "7c00ce5c6b67d90efc717eb539b6c363ba8aea4daf6c3c5b801323c52a1b0c97"
     },
     {
       "path": "tests/vgx_autoq_clock.cpp",
@@ -19740,15 +19964,23 @@
     },
     {
       "path": "tests/vgx_autoq_fxstep.cpp",
-      "sha256": "1a1e9575fedf993c11d4b6f206e4b0ced62324e520955381b0dcab09ab725d05"
+      "sha256": "614e717520da4791321602263ab43e2851722921338097c472b6868db2f0fe47"
     },
     {
       "path": "tests/vgx_autoq_gl_test.cpp",
       "sha256": "d436a13b2bdb67bcd173b5215b59d7ea05b76f113399e4b2cc32b9e3fdda9dc3"
     },
     {
+      "path": "tests/vgx_autoq_hold30.cpp",
+      "sha256": "cb111e3f785fea77194377cdc0ed6eea4b295646df7d1b48898afcbd6f38fff3"
+    },
+    {
       "path": "tests/vgx_autoq_link_stubs.cpp",
       "sha256": "e6ea6803d1018a802d618472f12dd679683e1a1c003a5ff73d91ca2ffaeda295"
+    },
+    {
+      "path": "tests/vgx_autoq_play.cpp",
+      "sha256": "3b4dc6f73b92dd6a8b3c40c2106077d1b80594cc3199bcd600740c387e2840bd"
     },
     {
       "path": "tests/vgx_autoq_recover.cpp",
@@ -19764,11 +19996,15 @@
     },
     {
       "path": "tests/vgx_backend_quiet.cpp",
-      "sha256": "df4867d0e44153ae8df6d92de343be6173fde6187ef71f85c00743f5ff9f46d0"
+      "sha256": "499c0ad66802de0605acc8701cf69501350556c068fac865d6d256b938c18878"
     },
     {
       "path": "tests/vgx_backend_quiet.py",
       "sha256": "bf47c897a37f40ca5b0b01323411c6fe9d6d05d673f4a5835a2dc19e7edebe71"
+    },
+    {
+      "path": "tests/vgx_be_fast.cpp",
+      "sha256": "18bc3200cd5f908c3880b4c3b21dde4944443bc8f51691849c7f7b64a187623b"
     },
     {
       "path": "tests/vgx_cache_ordering.cpp",
@@ -19800,7 +20036,7 @@
     },
     {
       "path": "tests/vgx_coldtrace_backend.cpp",
-      "sha256": "612ea428e68b37df20c937858603b682e496125cc8615ba8224472d4421cf19f"
+      "sha256": "3f1d83ac880a8abdb2ce0c535670c7402daa0fb961368e0673afcbb5b6c81f71"
     },
     {
       "path": "tests/vgx_coldtrace_control.cpp",
@@ -19847,8 +20083,16 @@
       "sha256": "e9c5bd67abb5b413ca21f2cf8dc49af32b371081696b4abe621360c69140bd06"
     },
     {
+      "path": "tests/vgx_cornerfx_gl.cpp",
+      "sha256": "ef72cbeb7e4b3a617a6365b6080a6d7903a7503432643e320ac896b0aed9ae5d"
+    },
+    {
       "path": "tests/vgx_diagnostic_csv.cpp",
       "sha256": "9f951f6e9a4d6257def31b00df19138ab4de35bc5149042f57827ba59633666a"
+    },
+    {
+      "path": "tests/vgx_discard_blend_gl.cpp",
+      "sha256": "ea41a949f01bd2575a0b752f3d807be41293f7edabf272b8572c29458290d461"
     },
     {
       "path": "tests/vgx_dlcache.cpp",
@@ -19867,12 +20111,40 @@
       "sha256": "a2d00ed310959bee39b366f240796ac0647ff60bc26cb6d113373806509929db"
     },
     {
+      "path": "tests/vgx_draw_reject.cpp",
+      "sha256": "7a4df54cb58279741fa250a0cd6dce2776a02f24f0889d5f088ac62bcc8b7ed9"
+    },
+    {
+      "path": "tests/vgx_drawreplay.cpp",
+      "sha256": "ab5bdfd57054d1043430a04cbf24393ba9659a799f90b25f360009a08fa9a56b"
+    },
+    {
+      "path": "tests/vgx_edgeaa_fe_test.cpp",
+      "sha256": "bfce8736057095a9c85d7a03003ba71aa02b0b72475ac103704e18f2f15ac6b4"
+    },
+    {
+      "path": "tests/vgx_edgeaa_gl_test.cpp",
+      "sha256": "48b9dd26b5c09204808f4d6b39e54177ae8776786d37b876bc8205813328f7a7"
+    },
+    {
       "path": "tests/vgx_efb_create_guard.cpp",
       "sha256": "6ca308e67aa6f1417f14140313ccc5220d847b8e6ac6f5c40b1a1669a552f3d2"
     },
     {
+      "path": "tests/vgx_efbswap2_gl.cpp",
+      "sha256": "a79e5fdb6e4e67190c2ac2818d97515527151a52847b06325f4d5ba835a4bec6"
+    },
+    {
       "path": "tests/vgx_efbswap_failure_gl_test.cpp",
       "sha256": "4a961df312d240e281d60a56c3f6311a162898f9cd2e9c203f9a5f2c29b4328c"
+    },
+    {
+      "path": "tests/vgx_fe_prefetch.cpp",
+      "sha256": "20c69b1ddc4ad434e0607ba8678c4cfdd19144e73bf1bc564b747bd68277bce6"
+    },
+    {
+      "path": "tests/vgx_fe_work.cpp",
+      "sha256": "8b83ec3a5914e1f6d58eae2c1b3a0f614269288bdd834a4e54e96fe2d42e8514"
     },
     {
       "path": "tests/vgx_fesplit_stress.cpp",
@@ -19919,6 +20191,14 @@
       "sha256": "678fa16236df2eecc08b505fb2d3d94bdc46d9f52cf0d5736ca0046b9ec53694"
     },
     {
+      "path": "tests/vgx_fxmerge.cpp",
+      "sha256": "25e4ec79e15f59a3eecd3423c0661e93f1af5fb4468f381b6e3b00e2db1bd715"
+    },
+    {
+      "path": "tests/vgx_fxmerge_fe.cpp",
+      "sha256": "e2b59513d08f196b8de5640457bd7ef0b9f083a55ea04b6b32cb2e3108d12aa5"
+    },
+    {
       "path": "tests/vgx_fxscan_gl_test.cpp",
       "sha256": "5069e06d5c793ebf82f4a9202c4fe759217f3e27e5d8ffefaba162a5b8251d61"
     },
@@ -19936,15 +20216,27 @@
     },
     {
       "path": "tests/vgx_gpu_timer_ring.c",
-      "sha256": "37b7087c532d34bb4f65ee7d86b6ff3f8b46c595bb3455b550ac31804a27cd87"
+      "sha256": "ef8885fc085d2aff4f5a9035dcf877f88ba2fa5560074c82ab819db53053d59d"
     },
     {
       "path": "tests/vgx_guestmem_concurrent.cpp",
       "sha256": "d99dfb866ef10af1546451624f286c92dea6e7cce1aeb18c6982d1e9b1515cad"
     },
     {
+      "path": "tests/vgx_guestmem_generation.cpp",
+      "sha256": "66ef345cc206dc6a2a2e0e9d32f3a308b5dfb04d3ac519535d5c9d7e85bd937c"
+    },
+    {
       "path": "tests/vgx_hdtex.cpp",
       "sha256": "37e2fd98d6b414846eb89a02256ff0d754f240d41733b4a4eb03af7d3ce21ce4"
+    },
+    {
+      "path": "tests/vgx_indvs_gl.cpp",
+      "sha256": "099c752507013dbd9ab63bd3f7e2fcfa7830ceec1f3cd1a3099eb547d68ecbf4"
+    },
+    {
+      "path": "tests/vgx_j3d_lists.cpp",
+      "sha256": "fd653818b63fdfc897c7584f09eccdb6a255fa392f4d7f14964ecda7b1e7fe7d"
     },
     {
       "path": "tests/vgx_keymemo_test.cpp",
@@ -19995,16 +20287,24 @@
       "sha256": "9c867bf38db71ba86af9da4228808a058275c584c9642dc0b6da0a68f6f38fb8"
     },
     {
+      "path": "tests/vgx_present_fast_gl_test.cpp",
+      "sha256": "ad76e1105e06477aa03a0a086ca81cc9535b4759c02b15b261463b9713d2bb70"
+    },
+    {
       "path": "tests/vgx_program_eviction.cpp",
-      "sha256": "3e484dd3cbe6b953fb6cc8dd0ce4daea55c30312506ae2a56fa4df3a59dadcc6"
+      "sha256": "cfc0bbc52599a1b5cf7190aa09b7f2cce32c871e2b2cc4abd65eb57cddf82a4a"
     },
     {
       "path": "tests/vgx_program_recovery.cpp",
       "sha256": "a1a5bf4da020879b81d4d4d004ce35c5931e750c6e478680cf4290ecc6dca409"
     },
     {
+      "path": "tests/vgx_pxcut_gl.cpp",
+      "sha256": "a10dad7170fc259635acdafc04bcca91129fa4ed9e3056f946fbf8ca35651faf"
+    },
+    {
       "path": "tests/vgx_render_accounting.cpp",
-      "sha256": "950b7561271036f1a5f2f84095ad93bc4ce60b7ae090bc313c4b95de80c56375"
+      "sha256": "3b2f33eac0bc247ba74fba16729e8b1b8b106695e616bee162ced5f6a85c9ce7"
     },
     {
       "path": "tests/vgx_resource_driver.cpp",
@@ -20023,12 +20323,36 @@
       "sha256": "fdb6f9696fb8baf5a6bb13d1b5ba80f127ab4020b3d77b8f3fa687437cb0c59d"
     },
     {
+      "path": "tests/vgx_seg_idle.cpp",
+      "sha256": "123c5ca8d6b39c50bf4eab189a14e6b5d848af44167ab6c720656663f30bc303"
+    },
+    {
       "path": "tests/vgx_shader_learning.cpp",
       "sha256": "1fe4548d062e84c4c38996b5190643183125aa00b5f4c4112035981e6f4a14ce"
     },
     {
       "path": "tests/vgx_shader_list.cpp",
-      "sha256": "c08636f1ebdcc41c671819169acef243475b11d8636abd084fa0b352c31899e8"
+      "sha256": "2192349e736293cb64a0b4c7ca1dac93e7561e2dead1b20e5b53cec3282a3f04"
+    },
+    {
+      "path": "tests/vgx_shader_residency.cpp",
+      "sha256": "4f761ccbb6fbd761d5d01dc2c4faa79a0823a3e0d58d95a74cfbda15b057cf05"
+    },
+    {
+      "path": "tests/vgx_shader_residency_edges.cpp",
+      "sha256": "db0531d11037a9bd54f1072a91629a2a84249e3694a053653bab1fd07ade3da6"
+    },
+    {
+      "path": "tests/vgx_shadowfill_gl.cpp",
+      "sha256": "08f0e3c48fba595d3f48a507ff6eac6082482785d8ef01d45f1a4340e3142d18"
+    },
+    {
+      "path": "tests/vgx_stage_warm.cpp",
+      "sha256": "651a5f8b3478d95d94eab86de10283433e160b3d35d20a367997921a4acbd648"
+    },
+    {
+      "path": "tests/vgx_staticcull_gl.cpp",
+      "sha256": "5174c153aa2f61a24d5c66c4bcaa0011c46f087bfa6e1fa0b2bbc1ebc5fc8f64"
     },
     {
       "path": "tests/vgx_tevfix_gl.cpp",
@@ -20047,6 +20371,10 @@
       "sha256": "74c65d6ce198f041934d7c30cf3fbcb18635bdcbd34bdd069b2e1f1988887065"
     },
     {
+      "path": "tests/vgx_texbake_gl.cpp",
+      "sha256": "f923249276cafd6fcb7b267285f009ddd3bfabf56794433f5f49321fa630139a"
+    },
+    {
       "path": "tests/vgx_texcache_compact.cpp",
       "sha256": "2671e072cfcda772674bc406a497928a8eb37db7236b4eb47a3a7f89c038ce75"
     },
@@ -20059,8 +20387,28 @@
       "sha256": "f53b41e769a9f5ecfc6adce77693ffa9e72c1e279237e299d289b3e3a111a2e8"
     },
     {
+      "path": "tests/vgx_texdecode_fast.cpp",
+      "sha256": "652e3480da7cdc1ab617da89d483cd4fb26173f22fdec0baf98213cb3b7ff3fe"
+    },
+    {
       "path": "tests/vgx_texture_upload.cpp",
       "sha256": "9153c362e5c3e98d811bc204cbe63719f746a8b05a145d059859983a2b797fe2"
+    },
+    {
+      "path": "tests/vgx_tiny_state_cache.cpp",
+      "sha256": "c360b8ebbd60e9ffdb602bc2a9b12c2036474a3d76bac7bf2eb00ecd98b365fe"
+    },
+    {
+      "path": "tests/vgx_trim_gl.cpp",
+      "sha256": "bbe3465514067f7e206ddbec490d787a726817ded006b6325963186cdab38e57"
+    },
+    {
+      "path": "tests/vgx_uni_shadow.cpp",
+      "sha256": "3d69977e4ea19b3804987c6aab155d8024da483dac2fca4be86567572827f203"
+    },
+    {
+      "path": "tests/vgx_upload_sync.cpp",
+      "sha256": "f0a4162a8bd28ea30496f443ecd122d17dbf21ed21d64acb34e502f4a4803734"
     },
     {
       "path": "tests/vgx_variant_census.cpp",
@@ -20075,6 +20423,10 @@
       "sha256": "b91716a22d021782b27a79fd2d9d18a5355bb6dbb9c788f331651b3925c2139a"
     },
     {
+      "path": "tests/vgx_vsout_gl.cpp",
+      "sha256": "7d1de2ddc1ff3a6affcbd93f844003208106b03cfec5e2bb13b2580adb1ed85e"
+    },
+    {
       "path": "tests/vgx_wake_ordering.py",
       "sha256": "1c4c650983467f12d786113aa26b003aa28fa1b4010f11234d9d3dafe164f175"
     },
@@ -20087,6 +20439,10 @@
       "sha256": "f5aca4bda1ab7cb5316a772b05025285259f95c86e8eadd1c787947d8976859d"
     },
     {
+      "path": "tests/vgx_warm_nochurn.cpp",
+      "sha256": "416cba3b08ce37812cdafb83cdef79d97175494e26db8efee657cba0df41514c"
+    },
+    {
       "path": "tests/vgx_warm_variants.cpp",
       "sha256": "7e25f6c39946001e04663e083bd193d9550b270e4be581e6cf5196db084f3eac"
     },
@@ -20096,7 +20452,7 @@
     },
     {
       "path": "tests/vgx_workload_hooks.cpp",
-      "sha256": "60a55dfdd4e61d269414c9bda138e4468b206f9858e2bfb75afc5fc1b859a03d"
+      "sha256": "ee55a4861016c7d31c3b59b5b9c26d2429090dea14eaff92974cbba674eceabf"
     },
     {
       "path": "tests/vgx_workload_test.cpp",
@@ -20136,7 +20492,7 @@
     },
     {
       "path": "tests/vita_controls.cpp",
-      "sha256": "69592a39a7e27d43f02dd91524a34f6daeff685285996287b75e3fdd48181f66"
+      "sha256": "c3829e2b920bb4ee1f81f13638f277047674faa066aba4ebb8d2c33c24f0e64a"
     },
     {
       "path": "tests/vita_csv_status.cpp",
@@ -20208,7 +20564,7 @@
     },
     {
       "path": "tests/vita_rear_touch.cpp",
-      "sha256": "534cac4187ecee85ed0761ac932e146c5c2c85a244b01a0a5d41e64b37d19e02"
+      "sha256": "f6ec3c5dd99b7b79bcf4ebbcedbff3a3e15d66ec0f9be70461fa97fd4546384a"
     },
     {
       "path": "tests/vita_scheduling_audit.cpp",
@@ -20216,7 +20572,7 @@
     },
     {
       "path": "tests/vita_seed_cache.cpp",
-      "sha256": "9028f86916869bf81d0c2bc59c7a6aa2909958155a301757642527002e0a8e10"
+      "sha256": "1afb16f848dacbf82f25533a78e8fd5bbaff596f8e039305586695d2dd3e0e7a"
     },
     {
       "path": "tests/vita_shader_cache.cpp",
@@ -20260,11 +20616,11 @@
     },
     {
       "path": "tests/xfburst.cpp",
-      "sha256": "e69062fa25af04de33c8ae954b00694ef159e932ef129978d124e935c2c2190a"
+      "sha256": "4016659d5d6ebe94aaa6e0fa97008608d771599de6cbb0a2d60aea03e5f3766f"
     },
     {
       "path": "tests/xfburst_bench.cpp",
-      "sha256": "e99930c2aa564ca5ec16b741e56d711ced7d79bfe9fee2def33bc6152fad1065"
+      "sha256": "1ee5056be6b9561d06367f5d5c23ae3acd7cb5bfe1aa1516cbed93976d2e66c7"
     },
     {
       "path": "tests/xfburst_driver.c",
@@ -20564,7 +20920,7 @@
     },
     {
       "path": "tools/hdtex/gxdecode.py",
-      "sha256": "ef4a60f3548e7a1130664bb1ec6997317e9784d7f464fc4b1a2f8fb07175bc8c"
+      "sha256": "6e85d0334c2a8583a163e526ea4e11407594fc5f3e19b37fa6e2ee21e47c1cf1"
     },
     {
       "path": "tools/hdtex/make_test_pack.py",
@@ -20712,7 +21068,7 @@
     },
     {
       "path": "tools/preview_player_settings.cpp",
-      "sha256": "edb62fe4fe9e9764fc411b97f9df5bb95497f9125087b5d6126cd1a2fcef76e6"
+      "sha256": "2241c81377b7a4f15f3feee81d1dc2decd4d86b26bae42a730a90f85f9dee0ae"
     },
     {
       "path": "tools/push_data.py",
@@ -20732,11 +21088,11 @@
     },
     {
       "path": "tools/settings_panel_preview/preview.cpp",
-      "sha256": "a117b6d1dbb68d17992ecc04509f2d983b0889894f72f9debe5787250a5316cc"
+      "sha256": "a1bbd08547f6291d689c4bc913461f9b6f62f91182ccb543acee87131f26b42c"
     },
     {
       "path": "tools/settings_panel_preview/render.py",
-      "sha256": "d81e5e1f06dbe0acdae30c0c35188b1ba7ece228c10662ba78d4e876d3ea2157"
+      "sha256": "ce7f10e2a0d7fcc269b19ec0ece0ed1c191f5d492d78b319310ccd29fbe4a03c"
     },
     {
       "path": "tools/sjis_literals.py",
@@ -20753,6 +21109,10 @@
     {
       "path": "tools/symbolize_data.py",
       "sha256": "8237127f95928839e1cae28794bd43e74646d08b780b99de430a7f3d89be33f6"
+    },
+    {
+      "path": "tools/test_ac_pane_mtx.sh",
+      "sha256": "04b7397462923b9616e36324b25cb182efee2dfe4aa53d97f2b61d1a1daa26c4"
     },
     {
       "path": "tools/test_anm_key_repair.sh",
@@ -20827,6 +21187,10 @@
       "sha256": "306aef61dc75e0a846fe86ea6f66948b434d37b93c16a0f33153bfcc4a692aba"
     },
     {
+      "path": "tools/test_dsp_voice_input.sh",
+      "sha256": "4744e8b62b9a0cf0e91c17aa4c8955bcf838ecb2df3381c05b70394bd3e25bcf"
+    },
+    {
       "path": "tools/test_dvd_errors.sh",
       "sha256": "22a526d02ff848b75b750eb687f826a18ddcd30016bcaf5a146a6c32412e0d05"
     },
@@ -20839,12 +21203,20 @@
       "sha256": "a830ff068ade6e24c35ca41180e8225e61d90a5e4dbfb27a60be605744ba14e5"
     },
     {
+      "path": "tools/test_fifo_batch.sh",
+      "sha256": "98606dda3d2e5c465466bb6c9a2e147fb8e8f61290064bd7e91ac35d43d38761"
+    },
+    {
       "path": "tools/test_fur_map.sh",
       "sha256": "08aed8703b050e2e10123367617e264c7155c5e2b554fcd8feacf4837d834fd3"
     },
     {
       "path": "tools/test_gd_write.sh",
       "sha256": "a39b1cd9ab444c90aa4e336755664cab97e4dbe78c03f888176ccb41fe31c9b5"
+    },
+    {
+      "path": "tools/test_gravity_reach.sh",
+      "sha256": "4bc9d7c67c453a340f37f1dc2785ef8c8b57277b45772bdc2301635c0bdca433"
     },
     {
       "path": "tools/test_gx_cpu_xf.sh",
@@ -20875,20 +21247,68 @@
       "sha256": "310bb1f94630f14a6b6cd4bba245b567846db0310a19389dc550e2efa7dfb0db"
     },
     {
+      "path": "tools/test_hivelogic_cuts.sh",
+      "sha256": "05e783c45eb1e2293af10b74a429ab481745016f326eefbb5e5ed9b22a85d24d"
+    },
+    {
+      "path": "tools/test_hot_knob.sh",
+      "sha256": "7b9551fd53d5b31e2756a49b82c63664c07ca42e0d863d3a04230c2f31ae3374"
+    },
+    {
       "path": "tools/test_input_settings_rearm.sh",
       "sha256": "a68ced52f303f6d93af2380a425442b4faaeaaf7e09af7e87eaafb4d978d5d56"
+    },
+    {
+      "path": "tools/test_j3d_envelope_neon.sh",
+      "sha256": "28d4df37dcfab4d4d03e2e2c76edfafb90b2636158f48232c80bfcad8f71662d"
     },
     {
       "path": "tools/test_jai_stream_prepare.sh",
       "sha256": "13e1d485683eb7d032404d9e543187c6530a11803c2ef711088ef81b49849ab4"
     },
     {
+      "path": "tools/test_jpa_look.sh",
+      "sha256": "5f56278736dd380c9b65c7e25856dd5b1e2e518e1ec2b63865e73cb87147082a"
+    },
+    {
+      "path": "tools/test_lc_keysearch.sh",
+      "sha256": "9e6312fd5a0280e740c4a3fce263808dda4afde3de7929d5afaae0a9797c4378"
+    },
+    {
+      "path": "tools/test_lc_native.sh",
+      "sha256": "aabcd4ae7650287e4b18f131bbc65065dcf586b8cb5bff62b58b24fe6409f0c6"
+    },
+    {
+      "path": "tools/test_lc_pane_memo.sh",
+      "sha256": "001dee90bf55c15170cb08ef022dcb80b82921a09ba3ce8cf9b789c71db91f74"
+    },
+    {
+      "path": "tools/test_lc_yield.sh",
+      "sha256": "1ee736bc9dd835b8749824d1c89bb744db736936606f795169db0fe1e4ffe609"
+    },
+    {
+      "path": "tools/test_light_dedup.sh",
+      "sha256": "941361d203393f5a48e8838878344e59077136db9d97831fd682379c0aa185e2"
+    },
+    {
       "path": "tools/test_loading_artwork.sh",
       "sha256": "a62be99fe7b86b68c3e166bc3874686b4fa1f0c76bd9d6c6a07c7742bbdeedf7"
     },
     {
+      "path": "tools/test_mo_grav_memo.sh",
+      "sha256": "a78787670b5a4664e6139bdf276666362feced7e4cc161bfa715d65fc5597f79"
+    },
+    {
       "path": "tools/test_mtx_profile.sh",
       "sha256": "3ddc3b2a26a5f1533da945f2e04bfc65d836c7c488a030cda7ff1b3fb722f0e7"
+    },
+    {
+      "path": "tools/test_os_audio_cpu1.sh",
+      "sha256": "83587196a505c1238651739f619618f5a39bbd6e66d23d521b54216e71d01bf9"
+    },
+    {
+      "path": "tools/test_os_audio_hold.sh",
+      "sha256": "221916ce8626253f972a83d551fe2cdc53ff0c56f84021dd307cb7b040463e9d"
     },
     {
       "path": "tools/test_os_memory.sh",
@@ -20905,6 +21325,18 @@
     {
       "path": "tools/test_pace_slip_perf.sh",
       "sha256": "661ae3644477d9270e47999a234fe59b6b484191b325778042f8395621991a3a"
+    },
+    {
+      "path": "tools/test_par_anim_walk.sh",
+      "sha256": "6e80b088801486ee4d133d3dbc933a6c35071392e7beaf3ff93da0acba2d9553"
+    },
+    {
+      "path": "tools/test_par_exec_view.sh",
+      "sha256": "adb09e770fb472c220a9a65bd67273d30dc462354ade1d9de4f576487efdc015"
+    },
+    {
+      "path": "tools/test_par_view_async.sh",
+      "sha256": "3dc6b057e3d4db047e0357ad9d371cba1347a8d6835a7ac476109afcaae51a43"
     },
     {
       "path": "tools/test_pgo_build.sh",
@@ -20925,6 +21357,10 @@
     {
       "path": "tools/test_pointer_aim.sh",
       "sha256": "884ee3a77cc7128f2380ff5aef2b5a173f0c2bfc73b0ea0f1e158fda41a1ffac"
+    },
+    {
+      "path": "tools/test_present_sync_model.sh",
+      "sha256": "dd451f0488339f2094d258708a9181c091bd9b2b044b3ebb0aef161e7072c892"
     },
     {
       "path": "tools/test_queue_depth.sh",
@@ -20975,12 +21411,24 @@
       "sha256": "803034a27564878c0ce0a53fb89dc6cebab56386ed63cd6be71dba5b0edaa766"
     },
     {
+      "path": "tools/test_shadowmemo.sh",
+      "sha256": "e30e30537cde8ea0216f649a7e1a30c2cf5d0a6d4fb00d4a472391cbd79c54e4"
+    },
+    {
+      "path": "tools/test_skip_maxstep_model.sh",
+      "sha256": "030938f9e15d6585e7b7c740193ee2f16dca2d6cc809be67f996df6cf7183e6e"
+    },
+    {
       "path": "tools/test_spin_detect.sh",
       "sha256": "8b1d09b6b4fc983d9b2c29959879aa6c20d6ce67cbbfb4419c84c2579a8c6ee1"
     },
     {
       "path": "tools/test_spin_paths.sh",
       "sha256": "ce4487bfae1773ff782a5b6c194622998652e828607fe5a3b1d20e387ac76ebb"
+    },
+    {
+      "path": "tools/test_steady_cadence_model.sh",
+      "sha256": "543c46806dd0ff65ebc6167afebfcaa29755737fbf63865f8789bcfdd5012845"
     },
     {
       "path": "tools/test_tap_clean.sh",
@@ -20997,6 +21445,10 @@
     {
       "path": "tools/test_title_art.sh",
       "sha256": "a9e84d509c5652345e3e81e869b91bf088e0bd9566425d1e9af54a9042071400"
+    },
+    {
+      "path": "tools/test_vgl_drawcache.sh",
+      "sha256": "cceac64be3f0f2de18510589bdc7f58f5f71d1c63927159de2252a7c7be82958"
     },
     {
       "path": "tools/test_vgx_aniso_gl.sh",
@@ -21019,6 +21471,10 @@
       "sha256": "b1733f8a4e2c38f478e5ea8f3ff7e3690b84a3306e743883ee70f2856dc80712"
     },
     {
+      "path": "tools/test_vgx_autoq_cadence.sh",
+      "sha256": "a43d842bc7476f6014c0bb4c70fbf56e4c161daf4a772bc4525fa4a2985e51e3"
+    },
+    {
       "path": "tools/test_vgx_autoq_clock.sh",
       "sha256": "1b4bb60e3e0337ce089b0b83e1e26b60914c475533c2a679ec35c0fd7aa0b16a"
     },
@@ -21029,6 +21485,14 @@
     {
       "path": "tools/test_vgx_autoq_gl.sh",
       "sha256": "abd7aa77acaf8c6e41d7c6a45f3d355682c38a358f1db326fb20370aa6d389e1"
+    },
+    {
+      "path": "tools/test_vgx_autoq_hold30.sh",
+      "sha256": "eba0b00041006fde0740762394baf3b81a4108422a65578c2ab09bbbe63577fb"
+    },
+    {
+      "path": "tools/test_vgx_autoq_play.sh",
+      "sha256": "6bdea9dc4f970b3ebe8cbb584474820f9ef29c8fd6bbdd3e2fe9650df88742ad"
     },
     {
       "path": "tools/test_vgx_autoq_recover.sh",
@@ -21099,8 +21563,16 @@
       "sha256": "e87655965dd3fd8e8a5d28e5334228885bd9c5e13f6d6f5f73994a9893ecb337"
     },
     {
+      "path": "tools/test_vgx_cornerfx_gl.sh",
+      "sha256": "e51ced0098d25d0e68d4b8c31437274ea7c7cfe963750e67f3fa522990117312"
+    },
+    {
       "path": "tools/test_vgx_diagnostic_csv.sh",
       "sha256": "0b8ce1b1b3954e256eb2f529b1fb307800f39a9c414e2b2a7f96753354935d4b"
+    },
+    {
+      "path": "tools/test_vgx_discard_blend_gl.sh",
+      "sha256": "3b78559dc8b46cb5530e56f889b7fc56ab305b271d671813e1df62481effc6d9"
     },
     {
       "path": "tools/test_vgx_dlcache.sh",
@@ -21119,12 +21591,40 @@
       "sha256": "e253ceb8a8cdc6b529110876506311739f9a92b1b9b3119871912b1531a01059"
     },
     {
+      "path": "tools/test_vgx_draw_reject.sh",
+      "sha256": "970ada2508439170d147babf6799c88dbb82bfcae73db46f63f053c5cb2c97b0"
+    },
+    {
+      "path": "tools/test_vgx_drawreplay.sh",
+      "sha256": "2710f471785e2cfc0a58099172b258930be539de648761a49472af2d385d8907"
+    },
+    {
+      "path": "tools/test_vgx_edgeaa_fe.sh",
+      "sha256": "36cf389a3886289728914c885bd01a8b0c76b5aa5aba43aefec279ac3aef4f90"
+    },
+    {
+      "path": "tools/test_vgx_edgeaa_gl.sh",
+      "sha256": "47cfea2b0262c20a4cf1043007f3b32a9c5b2c051fffdbb16a4987b5b885c683"
+    },
+    {
       "path": "tools/test_vgx_efb_create_guard.sh",
       "sha256": "b32ae4fb63acef15f427493f8e4dfc8cd150d03068c44fcfba83bb27c0669c0d"
     },
     {
+      "path": "tools/test_vgx_efbswap2_gl.sh",
+      "sha256": "124fb259820e7b20e9921cc154df1cfb0ae281e0b2716e9ce26e2996d0f277e4"
+    },
+    {
       "path": "tools/test_vgx_efbswap_failure_gl.sh",
       "sha256": "1f35fb4fe3e4f7f777bacd963c81e070c251c600f8c3acfc11aff72a811135f9"
+    },
+    {
+      "path": "tools/test_vgx_fe_prefetch.sh",
+      "sha256": "bc113a305063e51a88b62bf866820b0f700cb51d21962c861806bb8d7f416425"
+    },
+    {
+      "path": "tools/test_vgx_fe_work.sh",
+      "sha256": "6b1a62e6c92c5b0762e5d05ae79f2ecd920e3cf9da040c57a5b0b415ace4af24"
     },
     {
       "path": "tools/test_vgx_fesplit.sh",
@@ -21155,6 +21655,10 @@
       "sha256": "a23b27f3fc6a6837f030e24f37a8ac5e527c0ed023512c3c07a726753d1b5a69"
     },
     {
+      "path": "tools/test_vgx_fxmerge.sh",
+      "sha256": "8b97f5a4720bdf3f3772b15a246033f19159c19d99bdbd3c2159722c108c7446"
+    },
+    {
       "path": "tools/test_vgx_fxscan.sh",
       "sha256": "82f8c331d2b9e38e0a568efc693b9cc7601480276c9a45fb03a930d0aa693e16"
     },
@@ -21168,11 +21672,23 @@
     },
     {
       "path": "tools/test_vgx_gpu_timer_ring.sh",
-      "sha256": "a7aae873c64aaf2901fc5128c2ac50e45463e5dd62ac01bdd98e42ceea856e13"
+      "sha256": "63efdbd08a3218334b63c5b2cd83eb1587087dc746cb1e6fe7b7e7271aa99264"
+    },
+    {
+      "path": "tools/test_vgx_guestmem_generation.sh",
+      "sha256": "e223d10a3eabc9c2f8a210fccacf0ca212e5022fcf334964072d8fc587e7f6b8"
     },
     {
       "path": "tools/test_vgx_hdtex.sh",
       "sha256": "f4534a25e1897185f6922f42df486d44687ce1217fafbc943f7aa1b78a0f3345"
+    },
+    {
+      "path": "tools/test_vgx_indvs_gl.sh",
+      "sha256": "396ebf680b655e31401cc273c0cdb1ff2222572a357cd474bf37f6a84ca3a488"
+    },
+    {
+      "path": "tools/test_vgx_j3d_lists.sh",
+      "sha256": "3a04430f303d65253c53476af7fce09c4d9dbc5672311cbd7b835e908b898815"
     },
     {
       "path": "tools/test_vgx_keymemo.sh",
@@ -21215,12 +21731,20 @@
       "sha256": "380846e6f4ecfe596c8895952533b0c16aa5d7b337164f5d746b18e8423c880d"
     },
     {
+      "path": "tools/test_vgx_present_fast_gl.sh",
+      "sha256": "ffc7be9c4248760c36993c296489116b8b96ce69cb813968137904c54c58cf3b"
+    },
+    {
       "path": "tools/test_vgx_program_eviction.sh",
       "sha256": "af993d6d215c6e114b8c3a468b97e7e9bbd329618864eca3f9e18ef9120ea019"
     },
     {
       "path": "tools/test_vgx_program_recovery.sh",
       "sha256": "c5ab6f6a992fcc499225835e132f2e7871404de66bbd75179282e2b2d55aafae"
+    },
+    {
+      "path": "tools/test_vgx_pxcut_gl.sh",
+      "sha256": "310e5292cbd9f64a860f6e14724ba2099e6966bf71f07904d18beb6fa957d8d8"
     },
     {
       "path": "tools/test_vgx_render_accounting.sh",
@@ -21248,7 +21772,19 @@
     },
     {
       "path": "tools/test_vgx_shader_list.sh",
-      "sha256": "b513932f4644cfb96622d6ef90c003a496819e7af7051dff22d23595842574fd"
+      "sha256": "a7b2ebb8f36af0d2f6a9cd12bae07cef29485da96d530a9ff109da2291f5c765"
+    },
+    {
+      "path": "tools/test_vgx_shader_residency.sh",
+      "sha256": "c648251089f318c25a70c88e7a36194230577474305985cfead68e20eae0d955"
+    },
+    {
+      "path": "tools/test_vgx_shadowfill_gl.sh",
+      "sha256": "458c10bda6a0a46e055bb9a900e44370fd5110dd55a270f1e66e519279d7e2c4"
+    },
+    {
+      "path": "tools/test_vgx_staticcull_gl.sh",
+      "sha256": "ccfd266ef0a53afd3e9bf2e7dd561d5d709c0f175411f9380b9d133de68a3b51"
     },
     {
       "path": "tools/test_vgx_tevfix_gl.sh",
@@ -21275,6 +21811,10 @@
       "sha256": "76702dd3a8a03df74b07d1993aabb926f1f98c9f6793461ff334fc63d0a5dfbe"
     },
     {
+      "path": "tools/test_vgx_texbake_gl.sh",
+      "sha256": "f5efc075a0e881b6680d0e47b347df708d01c271cf79900f4cc0081e6d04164f"
+    },
+    {
       "path": "tools/test_vgx_texcache_compact.sh",
       "sha256": "e5cd7aeb5e7aad017f69babdbaf2e0df994840308f3ec97ffc6e4617606e6963"
     },
@@ -21283,16 +21823,40 @@
       "sha256": "92daa8218f84236c14db432f901b1206ca87a05826489ce7de0fe2060e0fbf79"
     },
     {
+      "path": "tools/test_vgx_texdecode_fast.sh",
+      "sha256": "3f2ff8bd2e837e0f2b4083f3d246c429a83a57a106b2789e7537b1dea95b3d7c"
+    },
+    {
       "path": "tools/test_vgx_texture_upload.sh",
       "sha256": "3979f46af902a7315bb44eb2aecda9f5850f9e1f641efd6cc6cd48bd1800f1b1"
+    },
+    {
+      "path": "tools/test_vgx_tiny_state_cache.sh",
+      "sha256": "0772ea78c33e83f67dc46c28c6bfaa1468839ee4841511cb05d44676520bfb7a"
+    },
+    {
+      "path": "tools/test_vgx_trim_gl.sh",
+      "sha256": "3a644621f31bf7900fbbce769914b9671b7ba26633beade20c9388f24cd530fd"
+    },
+    {
+      "path": "tools/test_vgx_upload_sync.sh",
+      "sha256": "3eca7f7ee7b8fc491f95c8fcdbe6f1e826563350773364140985968c9615cbad"
     },
     {
       "path": "tools/test_vgx_variant_hash.sh",
       "sha256": "284218f440e28d947bd7d7c79dabd6db92a8d4406d28ebc9e483ba38582c49b1"
     },
     {
+      "path": "tools/test_vgx_vsout_gl.sh",
+      "sha256": "ec7b8698fece78431e66ffdf705e83813b3470c862c849475ddf3a1a4fc8538f"
+    },
+    {
       "path": "tools/test_vgx_warm_budget.sh",
       "sha256": "2eda79c9e890e4ec56ed8e4e65ff6bcb549bf58a1c41d096fe9bb11f14b68956"
+    },
+    {
+      "path": "tools/test_vgx_warm_nochurn.sh",
+      "sha256": "3c981624562149b4d2f099e5b86f031e733361c33d697a440f0441b3953ac1dc"
     },
     {
       "path": "tools/test_vgx_warm_variants.sh",
@@ -21392,7 +21956,7 @@
     },
     {
       "path": "tools/test_vita_seed_cache.sh",
-      "sha256": "76dad275803bcfb07ff9757bfe2b807d9de602d15221c627b5da79f65ae5ff31"
+      "sha256": "b9e874b5b1400b0d07b70abfe18f162b9756af1816adc653a6de59f9ae6e23aa"
     },
     {
       "path": "tools/test_vita_shader_cache.sh",
@@ -21431,6 +21995,10 @@
       "sha256": "96d61b76eefda4fd6ea06d5db7d8570575355491f40beef1d2ac4d428d4b6668"
     },
     {
+      "path": "tools/tests/test_hdtex_decode.py",
+      "sha256": "5b23adabbf7bb4df4960c028154a688ba6bb3329732b11735e42454e21eb90bf"
+    },
+    {
       "path": "tools/tests/test_installer.py",
       "sha256": "bbc8482f64025b22ebcaafebcf2758ecbc2e329097f1c6e443405421c0b859ba"
     },
@@ -21452,7 +22020,7 @@
     },
     {
       "path": "tools/vgx_build/build.py",
-      "sha256": "e868c0419f398444161d6f3c508cbc58d3547fa159918d1a76cf5dca9443c986"
+      "sha256": "5004438e43e092ad69b828a5064e5a99c396ba7a3c062e55fa4731c024ea11de"
     },
     {
       "path": "tools/vgx_build/inputs.json",
@@ -21476,11 +22044,11 @@
     },
     {
       "path": "tools/vitagl/README.md",
-      "sha256": "acb3eaedd33d4f4370ad0673d6a726a0022a925fe6042e3bbf60c2a48e90b331"
+      "sha256": "1c7335eaf795134491571a6ecffed4072d892bbe0fcb83ad873bd235f862bd72"
     },
     {
       "path": "tools/vitagl/build-release.sh",
-      "sha256": "8db36a77ec29e9c8eb942e35ded256e1a6e5281632450b45485b5e6507805d29"
+      "sha256": "01cb0353f71a01bcbfcaeca597d1784973e9ab2ca443665cfd9f786b9f02e295"
     },
     {
       "path": "tools/vitagl/build-vitagl.sh",
@@ -21492,7 +22060,7 @@
     },
     {
       "path": "tools/vitagl/gpu_timers.py",
-      "sha256": "f692be2f0772a32ae686d71a558691d50fe6f62d27fa3b51704003aa03114936"
+      "sha256": "9c85fa669da282a6d43a7215a7c243474679d4d28e119db495aefd09a7071734"
     },
     {
       "path": "tools/vitagl/patches/0001-strikers-patches.patch",
@@ -21543,8 +22111,36 @@
       "sha256": "a472646baaf27acecbf60844947f5ecbdaf5b3ffcdcf282b3366e93c2c111ae4"
     },
     {
+      "path": "tools/vitagl/patches/0013-vgx-direct-draw.patch",
+      "sha256": "234ee83f970c012a92ea2a7af33c0b4a5398c54c5603d7fcf17db711c93d5cba"
+    },
+    {
+      "path": "tools/vitagl/patches/0014-vgx-draw-caches.patch",
+      "sha256": "475fe8ec0a6882e18ab1401b15e46fa73e2ad097a1339181ff9c02ca6c7e9edf"
+    },
+    {
+      "path": "tools/vitagl/patches/0015-vgx-uniform-shadow.patch",
+      "sha256": "605dc17cfdc1f82db1e68498ceb5f541fb5d522623a9479c803c98e7f433c379"
+    },
+    {
+      "path": "tools/vitagl/patches/0016-vgx-texture-reserve.patch",
+      "sha256": "230de56516c9e9ce86c83066b0ef103984ba86d183fceb9c1c0a3b47eb30157c"
+    },
+    {
+      "path": "tools/vitagl/patches/0017-viewport-exact-halves.patch",
+      "sha256": "86d42813dd3b460ec826597d7f44eeeca3e1d92fc8870cb046004ad86ccd1364"
+    },
+    {
+      "path": "tools/vitagl/patches/0018-mask-keep.patch",
+      "sha256": "c82045e1373b39846ce413de771fefa43d43b184ded278d5dcc4f17722eabeea"
+    },
+    {
+      "path": "tools/vitagl/patches/0019-color-load-from.patch",
+      "sha256": "eec9d4d952d4be4475aeff3a0b77c32b774904f57b0db3c5c0bd829901e0b442"
+    },
+    {
       "path": "vita/CMakeLists.txt",
-      "sha256": "4d3cb7c8d2db4dac773ab201731d1c373df9705bcdb3ff296a5035e244b24609"
+      "sha256": "02a8af1e1a3f0d8fe9f1587041175f7b0fccdbad67ac0311ecc75925249033e5"
     },
     {
       "path": "vita/bringup/CMakeLists.txt",
@@ -21636,7 +22232,7 @@
     },
     {
       "path": "vita/runtime/audio.cpp",
-      "sha256": "518b8e7a21f8095f609222290646fd8e4b4b81b7796ace48c2bf8ff44600f3da"
+      "sha256": "b1b38390772e26f261e3df0136268cae0869651216d64ce188fd7b8e3c5490f2"
     },
     {
       "path": "vita/runtime/audio.h",
@@ -21652,7 +22248,7 @@
     },
     {
       "path": "vita/runtime/flat_view.cpp",
-      "sha256": "88b7f36dedaaa4740a56ca8ab13ece14152c45eb477c5ff7ad73729351daa4b7"
+      "sha256": "3a1fc874f10654d40e50a52819665a4360bf4bf5a94e2837390c843275a39def"
     },
     {
       "path": "vita/runtime/gpu_device.cpp",
@@ -21716,7 +22312,7 @@
     },
     {
       "path": "vita/runtime/input.cpp",
-      "sha256": "5c869fcb2178b730f7190f3bc235afcf69d47fe4104ebea94d0961f0227ca495"
+      "sha256": "266d2aa32a94306a97561c4711518439aaf93120579990863ac7fa9cb3d7880f"
     },
     {
       "path": "vita/runtime/input.h",
@@ -21724,11 +22320,11 @@
     },
     {
       "path": "vita/runtime/memory.cpp",
-      "sha256": "7435559d31ca7ba68f83e50dda022566e1253a540027fc36cf8193a7556f07f0"
+      "sha256": "4b35f1c21ba03c29ee0a3c7867c38df5f63774cd38a710d9066e541aa908e881"
     },
     {
       "path": "vita/runtime/memory.h",
-      "sha256": "a0e880a95c9bc51f8b93f690005bf93b9b814652d408fc4ee20481a9aa06ccdc"
+      "sha256": "04bc97b6b6af9baf1bef7e84e708ccfb2c6447fccf785897beebe70b152238f3"
     },
     {
       "path": "vita/runtime/tex_image.cpp",
@@ -21748,7 +22344,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "8c45e7ce4483a4e8b36b929ab08ff7150c949ee5301180a465427f434c216cae"
+      "sha256": "142cae571ce72e44d639748797fd900dd5c4b74e917dc3ef6d7440fb1da7ce91"
     },
     {
       "path": "vita/vgx-game/coldtrace_export.cpp",
@@ -21760,7 +22356,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "e210bcda7278a33847274a8fafef8938cebde61b187819e6fbfb43d4503e9538"
+      "sha256": "c6036ba440bc23c7c7230ffe07feda44f5953ac9a5c127a690f907770d63e643"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",
@@ -21796,7 +22392,7 @@
     },
     {
       "path": "vita/vgx-game/settings_runtime.cpp",
-      "sha256": "2f88b5c5c2c385accc2da792b13a284f1b24c9013ce120d0a477e849e94b8d09"
+      "sha256": "838f7a453432f4754b350d29ad4c4600fae15c9115e678b959b5638819f9e16e"
     },
     {
       "path": "vita/vgx-game/settings_runtime.h",

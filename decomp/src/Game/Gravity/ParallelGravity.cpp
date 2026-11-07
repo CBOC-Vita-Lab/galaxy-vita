@@ -23,6 +23,34 @@ ParallelGravity::ParallelGravity()
     mWorldMtx.identity();
 }
 
+#ifdef TARGET_PC
+f32 ParallelGravity::calcReach(TVec3f* pCentre) const {
+    switch (mRangeType) {
+    case RangeType_Sphere:
+        *pCentre = mWorldPlanePosition;
+        return mRange < 0.0f ? -1.0f : mRange;
+    case RangeType_Cylinder:
+        *pCentre = mWorldPlanePosition;
+        return mCylinderHeight + mCylinderRadius;
+    case RangeType_Box: {
+        // (isInBoxRange bounds the projections on the axes: at right angles, a position is within the sum of their lengths)
+        TVec3f dirX, dirY, dirZ;
+        mWorldMtx.getTrans(*pCentre);
+        mWorldMtx.getXDir(dirX);
+        mWorldMtx.getYDir(dirY);
+        mWorldMtx.getZDir(dirZ);
+        const f32 xy = dirX.dot(dirY), xz = dirX.dot(dirZ), yz = dirY.dot(dirZ);
+        if (!(mExtentX > 0.0f && mExtentY > 0.0f && mExtentZ > 0.0f) || xy * xy > 1e-6f * mExtentX * mExtentY ||
+            xz * xz > 1e-6f * mExtentX * mExtentZ || yz * yz > 1e-6f * mExtentY * mExtentZ) {
+            return -1.0f;
+        }
+        return (__builtin_sqrtf(mExtentX) + __builtin_sqrtf(mExtentY) + __builtin_sqrtf(mExtentZ)) * 1.01f;
+    }
+    }
+    return -1.0f;
+}
+#endif
+
 bool ParallelGravity::calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPosition) const {
     if (!isInRange(rPosition, pScalar)) {
         return false;

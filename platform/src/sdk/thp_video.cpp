@@ -1403,14 +1403,17 @@ void pinWorker(int index) {
 #if defined(__vita__) && !defined(THP_STANDALONE)
     // Worker 0: the render core; worker 1: the auxiliary core; worker 2: the game core. While the movie plays there is no
     // 3D scene, so those cores have time; at the lowest priority the workers only take what the others leave.
+    // (The thread library starts every thread at the lowest user priority, 0xBF, the same as the game and the renderer, so a
+    // "lower than the game's" priority cannot be made by adding to it: the game's threads are raised instead, port_thread_class.)
+    // forkB (bug fix from Producdevity's fork, 4c7d7e4): class 4 also moves a thread off core 0 (GXV_CORE0_ALONE / helper cores),
+    // so it comes first and the pin after it; pinned first, the third decoder ended on cores 1-2 with the other two while core 0,
+    // with no 3D scene during a movie, sat nearly idle (fork's console: PrologueB's sound gaps 438 -> 5 from this alone).
+    if (port_vita_thread_class) {
+        port_vita_thread_class(4);
+    }
     static const int kCores[kMaxWorkers] = {1, 2, 0};
     if (port_vita_pin_core) {
         port_vita_pin_core(kCores[index % kMaxWorkers]);
-    }
-    // (The thread library starts every thread at the lowest user priority, 0xBF, the same as the game and the renderer, so a
-    // "lower than the game's" priority cannot be made by adding to it: the game's threads are raised instead, port_thread_class.)
-    if (port_vita_thread_class) {
-        port_vita_thread_class(4);
     }
     // GXV_CORE3_IO=1 (default 0): the third decoder tries the system core, a spare lane for movie frames; it sleeps on a condition
     // variable between pictures. The other two stay on the cores the movie leaves free.

@@ -105,6 +105,7 @@ extern "C" void __PortGXFifoOverflow() {
     events.push_back("resume:"+position(__PortGXFifoPtr)+":"+position(__PortGXFifoLimit));
 }
 extern "C" int port_vgx_player() { return player; }
+extern "C" int port_vgx_seg_idle() { return 0; } // (GXV_SEG_IDLE: gx_fifo.cpp __PortGXFifoIdlePoint, not used here)
 extern "C" int port_vgx_active() { return 1; }
 extern "C" uint8_t* port_vgx_publish(uint8_t* p, int flags) {
     events.push_back("publish:"+position(p)+":"+std::to_string(flags));

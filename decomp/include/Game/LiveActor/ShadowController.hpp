@@ -95,6 +95,9 @@ public:
     void invalidate();
 
     void updateProjection();
+#ifdef TARGET_PC
+    void portCast(const TVec3f&, const TVec3f&);  // (the cast and its stores, as updateProjection makes them)
+#endif
 
     inline void appendToHolder() {
         MR::getSceneObj< ShadowControllerHolder >(SceneObj_ShadowControllerHolder)->_18.push_back(this);
@@ -129,6 +132,25 @@ public:
     /* 0x70 */ u8 _70;
     /* 0x71 */ u8 _71;
     /* 0x72 */ u8 _72;
+#ifdef TARGET_PC
+    // GXV_SHADOWMEMO (shadowmemo): the last projection cast made from ShadowControllerHolder, its arguments and its answer
+    // (ShadowController.cpp, port/shadow_memo.h). Port only; the controller is only ever made with new.
+    struct PortProjMemo {
+        TVec3f mStart;  // the cast's start and direction, as passed
+        TVec3f mRay;
+        TVec3f mPos;  // its answer (mPos / mNorm / mSensor only when mHit)
+        TVec3f mNorm;
+        HitSensor* mSensor;
+        const void* mFilter;  // the parts filter, its vtable and its one field
+        const void* mFilterVt;
+        const void* mFilterArg;
+        u32 mSeq;  // the change log's position and the category's epoch when it was made
+        u32 mEpoch;
+        u8 mValid;
+        u8 mSlot;  // 0: map (category 0), 1: water surface (category 2)
+        u8 mHit;
+    } mPortMemo;
+#endif
 };
 
 namespace MR {

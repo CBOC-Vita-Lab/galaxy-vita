@@ -71,12 +71,18 @@ void RequestCapture(bool) {}
 void SetPresentHook(PresentHook) {}
 int PresentCharaAA(unsigned, int, int, int, int, int, int, int, int, float, bool) { return 0; }
 void CharaAACounters(uint64_t& a, uint64_t& b, uint64_t& c, uint64_t& d) { a = b = c = d = 0; }
+bool PresentEdgeAA(unsigned, int, int, int, int, int, int, int, int, float, bool) { return false; }
+void WarmEdgeAA() {}
+void EdgeAACounters(uint64_t& a, uint64_t& b, uint64_t& c, uint64_t& d) { a = b = c = d = 0; }
+void PresentFastCounters(uint64_t& a, uint64_t& b, uint64_t& c) { a = b = c = 0; }
 void QualityRungSize(int& w, int& h, int& samples) { w = h = 0; samples = 1; }
 void DebugSetQualitySteps(bool, bool) {}
+void DebugSetEdgeStep(bool) {}
 void SetAnisotropicHook(AnisoHook) {}
 void DebugSetAnisotropic(bool, unsigned) {}
 bool AnisotropicOn() { return false; }
 unsigned DebugLastFrameScenes() { return 0; }
+void DebugPxCuts(uint64_t& a, uint64_t& b, uint64_t& c, uint64_t& d, uint64_t& e) { a = b = c = d = e = 0; }
 void SetProgressDisplay(unsigned, int, int, ProgressShowHook) {}
 bool SetPicture(const uint32_t*, int, int) { return false; }
 bool DrawPicture() { return false; }
@@ -85,6 +91,11 @@ void SetProgressHostDraws(bool) {}
 void SetWarmBudget(double) {}
 unsigned WarmPending() { return 0; }
 void WarmIdle() {}
+unsigned StageWarmPending() { return 0; }
+void SetColorLoadHook(ColorLoadHook) {}
+unsigned DebugEfbLoadFroms() { return 0; }
+bool StageWarmIdleWanted() { return false; }
+void StageWarmIdle() {}
 unsigned WarmTotal() { return 0; }
 void WarmSliceStats(unsigned& slices, double& worstMs, double& totalMs) { slices = 0; worstMs = totalMs = 0.0; }
 void SetProgressPolicy(uint64_t, unsigned) {}

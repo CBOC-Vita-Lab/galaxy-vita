@@ -14,6 +14,9 @@
 #include <JSystem/JGeometry/TBox.hpp>
 #include <JSystem/JUtility/JUTTexture.hpp>
 #include <new>
+#ifdef TARGET_PC
+#include "port/host_vector.h"  // (PORT_HEAP_GUARD_PTR)
+#endif
 #include <revolution/gd.h>
 #include <revolution/gx/GXEnum.h>
 #include <revolution/gx/GXFrameBuf.h>
@@ -628,6 +631,21 @@ void MarioActor::updateRasterScroll() {
     }
 }
 
+#ifdef TARGET_PC
+// The scene copy for drawRasterScroll. It is made from the current JKRHeap (a texture copy target must be in guest memory, so the host
+// heap is no choice), which is the scene's: it is given back when the scene is destroyed (port_raster_image_drop, called from
+// GameSystemSceneController::exeDestroyScene). A function-local `static` kept the pointer across the scene change; the next scene
+// then drew into, and the front end read, memory that the new scene's objects own.
+static u8* sRasterImage = nullptr;
+PORT_HEAP_GUARD_PTR(sRasterImage);
+
+extern "C" void port_raster_image_drop(void) {
+    u8* const image = sRasterImage;
+    sRasterImage = nullptr;
+    delete[] image;
+}
+#endif
+
 void MarioActor::drawRasterScroll(f32 amplitude, s16 period, f32 wavelength) const {
     if (wavelength == 0.0f) {
         return;
@@ -643,7 +661,10 @@ void MarioActor::drawRasterScroll(f32 amplitude, s16 period, f32 wavelength) con
     // textured strip; the same geometry then works for every eye/scale.
     const u16 width = MR::getFrameBufferWidth();
     const u16 height = MR::getScreenHeight();
-    static u8* image = new (0x20) u8[GXGetTexBufferSize(width, height, GX_TF_RGB565, GX_FALSE, 0)];
+    if (sRasterImage == nullptr) {
+        sRasterImage = new (0x20) u8[GXGetTexBufferSize(width, height, GX_TF_RGB565, GX_FALSE, 0)];
+    }
+    u8* const image = sRasterImage;
     GXDrawDone();
     GXTexModeSync();
     GXPixModeSync();

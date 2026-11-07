@@ -251,7 +251,7 @@ int main() {
     // The switch: only 1 and 2 turn it on.
     Require(ParseMode(nullptr) == 0 && ParseMode("") == 0, "unset and empty are off");
     Require(ParseMode("0") == 0 && ParseMode("1") == 1 && ParseMode("2") == 2, "0, 1, 2");
-    Require(ParseMode("3") == 0 && ParseMode("-1") == 0 && ParseMode("garbage") == 0 && ParseMode("1x") == 0,
+    Require(ParseMode("3") == 3 && ParseMode("4") == 0 && ParseMode("-1") == 0 && ParseMode("garbage") == 0 && ParseMode("1x") == 0,
             "other values are off");
     Require(ParseMode("0x1") == 1 && ParseMode("01") == 1, "numbers in the forms strtol reads (the port's other switches do the same)");
 
@@ -267,6 +267,19 @@ int main() {
     Require(Join(Reference(2, script)) == "defer wait@2 defer wait@0 mid defer wait@2 defer wait@2 defer wait@2 ",
             "mode 2 trace");
 
+    // Mode 3: the turns without a picture never wait (update, calcAnim); the next drawn turn's start does, and a GXSetDrawDone does.
+    {
+        Deferral d(3);
+        d.Arm();
+        Require(!d.MustWait(port::drawdone::kUpdate) && !d.MustWait(port::drawdone::kCalcAnim), "mode 3: no wait in turns without a picture");
+        Require(!d.MustWait(port::drawdone::kUpdate) && !d.MustWait(port::drawdone::kCalcAnim), "mode 3: still none a turn later");
+        Require(d.MustWait(port::drawdone::kDrawnTurn) && !d.MustWait(port::drawdone::kDrawnTurn), "mode 3: one wait at the drawn turn");
+        d.Arm();
+        Require(d.MustWait(port::drawdone::kSetDrawDone), "mode 3: a GXSetDrawDone waits first");
+        Deferral two(2);
+        two.Arm();
+        Require(two.MustWait(port::drawdone::kCalcAnim) && !two.MustWait(port::drawdone::kDrawnTurn), "mode 2 unchanged; the drawn-turn point finds nothing left");
+    }
     // The log line.
     {
         Deferral d(1);
@@ -280,6 +293,6 @@ int main() {
         Require(strstr(line, "mode 1") && strstr(line, "300 deferred") && strstr(line, "2.00 ms each") && strstr(line, "(300 over 1 ms)"), "the line says what happened");
         Require(!d.Report(line, sizeof line, 300), "and starts a new window");
     }
-    printf("drawdone defer: modes 0, 1, 2 wait where the rules say, never two finishes outstanding, random front end clean\n");
+    printf("drawdone defer: modes 0, 1, 2, 3 wait where the rules say, never two finishes outstanding, random front end clean\n");
     return 0;
 }

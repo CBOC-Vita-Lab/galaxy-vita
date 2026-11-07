@@ -311,7 +311,13 @@ def main():
             run(["ninja", "-C", lto, f"-j{args.jobs}"], env, logs / "lto-compile.log")
             # One relocatable native object: ThinLTO imports and inlines across units; -r keeps every global symbol
             # (the game is linked --whole-archive, and the runtime calls into it by name).
-            run(["ld.lld", "-r", "-o", lto / "galaxy_lto.o", f"--thinlto-jobs={args.jobs}", "--lto-O2",
+            # The game's ThinLTO back end at -O3 (1.3; GAME_LTO_OPT=2 gives 1.2's -O2): more inlining and unrolling of the J3D
+            # animation/material loops and the actors' per-turn work, the game thread's limit. The units' own FP, aliasing and
+            # wrapping options are kept in their bitcode; only the optimisation level of the native code generation changes.
+            lto_opt = os.environ.get("GAME_LTO_OPT", "3")
+            if lto_opt not in ("2", "3"):
+                raise ValueError("GAME_LTO_OPT must be 2 or 3")
+            run(["ld.lld", "-r", "-o", lto / "galaxy_lto.o", f"--thinlto-jobs={args.jobs}", f"--lto-O{lto_opt}",
                  "-mllvm", "-emulated-tls", f"@{lto / 'objects.txt'}"], env, logs / "lto-link.log")
             (lto / "libgalaxy_vita_sources.a").unlink(missing_ok=True)
             run(["llvm-ar", "rcs", lto / "libgalaxy_vita_sources.a", lto / "galaxy_lto.o"], env, logs / "lto-archive.log")

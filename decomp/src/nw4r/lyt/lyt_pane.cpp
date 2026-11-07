@@ -15,6 +15,47 @@ namespace nw4r {
     }
 }  // namespace nw4r
 
+#ifdef TARGET_PC
+// GXV_LC_PANEMEMO (logiccut, 6 Nov; default 0): FindPaneByName answers a repeated lookup from a memo (port/pane_memo.h: the key, and
+// why every change to a name or a child list retires the entries). The search itself, and so every answer, is unchanged.
+#include "port/diagnostics.h"
+#include "port/hot_knob.h"
+#include "port/pane_memo.h"
+#include <cstring>
+namespace {
+    port::panememo::Memo< nw4r::lyt::Pane > sLcPaneMemo;
+    u32 sLcPaneMemoLoggedHits = 0;
+    // (one line per 65536 lookups: how many the memo answered)
+    void lcPaneMemoLog() {
+        const u32 hits = sLcPaneMemo.hits;
+        port_log_summary("logiccut: pane memo: %u of the last 65536 FindPaneByName lookups answered from the memo (GXV_LC_PANEMEMO=1)",
+                         hits - sLcPaneMemoLoggedHits);
+        sLcPaneMemoLoggedHits = hits;
+    }
+    inline bool lcPaneMemo() {
+        return PORT_HOT_KNOB(int, [] { const char* e = getenv("GXV_LC_PANEMEMO"); return e && *e ? atoi(e) : 0; }()) != 0;
+    }
+    // (a name or a child list changes: always, switch or not, so that turning the switch on mid-run finds no stale entry)
+    inline void lcPaneTreeChanged() {
+        sLcPaneMemo.Bump();
+    }
+    // GXV_AC_PANEMTX (animcut, 6 Nov; default 1, vita/vgx-game/entry.cpp): Pane::CalculateMtx keeps a pane's local matrix (mMtx)
+    // when its scale, rotation and translation have the bits of the last computation (pane.h mPortMtxKey); the global matrix and
+    // alpha are made as before. 0: every pane computes its local matrix (3 sinf + 3 cosf + 3 concats), as before. 2: verify: every
+    // pane computes it, and a pane whose key repeated is checked against the matrix it had (logged as "differed": must be 0).
+    inline int acPaneMtxMode() {
+        return PORT_HOT_KNOB(int, [] { const char* e = getenv("GXV_AC_PANEMTX"); return e && *e ? atoi(e) : 0; }());
+    }
+    u32 sAcPaneKept = 0, sAcPaneMade = 0, sAcPaneChecked = 0, sAcPaneBad = 0;
+    // (one line per 262144 pane matrices: the HUD's ~300-600 visible panes a turn make that every ~450-900 turns)
+    void acPaneMtxLog(int mode) {
+        port_log_summary("animcut: pane mtx: kept %u, made %u of the last 262144 (GXV_AC_PANEMTX=%d); verify: %u checked, %u differed since the start",
+                         sAcPaneKept, sAcPaneMade, mode, sAcPaneChecked, sAcPaneBad);
+        sAcPaneKept = sAcPaneMade = sAcPaneChecked = 0;
+    }
+}  // namespace
+#endif
+
 namespace nw4r {
     namespace lyt {
         NW4R_UT_RUNTIME_TYPEINFO_ROOT_DEFINITION(Pane);
@@ -46,6 +87,9 @@ namespace nw4r {
         }
 
         Pane::~Pane() {
+#ifdef TARGET_PC
+            lcPaneTreeChanged();
+#endif
             for (PaneList::Iterator it = mChildList.GetBeginIter(); it != mChildList.GetEndIter();) {
                 PaneList::Iterator currIt = it++;
                 mChildList.Erase(currIt);
@@ -70,6 +114,9 @@ namespace nw4r {
         }
 
         void Pane::SetName(const char* pName) {
+#ifdef TARGET_PC
+            lcPaneTreeChanged();
+#endif
             strncpy(mName, pName, 0x10);
             mName[0x10] = '\0';
         }
@@ -84,11 +131,17 @@ namespace nw4r {
         }
 
         void Pane::InsertChild(PaneList::Iterator next, Pane* pChild) {
+#ifdef TARGET_PC
+            lcPaneTreeChanged();
+#endif
             mChildList.Insert(next, pChild);
             pChild->mpParent = this;
         }
 
         void Pane::RemoveChild(Pane* pChild) {
+#ifdef TARGET_PC
+            lcPaneTreeChanged();
+#endif
             mChildList.Erase(pChild);
             pChild->mpParent = nullptr;
         }
@@ -134,6 +187,22 @@ namespace nw4r {
         }
 
         Pane* Pane::FindPaneByName(const char* pName, bool recursive) {
+#ifdef TARGET_PC
+            if (lcPaneMemo()) {
+                port::panememo::Key key;
+                port::panememo::MakeKey(&key, this, recursive, pName);
+                const u32 hash = port::panememo::Hash(key);
+                Pane* pFound;
+                if (!sLcPaneMemo.Find(key, hash, &pFound)) {
+                    pFound = FindPaneByNameSearch(pName, recursive);
+                    sLcPaneMemo.Store(key, hash, pFound);
+                }
+                if (((sLcPaneMemo.hits + sLcPaneMemo.misses) & 0xFFFFu) == 0) {
+                    lcPaneMemoLog();
+                }
+                return pFound;
+            }
+#endif
             if (detail::EqualsResName(mName, pName)) {
                 return this;
             }
@@ -148,6 +217,26 @@ namespace nw4r {
 
             return nullptr;
         }
+
+#ifdef TARGET_PC
+        // GXV_LC_PANEMEMO: the search above, for a memo miss. The children are searched with this function directly: no pane class
+        // overrides FindPaneByName, so the answer is the same, and the children's own lookups do not become memo entries.
+        Pane* Pane::FindPaneByNameSearch(const char* pName, bool recursive) {
+            if (detail::EqualsResName(mName, pName)) {
+                return this;
+            }
+
+            if (recursive) {
+                for (PaneList::Iterator it = mChildList.GetBeginIter(); it != mChildList.GetEndIter(); ++it) {
+                    if (Pane* pPane = it->FindPaneByNameSearch(pName, true)) {
+                        return pPane;
+                    }
+                }
+            }
+
+            return nullptr;
+        }
+#endif
 
         Material* Pane::FindMaterialByName(const char* pName, bool recursive) {
             if (mpMaterial != NULL && detail::EqualsMaterialName(mpMaterial->GetName(), pName)) {
@@ -179,6 +268,27 @@ namespace nw4r {
                 scale.y *= rInfo.GetLocationAdjustScale().y;
             }
 
+#ifdef TARGET_PC
+            // GXV_AC_PANEMTX: the local matrix below is a pure function of these 8 values. When their bits are those of the last
+            // computation, mMtx (written only here) already holds exactly what it would compute: it is kept (no sinf/cosf).
+            const int acMode = acPaneMtxMode();
+            u32 acKey[8];
+            bool acSame = false;
+            math::MTX34 acOld;
+            if (acMode != 0) {
+                memcpy(&acKey[0], &scale.x, 4);
+                memcpy(&acKey[1], &scale.y, 4);
+                memcpy(&acKey[2], &mRotate, 12);
+                memcpy(&acKey[5], &mTranslate, 12);
+                acSame = mPortMtxKeyOk != 0 && memcmp(acKey, mPortMtxKey, sizeof(acKey)) == 0;
+                if (acSame && acMode == 2) {
+                    acOld = mMtx;
+                }
+            }
+            if (acSame && acMode == 1) {
+                sAcPaneKept++;
+            } else {
+#endif
             PSMTXScale(mtx2, scale.x, scale.y, 1.0f);
 
             PSMTXRotRad(rotateMtx, 'x', NW4R_MATH_DEG_TO_RAD(mRotate.x));
@@ -191,6 +301,23 @@ namespace nw4r {
             PSMTXConcat(rotateMtx, mtx2, mtx1);
 
             PSMTXTransApply(mtx1, mMtx, mTranslate.x, mTranslate.y, mTranslate.z);
+#ifdef TARGET_PC
+                sAcPaneMade++;
+                if (acSame && acMode == 2) {
+                    sAcPaneChecked++;
+                    if (memcmp(&acOld, &mMtx, sizeof(acOld)) != 0) {
+                        sAcPaneBad++;  // (verify: a kept matrix would have differed)
+                    }
+                }
+                if (acMode != 0) {
+                    memcpy(mPortMtxKey, acKey, sizeof(acKey));
+                }
+                mPortMtxKeyOk = acMode != 0 ? 1 : 0;
+            }
+            if (((sAcPaneKept + sAcPaneMade) & 0x3FFFFu) == 0) {
+                acPaneMtxLog(acMode);
+            }
+#endif
 
             if (mpParent != NULL) {
                 math::MTX34Mult(&mGlbMtx, &mpParent->mGlbMtx, &mMtx);

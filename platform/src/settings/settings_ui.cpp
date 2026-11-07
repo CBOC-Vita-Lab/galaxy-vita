@@ -20,7 +20,9 @@ bool ExtraRow(const UiState& s) {return s.page==Page::Controls&&s.row>s.session-
 unsigned ExtraAt(const UiState& s) {return s.row-static_cast<unsigned>(s.session->controls->actionCount)-1;}
 void ModalOpen(UiState& s,Modal modal) {s.modal=modal;s.modalChoice=0;s.captureArmed=false;s.candidate=0;s.previousMenu=0;s.armed=false;s.repeatKey=0;}
 void Finish(UiState& s) {s.result={Safe(*s.session),false};s.done=true;}
-void Cancel(UiState& s) {if(Dirty(s))ModalOpen(s,Modal::Discard);else Finish(s);}
+// Leaving with changes asks what to do with them: Save (the default choice), Discard, or Keep editing (the save row is at the
+// bottom of the list, out of the way for a quick change).
+void Cancel(UiState& s) {if(Dirty(s)){ModalOpen(s,Modal::Discard);s.modalChoice=2;}else Finish(s);}
 void Save(UiState& s,ExitIntent intent) {
     if(!s.session->document.editable) {s.message="Newer settings file is read-only";return;}
     std::string error;
@@ -93,13 +95,13 @@ void Change(UiState& s,int direction) {
             ApplyPreset(s.working,static_cast<Preset>((index+direction+3)%3));break;
         }
         case RowRate: {
-            // Right moves along the screen (Locked 30, Up to 60) and wraps; the locked 30 needs the driver capability.
-            if(!s.session->features.fixed30&&(s.working.fpsLimit==30||s.working.fpsLimit==kSteady30)) {s.message="Fixed 30 FPS unavailable in this build";break;}
-            if(s.working.fpsLimit==kSteady30)s.working.fpsLimit=30;
-            std::vector<int> rates{0};if(s.session->features.fixed30)rates.push_back(30);
-            auto at=std::find(rates.begin(),rates.end(),s.working.fpsLimit);const int n=static_cast<int>(rates.size());
-            const int index=at==rates.end()?0:static_cast<int>(at-rates.begin());
-            s.working.fpsLimit=rates[static_cast<size_t>((index+direction+n)%n)];break;
+            // Picture mode: Right moves along the screen (Quality, Performance, Locked 30) and wraps; Locked 30 needs the driver capability.
+            const bool locked=s.working.fpsLimit==30||s.working.fpsLimit==kSteady30;
+            if(!s.session->features.fixed30&&locked) {s.message="Fixed 30 FPS unavailable in this build";break;}
+            const int n=s.session->features.fixed30?3:2;
+            const int index=locked?2:s.working.performance60?1:0,next=(index+direction+n)%n;
+            s.working.fpsLimit=next==2?30:0;s.working.performance60=next==1;
+            break;
         }
         // On and the default are one choice on the console; turning it back on returns to the default (no switch is forced).
         case RowDynamic: s.working.autoQuality=s.working.autoQuality==AutoQuality::Disabled?AutoQuality::Default:AutoQuality::Disabled;break;
@@ -111,6 +113,14 @@ void Change(UiState& s,int direction) {
         case RowEffects: s.working.effects=s.working.effects==EffectsQuality::Adaptive?EffectsQuality::Full:EffectsQuality::Adaptive;break;
         case RowDepthOfField: s.working.depthOfField=!s.working.depthOfField;break;
         case RowCorePlan: s.working.coreHelp=!s.working.coreHelp;break;
+        case RowRenderer: s.working.gxmDirect=!s.working.gxmDirect;break;
+        case RowOverlap: {   // Max, On, Off (Right), wrapping
+            const int now=!s.working.logicOverlap?2:s.working.overlapMax?0:1;const int next=(now+direction+3)%3;
+            s.working.logicOverlap=next!=2;s.working.overlapMax=next==0;break;
+        }
+        case RowMaterials: s.working.lazyMaterials=!s.working.lazyMaterials;break;
+        case RowFarAnimation: s.working.farAnimation=static_cast<FarAnimation>((static_cast<int>(s.working.farAnimation)+direction+3)%3);break;
+        case RowSpeed: s.working.fullSpeed=!s.working.fullSpeed;break;
         case RowMotion: s.working.reducedMotion=!s.working.reducedMotion;break;
         case RowLanguage: {
             if(s.session->languages.names.empty()) {s.message="Game language unavailable until game data is found";break;}
@@ -171,6 +181,17 @@ void Step(UiState& s,const UiInput& input,uint64_t now) {
             if(event&(Down|Right))s.picker=(s.picker+1)%count;
             const unsigned index=s.picker%count;
             if(event&Accept)Bind(s,optional&&index==0?"":buttons[index-optional]->id,false);
+            return;
+        }
+        if(s.modal==Modal::Discard) {
+            // Three choices: 0 Keep editing, 1 Discard, 2 Save.
+            if(event&(Up|Left))s.modalChoice=(s.modalChoice+2)%3;
+            if(event&(Down|Right))s.modalChoice=(s.modalChoice+1)%3;
+            if(event&Accept) {
+                const unsigned choice=s.modalChoice;s.modal=Modal::None;s.armed=false;
+                if(choice==1)Finish(s);
+                else if(choice==2)Save(s,Safe(*s.session));
+            }
             return;
         }
         if(event&(Up|Down|Left|Right))s.modalChoice=1-s.modalChoice;
@@ -263,29 +284,41 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
             v.label="Preset";const auto p=PresetOf(c);
             Put(v.value,p==Preset::BestPicture?"Best picture":p==Preset::Balanced?"Balanced":p==Preset::Performance?"Performance":"Custom");
             v.help1="Sets dynamic resolution, Sharper, Mario, anti-aliasing, sharpness, effects and depth of field together.";
-            v.help2="Change any of them and this reads Custom. Picture rate, HD textures, core plan and language are not in a preset.";break;
+            v.help2="Change any and this reads Custom. Performance also picks Performance mode (not HD, cores, speed or language).";break;
         }
         case RowRate:
-            v.label="Picture rate";Put(v.value,(c.fpsLimit==30||c.fpsLimit==kSteady30)?(s.session->features.fixed30?"Locked 30":"Locked 30 (unavailable here)"):"Up to 60");
-            if(!s.session->features.fixed30&&(c.fpsLimit==30||c.fpsLimit==kSteady30)) {v.help1="Locked 30 is saved, but this build cannot hold it. The current rate is unchanged.";v.help2="";}
-            else if(c.fpsLimit!=0) {v.help1="Locked 30: an even 30 FPS, every frame, at full effects.";v.help2="Steadier than a rate that wanders, and kinder to the battery.";}
-            else {v.help1="Up to 60: as fast as each scene allows, with 30 as the floor.";v.help2="Scenes that cannot reach 60 run at 30 (or between) rather than dropping in size first.";}
+            v.label="Picture mode";
+            if(c.fpsLimit==30||c.fpsLimit==kSteady30) {
+                Put(v.value,s.session->features.fixed30?"Locked 30":"Locked 30 (unavailable here)");
+                if(!s.session->features.fixed30) {v.help1="Locked 30 is saved, but this build cannot hold it. The current mode is unchanged.";v.help2="";}
+                else {v.help1="Locked 30: an even 30 FPS with the full 960x544 picture, every frame, never smaller.";v.help2="A very heavy scene may dip under 30 rather than lose sharpness; Quality gives up size first.";}
+            } else if(c.performance60) {
+                Put(v.value,"Performance (aims for 60)");
+                v.help1="Aims for 60 FPS: under load edge smoothing, background detail, then picture size give way; Mario stays sharp.";
+                v.help2="Where the console's processor cannot come near 60, the pictures come at an even 30 instead.";
+            } else {
+                Put(v.value,s.session->features.fixed30?"Quality (30, sharpest)":"Quality (sharpest)");
+                v.help1="Quality: a steady 30 FPS at up to the screen's full 960x544, with smoothed edges when the GPU has room.";
+                v.help2="The default. In a scene too heavy for that the picture size gives way first, never below the standard size.";
+            }
             break;
         case RowDynamic:
             v.label="Dynamic resolution";Put(v.value,OnOff(c.autoQuality!=AutoQuality::Disabled));
-            v.help1="Lets the picture size follow the GPU: sharper when there is room, smaller only to hold 30 FPS.";
-            v.help2="Off keeps the game's own 640x456 picture all the time; Sharper, Mario and Anti-aliasing then do nothing.";break;
+            v.help1=c.performance60?"Lets the picture size follow the GPU: smaller to reach 60 FPS, sharper when there is room at 60."
+                                   :"Lets the picture size follow the GPU: sharper when there is room, smaller only to hold 30 FPS.";
+            v.help2="Off keeps the game's standard picture size all the time; Sharper, Mario and Anti-aliasing then do nothing.";break;
         case RowSharper:
             v.label="Sharper when possible";Put(v.value,OnOff(c.aboveNative));
             v.help1="On: when the GPU has room the picture grows up to the screen's own 960x544, then smooths edges.";
-            v.help2="Off: never above the game's 640x456 picture. Balanced and Performance turn this off.";break;
+            v.help2="Off: never above the game's standard picture size. Balanced and Performance turn this off.";break;
         case RowMario:
             v.label="Prioritize Mario";Put(v.value,OnOff(c.prioritizeMario));
             v.help1="On: under load, effects, background textures and picture size give way before Mario's quality,";
-            v.help2="and Mario and Luigi get their own edge smoothing when the picture shrinks. Off: no Mario-first ladder.";break;
+            v.help2="and Mario and Luigi get edge smoothing when the picture drops below the standard size. Off: no Mario-first ladder.";break;
         case RowAntiAliasing:
             v.label="Anti-aliasing";Put(v.value,c.antiAliasing==AntiAliasing::Auto?"Auto":"Off");
-            v.help1="Auto: smooths jagged edges with 2x or 4x multisampling when the GPU has room (needs Sharper when possible).";
+            v.help1=c.performance60?"Auto: no multisampling in Performance; the present's edge smoothing is kept while the GPU has room."
+                                   :"Auto: smooths jagged edges with 2x or 4x multisampling when the GPU has room (needs Sharper when possible).";
             v.help2="Off: no multisampling; the picture then tops out at 960x544 without it.";break;
         case RowSharpness:
             v.label="Sharpness";Put(v.value,c.sharpness==Sharpness::Auto?"Auto":c.sharpness==Sharpness::Off?"Off":"Strong");
@@ -297,16 +330,36 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
             v.help2=s.session->hdtexPack?"On only matters when the pack is installed; Off uses the game's own textures.":"The pack is not in ux0:data/smg, so there is nothing to turn on yet.";break;
         case RowEffects:
             v.label="Effects quality";Put(v.value,c.effects==EffectsQuality::Adaptive?"Adaptive":"Full");
-            v.help1="Adaptive: effects and blur are drawn at half size only while a scene would drop under 30 FPS.";
-            v.help2="Full: they are never reduced, so under load the picture size drops instead.";break;
+            v.help1="Adaptive: under load, background textures use cheaper filtering first; effects stay full size.";
+            v.help2="Full: nothing is reduced, so under load the picture size drops sooner.";break;
         case RowDepthOfField:
             v.label="Depth of field";Put(v.value,c.depthOfField?"On (as game)":"Off");
             v.help1="On: the game's own depth-of-field blur. Off: skips that full-screen blur pass, which is cheaper,";
             v.help2="but backgrounds stay sharp in the scenes where the game would blur them.";break;
         case RowCorePlan:
             v.label="Core plan";Put(v.value,c.coreHelp?"Auto":"Off");
-            v.help1="Auto: disc read-ahead and a movie decoder may use the system core when the console allows it.";
-            v.help2="Off: they stay on cores 1 and 2 as before. Try Off only if one console stutters while loading.";break;
+            v.help1="Auto: disc read-ahead may use the system core; the memory collector and audio mixer move to core 1.";
+            v.help2="Off: 1.2's layout (all on cores 1 and 2). Try Off only if one console stutters or crackles.";break;
+        case RowRenderer:
+            v.label="Renderer";Put(v.value,c.gxmDirect?"Direct":"Standard");
+            v.help1="Direct: each draw goes to the GPU driver in one call with a cached shader setup. Faster.";
+            v.help2="Standard: 1.2's path. Try it if the picture is garbled or parts of a level are missing.";break;
+        case RowOverlap:
+            v.label="Logic overlap";Put(v.value,!c.logicOverlap?"Off":c.overlapMax?"Max":"On");
+            v.help1=c.overlapMax&&c.logicOverlap?"Max: the game never waits for the graphics between pictures. Fastest.":"On: game logic runs while the previous picture is still being prepared.";
+            v.help2="Try On, then Off, if objects flicker or are drawn in the wrong place. Off is 1.2's way.";break;
+        case RowMaterials:
+            v.label="Material updates";Put(v.value,c.lazyMaterials?"Per picture":"Every turn");
+            v.help1="Per picture: colours and materials are worked out once per drawn picture, not every game turn.";
+            v.help2="Every turn: 1.2's way. Try it if a surface shows the wrong colour or a stale animation.";break;
+        case RowFarAnimation:
+            v.label="Far animation";Put(v.value,c.farAnimation==FarAnimation::Reduced?"Reduced":c.farAnimation==FarAnimation::Full?"Full":"Aggressive");
+            v.help1="Reduced: scenery and characters far from Mario are animated once per picture, not every turn.";
+            v.help2="Aggressive does it nearer too (faster). Full: every turn. Solid objects are never reduced.";break;
+        case RowSpeed:
+            v.label="Game speed";Put(v.value,c.fullSpeed?"Full":"Smooth");
+            v.help1="Full: the game keeps its real speed in heavy scenes by showing fewer pictures.";
+            v.help2="Smooth: steadier pictures, but the game may run up to 20% slower (1.2's choice).";break;
         case RowMotion:
             v.label="Reduced motion";Put(v.value,OnOff(c.reducedMotion));
             v.help1="Less camera shake and screen blur; short bright flashes are softened.";

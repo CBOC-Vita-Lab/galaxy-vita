@@ -5,6 +5,7 @@
 //   - Every function tolerates its output aliasing an input.
 #include <math.h>
 #include <string.h>
+#define PORT_MTX_DEFINE  // (the out-of-line definitions of the helpers mtx.h has inline for the game)
 #include "revolution/mtx.h"
 #include "port/mtx_profile.h"
 

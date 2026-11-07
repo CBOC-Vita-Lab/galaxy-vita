@@ -6,16 +6,26 @@
 
 #include "port/diagnostics.h"
 #include "port/drawdone_defer.h"
+#include "port/hot_knob.h"
 #include "port/port.h"
 
 namespace {
-port::drawdone::Deferral& DrawDoneDeferral() {
-    static port::drawdone::Deferral d(port::drawdone::ParseMode(getenv("GXV_DRAWDONE_DEFER")));
+port::drawdone::Deferral& DrawDoneDeferralOnce() {
+    // Modes 3 and 4 need the material lists made once per picture (GXV_DL_LAZY=2, the default): with another value they act as 2.
+    static port::drawdone::Deferral d([] {
+        int m = port::drawdone::ParseMode(getenv("GXV_DRAWDONE_DEFER"));
+        const char* lazy = getenv("GXV_DL_LAZY");
+        if (m >= 3 && lazy && *lazy && atoi(lazy) != 2) m = 2;
+        return m;
+    }());
     return d;
 }
+// (GXV_HOT_KNOBS: its address read without a barrier, port/hot_knob.h; the object is still made once, by the guarded static above)
+port::drawdone::Deferral& DrawDoneDeferral() { return *PORT_HOT_KNOB(port::drawdone::Deferral*, &DrawDoneDeferralOnce()); }
 }  // namespace
 
 extern "C" int port_gx_drawdone_defer_mode(void) { return DrawDoneDeferral().Mode(); }
+extern "C" int port_gx_drawdone_pending(void) { return DrawDoneDeferral().Pending() ? 1 : 0; }
 extern "C" void port_gx_drawdone_armed(void) { DrawDoneDeferral().Arm(); }
 extern "C" int port_gx_drawdone_must_wait(int point) { return DrawDoneDeferral().MustWait(point) ? 1 : 0; }
 extern "C" void port_gx_drawdone_waited(int64_t ns) {

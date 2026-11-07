@@ -41,7 +41,8 @@ enum {
     GL_CULL_FACE = 0xB44, GL_DEPTH_TEST = 0xB71, GL_BLEND = 0xBE2, GL_DITHER = 0xBD0, GL_SCISSOR_TEST = 0xC11,
     GL_UNPACK_ALIGNMENT = 0xCF5, GL_PACK_ALIGNMENT = 0xD05, GL_TEXTURE_2D = 0xDE1,
     GL_UNSIGNED_BYTE = 0x1401, GL_UNSIGNED_SHORT = 0x1403, GL_UNSIGNED_INT = 0x1405, GL_FLOAT = 0x1406,
-    GL_DEPTH_COMPONENT = 0x1902, GL_RGBA = 0x1908, GL_LUMINANCE_ALPHA = 0x190A,
+    GL_DEPTH_COMPONENT = 0x1902, GL_RGB = 0x1907, GL_RGBA = 0x1908, GL_LUMINANCE_ALPHA = 0x190A,
+    GL_UNSIGNED_SHORT_4_4_4_4 = 0x8033, GL_UNSIGNED_SHORT_5_5_5_1 = 0x8034, GL_UNSIGNED_SHORT_5_6_5 = 0x8363,
     GL_VENDOR = 0x1F00, GL_RENDERER, GL_VERSION, GL_EXTENSIONS,
     GL_NEAREST = 0x2600, GL_LINEAR = 0x2601, GL_NEAREST_MIPMAP_NEAREST = 0x2700, GL_LINEAR_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
     GL_LINEAR_MIPMAP_LINEAR,
@@ -60,6 +61,7 @@ enum {
 extern "C" {
 GLuint glCreateShader(GLenum);
 GLuint glCreateProgram(void);
+unsigned vglGetFreeProgramSlots(void);
 GLint glGetUniformLocation(GLuint, const GLchar*);
 GLenum glCheckFramebufferStatus(GLenum);
 GLenum glGetError(void);
@@ -143,11 +145,11 @@ VGX_STUB_FN void glUniform4fv(GLint, GLsizei, const GLfloat*) {}
 VGX_STUB_FN void glUniformMatrix4fv(GLint, GLsizei, GLboolean, const GLfloat*) {}
 VGX_STUB_FN void glBindTexture(GLenum, GLuint name) { vgx_stub_curTex_ = name; }
 VGX_STUB_FN void glActiveTexture(GLenum) {}
-VGX_STUB_FN void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum, const GLvoid* data) {
+VGX_STUB_FN void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, GLint, GLenum format, GLenum type, const GLvoid* data) {
     const unsigned t = vgx_stub_curTex_;
     if (t == 0 || t >= VGX_STUB_MAXN) return;
     if (level == 0) {
-        vgx_stub_base_[t] = (uint32_t)w * (uint32_t)h * (format == GL_LUMINANCE_ALPHA ? 2u : 4u);
+        vgx_stub_base_[t] = (uint32_t)w * (uint32_t)h * (format == GL_LUMINANCE_ALPHA || (type != GL_UNSIGNED_BYTE && type != GL_FLOAT && type != GL_UNSIGNED_INT) ? 2u : 4u); // (GXV_TEX16: 16-bit types)
         vgx_stub_set(t, format == GL_DEPTH_COMPONENT ? VGX_STUB_RT_DEPTH : data ? (format == GL_LUMINANCE_ALPHA ? VGX_STUB_TEX_LA : VGX_STUB_TEX_RGBA) : VGX_STUB_RT_COLOR, vgx_stub_base_[t]);
     } else {
         vgx_stub_set(t, vgx_stub_kind_[t], (uint64_t)vgx_stub_base_[t] * 4u / 3u);

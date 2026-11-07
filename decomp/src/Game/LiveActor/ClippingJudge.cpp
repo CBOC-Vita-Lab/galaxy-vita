@@ -24,12 +24,43 @@ ClippingJudge::ClippingJudge(const char* pName) : NameObj(pName), mFrustum() {
 void ClippingJudge::init(const JMapInfoIter& rIter) {
 }
 
+#if defined(__vita__) && defined(__arm__) && defined(GXV_SHARED_CLIP_PREP) && GXV_SHARED_CLIP_PREP
+namespace {
+// Preserve the original far-plane sequence; enablement requires target codegen verification.
+__attribute__((noinline)) void calcFarPlaneLikeCalcViewingVolume(THex3f* pVolume, const TVec3f& front,
+                                                                 const TVec3f& position, f32 farClip) {
+    TVec3f back;
+    back.negate(front);
+    TVec3f planePosition;
+    planePosition.scaleAdd(farClip, front, position);
+    pVolume->mPlanes[5].set(back, planePosition);
+}
+}  // namespace
+#endif
+
 void ClippingJudge::movement() {
     calcViewingVolume(&mFrustum, MR::getFarZ());
 
+#if defined(__vita__) && defined(__arm__) && defined(GXV_SHARED_CLIP_PREP) && GXV_SHARED_CLIP_PREP
+    TPos3f cameraMtx;
+    cameraMtx.setPositionFromLookAt(MR::getCameraViewMtx());
+    TVec3f front;
+    cameraMtx.getZDir(front);
+    TVec3f position;
+    cameraMtx.getTrans(position);
+    for (u32 i = 1; i < 8; i++) {
+        mClipFrustums[i].mPlanes[3] = mFrustum.mPlanes[3];
+        mClipFrustums[i].mPlanes[1] = mFrustum.mPlanes[1];
+        mClipFrustums[i].mPlanes[2] = mFrustum.mPlanes[2];
+        mClipFrustums[i].mPlanes[0] = mFrustum.mPlanes[0];
+        calcFarPlaneLikeCalcViewingVolume(&mClipFrustums[i], front, position, mClipDistances[i]);
+        mClipFrustums[i].mPlanes[4] = mFrustum.mPlanes[4];
+    }
+#else
     for (u32 i = 1; i < 8; i++) {
         calcViewingVolume(&mClipFrustums[i], mClipDistances[i]);
     }
+#endif
 }
 
 bool ClippingJudge::isJudgedToClipFrustum(const TVec3f& rVec, f32 a2) const {

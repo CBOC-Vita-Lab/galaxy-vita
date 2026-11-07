@@ -25,3 +25,7 @@ cases=${CASES:-"0 1 47 48 255 256 300 1024"}
 for n in $cases; do
     "$tmp/timer-ring" "$n" "${GUARD:-1}"
 done
+# Scene timers (GXV_GPU_SCENES), when the generator has them.
+if grep -q 'vglRtSetupScenes' "${VGX_TIMER_GENERATOR:-$root/tools/vitagl/gpu_timers.py}"; then
+    "$tmp/timer-ring" scenes
+fi

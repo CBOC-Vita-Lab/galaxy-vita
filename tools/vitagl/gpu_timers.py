@@ -26,6 +26,18 @@ With the opt-in ring guard, a full metadata ring is not overwritten: excess scen
 After any such drop, timer samples remain unavailable until restart rather than undercounting GPU work. Rendering does not wait
 for the watcher. The host configures this before starting the watcher through vglRtSetRingGuard.
 
+Per-scene vertex and fragment completion (GXV_GPU_SCENES in the back end; off until vglRtSetupScenes is called):
+  vglRtSetupScenes(priority, affinity)   after vglRtSetup: every timed scene is also ended with a VERTEX notification of its own (a second
+      ring of 64 words, words 65..128 of the notification region) and a second watcher thread stamps each scene's vertex completion the
+      same way (sceGxmNotificationWait in order). The two watchers are independent, so a scene's vertex completion is seen while an earlier
+      scene's fragment work still runs. Returns 1 when the watcher runs.
+  vglRtTagScene(tag)    the host's tag for the scene that BEGINS next (scene_reset); a scene begun without one has tag 0.
+  vglRtReadScenes(out, max)   the finished scenes (both watchers done with them) since the last call, oldest first, at most max:
+      seq, frame, tag, begin (CPU time of the scene's begin), submitted, vertex done, fragment done (process time, us), timed, vtimed.
+      A reader more than half the ring behind loses the oldest. One reader thread.
+  Nothing else changes: the fragment watcher, the frame sums and query_fence work as before; with the scenes off no scene gets a vertex
+  notification.
+
 Also (only with -DANISO_SWITCH), the Strikers port's experimental anisotropic switch, OFF unless asked for:
   vglSetAnisotropicFilter(f)   f = 2 or 3: a trilinear texture (minification LINEAR with the mip filter on) gets this minification
       filter instead (the filter values vitasdk names MIPMAP_LINEAR / MIPMAP_POINT, believed to be the hardware's anisotropic modes;
@@ -69,6 +81,9 @@ typedef struct {
 	uint32_t done_us;
 	uint32_t fence; // query_fence.value of the scene
 	uint8_t timed;
+	uint8_t vtimed; // (scene timers) a vertex notification of its own
+	uint32_t seq, tag, begin_us;
+	volatile uint32_t vdone_us;
 } rt_scene_rec;
 static rt_scene_rec rt_ring[RT_SCENES];
 static volatile uint32_t rt_produced = 0; // scenes recorded
@@ -83,6 +98,13 @@ static volatile uint32_t rt_scenes_timed = 0, rt_scenes_untimed = 0, rt_scenes_l
 static GLboolean rt_ring_guard = GL_FALSE;
 static volatile uint32_t rt_ring_drops = 0;
 GLboolean vgl_rt_gpu_on = GL_FALSE;
+// scene timers (vglRtSetupScenes): the vertex watcher
+static volatile uint32_t rt_vconsumed = 0;
+static volatile uint32_t rt_vwatcher_idle = 0;
+static volatile unsigned int *rt_vslots = NULL;
+static SceUID rt_vsema = -1, rt_vthread = -1;
+static volatile GLboolean rt_scenes_on = GL_FALSE;
+static uint32_t rt_tag_next = 0, rt_tag_cur = 0, rt_begin_cur = 0, rt_read = 0;
 
 static inline uint32_t rt_now(void) { return sceKernelGetProcessTimeLow(); }
 
@@ -90,9 +112,19 @@ void vglRtSetRingGuard(uint32_t enabled) { if (rt_thread < 0) rt_ring_guard = en
 uint32_t vglRtRingDrops(void) { return rt_ring_drops; }
 
 // gxm.c scene_end, query_fence.value already counting this scene: sceGxmEndScene with the scene's own fragment notification.
+// gxm.c scene_reset, right before a scene begins: the host's tag goes with it (scene timers)
+void vgl_rt_scene_begin(void) {
+	rt_tag_cur = rt_tag_next;
+	rt_tag_next = 0;
+	rt_begin_cur = rt_now();
+}
+
+void vglRtTagScene(uint32_t tag) { rt_tag_next = tag; }
+
 void vgl_rt_end_scene(SceGxmContext *ctx) {
 	const uint32_t seq = rt_produced;
-	if (rt_ring_guard && seq - rt_consumed >= RT_SCENES) {
+	const GLboolean scenes = rt_scenes_on;
+	if ((rt_ring_guard && seq - rt_consumed >= RT_SCENES) || (scenes && seq - rt_vconsumed >= RT_SCENES)) {
 		// A watcher can still hold the oldest record while blocked in NotificationWait.
 		// Replacing its fence can incorrectly certify future GPU work as complete.
 		sceGxmEndScene(ctx, NULL, &query_fence);
@@ -103,16 +135,30 @@ void vgl_rt_end_scene(SceGxmContext *ctx) {
 	r->frame = rt_frame;
 	r->done_us = 0;
 	r->fence = query_fence.value;
+	r->seq = seq;
+	r->tag = rt_tag_cur;
+	r->begin_us = rt_begin_cur;
+	r->vdone_us = 0;
+	// (scene timers) the vertex notification, under the same rule as the fragment one
+	SceGxmNotification vn, *vnp = NULL;
+	r->vtimed = 0;
+	if (scenes && seq - rt_vconsumed < RT_SLOTS - 16) {
+		vn.address = &rt_vslots[seq % RT_SLOTS];
+		vn.value = seq + 1;
+		*vn.address = 0;
+		vnp = &vn;
+		r->vtimed = 1;
+	}
 	// The watcher must not fall a whole slot ring behind: a slot word is rewritten RT_SLOTS scenes later.
 	if (seq - rt_consumed < RT_SLOTS - 16) {
 		SceGxmNotification n;
 		n.address = &rt_slots[seq % RT_SLOTS];
 		n.value = seq + 1;
 		*n.address = 0;
-		sceGxmEndScene(ctx, NULL, &n);
+		sceGxmEndScene(ctx, vnp, &n);
 		r->timed = 1;
 	} else {
-		sceGxmEndScene(ctx, NULL, &query_fence);
+		sceGxmEndScene(ctx, vnp, &query_fence);
 		r->timed = 0;
 	}
 	r->submit_us = rt_now();
@@ -121,6 +167,10 @@ void vgl_rt_end_scene(SceGxmContext *ctx) {
 	if (rt_watcher_idle) {
 		rt_watcher_idle = 0;
 		sceKernelSignalSema(rt_sema, 1);
+	}
+	if (scenes && rt_vwatcher_idle) {
+		rt_vwatcher_idle = 0;
+		sceKernelSignalSema(rt_vsema, 1);
 	}
 }
 
@@ -211,6 +261,91 @@ void vglRtSetup(uint32_t flags, int watcher_priority, int watcher_affinity) {
 	}
 }
 
+// (scene timers) the vertex watcher: each scene's vertex completion, in order
+static int rt_vwatcher(SceSize args, void *argp) {
+	for (;;) {
+		if (rt_vconsumed == rt_produced) {
+			rt_vwatcher_idle = 1;
+			__sync_synchronize();
+			if (rt_vconsumed == rt_produced)
+				sceKernelWaitSema(rt_vsema, 1, NULL);
+			rt_vwatcher_idle = 0;
+			continue;
+		}
+		__sync_synchronize();
+		const uint32_t seq = rt_vconsumed;
+		rt_scene_rec *r = &rt_ring[seq % RT_SCENES];
+		if (r->vtimed) {
+			SceGxmNotification n;
+			n.address = &rt_vslots[seq % RT_SLOTS];
+			n.value = seq + 1;
+			if (*n.address != n.value)
+				sceGxmNotificationWait(&n);
+			r->vdone_us = rt_now();
+		}
+		__sync_synchronize();
+		rt_vconsumed = seq + 1;
+	}
+	return 0;
+}
+
+// Called on the thread that ends the scenes (the render thread), after vglRtSetup.
+uint32_t vglRtSetupScenes(int watcher_priority, int watcher_affinity) {
+	if (!vgl_rt_gpu_on || !rt_slots)
+		return 0;
+	if (rt_vthread >= 0)
+		return 1;
+	rt_vslots = rt_slots + RT_SLOTS; // words 65..128 of the notification region
+	for (int i = 0; i < RT_SLOTS; i++)
+		rt_vslots[i] = 0;
+	rt_vconsumed = rt_produced;
+	rt_read = rt_produced;
+	rt_vsema = sceKernelCreateSema("vgl_rt_vsema", 0, 0, 0x7FFFFFFF, NULL);
+	rt_vthread = sceKernelCreateThread("vgl_rt_gpu_v", rt_vwatcher, watcher_priority ? watcher_priority : 0x10000100, 0x2000, 0, watcher_affinity, NULL);
+	if (rt_vsema < 0 || rt_vthread < 0 || sceKernelStartThread(rt_vthread, 0, NULL) < 0) {
+		vgl_log("%s:%d GPU scene timer thread not started (0x%08X, 0x%08X).\n", __FILE__, __LINE__, rt_vsema, rt_vthread);
+		rt_vthread = -1;
+		return 0;
+	}
+	__sync_synchronize();
+	rt_scenes_on = GL_TRUE;
+	return 1;
+}
+
+uint32_t vglRtReadScenes(vglRtGpuScene *out, uint32_t max) {
+	if (!rt_scenes_on)
+		return 0;
+	uint32_t done = rt_consumed;
+	const uint32_t vdone = rt_vconsumed;
+	if ((int32_t)(vdone - done) < 0)
+		done = vdone;
+	__sync_synchronize();
+	if ((int32_t)(done - rt_read) < 0)
+		rt_read = done;
+	if (done - rt_read > RT_SCENES / 2)
+		rt_read = done - RT_SCENES / 2; // (fell behind: the oldest are lost)
+	uint32_t n = 0;
+	while (rt_read != done && n < max) {
+		const rt_scene_rec *r = &rt_ring[rt_read % RT_SCENES];
+		vglRtGpuScene s;
+		s.seq = rt_read;
+		s.frame = r->frame;
+		s.tag = r->tag;
+		s.begin_us = r->begin_us;
+		s.submit_us = r->submit_us;
+		s.vdone_us = r->vdone_us;
+		s.fdone_us = r->done_us;
+		s.timed = r->timed;
+		s.vtimed = r->vtimed;
+		s.pad0 = s.pad1 = 0;
+		__sync_synchronize();
+		if (r->seq == rt_read)
+			out[n++] = s;
+		rt_read++;
+	}
+	return n;
+}
+
 uint32_t vglRtLastGpuFrame(vglRtGpuFrame *out) {
 	const uint32_t h = rt_gpu_frame_head;
 	if (!h)
@@ -244,6 +379,15 @@ edit('gxm.c', [
 	else
 #endif
 	sceGxmEndScene(gxm_context, NULL, &query_fence);'''),
+    ('''		// Starting drawing scene
+		is_rendering_display = !active_write_fb;
+''', '''#ifdef GPU_TIMERS
+		if (vgl_rt_gpu_on) // the host's tag for the scene beginning now (rt_gpu.c, scene timers)
+			vgl_rt_scene_begin();
+#endif
+		// Starting drawing scene
+		is_rendering_display = !active_write_fb;
+'''),
     ('''	if (!needs_scene_reset)
 		scene_end();
 ''', '''	if (!needs_scene_reset)
@@ -259,6 +403,7 @@ edit('shared.h', [
 #ifdef GPU_TIMERS
 extern GLboolean vgl_rt_gpu_on; // rt_gpu.c
 void vgl_rt_end_scene(SceGxmContext *ctx);
+void vgl_rt_scene_begin(void);
 void vgl_rt_frame_end(void);
 #endif'''),
 ])
@@ -299,6 +444,14 @@ typedef struct {
 } vglRtGpuFrame;
 uint32_t vglRtLastGpuFrame(vglRtGpuFrame *out); // the newest finished frame; returns frames finished so far (0: none)
 void vglRtGpuCounters(uint32_t *timed, uint32_t *untimed, uint32_t *late, uint32_t *pending);
+// scene timers (GXV_GPU_SCENES): a vertex notification per scene too, a second watcher, and the scenes one by one
+typedef struct {
+	uint32_t seq, frame, tag, begin_us, submit_us, vdone_us, fdone_us; // process time (us, low 32 bits)
+	uint8_t timed, vtimed, pad0, pad1;
+} vglRtGpuScene;
+uint32_t vglRtSetupScenes(int watcher_priority, int watcher_affinity); // after vglRtSetup, on the thread that ends the scenes; 1: running
+void vglRtTagScene(uint32_t tag); // the host's tag for the scene that begins next (0: none)
+uint32_t vglRtReadScenes(vglRtGpuScene *out, uint32_t max); // finished scenes since the last call (one reader)
 void vglSetAnisotropicFilter(uint32_t sceFilter); // builds with ANISO_SWITCH: 0 off (default); 2 or 3 for trilinear textures, experimental'''),
 ])
 print('GPU_TIMERS patch applied to', root)

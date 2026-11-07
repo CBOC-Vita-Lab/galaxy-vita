@@ -5,9 +5,9 @@
 // lower one ends at y -118; the dark band of the counters (PicStagebase1) starts at -123, with the star and lives counters at
 // its left (they end 172 square units left of the middle) and the coin and Star Bit counters at its right (from 223 right of the
 // middle, with four figures of Star Bits). The star list and the stage's name are at the top. The panel takes the middle of the
-// counter band, 420 x 92 square units, from 122 to 214 below the middle of the picture, under the buttons and between the counters.
+// counter band, 420 x 98 square units, from 122 to 220 below the middle of the picture, under the buttons and between the counters.
 // The Luigi letter button (shown only while Luigi waits for a rescue) sits in the bottom middle from 178 below the middle down:
-// then the panel is 54 high, without the hint line.
+// then the panel is 54 high, with tighter rows.
 #include "settings_panel_plan.h"
 
 #include <math.h>
@@ -23,25 +23,35 @@ struct Words {
     const char16_t* rear;        // the rear touch row
     const char16_t* on;
     const char16_t* off;
-    const char16_t* hint;        // what rear touch aiming does
+    const char16_t* stick;       // the right stick row
+    const char16_t* camera;
+    const char16_t* pointer;
 };
 const Words kWords[] = {
     {"English", u"Camera Zoom", u"Rear Touch Aiming", u"On", u"Off",
-     u"Slide a finger on the rear touch pad to move the Star Pointer."},
+     u"Right Stick", u"Camera", u"Pointer"},
     {"French", u"Zoom de la caméra", u"Visée tactile arrière", u"Oui", u"Non",
-     u"Faites glisser un doigt sur le pavé tactile arrière pour déplacer le pointeur."},
+     u"Stick droit", u"Caméra", u"Pointeur"},
     {"Spanish", u"Zoom de la cámara", u"Apuntar con panel trasero", u"Sí", u"No",
-     u"Desliza un dedo por el panel táctil trasero para mover el puntero."},
+     u"Palanca derecha", u"Cámara", u"Puntero"},
     {"German", u"Kamera-Zoom", u"Zielen mit Rück-Touchpad", u"An", u"Aus",
-     u"Streiche mit einem Finger über das Rück-Touchpad, um den Pointer zu bewegen."},
+     u"Rechter Stick", u"Kamera", u"Pointer"},
     {"Italian", u"Zoom della telecamera", u"Mira col pannello posteriore", u"Sì", u"No",
-     u"Fai scorrere un dito sul pannello posteriore per muovere il puntatore."},
+     u"Levetta destra", u"Telecamera", u"Puntatore"},
     {"Dutch", u"Camerazoom", u"Richten met achterpaneel", u"Aan", u"Uit",
-     u"Schuif met een vinger over het achterpaneel om de aanwijzer te bewegen."},
+     u"Rechterstick", u"Camera", u"Aanwijzer"},
     {"Japanese", u"カメラズーム", u"背面タッチでねらう", u"オン", u"オフ",
-     u"背面タッチパッドを指でなぞると、ポインターが動きます。"},
+     u"右スティック", u"カメラ", u"ポインター"},
 };
 constexpr int kLanguages = sizeof(kWords) / sizeof(kWords[0]);
+// The Star Bit reach row's words, in kWords' order (from Producdevity's fork, 77119d3): its label and its last step.
+struct ReachWords { const char16_t* reach; const char16_t* all; };
+const ReachWords kReachWords[] = {
+    {u"Star Bit Reach", u"All"}, {u"Portée des fragments", u"Tous"}, {u"Alcance de trozos", u"Todos"},
+    {u"Sternteil-Reichweite", u"Alle"}, {u"Portata astroschegge", u"Tutte"}, {u"Bereik sterstukjes", u"Alle"},
+    {u"スターピース範囲", u"ぜんぶ"},
+};
+static_assert(sizeof(kReachWords) / sizeof(kReachWords[0]) == kLanguages, "a reach row's words for every language");
 
 int Length(const char16_t* s) {
     int n = 0;
@@ -240,8 +250,27 @@ struct Writer {
 
 // The characters the runs point at must outlive the plan: static, one per button.
 const char16_t kTriangleText[2] = {kPicTriangle, 0};
+const char16_t kSquareText[2] = {kPicSquare, 0};
 const char16_t kLText[2] = {kPicL, 0};
 const char16_t kRText[2] = {kPicR, 0};
+const char16_t kSelectText[2] = {kPicSelect, 0};
+
+// ---- Star Bit reach:  label   [SELECT]  ● ● ● ○ ○   value   (st.starBitReach 1..5: Off, 1.5×, 2×, 3×, All; the switch column's
+// left from sx0 to sx1)
+void ReachRow(Builder& g, Writer& t, const State& st, const Words* words, float row, float labelX, float labelMax, float cl, float sx0,
+              float sx1, float icon, float labelSize) {
+    const ReachWords* rw = &kReachWords[words - kWords];
+    if (!t.Has(FONT_MESSAGE, rw->reach) || !t.Has(FONT_MESSAGE, rw->all)) rw = &kReachWords[0];
+    t.Text(rw->reach, labelX, row, labelSize, kWhite, 0, labelMax);
+    t.Button(kPicSelect, cl + icon * 0.5f, row, icon, kSelectText);
+    const int reach = st.starBitReach < 1 ? 1 : (st.starBitReach > 5 ? 5 : st.starBitReach);
+    const float pipStep = st.compact ? 13.0f : 17.0f, pipRadius = st.compact ? 3.0f : 4.0f;
+    for (int i = 1; i <= 5; i++) g.Disc(sx0 + pipRadius + 2.0f + (i - 1) * pipStep, row, pipRadius, i <= reach ? kYellow : kPipOff);
+    static const char16_t* const kReachValues[] = {u"1.5×", u"2×", u"3×"};
+    const char16_t* value = reach == 1 ? words->off : (reach == 5 ? rw->all : kReachValues[reach - 2]);
+    const float valueLeft = sx0 + pipRadius * 2.0f + 4.0f * pipStep + 10.0f;
+    t.Text(value, sx1 - 4.0f, row, labelSize * 0.9f, reach == 1 ? kDim : kYellow, 2, sx1 - 4.0f - valueLeft);
+}
 
 }  // namespace
 
@@ -266,20 +295,22 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
     // words of the language, or English where the font lacks a character
     const Words* words = &kWords[st.language >= 0 && st.language < kLanguages ? st.language : 0];
     if (!t.Has(FONT_MESSAGE, words->zoom) || !t.Has(FONT_MESSAGE, words->rear) || !t.Has(FONT_MESSAGE, words->on) ||
-        !t.Has(FONT_MESSAGE, words->off) || !t.Has(FONT_MESSAGE, words->hint))
+        !t.Has(FONT_MESSAGE, words->off) || !t.Has(FONT_MESSAGE, words->stick) || !t.Has(FONT_MESSAGE, words->camera) ||
+        !t.Has(FONT_MESSAGE, words->pointer))
         words = &kWords[0];
 
     const float midX = st.width * 0.5f, midY = st.height * 0.5f;
     const float w = 420.0f;
     const float x0 = midX - w * 0.5f, x1 = midX + w * 0.5f;
-    const float y0 = midY + 122.0f, y1 = midY + (st.compact ? 176.0f : 214.0f);
-    // rows (middles), sizes
-    const float rowZoom = y0 + (st.compact ? 14.0f : 17.0f);
-    const float rowPips = y0 + 33.0f;
-    const float rowLine = y0 + (st.compact ? 28.5f : 41.0f);
-    const float rowRear = y0 + (st.compact ? 42.0f : 56.0f);
-    const float rowHint = y0 + 78.0f;
-    const float labelSize = st.compact ? 18.0f : 20.0f, icon = st.compact ? 21.0f : 24.0f;
+    const float y0 = midY + 122.0f, y1 = midY + (st.compact ? 176.0f : 220.0f);
+    // rows (middles), sizes (four rows: the fork's final layout, 77119d3)
+    const float rowZoom = y0 + (st.compact ? 8.5f : 15.0f);
+    const float rowPips = y0 + 29.0f;
+    const float rowLine = y0 + (st.compact ? 15.0f : 36.0f);
+    const float rowRear = y0 + (st.compact ? 21.5f : 48.0f);
+    const float rowStick = y0 + (st.compact ? 33.5f : 67.0f);
+    const float rowReach = y0 + (st.compact ? 45.5f : 86.0f);
+    const float labelSize = st.compact ? 12.5f : 18.0f, icon = st.compact ? 13.0f : 20.0f;
     plan->x0 = x0, plan->y0 = y0, plan->x1 = x1, plan->y1 = y1;
 
     // the window: a soft dark glow round it, the indigo body with a sheen on its upper part, a light rim with a soft edge
@@ -333,28 +364,29 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
         }
     }
 
-    // ---- rear touch aiming:  label   [△]  ( Off | On )
-    t.Text(words->rear, labelX, rowRear, labelSize, kWhite, 0, labelMax);
-    t.Button(kPicTriangle, cl + icon * 0.5f, rowRear, icon, kTriangleText);
-    const float sx0 = cl + icon + 8.0f, sx1 = cr, sh = st.compact ? 19.0f : 22.0f;
-    const float sy0 = rowRear - sh * 0.5f, sy1 = rowRear + sh * 0.5f;
-    g.Fill(sx0, sy0, sx1, sy1, sh * 0.5f, kTrack, kTrack);
-    Rgba trackClear = kTrackRim;
-    trackClear.a = 0;
-    g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, -1.2f, kTrackRim, 0.0f, kTrackRim);
-    g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, 0.0f, kTrackRim, 0.8f, trackClear);
-    const float half = (sx1 - sx0) * 0.5f;
-    const float knob = st.knob < 0 ? 0 : (st.knob > 1 ? 1 : st.knob);
-    const float kx0 = sx0 + 2.0f + knob * half, kx1 = kx0 + half - 4.0f;
-    g.Fill(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, kKnobTop, kKnobBottom);
-    g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, -1.0f, Rgba{200, 214, 255, 200}, 0.0f, Rgba{236, 242, 255, 230});
-    g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, 0.0f, Rgba{236, 242, 255, 230}, 0.8f, Rgba{236, 242, 255, 0});
-    const float wordSize = labelSize * 0.9f;
-    t.Text(words->off, sx0 + half * 0.5f, rowRear, wordSize, Mix(kWhite, kDim, knob), 1, half - 10.0f);
-    t.Text(words->on, sx0 + half * 1.5f, rowRear, wordSize, Mix(kDim, kYellow, knob), 1, half - 10.0f);
-
-    // ---- what it does
-    if (!st.compact) t.Text(words->hint, midX, rowHint, 14.0f, kHint, 1, w - 36.0f);
+    // ---- two switches:  label   [button]  ( left | right )
+    const float sx0 = cl + icon + 8.0f, sx1 = cr, sh = st.compact ? 11.0f : 17.0f;
+    const float half = (sx1 - sx0) * 0.5f, wordSize = labelSize * 0.9f;
+    auto Switch = [&](float row, const char16_t* label, uint16_t code, const char16_t* button, const char16_t* left, const char16_t* right, float at) {
+        t.Text(label, labelX, row, labelSize, kWhite, 0, labelMax);
+        t.Button(code, cl + icon * 0.5f, row, icon, button);
+        const float sy0 = row - sh * 0.5f, sy1 = row + sh * 0.5f;
+        g.Fill(sx0, sy0, sx1, sy1, sh * 0.5f, kTrack, kTrack);
+        Rgba trackClear = kTrackRim;
+        trackClear.a = 0;
+        g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, -1.2f, kTrackRim, 0.0f, kTrackRim);
+        g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, 0.0f, kTrackRim, 0.8f, trackClear);
+        const float knob = at < 0 ? 0 : (at > 1 ? 1 : at);
+        const float kx0 = sx0 + 2.0f + knob * half, kx1 = kx0 + half - 4.0f;
+        g.Fill(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, kKnobTop, kKnobBottom);
+        g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, -1.0f, Rgba{200, 214, 255, 200}, 0.0f, Rgba{236, 242, 255, 230});
+        g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, 0.0f, Rgba{236, 242, 255, 230}, 0.8f, Rgba{236, 242, 255, 0});
+        t.Text(left, sx0 + half * 0.5f, row, wordSize, Mix(kWhite, kDim, knob), 1, half - 10.0f);
+        t.Text(right, sx0 + half * 1.5f, row, wordSize, Mix(kDim, kYellow, knob), 1, half - 10.0f);
+    };
+    Switch(rowRear, words->rear, kPicTriangle, kTriangleText, words->off, words->on, st.knob);
+    Switch(rowStick, words->stick, kPicSquare, kSquareText, words->camera, words->pointer, st.stickKnob);
+    ReachRow(g, t, st, words, rowReach, labelX, labelMax, cl, sx0, sx1, icon, labelSize);
 }
 
 }  // namespace settings_panel

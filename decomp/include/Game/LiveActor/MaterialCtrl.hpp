@@ -60,6 +60,7 @@ public:
 
         /* 0x00 */ J3DTexMtx* mTexMtx;
         /* 0x04 */ TPos3f mInitEffectMtx;
+        /* 0x34 */ bool mInitEffectMtxEqualsPrev;
     };
 
     ProjmapEffectMtxSetter(J3DModel*, const ResourceHolder*);

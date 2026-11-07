@@ -23,6 +23,7 @@
 #include "portable_shader.h"
 #include "gpu.h"
 #include "port/heap_routing.h"
+#include "port/host_vector.h"
 #include "port/port.h"
 
 extern "C" void port_headless_write_png(const char* path, const unsigned char* rgba, int w, int h);
@@ -37,7 +38,9 @@ static const bool sPortableTevDiagnostic = debugEnv("PETARI_PORTABLE_TEV") != nu
 // Deferred GL deletes (texture images die on whichever thread drops them)
 // ---------------------------------------------------------------------------
 static std::mutex sDeleteLock;
-static std::vector<GLuint> sDeleteTextures;
+// (host memory: TexImage dies on a game thread too, and the list lives on until the next flushDeletes; a game heap's storage would
+// outlive the scene whose heap it came from. port/host_vector.h)
+static PortHostVector<GLuint> sDeleteTextures;
 
 void queueGlTextureDelete(uint32_t tex) {
     if (tex) {
@@ -51,7 +54,7 @@ TexImage::~TexImage() {
 }
 
 static void flushDeletes() {
-    std::vector<GLuint> list;
+    PortHostVector<GLuint> list;
     {
         std::lock_guard<std::mutex> lock(sDeleteLock);
         list.swap(sDeleteTextures);

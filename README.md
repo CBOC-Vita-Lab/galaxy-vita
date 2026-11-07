@@ -13,18 +13,17 @@ aim Star Bits, touch the screen where you used to point the Wii Remote, and tilt
 
 You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
-## New In Version 1.2
+## New In Version 2.0
 
-A sharper, correct picture, a 30 FPS floor in most of the game, and a real Settings menu.
+Full resolution: the Vita's whole 960×544 at a steady 30 FPS, or up to 60 FPS in the new Performance mode.
 
-- **Bowser, the Lumas and the effects look right.** No more twisting Bowser intros or white-blob Lumas, the ground-pound and black-hole trails are back, and about 85 effects have their true colours again.
-- **30 FPS first.** Heavy scenes lower the least noticeable details first and keep Mario at full quality. Prefer an even picture? Choose **Locked 30**.
-- **A full Settings menu** on the LiveArea screen: picture presets, sharpness, anti-aliasing, effects, HD textures, reduced motion, language, and a Controls page with every button explained.
-- **Tilt your way:** sensitivity from 1 to 10, or steer the Star Ball and Manta Ray with the left stick.
-- **No first-visit freezes,** a **much faster start** (about 20 seconds to the title), and no more crash after a long session.
-- **Music after sleep, spins on time, dialogue that doesn't skip,** and full **PS TV** controller support.
+- **Three picture modes.** **Quality** (the default) holds 30 FPS at up to the full 960×544, **Performance** goes for 60, and **Locked 30** never drops below 960×544.
+- **The Vita's fourth CPU core** is put to work when the CapUnlocker plug-in is installed, and the game no longer waits for the renderer between pictures.
+- **Honeyhive, Beach Bowl and Bowser's Star Reactor hold 30** in Quality mode, where 1.2 dipped into the teens and 20s.
+- **A four-row pause panel:** camera zoom, rear-touch aiming, the right stick as camera or Star Bit pointer, and Star Bit reach.
+- **Fixes:** enemies that release Mario with damage hurt him again, hidden-star scenarios, rear touch after the Settings menu, spins right after a jump, a 1-pixel line in Beach Bowl, and more.
 
-Everything is listed in [What's New](CHANGELOG.md). See [Known Issues](KNOWN-ISSUES.md) for what's still being worked on.
+Still here from 1.2: the correct Bowser, Lumas and effects, the full Settings menu, tilt from 1 to 10, no first-visit freezes, a 20-second start, music after sleep and full PS TV support. Everything is listed in [What's New](CHANGELOG.md). See [Known Issues](KNOWN-ISSUES.md) for what's still being worked on.
 
 ## Touch Controls, Built For The Vita
 
@@ -39,32 +38,33 @@ Galaxy was made for the Wii pointer, so touch got more work than anything else i
   Select re-centers it.
 - **Buttons where the Wii used motion.** Spin with Square or R instead of shaking a remote, and shoot Star Bits with Circle.
 - **Settings in the pause menu.** A panel in the game's own style: L and R set the camera zoom (1.0× to 2.0×), Triangle
-  turns rear touch aiming on or off.
+  turns rear touch aiming on or off, Square makes the right stick move the camera or the Star Bit pointer, and Select sets
+  how far from the pointer Star Bits are collected (Star Bit reach).
 
 The full list is in [Controls](CONTROLS.md).
 
 ## How Smooth Is It?
 
 Frames per second (fps) is how many new pictures you see each second. 60 is the most the Vita's screen can show, and many
-console games aim for 30. Version 1.2 puts **30 first**: in a heavy scene it lowers the sharpness and the effects that
-matter least (never Mario), and when there's room it spends it on a sharper picture. Measured with version 1.2 on a PS Vita,
-in scripted 2½-minute runs of running, jumping, spins and camera turns:
+console games aim for 30. Version 2.0 has three picture modes (Settings > Display > Picture mode). Measured with version 2.0
+on a PS Vita at the widest camera zoom (1.0×, the hardest case), in scripted runs of running, jumping, spins and camera turns:
+
+| Galaxy | Quality (default) | Performance | Locked 30 |
+|---|---|---|---|
+| **Good Egg** | **30 fps** at 848–960 wide | **54 fps** | 30 at 960×544 |
+| **Beach Bowl** | **30** at 720–784 wide | 30 | 25 at 960×544 |
+| **Honeyhive** | **30** at 784–848 wide | **42** | 30 at 960×544 |
+| **Bowser's Star Reactor** | **29** at 784–848 wide | **45** | 30 at 960×544 |
 
 | | |
 |---|---|
-| **Good Egg Galaxy** | **46 fps** on average (41 at its lowest), at 640×456 |
-| **Comet Observatory** | **38 fps** on average (31 lowest) |
-| **Ghostly Galaxy** | **38 fps** on average (32 lowest) |
-| **Beach Bowl, Sea Slide, the first Bowser fight** | about **31–32 fps** on average; the heaviest moments still dip into the 20s |
-| **Locked 30** (Settings > Picture rate) | an even **30 fps**, every frame |
-| **Sharpness** | 640×456 in most galaxies, up to 960×544 when there's room; the heaviest water and boss scenes go down to 480×340–544×388 |
+| **Quality** | a steady 30 at up to the full 960×544; the closer default zoom (1.5×) holds 30 in all four, at 720–960 wide |
+| **Performance** | up to 60: 60 in Good Egg and 54–59 in Honeyhive at 1.5–2.0×, at 608–720 wide |
 | **Start-up** | the title screen in about 20 seconds |
-| **Graphics prepared ahead of time** | 2,144, covering every galaxy |
 | **Download** | about 7 MB (2.5 GB on the memory card with your game files) |
 
-(The lowest numbers are averages over 5-second stretches.) Compared with 1.0, the average is a few fps lower in some
-galaxies because 1.2 draws a sharper and more correct picture there (1.0 averaged 54 in Good Egg at a smaller size and
-42 in the Observatory), while the worst dips in the heaviest scenes are smaller.
+Version 1.2 managed 12 fps in Honeyhive and 25 in the Bowser fight at this zoom, at 544×388. Every table, zoom and mode is in
+[Performance](docs/PERFORMANCE.md).
 
 ![The Comet Observatory on the PS Vita](store/screenshots/02-comet-observatory.png)
 
@@ -116,7 +116,7 @@ Open [CBOC Vita Installer](https://github.com/CBOC-Vita-Lab/vita-installer/relea
 | **Rear touch** (optional) | Slide to aim the pointer |
 | **START** | Pause |
 
-**In the pause menu:** L and R set the camera zoom, and Triangle turns rear touch aiming on or off. **Settings:** tap Settings on the game's LiveArea screen, before playing or while the game runs. Your choices are saved for next time. The full list is in [Controls](CONTROLS.md).
+**In the pause menu:** L and R set the camera zoom, Triangle turns rear touch aiming on or off, Square switches the right stick between camera and pointer, and Select sets Star Bit reach. **Settings:** tap Settings on the game's LiveArea screen, before playing or while the game runs. Your choices are saved for next time. The full list is in [Controls](CONTROLS.md).
 
 ## Download Contents
 

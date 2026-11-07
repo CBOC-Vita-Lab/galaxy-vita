@@ -1,6 +1,7 @@
 // vgx - GX renderer for the Mario Strikers Charged Vita port.
 // Shared small helpers. No GL and no runtime (HLE) headers in here.
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -103,6 +104,57 @@ inline long EnvInt(const char* name, long dflt) {
     const char* v = std::getenv(name);
     return (v && *v) ? std::strtol(v, nullptr, 0) : dflt;
 }
+
+// ---- switches read once, without a barrier (GXV_FE_KNOBS)
+// A switch kept as a function-local `static const int x = EnvInt(...)` is a guarded static: every call loads the guard byte and,
+// on the console's ARMv7 (clang, arm-vita-eabi), follows it with `dmb ish`, the acquire the guard needs (the first call may run on
+// any thread). A barrier waits until every memory access before it has completed, the front end's stream of stores into the
+// operation chunks, the vertex and uniform arenas and the command list among them. The player reached some 7,800 of them per
+// picture of the host fixture (tests/vgx_fe_work.cpp: two per FeScope alone, four per material hit, eight per static draw), several
+// times that in a picture of the lit Comet Observatory.
+// VGX_KNOB(expr) is the value of `expr` (an int-sized value read from the environment, the same on every thread), worked out at
+// the first call and kept in a constant-initialised atomic word (no guard) read with a relaxed load: one load, no barrier. Two
+// threads that both find it unset both work it out (from the same environment) and store the same value: a word, read whole.
+//   GXV_FE_KNOBS=1 (default) as above;  0: each read is followed by an acquire fence, the barrier the guarded static had (the values
+//   are the same either way: this only measures the barriers on the console). Read once (by itself, without a barrier).
+namespace knob {
+constexpr int32_t kUnset = INT32_MIN; // (never a switch's value: a switch with it would be worked out on every read; one compare with an immediate)
+inline std::atomic<int32_t> g_fenced{kUnset};
+inline __attribute__((noinline)) bool Fenced() {
+    int32_t v = g_fenced.load(std::memory_order_relaxed);
+    if (v == kUnset) {
+        v = EnvInt("GXV_FE_KNOBS", 1) == 0 ? 1 : 0;
+        g_fenced.store(v, std::memory_order_relaxed);
+    }
+    return v != 0;
+}
+// (the value goes into `k` (read without a barrier) or, with GXV_FE_KNOBS=0, into `kf` (read with one))
+template <class F> __attribute__((noinline)) int32_t Init(std::atomic<int32_t>& k, std::atomic<int32_t>& kf, F f) {
+    const int32_t v = static_cast<int32_t>(f());
+    if (v != kUnset) (Fenced() ? kf : k).store(v, std::memory_order_relaxed);
+    return v;
+}
+template <class F> inline __attribute__((always_inline)) int32_t Read(std::atomic<int32_t>& k, std::atomic<int32_t>& kf, F f) {
+    const int32_t v = k.load(std::memory_order_relaxed);
+    if (__builtin_expect(v != kUnset, 1)) return v;
+    const int32_t w = kf.load(std::memory_order_relaxed);
+    if (w != kUnset) {
+        std::atomic_thread_fence(std::memory_order_acquire); // (GXV_FE_KNOBS=0: the guarded static's barrier)
+        return w;
+    }
+    return Init(k, kf, f);
+}
+} // namespace knob
+#define VGX_KNOB(...) \
+    ([]() -> int32_t { \
+        static std::atomic<int32_t> vgx_knob_{::vgx::knob::kUnset}, vgx_knob_fenced_{::vgx::knob::kUnset}; \
+        return ::vgx::knob::Read(vgx_knob_, vgx_knob_fenced_, [] { return (__VA_ARGS__); }); \
+    }())
+namespace knob {
+// The acquire fence a display-list cache hit had between its generation reads and its use of the entry: none with GXV_FE_KNOBS=1 (a
+// hit reads no guest bytes after the generations), the fence as before with =0 (reading this knob then is that fence).
+inline __attribute__((always_inline)) void HitFence() { (void)VGX_KNOB(Fenced() ? 1 : 0); }
+} // namespace knob
 
 // Quiet builds ignore observers, not functional rendering or cache settings.
 namespace diag {

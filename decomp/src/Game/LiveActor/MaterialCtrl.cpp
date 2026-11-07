@@ -3,6 +3,11 @@
 #include "Game/Util.hpp"
 #include <JSystem/J3DGraphBase/J3DMaterial.hpp>
 #include <JSystem/J3DGraphBase/J3DTexture.hpp>
+#include <cstring>
+
+#ifndef GXV_PROJMAP_RUN_REUSE
+#define GXV_PROJMAP_RUN_REUSE 0
+#endif
 
 char MirrorReflectionMtxSetter::sMirrorTextureName[] = "MirrorTex";
 
@@ -141,6 +146,11 @@ ProjmapEffectMtxSetter::ProjmapEffectMtxSetter(J3DModel* pModel, const ResourceH
             if (texMtx && (texMtx->getTexMtxInfo().mInfo & 0x3FU) == J3DTexMtxMode_Projmap && MR::isUseTexMtx(material, j)) {
                 mUpdatingMtxInfo[matrixCount].mTexMtx = texMtx;
                 mUpdatingMtxInfo[matrixCount].mInitEffectMtx.set(pResourceHolder->getInitEffectMtx(i, j));
+                mUpdatingMtxInfo[matrixCount].mInitEffectMtxEqualsPrev =
+                    matrixCount > 0 &&
+                    std::memcmp(mUpdatingMtxInfo[matrixCount].mInitEffectMtx.mMtx,
+                                mUpdatingMtxInfo[matrixCount - 1].mInitEffectMtx.mMtx,
+                                sizeof(mUpdatingMtxInfo[matrixCount].mInitEffectMtx.mMtx)) == 0;
                 matrixCount++;
             }
         }
@@ -148,12 +158,23 @@ ProjmapEffectMtxSetter::ProjmapEffectMtxSetter(J3DModel* pModel, const ResourceH
 }
 
 void ProjmapEffectMtxSetter::update() {
+#if GXV_PROJMAP_RUN_REUSE
+    TPos3f effectMtx;
+    for (s32 i = 0; i < mNumUpdatingMtx; i++) {
+        UpdateEffectMtxInfo* info = &mUpdatingMtxInfo[i];
+        if (i == 0 || !info->mInitEffectMtxEqualsPrev) {
+            effectMtx.concat(info->mInitEffectMtx, mEffectMtx);
+        }
+        info->mTexMtx->setEffectMtx(effectMtx);
+    }
+#else
     for (s32 i = 0; i < mNumUpdatingMtx; i++) {
         UpdateEffectMtxInfo* info = &mUpdatingMtxInfo[i];
         TPos3f effectMtx;
         effectMtx.concat(info->mInitEffectMtx, mEffectMtx);
         info->mTexMtx->setEffectMtx(effectMtx);
     }
+#endif
 }
 
 void ProjmapEffectMtxSetter::getBaseTrans(TVec3f* pTrans) const {

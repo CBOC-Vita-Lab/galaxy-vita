@@ -68,6 +68,8 @@ unsigned pending = 2, total = 3;
 void SetWarmBudget(double value) { budget = value; }
 unsigned WarmPending() { return pending; }
 unsigned WarmTotal() { return total; }
+// No warm-up work yielded to native program capacity (the hold is released early only for a genuine title when it is).
+bool WarmCapacityYielded() { return false; }
 }
 }
 void port_log(const char*, ...) {}

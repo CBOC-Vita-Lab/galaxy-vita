@@ -56,6 +56,16 @@ int main(int argc,char** argv) {
      state.working=session.document.config;session.hdtexPack=false;state.row=RowHdTextures;if(!render("display-hd-not-installed",state))return false;session.hdtexPack=true;
      state.working=session.document.config;state.row=RowLanguage;if(!render("display-scrolled",state))return false;
      state.working=saved;}
+    // Picture mode: Quality, Performance (with its Dynamic resolution and Anti-aliasing words), the Performance preset, Locked 30, and
+    // Quality and Locked 30 on a build without the fixed 30 cap: every help line must fit untruncated.
+    {const auto saved=state.working;state.working=session.document.config;state.row=RowRate;if(!render("display-mode-quality",state))return false;
+     state.working.performance60=true;if(!render("display-mode-performance",state))return false;
+     state.row=RowDynamic;if(!render("display-mode-performance-dynamic-row",state))return false;state.row=RowAntiAliasing;if(!render("display-mode-performance-aa-row",state))return false;
+     state.working=session.document.config;ApplyPreset(state.working,Preset::Performance);state.row=RowPreset;if(!render("display-preset-performance-mode",state))return false;
+     state.working=session.document.config;state.working.fpsLimit=30;state.row=RowRate;if(!render("display-mode-locked-30",state))return false;
+     session.features={false,true};state.working=session.document.config;if(!render("display-mode-quality-no-cap",state))return false;
+     state.working.fpsLimit=30;if(!render("display-mode-locked-30-unavailable",state))return false;session.features={true,true};
+     state.working=saved;}
     // The Reduced motion row focused, off and on.
     state.row=RowMotion;if(!render("display-reduced-motion-row",state))return false;state.working.reducedMotion=true;if(!render("display-reduced-motion-row-on",state))return false;state.working.reducedMotion=false;state.row=RowLanguage;
     session.mode=OpenMode::Running;Begin(state,session);state.modal=Modal::Restart;

@@ -12,6 +12,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 get_filename_component(ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(DECOMP "${ROOT}/decomp")
+option(GXV_SHARED_CLIP_PREP "Reuse common clipping planes on supported Vita ARM32 builds" ON)
+set_property(SOURCE "${DECOMP}/src/Game/LiveActor/ClippingJudge.cpp" APPEND PROPERTY
+  COMPILE_DEFINITIONS "GXV_SHARED_CLIP_PREP=$<BOOL:${GXV_SHARED_CLIP_PREP}>")
+option(GXV_PROJMAP_RUN_REUSE "Reuse consecutive equal projection initializers within each update" ON)
+set_property(SOURCE "${DECOMP}/src/Game/LiveActor/MaterialCtrl.cpp" APPEND PROPERTY
+  COMPILE_DEFINITIONS "GXV_PROJMAP_RUN_REUSE=$<BOOL:${GXV_PROJMAP_RUN_REUSE}>")
 
 # ---- the same source inventory as vita/CMakeLists.txt -------------------------------------------------
 file(GLOB_RECURSE GAME_SRCS CONFIGURE_DEPENDS "${DECOMP}/src/Game/*.cpp" "${DECOMP}/src/Game/*.c")
@@ -52,7 +58,7 @@ list(APPEND HARNESS_SRCS "${ROOT}/vita/runtime/flat_view.cpp")
 # Vita: clang-vita-toolchain.cmake vita_flags (minus -D__vita__/newlib/-nostdlibinc, see below) + vita/CMakeLists.txt.
 set(ARCH_FLAGS -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb -fsigned-char -fno-short-enums -femulated-tls -fno-pic -munaligned-access)
 set(GAME_FLAGS
-  -w -O2 -fshort-wchar -fsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=on -fno-fast-math -fno-math-errno -fms-extensions -ferror-limit=0
+  -w -O2 -fshort-wchar -fno-builtin-wcslen -fsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=on -fno-fast-math -fno-math-errno -fms-extensions -ferror-limit=0
   "SHELL:-include ${ROOT}/vita/include/vita_source_prelude.h"
   "SHELL:-include ${ROOT}/platform/include/port/compat.h"
   -Wno-register -Wno-multichar -Wno-invalid-offsetof -Wno-c++11-narrowing
@@ -82,7 +88,7 @@ target_compile_options(decomp PRIVATE ${ARCH_FLAGS} ${GAME_FLAGS} $<$<COMPILE_LA
 add_library(platform OBJECT ${PLATFORM_SRCS} ${HARNESS_SRCS} "${ROOT}/platform/desktop/main.cpp")
 target_include_directories(platform PRIVATE ${INCLUDES} "${ROOT}/platform/vgx/src")
 target_compile_definitions(platform PRIVATE TARGET_PC=1 NDEBUG=1 VERSION=0 PORT_ARMHF_HARNESS=1 PORT_PLATFORM_CODE=1
-  PORT_GX_VGX=1 PORT_GX_VGX_ONLY=1 _GNU_SOURCE=1)
+  PORT_GX_VGX=1 PORT_GX_VGX_ONLY=1 PORT_WORKLOAD_GAME_BRIDGES=1 _GNU_SOURCE=1)
 target_compile_options(platform PRIVATE ${ARCH_FLAGS} ${GAME_FLAGS} $<$<COMPILE_LANGUAGE:C>:${PORT_C_FLAGS}>)
 
 # vgx front end (parser, vertex/texture decode, command buffers): same code generation, but not the game's compat.h.

@@ -63,6 +63,21 @@
 #ifdef __vita__
 #include <psp2/kernel/processmgr.h>
 #endif
+#ifdef __VGX_VITA__
+#include <psp2/gxm.h>
+// GXV_MIDFLUSH: vitaGL's context, and the GXM state cache of its patch 0011 (weak: a library without them leaves these null)
+extern "C" SceGxmContext* gxm_context __attribute__((weak));
+extern "C" const SceGxmFragmentProgram* gxm_sc_fprog __attribute__((weak));
+extern "C" const SceGxmVertexProgram* gxm_sc_vprog __attribute__((weak));
+extern "C" uint32_t gxm_sc_ftex_valid __attribute__((weak));
+// GXV_UNI_SHADOW: vitaGL's uniform shadow buffers (vgl.diff of agent be8; weak: a library without them keeps glUniform*)
+// (GLboolean / GLuint / GLint spelled as the GL headers, which come later, define them)
+extern "C" unsigned char vglGetUniformShadow(unsigned int prog, int location, void** vptr, void** fptr, uint32_t* bytes) __attribute__((weak));
+extern "C" void vglUniformShadowWritten(unsigned int prog, uint32_t stages) __attribute__((weak));
+#endif
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 #if VGX_COLDTRACE && defined(__vita__)
 #include "port/vgx_coldtrace_control.h"
 #include <psp2/kernel/threadmgr.h>
@@ -78,6 +93,7 @@
 #include <deque>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -99,12 +115,23 @@
 // The game's state for automatic quality's calm mode (vita/runtime/flat_view.cpp, platform/src/port/perf.cpp; weak: absent in
 // the desktop and test builds, where calm mode then runs without quiet moments and stage keys).
 extern "C" int port_screen_quiet(void) __attribute__((weak));
+extern "C" int port_skip_movie_playing(void) __attribute__((weak));  // (platform/src/port/cutscene_skip.cpp: a THP movie plays)
 extern "C" uint32_t port_scene_key(void) __attribute__((weak));
+extern "C" void port_render_size_changed(void) __attribute__((weak)); // (platform/src/port/perf.cpp: PETARI_PAUSE_FREEZE copies again)
+extern "C" int port_vgx_vita_splash_active(void) __attribute__((weak));
+extern "C" int port_vgx_vita_fixed_cap_supported(void) __attribute__((weak)); // (vgx_host_galaxy_vita.cpp: the fixed 30 cap's driver path; GXV_AUTOQ_HOLD30)
 #ifdef __VGX_VITA__
+extern "C" unsigned vglGetFreeProgramSlots(void);
 extern "C" void vglSetNextSceneDepthModes(GLboolean load, GLboolean store) __attribute__((weak));
 extern "C" void vglUseLowPrecisionFragmentOnly(GLboolean val) __attribute__((weak)); // vitaGL patch 0012 (GXV_FS_HALF)
 extern "C" GLint vglFramebufferDepthTexture(GLuint fb) __attribute__((weak)); // vitaGL built with DEPTH_SAMPLE (GXV_FXHALF): row width or 0
 extern "C" void vgxvita_uploadAuthoredI4Mips(unsigned width, unsigned height, unsigned count, const void* const* levels) __attribute__((weak));
+// tex11: the transfer-unit waits of texture uploads (vgx_host_galaxy_vita.cpp, GXV_VITA_UPLOAD_SYNC) and vitaGL patch 0015's chain reserve
+// (vglReserveTextureLevels: the next level-0 allocation of that size holds the whole chain). Weak: a host or a library without them.
+extern "C" int vgxvita_uploadSyncMode(void) __attribute__((weak));
+extern "C" void vgxvita_xferFence(void) __attribute__((weak));
+extern "C" void vgxvita_xferStats(uint64_t* waits, uint64_t* us) __attribute__((weak));
+extern "C" void vglReserveTextureLevels(GLsizei width, GLsizei height, GLint levels) __attribute__((weak));
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // The first few times something of the gpupass section happens: one line in the console's log (the back end's stderr does not reach it).
 #define GPUPASS_NOTE(n, ...) do { static int gp_cnt_ = 0; if (gp_cnt_ < (n)) { ++gp_cnt_; port_log("[vgx] " __VA_ARGS__); } } while (0)
@@ -113,6 +140,12 @@ extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 
 #endif
 
 extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));  // the basic log, when the platform layer has one
+// The stage the game is loading (platform/src/port/perf.cpp, set by GameSystemSceneController::initializeScene on its loading
+// thread): its key while it loads and after, 0 before the first load; and 1 while the loading thread runs (GXV_STAGEWARM).
+extern "C" uint32_t port_scene_loading_key(void) __attribute__((weak));
+extern "C" int port_scene_loading_active(void) __attribute__((weak));
+// The front end's texture decode time so far, in microseconds (vgx_texcache.cpp; GXV_STUTTER_LOG). Weak: absent without the front end.
+extern "C" uint64_t vgx_tex_decode_us(void) __attribute__((weak));
 
 // The front end's list of character and key-item textures (vgx_state.h): weak, a build without the front end has none.
 namespace vgx { bool IsCharaTexture(uint32_t texId) __attribute__((weak)); }
@@ -144,6 +177,8 @@ const Caps& GetCaps() {
         c.mipGen = EnvInt("GXV_MIPGEN", vita) != 0;
         c.mipClamp = EnvInt("GXV_MIPCLAMP", vita) != 0;
         c.la88 = EnvInt("GXV_LA88", vita) != 0;
+        c.dxt5 = true;  // (GXV_CMPRA: compressed where the GL has DXT5, decoded in Upload otherwise)
+        c.tex16 = true; // (GXV_TEX16: glTexImage2D with the 16-bit types, internal format = format)
 #ifdef __VGX_VITA__
         // Read once; off until the authored storage/LOD path has native validation.
         c.authoredI4Mips = EnvInt("GXV_AUTHORED_I4_MIPS", 0) != 0 && c.mipClamp && vgxvita_uploadAuthoredI4Mips;
@@ -173,6 +208,7 @@ long DiagnosticInt(const char* name, long fallback) { return kBackendDiagnostics
     X(clears)         /* glClear */                                                                                                  \
     X(quadClears)     /* clears drawn as a quad (partial colour mask) */                                                             \
     X(copyQuads)      /* EFB / pass -> texture copy draws */                                                                         \
+    X(quadPads)       /* copy-program quads drawn over a viewport made even (odd size; GXV_RECT_LEGACY) */                            \
     X(quadIdentity) X(quadRgbA) X(quadConstant) X(quadGeneric) /* every copy-program quad by the form of its transform (vgx_copyvar.h): counted whether or not GXV_COPYVAR draws the dedicated program */ \
     X(draws) X(drawIndices)                                                                                                          \
     X(programUses)    /* glUseProgram */                                                                                             \
@@ -199,6 +235,12 @@ long DiagnosticInt(const char* name, long fallback) { return kBackendDiagnostics
     X(depthPlanSaved) /* of the loads and stores GXV_DEPTH_SKIP=2 alone makes: left out by GXV_DEPTHPLAN (EFB size x 4 bytes each) */   \
     X(efbSwaps)       /* GXV_EFBSWAP: full-size copies made by handing the EFB's colour buffer to the texture (no copy scene) */     \
     X(efbRestores)    /* of those: the EFB's new colour buffer filled from the old one by a quad at the start of the next EFB scene */ \
+    X(efbLoadFroms)   /* of those: filled by the next scene's own colour load instead (GXV_VGL_LOADFROM, vitaGL patches/0019) */ \
+    X(efbSwapsPartial) /* of those: GXV_EFBSWAP2's, copies with a conversion that the frame's samplers do not see */                  \
+    X(rawConverts)    /* GXV_EFBSWAP2: such buffers converted into an ordinary copy after all, for a later frame's draw (RawConvert) */ \
+    X(copiesMade)     /* texture copies executed (not dead, not hoisted): with a copy scene unless swapped */                         \
+    X(wholeCopies) X(wholeRgb) X(wholeA) X(wholeOk) /* of those: of the whole EFB 1:1; keeping r,g,b only (RGB565); a only (A8); swapOk */ \
+    X(wholePredNo) X(swapHolds) /* GXV_EFBSWAP2_PREDICT: whole copies left ordinary for an earlier reader; GXV_EFBSWAP2_HOLD: swaps refused */ \
     X(hoists)         /* GXV_PASSHOIST: small copies made from a target of their own instead of interrupting the EFB's scene */ \
     X(fxRuns) X(fxDraws) X(fxVerts) /* GXV_FXHALF: runs of additive sprite draws drawn at the reduced size, their draws and vertices */ \
     X(fxCandidates)   /* draws that could go there (additive, no depth write, outside passes), whether or not their run did */
@@ -221,13 +263,19 @@ struct Program {
     const CmdBuf* uniformBuffer = nullptr;
     uint64_t usedSerial = 0;               // last frame a draw used it
     uint64_t linkSerial = 0;               // last linked frame (eviction ordering only)
+    uint64_t drawSerial = 0;               // last frame a real draw (not a warm-up variant) used it; 0: only ever warmed
     uint32_t blendKey = ~0u, layout = ~0u; // of its last draw (see BlendKey)
     uint32_t layoutNeed = 0;               // vertex-layout bits (VL_*) of the attributes the vertex shader declares
     bool ok = false;
     bool warmCompatible = false; // last use had the EFB format and the warm draw's zero vertex base
+    uint32_t recStage = 0, recLB = ~0u; // (GXV_STAGEWARM) stage and layout/blend of its last draw already in that stage's set
     uint8_t failures = 0;        // (GXV_GL_RETRY) failed links so far; the GL program of a failed link is deleted
     uint64_t retryAfter = 0;     // (GXV_GL_RETRY) frame from which a failed link may be tried again
+    // (GXV_UNI_SHADOW) per uniform (US_*): where vitaGL keeps its values for each stage; ok = it is written there directly
+    struct Shadow { float* v = nullptr; float* f = nullptr; bool ok = false; } sh[7];
+    bool shadow = false; // (GXV_UNI_SHADOW) at least one of sh[] is ok
 };
+enum { US_PROJ, US_MV, US_TM, US_PTM, US_PAL, US_LT, US_TEV, US_COUNT };
 struct Tex {
     GLuint id = 0;
     uint16_t w = 0, h = 0;
@@ -236,7 +284,9 @@ struct Tex {
     bool renderTarget = false;
     uint16_t ew = 0, eh = 0; // a render target: its size in EFB pixels (w x h is that at the render scale); 0: unknown
     bool efbBuf = false; // GXV_EFBSWAP: `id` is a colour buffer the EFB had (it goes back to the EFB's spares, it is not deleted)
+    int8_t lodBias = 0;    // GXV_RUNG_LODBIAS: the bias last set on it, in vitaGL steps of 1/8 level (0 = never set)
     uint32_t anisoGen = 0; // g_anisoGen when a trilinear minification filter was last set (GXV_AUTOQ_ANISO: set again after a change)
+    uint32_t xferEpoch = 0; // (GXV_VITA_UPLOAD_SYNC=2) g_xferEpoch when its upload last left transfers pending
 };
 
 int g_fixedW = 0, g_fixedH = 0; // 0 = follow the EFB size
@@ -297,10 +347,54 @@ uint32_t g_progsThisFrame = 0;
 
 // GXV_SANITIZE (vgx_sanitize.h): checks on what reaches the GPU, read once, default 0 (off): nothing is read, counted or skipped.
 sanitize::Counts g_san;
-inline unsigned SanMode() {
+inline unsigned SanModeRead() {
     static const unsigned mode = sanitize::ParseMode(EnvInt("GXV_SANITIZE", 0));
     return mode;
 }
+// GXV_BE_FAST2=1 (default; 0: as before; read in Init): (1) the switches a draw asks about (GXV_SANITIZE two or three times a
+// draw, GXV_UNIFORM_REUSE, GXV_STAGEWARM, GXV_RESOURCE_AUDIT and GXV_RUNG_LODBIAS once a texture) are read once in Init into
+// plain variables instead of through function-local statics: with clang on ARMv7 every pass over such a static's guard is a
+// load-acquire, i.e. a `dmb ish` that waits for the draw's outstanding stores (~8-12 a draw). (2) The uniform comparisons of a
+// draw (Draw: need, ShadowBlock) use SameWords (NEON, 64 bytes a step) instead of newlib's memcmp (a word a step, two loads and
+// a compare per 4 bytes, called for every candidate block: lights 176 floats, palette up to 384). Both exact: the same values,
+// the same answers (bitwise equality, as memcmp == 0).
+bool g_beFast2 = false;
+struct BeFast2Cache {
+    unsigned sanMode = 0;
+    bool uniformReuse = true, stageWarm = true, audit = false;
+    long lodPct = 0;
+} g_f2;
+inline unsigned SanMode() { return g_beFast2 ? g_f2.sanMode : SanModeRead(); }
+inline bool UniformReuseRead() {
+    static const bool on = EnvInt("GXV_UNIFORM_REUSE", 1) != 0;
+    return on;
+}
+// Bitwise equality of n 32-bit words: exactly memcmp(a, b, 4 * n) == 0 (floats compared as bits: -0 / +0 and NaN payloads
+// differ, as for memcmp). Both pointers 4-byte aligned (uniform arena floats, vitaGL's uniform buffers).
+inline bool SameWords(const void* a, const void* b, size_t n) {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    const uint32_t* x = static_cast<const uint32_t*>(a);
+    const uint32_t* y = static_cast<const uint32_t*>(b);
+    if (n && *x != *y) return false; // (most changed blocks differ in their first word: a matrix row, a light colour)
+    while (n >= 16) {
+        uint32x4_t d = veorq_u32(vld1q_u32(x), vld1q_u32(y));
+        d = vorrq_u32(d, veorq_u32(vld1q_u32(x + 4), vld1q_u32(y + 4)));
+        d = vorrq_u32(d, veorq_u32(vld1q_u32(x + 8), vld1q_u32(y + 8)));
+        d = vorrq_u32(d, veorq_u32(vld1q_u32(x + 12), vld1q_u32(y + 12)));
+        const uint32x2_t h = vorr_u32(vget_low_u32(d), vget_high_u32(d));
+        if (vget_lane_u32(vpmax_u32(h, h), 0) != 0) return false;
+        x += 16;
+        y += 16;
+        n -= 16;
+    }
+    uint32_t acc = 0;
+    while (n--) acc |= *x++ ^ *y++;
+    return acc == 0;
+#else
+    return std::memcmp(a, b, n * 4) == 0;
+#endif
+}
+inline bool SameUniforms(const void* a, const void* b, size_t words) { return g_beFast2 ? SameWords(a, b, words) : std::memcmp(a, b, words * 4) == 0; }
 std::unique_ptr<validate::Session> g_validation;
 bool g_validateFrame = false;
 struct ValidationFrame {
@@ -319,6 +413,11 @@ bool g_skipDraws = false; // harness fast-forward: geometry of frames nobody loo
 std::vector<uint8_t> g_captured;
 int g_capW = 0, g_capH = 0;
 unsigned g_efbSwapsTotal = 0; // GXV_EFBSWAP copies made so far (tests: DebugEfbSwaps)
+unsigned g_efbSwapsPartialTotal = 0, g_rawConvertsTotal = 0; // GXV_EFBSWAP2's, and the later conversions (tests)
+unsigned g_efbSwapHoldsTotal = 0; // GXV_EFBSWAP2_HOLD: conversion swaps refused (tests: DebugEfbSwapHolds)
+unsigned g_efbLoadFromsTotal = 0; // GXV_VGL_LOADFROM: swaps whose drawing back was the next scene's colour load (tests)
+ColorLoadHook g_colorLoadHook = nullptr; // (GXV_VGL_LOADFROM: the host's vglColorLoadFrom)
+unsigned g_efbAdoptsTotal = 0; // EFB buffers that became a texture's own storage (AdoptEfbBuffer; tests: DebugEfbAdopts)
 
 // Framebuffer objects for everything that is not the EFB: copy destinations and
 // offscreen passes (PassCmd in vgx_cmd.h). They are pooled by size, and one of
@@ -351,6 +450,7 @@ struct PoolFbo {
 namespace PoolHeld { constexpr uint8_t FX = 1; }
 std::vector<PoolFbo> g_pool;
 uint64_t g_presents = 0; // CMD_PRESENTs executed (pool ageing)
+uint64_t g_poolRecycled = 0; // pooled objects given up by RecycleFbo (status line)
 uint32_t g_fboMaxUses = 8;
 // The usage hint of the display-list cache's static vertex and index buffers.
 // GXV_STATIC_USAGE=dynamic (the Vita host's default; "static" elsewhere): on vitaGL the
@@ -375,8 +475,10 @@ float g_passScale = 1.0f;       // GXV_PASSHALF: the open pass is drawn at this 
 //   g_stepBg  the textures of draws that sample no character or key-item texture use the nearest mip level between levels
 //             (LINEAR_MIPMAP_LINEAR -> LINEAR_MIPMAP_NEAREST): half the texture fetches of a trilinear surface
 // Off, every draw is the one the static switches (or nothing) give.
-bool g_stepFxWanted = false, g_stepBgWanted = false;
-bool g_stepFx = false, g_stepBg = false;
+//   g_stepEdge the present without its edge smoothing (GXV_AUTOQ_EDGESTEP, Performance mode's first step): PresentEdgeAA declines, so
+//             the host presents as it does with GXV_EDGE_AA off for that picture (the HUD and Mario's own smoothing as before)
+bool g_stepFxWanted = false, g_stepBgWanted = false, g_stepEdgeWanted = false;
+bool g_stepFx = false, g_stepBg = false, g_stepEdge = false;
 float g_passScaleNext = 1.0f;   // ... for the pass BeginPass begins next (set by its caller, used once)
 // Anisotropic filtering at the top rung (vgx_autoq.h, GXV_AUTOQ_ANISO): vitaGL's anisotropic switch (a vitaGL built with ANISO_SWITCH;
 // the host hands its function over, SetAnisotropicHook) makes a trilinear texture's minification filter the anisotropic value when
@@ -387,6 +489,465 @@ AnisoHook g_anisoHook = nullptr;
 bool g_anisoWanted = false, g_aniso = false; // wanted (the controller, or a test: DebugSetAnisotropic) / latched at the start of a frame
 unsigned g_anisoFilter = 2;                  // the value handed to the switch when on (GXV_AUTOQ_ANISO=1|2: 2, =3: 3)
 uint32_t g_anisoGen = 0;
+#ifndef GL_TEXTURE_LOD_BIAS
+#define GL_TEXTURE_LOD_BIAS 0x8501
+#endif
+// GXV_RUNG_LODBIAS (see BindTexture): the bias for the current rung, recomputed only when the rung's width changes.
+long RungLodPctRead() {
+    static const long pct = std::clamp<long>(EnvInt("GXV_RUNG_LODBIAS", 0), 0, 200);
+    return pct;
+}
+int8_t RungLodBiasSteps() {
+    const long pct = g_beFast2 ? g_f2.lodPct : RungLodPctRead(); // (GXV_BE_FAST2: no guard per texture)
+    if (!pct) return 0;
+    static float lastSX = -1.0f;
+    static int8_t steps = 0;
+    if (g_rungSX != lastSX) {
+        lastSX = g_rungSX;
+        const float levels = g_rungSX > 0.0f ? std::log2(1.5f / g_rungSX) : 0.0f; // (1.5 = 960 / 640, the top rung's width factor)
+        steps = static_cast<int8_t>(std::clamp(-std::lround(levels * 8.0f * static_cast<float>(pct) / 100.0f), -32L, 0L));
+    }
+    return steps;
+}
+
+// ---- GXV_BE_PROF (the player build too; default 0): where the back end's own time goes, on the console
+// GXV_PROF / GXV_PROF=3 below are compiled out of the player build (kBackendDiagnostics), and the workload probe only gives the
+// whole Execute (r27: 8.3 ms a picture on the Observatory route, ~280 draws, 6-8 scenes). GXV_BE_PROF=<n> times one picture in n
+// (1: every one) with the process clock at coarse points: the frame's set-up (render-scale controller, stream upload, plans,
+// warm-up slice), every command by its type, and four stages inside a draw (program + render state; glUniform*; textures,
+// vertex layout and target; the vitaGL draw call itself, i.e. vitaGL + sceGxm). Every 5 s one basic-log line "be-prof:" gives
+// the per-picture averages, the counts that drive them (draws, program switches, blend re-patches, texture binds, uniform calls
+// and bytes, scenes, copy quads) and, from a vitaGL with patch 0014, its fragment-program memo and uniform-ring counters. A clock
+// read costs time itself: the measured cost is in the line ("clock N ns x M reads a picture"), to take off by hand.
+// Off: one predictable branch per command and per draw stage.
+extern "C" void vglGetDrawCacheStats(uint32_t* stats) __attribute__((weak)); // tools/vitagl/patches/0014: 8 counters, see there
+extern "C" void vglSetDrawCaches(uint32_t flags) __attribute__((weak));       // (the same patch; VGL_DRAWCACHE_* bits)
+namespace beprof {
+enum Bucket : unsigned { kSetup, kDrawProg, kDrawUni, kDrawTex, kDrawCall, kDrawAfter, kCopy, kPass, kDisp, kUpload, kWarmCmd, kOther, kTail, kBuckets };
+bool g_on = false;    // GXV_BE_PROF > 0 (read in Init)
+unsigned g_every = 1; // one picture in g_every is timed
+bool g_frame = false; // the picture being executed is timed
+uint64_t g_us[kBuckets] = {};
+uint64_t g_pictures = 0, g_seen = 0, g_reads = 0;
+uint64_t g_draws = 0, g_progSwitches = 0, g_blendRepatch = 0, g_texBinds = 0, g_uniCalls = 0, g_uniBytes = 0, g_scenes = 0, g_copies = 0;
+double g_windowStartMs = 0.0, g_clockNs = 0.0;
+uint32_t g_vglBase[8] = {};
+uint64_t g_mark = 0;
+int64_t g_cpu0 = 0;
+uint64_t g_wall0 = 0, g_cpuSum = 0, g_wallSum = 0;
+inline uint64_t Now() {
+#ifdef __vita__
+    return sceKernelGetProcessTimeWide();
+#else
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
+// A stage mark: the time since the previous mark goes to `b`.
+inline void Mark(Bucket b) {
+    const uint64_t n = Now();
+    g_us[b] += n - g_mark;
+    g_mark = n;
+    ++g_reads;
+}
+void Configure() {
+    const long n = EnvInt("GXV_BE_PROF", 0);
+    g_on = n > 0;
+    g_every = n > 0 ? static_cast<unsigned>(n) : 1u;
+    if (!g_on) return;
+    // the clock's own cost: the best of five runs of 200 reads
+    double best = 1e9;
+    volatile uint64_t sink = 0;
+    for (int k = 0; k < 5; ++k) {
+        const uint64_t a = Now();
+        for (int i = 0; i < 200; ++i) sink = sink + Now();
+        const uint64_t b = Now();
+        best = std::min(best, static_cast<double>(b - a) * 1000.0 / 200.0);
+    }
+    g_clockNs = best;
+    if (vglGetDrawCacheStats) vglGetDrawCacheStats(g_vglBase);
+}
+inline void FrameBegin() {
+    g_frame = g_on && (g_seen++ % g_every) == 0;
+    if (!g_frame) return;
+    g_cpu0 = port_thread_cpu_us ? port_thread_cpu_us() : 0;
+    g_wall0 = g_mark = Now();
+}
+void Report(double nowMs) {
+    const double n = g_pictures ? static_cast<double>(g_pictures) : 1.0;
+    auto ms = [&](uint64_t us) { return static_cast<double>(us) / 1000.0 / n; };
+    const uint64_t drawUs = g_us[kDrawProg] + g_us[kDrawUni] + g_us[kDrawTex] + g_us[kDrawCall] + g_us[kDrawAfter];
+    char line[1024];
+    std::snprintf(line, sizeof line,
+                  "be-prof: %.1f s, %llu pictures timed (1 in %u): a picture %.2f ms wall, %.2f ms CPU: set-up %.2f, draws %.2f (program+state %.2f, "
+                  "uniforms %.2f, textures+layout+target %.2f, vitaGL call %.2f, after %.2f; %.1f us a draw), copies %.2f, passes %.2f, "
+                  "display copy+present %.2f, uploads %.2f, shader cmds %.2f, other %.2f, end %.2f; a picture: %.0f draws, %.0f program switches, "
+                  "%.1f blend re-patches, %.0f texture binds, %.0f glUniform (%.1f KB), %.1f scenes, %.1f copy quads; clock %.0f ns x %.0f reads",
+                  (nowMs - g_windowStartMs) / 1000.0, static_cast<unsigned long long>(g_pictures), g_every, ms(g_wallSum), ms(g_cpuSum), ms(g_us[kSetup]),
+                  ms(drawUs), ms(g_us[kDrawProg]), ms(g_us[kDrawUni]), ms(g_us[kDrawTex]), ms(g_us[kDrawCall]), ms(g_us[kDrawAfter]),
+                  g_draws ? static_cast<double>(drawUs) / static_cast<double>(g_draws) : 0.0, ms(g_us[kCopy]), ms(g_us[kPass]), ms(g_us[kDisp]),
+                  ms(g_us[kUpload]), ms(g_us[kWarmCmd]), ms(g_us[kOther]), ms(g_us[kTail]), g_draws / n, g_progSwitches / n, g_blendRepatch / n,
+                  g_texBinds / n, g_uniCalls / n, g_uniBytes / n / 1024.0, g_scenes / n, g_copies / n, g_clockNs, g_reads / n);
+    if (port_log_summary) port_log_summary("%s", line);
+    else std::fprintf(stderr, "%s\n", line);
+    if (vglGetDrawCacheStats) {
+        // (vitaGL counts every draw, timed or not: these are the whole window's)
+        uint32_t v[8] = {}, d[8] = {};
+        vglGetDrawCacheStats(v);
+        for (int i = 0; i < 8; ++i) d[i] = v[i] - g_vglBase[i];
+        std::memcpy(g_vglBase, v, sizeof v);
+        std::snprintf(line, sizeof line,
+                      "be-prof vitaGL (patch 0014, every picture of the window): fragment programs patched %u, memo hits %u; vertex uniform ring "
+                      "copies %u (%u KB), re-used %u; fragment copies %u (%u KB), re-used %u",
+                      d[0], d[1], d[2], d[6] / 1024u, d[3], d[4], d[7] / 1024u, d[5]);
+        if (port_log_summary) port_log_summary("%s", line);
+        else std::fprintf(stderr, "%s\n", line);
+    }
+    for (uint64_t& v : g_us) v = 0;
+    g_pictures = g_reads = g_draws = g_progSwitches = g_blendRepatch = g_texBinds = g_uniCalls = g_uniBytes = g_scenes = g_copies = 0;
+    g_cpuSum = g_wallSum = 0;
+    g_windowStartMs = nowMs;
+}
+inline void FrameEnd(unsigned scenes, unsigned copyQuads) {
+    if (!g_frame) return;
+    Mark(kTail);
+    ++g_pictures;
+    g_scenes += scenes;
+    g_copies += copyQuads;
+    g_wallSum += g_mark - g_wall0;
+    if (port_thread_cpu_us) g_cpuSum += static_cast<uint64_t>(port_thread_cpu_us() - g_cpu0);
+    g_frame = false;
+    const double now = static_cast<double>(g_mark) / 1000.0;
+    if (g_windowStartMs == 0.0) g_windowStartMs = now;
+    if (now - g_windowStartMs >= 5000.0) Report(now);
+}
+} // namespace beprof
+#define BEPROF_MARK(b) do { if (beprof::g_frame) beprof::Mark(beprof::b); } while (0)
+
+// ---- GXV_GPU_SCENES (the player build too; default 0): where the GPU's time goes, scene by scene, on the console
+// The GPU clock of automatic quality (vitaGL's GPU timers) gives one number a picture: from each scene's sceGxmEndScene to its fragment
+// completion. A tile-based GPU does a scene in two phases: the vertex phase (vertex shaders, clipping, binning into the tiles: "TA")
+// starts when the scene is handed over (sceGxmEndScene, or a mid-scene flush) and must finish before that scene's pixel phase ("3D":
+// hidden-surface removal, fragment shaders, blending, the tiles' load and store) can start. With a vitaGL whose GPU timers can also
+// stamp each scene's VERTEX completion (tools/vitagl/gpu_timers.py: vglRtSetupScenes / vglRtTagScene / vglRtReadScenes), each scene's
+// time splits into
+//   TA = vertex done - max(submitted, the last vertex completion seen before it)
+//   3D = fragment done - max(vertex done, submitted, the last fragment completion seen before it)
+// (the two phases of different scenes overlap on the GPU, so TA + 3D may exceed the busy time). The back end tags every scene it begins
+// (TouchTarget) with what it drew there: kind (EFB / texture or pass target / display or other), draws, indices, indices of lit draws and
+// "light-weighted" indices (indices x the light slots their vertex shader evaluates), blended draws and draws whose fragment shader can
+// discard. Every 5 s one basic-log line "gpu-scenes:" gives, a picture: TA, 3D and busy, and per kind the CPU-side counts with their TA,
+// 3D and the CPU time from the scene's beginning to its sceGxmEndScene ("feed"); also the biggest EFB scene of each picture alone.
+// Resolution-independent GPU time that sits in TA points at vertex work; 3D that does not shrink with the picture size points at per-tile
+// state, and a display scene with a long 3D at waits for the display. Without such a vitaGL the line still gives the CPU-side counts.
+// Scenes the timers could not follow ("untimed": vitaGL's watcher was more than 48 scenes behind, gpu_timers.py RT_SLOTS - 16, which
+// happens when the GPU runs about three pictures behind with 17 scenes a picture) leave a hole: the GPU work of the untimed scenes is
+// done between the last completion seen and the next timed scene's completion. That span is counted once (busy, and the picture's TA
+// and 3D), never from the next scene's submission (which counted the whole queue as work: per-picture sums above the picture interval),
+// and it is not given to that next scene's kind: the per-kind and per-scene figures hold only scenes whose previous scene was timed.
+//   GXV_GPU_SCENES=2 also every 5 s: the eight scene slots (a scene's place in the picture: its number, kind and target size) with the
+// most 3D a picture, each with its draws by class (opaque, blended, discard, depth-only, no effect), the pixels they cover (measured from
+// the vertices of stream draws; bounded by viewport and scissor for static ones), vitaGL's scissor-mask passes, clears and copy quads,
+// whether the scene loaded and stored its depth and whether its colour load was dead (the scene began with a clear of its whole
+// colour), and the fragment shaders with the largest estimated cost (pixels x a per-pixel weight from the shader's text). See the
+// second part of this section, after DrawAreaPx. Mode 2 costs some back-end CPU (each stream draw's triangles projected, at most 64).
+// Off: one predictable branch per scene and per draw.
+struct VgxRtGpuScene { // = vglRtGpuScene (tools/vitagl/gpu_timers.py)
+    uint32_t seq, frame, tag, begin_us, submit_us, vdone_us, fdone_us;
+    uint8_t timed, vtimed, pad0, pad1;
+};
+extern "C" uint32_t vglRtSetupScenes(int priority, int affinity) __attribute__((weak));
+extern "C" void vglRtTagScene(uint32_t tag) __attribute__((weak));
+extern "C" uint32_t vglRtReadScenes(VgxRtGpuScene* out, uint32_t max) __attribute__((weak));
+namespace gpuscenes {
+enum Kind : uint8_t { kEfb, kTex, kDisp, kKinds };
+struct Desc {
+    uint32_t serial = 0;
+    uint8_t kind = kDisp;
+    int8_t dLoad = -1, dStore = -1;   // (mode 2) the depth hint the scene began with; -1: not known
+    uint16_t ordinal = 0, w = 0, h = 0; // (mode 2) the scene's number in the back end's picture, its target's size
+    uint32_t draws = 0, idx = 0, litIdx = 0, lightIdx = 0, blend = 0, discard = 0;
+};
+// ---- GXV_GPU_SCENES=2: what each scene drew (filled by the hooks of the second part; one per scene, a ring like Desc's)
+enum DrawClass : uint8_t { kOpaque, kBlended, kDiscard, kDepthOnly, kNoEffect, kClasses };
+struct ShaderUse { uint16_t fs = 0; uint32_t draws = 0; float px = 0.0f, cost = 0.0f; };
+constexpr int kSceneShaders = 12;  // fragment shaders kept apart per scene (the rest are summed as "others")
+struct Detail {
+    uint32_t serial = 0;
+    uint16_t clsDraws[kClasses] = {}, clsBound[kClasses] = {}; // draws of the class; of them, those with a rectangle bound only
+    float clsPx[kClasses] = {}, clsBoundPx[kClasses] = {};      // target pixels: measured from the vertices / bounded by rectangles
+    ShaderUse sh[kSceneShaders];
+    uint8_t nSh = 0;
+    uint16_t otherDraws = 0;
+    float otherPx = 0.0f, otherCost = 0.0f;
+    uint16_t masks = 0, maskFull = 0; // vitaGL's scissor-mask updates (tests.c update_scissor_test) and full-target passes among them
+    float maskPx = 0.0f;              // pixels those passes cover (a full-target "clear the mask" pass and the rectangle / target)
+    uint16_t clears = 0, quads = 0;   // glClear quads; copy / pass quads (DrawQuad)
+    float clearPx = 0.0f, quadPx = 0.0f;
+    uint8_t firstClear = 0;           // the scene's first operation cleared its whole target: 1 colour, 2 depth
+    bool touched = false;             // something was drawn or cleared in it already
+};
+constexpr uint32_t kDetailRing = 256; // (the reader is a few pictures behind: at most ~70 scenes)
+Detail g_detail[kDetailRing];
+struct Cpu { uint64_t scenes = 0, draws = 0, idx = 0, litIdx = 0, lightIdx = 0, blend = 0, discard = 0; };
+struct Gpu { uint64_t scenes = 0, taUs = 0, fUs = 0, feedUs = 0; };
+bool g_on = false, g_started = false, g_timers = false;
+int g_mode = 0; // GXV_GPU_SCENES: 1 the line; 2 the line and the top scenes
+uint32_t g_serial = 0;
+uint16_t g_ordinal = 0; // scenes begun in the picture being executed
+constexpr uint32_t kRing = 1024;
+Desc g_ring[kRing];
+Desc* g_cur = nullptr;
+std::vector<int8_t> g_fsDiscard; // per fragment shader id: -1 not known yet, 0 / 1 its text has no / a `discard`
+Cpu g_cpu[kKinds];
+Gpu g_gpu[kKinds], g_main;
+uint64_t g_cpuPictures = 0, g_gpuPictures = 0, g_busyUs = 0, g_untimed = 0, g_early = 0, g_untagged = 0;
+uint64_t g_mainIdx = 0, g_mainDraws = 0;
+// scenes timed after an untimed one (their TA / 3D include the untimed scenes' remaining work: counted in the picture's totals only)
+uint64_t g_gapScenes = 0, g_gapTaUs = 0, g_gapFUs = 0;
+double g_windowStartMs = 0.0;
+// record continuity (the previous record the reader saw)
+bool g_havePrev = false;
+uint32_t g_prevSeq = 0;
+bool g_prevVt = false, g_prevFt = false;
+// the last completions seen (of any earlier scene: the GPU does the scenes' phases in order)
+bool g_haveV = false, g_haveF = false;
+uint32_t g_lastV = 0, g_lastF = 0;
+// the picture being gathered: its biggest EFB scene
+uint32_t g_frame = ~0u;
+bool g_frameOpen = false;
+struct Best { uint32_t draws = 0, idx = 0, ta = 0, f = 0, feed = 0; bool timed = false; } g_best;
+inline uint32_t Since(uint32_t later, uint32_t earlier) { return static_cast<int32_t>(later - earlier) > 0 ? later - earlier : 0u; }
+inline uint32_t Later(uint32_t a, uint32_t b) { return static_cast<int32_t>(a - b) > 0 ? a : b; }
+
+void TakeSlot(const Desc& d, uint32_t ta, uint32_t f, uint32_t feed); // (mode 2, second part)
+void Close() {
+    if (!g_cur) return;
+    if (g_mode >= 2 && !g_timers) TakeSlot(*g_cur, 0, 0, 0); // (no scene timers: the slots get the CPU-side record of every scene)
+    Cpu& c = g_cpu[g_cur->kind];
+    ++c.scenes;
+    c.draws += g_cur->draws; c.idx += g_cur->idx; c.litIdx += g_cur->litIdx; c.lightIdx += g_cur->lightIdx;
+    c.blend += g_cur->blend; c.discard += g_cur->discard;
+    g_cur = nullptr;
+}
+void BeginDetail(Desc& d); // (mode 2, second part: the target's size, a clean Detail)
+// TouchTarget: a scene begins on the bound target.
+void Begin(uint8_t kind) {
+    Close();
+    if (++g_serial == 0) ++g_serial; // (tag 0: a scene the back end did not begin)
+    Desc& d = g_ring[g_serial % kRing];
+    d = Desc{};
+    d.serial = g_serial;
+    d.kind = kind;
+    d.ordinal = g_ordinal < 0xFFFF ? g_ordinal++ : g_ordinal;
+    g_cur = &d;
+    if (g_mode >= 2) BeginDetail(d);
+    if (g_timers) vglRtTagScene(g_serial);
+}
+// GXV_VSOUT census (vertex shaders that leave out what their fragment shader does not read; ShaderSource::outPruned): per window
+uint64_t g_voDraws = 0, g_voPruned = 0, g_voIdx = 0, g_voColGone = 0, g_voPartOff = 0, g_voTexOff = 0;
+// GXV_FS_TRIM / GXV_VS_TRIM census (ShaderSource::trimOps): draws with a trimmed shader, and the operations left out, summed over draws
+uint64_t g_ftDraws = 0, g_ftOps = 0, g_vtDraws = 0, g_vtOps = 0, g_vtIdx = 0;
+inline bool FsDiscards(uint16_t fsId) {
+    if (fsId >= g_fsDiscard.size()) g_fsDiscard.resize(static_cast<size_t>(fsId) + 64, -1);
+    int8_t& dis = g_fsDiscard[fsId];
+    if (dis < 0) dis = (fsId < g_fsSrc.size() && g_fsSrc[fsId] && g_fsSrc[fsId]->text.find("discard") != std::string::npos) ? 1 : 0;
+    return dis != 0;
+}
+inline void NoteDraw(const DrawRec& r, const ShaderSource* vs) {
+    Desc& d = *g_cur;
+    ++d.draws;
+    d.idx += r.idxCount;
+    ++g_voDraws;
+    if (vs && vs->trimOps) { ++g_vtDraws; g_vtOps += vs->trimOps; g_vtIdx += r.idxCount; }
+    if (r.fsId < g_fsSrc.size() && g_fsSrc[r.fsId] && g_fsSrc[r.fsId]->trimOps) { ++g_ftDraws; g_ftOps += g_fsSrc[r.fsId]->trimOps; }
+    if (vs && vs->outPruned) {
+        ++g_voPruned;
+        g_voIdx += r.idxCount;
+        g_voColGone += (vs->outPruned & 1u) + ((vs->outPruned >> 1) & 1u);
+        g_voPartOff += (vs->outPruned >> 2) & 1u;
+        g_voTexOff += (vs->outPruned >> 3) & 1u;
+    }
+    if (vs && vs->usesLights) {
+        d.litIdx += r.idxCount;
+        d.lightIdx += r.idxCount * static_cast<uint32_t>(vs->nLt > 4 ? (vs->nLt - 4) / 5 : 0);
+    }
+    if (r.rs.blend) ++d.blend;
+    d.discard += FsDiscards(r.fsId) ? 1u : 0u;
+}
+void EndPicture() {
+    if (!g_frameOpen) return;
+    g_frameOpen = false;
+    ++g_gpuPictures;
+    if (g_best.draws) {
+        g_mainDraws += g_best.draws;
+        g_mainIdx += g_best.idx;
+        if (g_best.timed) { ++g_main.scenes; g_main.taUs += g_best.ta; g_main.fUs += g_best.f; g_main.feedUs += g_best.feed; }
+    }
+    g_best = Best{};
+}
+void Take(const VgxRtGpuScene& s) {
+    if (s.frame != g_frame) { EndPicture(); g_frame = s.frame; g_frameOpen = true; }
+    const Desc* d = s.tag && g_ring[s.tag % kRing].serial == s.tag ? &g_ring[s.tag % kRing] : nullptr;
+    if (!d) ++g_untagged;
+    const uint8_t kind = d ? d->kind : static_cast<uint8_t>(kDisp);
+    // (clean: the scene before it, in the GPU's order, was read and had both completions - or it is the first record read; then this
+    // scene's phases start at the later of its submission and that scene's completions, and its TA / 3D are its own)
+    const bool clean = !g_havePrev || (s.seq == g_prevSeq + 1 && g_prevFt && g_prevVt);
+    if (s.timed) {
+        // (from the last fragment completion seen, also across untimed scenes: their work lies in this span, counted once)
+        const uint32_t start = g_haveF ? Later(g_lastF, s.submit_us) : s.submit_us;
+        g_busyUs += Since(s.fdone_us, start);
+    }
+    if (s.timed && s.vtimed) {
+        const uint32_t ta0 = g_haveV ? Later(g_lastV, s.submit_us) : s.submit_us;
+        const uint32_t ta = Since(s.vdone_us, ta0);
+        if (static_cast<int32_t>(s.vdone_us - s.submit_us) <= 0) ++g_early; // (its vertex work was done before sceGxmEndScene returned)
+        uint32_t f0 = Later(s.vdone_us, s.submit_us);
+        if (g_haveF) f0 = Later(g_lastF, f0);
+        const uint32_t f = Since(s.fdone_us, f0);
+        const uint32_t feed = s.begin_us ? Since(s.submit_us, s.begin_us) : 0u;
+        if (clean) {
+            Gpu& g = g_gpu[kind];
+            ++g.scenes; g.taUs += ta; g.fUs += f; g.feedUs += feed;
+            if (d && kind == kEfb && d->draws > g_best.draws) g_best = Best{d->draws, d->idx, ta, f, feed, true};
+            if (g_mode >= 2) TakeSlot(d ? *d : Desc{}, ta, f, feed);
+        } else {
+            ++g_gapScenes; g_gapTaUs += ta; g_gapFUs += f;
+            if (d && kind == kEfb && d->draws > g_best.draws) g_best = Best{d->draws, d->idx, 0, 0, 0, false};
+        }
+    } else {
+        ++g_untimed;
+        if (d && kind == kEfb && d->draws > g_best.draws) g_best = Best{d->draws, d->idx, 0, 0, 0, false};
+    }
+    g_havePrev = true;
+    g_prevSeq = s.seq;
+    g_prevVt = s.timed && s.vtimed;
+    g_prevFt = s.timed != 0;
+    if (s.timed) { g_lastF = g_haveF ? Later(s.fdone_us, g_lastF) : s.fdone_us; g_haveF = true; }
+    if (s.timed && s.vtimed) { g_lastV = g_haveV ? Later(s.vdone_us, g_lastV) : s.vdone_us; g_haveV = true; }
+}
+void ReportTop(double seconds); // (mode 2, second part)
+void Report(double nowMs) {
+    static const char* const kName[kKinds] = {"EFB", "texture/pass", "display/other"};
+    const double cp = g_cpuPictures ? static_cast<double>(g_cpuPictures) : 1.0, gp = g_gpuPictures ? static_cast<double>(g_gpuPictures) : 1.0;
+    char line[2048];
+    int n = std::snprintf(line, sizeof line, "gpu-scenes: %.1f s, %llu pictures", (nowMs - g_windowStartMs) / 1000.0, static_cast<unsigned long long>(g_cpuPictures));
+    // (the picture's totals: every kind's clean scenes and the spans after untimed scenes)
+    uint64_t ta = g_gapTaUs, f = g_gapFUs;
+    for (const Gpu& g : g_gpu) { ta += g.taUs; f += g.fUs; }
+    if (g_timers)
+        n += std::snprintf(line + n, sizeof line - n, "; GPU (%llu pictures timed, %llu scenes untimed, %llu untagged, %llu with the vertex work done before EndScene): "
+                           "a picture vertex (TA) %.2f ms, pixel (3D) %.2f ms, busy %.2f ms",
+                           static_cast<unsigned long long>(g_gpuPictures), static_cast<unsigned long long>(g_untimed), static_cast<unsigned long long>(g_untagged),
+                           static_cast<unsigned long long>(g_early), ta / 1000.0 / gp, f / 1000.0 / gp, g_busyUs / 1000.0 / gp);
+    else
+        n += std::snprintf(line + n, sizeof line - n, "; GPU times: none (a vitaGL without vglRtReadScenes, or its GPU timers are off)");
+    for (int k = 0; k < kKinds && n > 0 && n < static_cast<int>(sizeof line); ++k) {
+        const Cpu& c = g_cpu[k];
+        const Gpu& g = g_gpu[k];
+        n += std::snprintf(line + n, sizeof line - n, "; %s: %.1f scenes, %.0f draws, %.1fk indices (lit %.1fk, light-weighted %.1fk), %.0f blended, %.0f discard",
+                           kName[k], c.scenes / cp, c.draws / cp, c.idx / cp / 1000.0, c.litIdx / cp / 1000.0, c.lightIdx / cp / 1000.0, c.blend / cp, c.discard / cp);
+        if (g_timers && n > 0 && n < static_cast<int>(sizeof line))
+            n += std::snprintf(line + n, sizeof line - n, ", TA %.2f, 3D %.2f, feed %.2f ms", g.taUs / 1000.0 / gp, g.fUs / 1000.0 / gp, g.feedUs / 1000.0 / gp);
+    }
+    if (g_timers && n > 0 && n < static_cast<int>(sizeof line)) {
+        const double m = g_main.scenes ? static_cast<double>(g_main.scenes) : 1.0;
+        n += std::snprintf(line + n, sizeof line - n, "; biggest EFB scene: %.0f draws, %.1fk indices, TA %.2f, 3D %.2f, feed %.2f ms", g_mainDraws / gp, g_mainIdx / gp / 1000.0,
+                      g_main.taUs / 1000.0 / m, g_main.fUs / 1000.0 / m, g_main.feedUs / 1000.0 / m);
+    }
+    if (VsOutMode() && n > 0 && n < static_cast<int>(sizeof line)) {
+        const double dr = g_voDraws ? static_cast<double>(g_voDraws) : 1.0;
+        n += std::snprintf(line + n, sizeof line - n, "; GXV_VSOUT: %.0f of %.0f draws a picture with a pruned vertex shader (%.1fk indices; colour varyings left out %.0f, "
+                      "a colour or alpha part not computed %.0f, a texgen constant %.0f), %.0f%% of draws", g_voPruned / cp, g_voDraws / cp, g_voIdx / cp / 1000.0,
+                      g_voColGone / cp, g_voPartOff / cp, g_voTexOff / cp, 100.0 * g_voPruned / dr);
+    }
+    if ((FsTrimMode() || VsTrimMode()) && n > 0 && n < static_cast<int>(sizeof line)) {
+        const double dr = g_voDraws ? static_cast<double>(g_voDraws) : 1.0;
+        n += std::snprintf(line + n, sizeof line - n, "; GXV_FS_TRIM: %.0f of %.0f draws a picture with a trimmed fragment shader (%.0f%%, %.1f clamp sides / floors left out "
+                           "a draw); GXV_VS_TRIM: %.0f draws (%.1fk indices, %.0f%%) with a trimmed vertex shader (%.1f light terms / clamp sides left out a draw)",
+                           g_ftDraws / cp, g_voDraws / cp, 100.0 * g_ftDraws / dr, g_ftDraws ? static_cast<double>(g_ftOps) / g_ftDraws : 0.0, g_vtDraws / cp,
+                           g_vtIdx / cp / 1000.0, 100.0 * g_vtDraws / dr, g_vtDraws ? static_cast<double>(g_vtOps) / g_vtDraws : 0.0);
+    }
+    g_ftDraws = g_ftOps = g_vtDraws = g_vtOps = g_vtIdx = 0;
+    g_voDraws = g_voPruned = g_voIdx = g_voColGone = g_voPartOff = g_voTexOff = 0;
+    if (port_log_summary) port_log_summary("%s", line);
+    else std::fprintf(stderr, "%s\n", line);
+    if (g_mode >= 2) ReportTop((nowMs - g_windowStartMs) / 1000.0);
+    for (Cpu& c : g_cpu) c = Cpu{};
+    for (Gpu& g : g_gpu) g = Gpu{};
+    g_main = Gpu{};
+    g_cpuPictures = g_gpuPictures = g_busyUs = g_untimed = g_early = g_untagged = g_mainIdx = g_mainDraws = 0;
+    g_gapScenes = g_gapTaUs = g_gapFUs = 0;
+    g_windowStartMs = nowMs;
+}
+// Execute's start (the render thread, the one that ends vitaGL's scenes): the vertex watcher is started once, as soon as automatic
+// quality's GPU clock has started vitaGL's timers (tried for the first 600 pictures; GXV_AUTOQ_LEVEL or GXV_AUTOQ=0 start no clock).
+void FrameBegin() {
+    if (!g_on || g_started) return;
+    static unsigned tries = 0;
+    if (vglRtSetupScenes && vglRtTagScene && vglRtReadScenes) g_timers = vglRtSetupScenes(0x60, 0x20000) != 0;
+    if (!g_timers && ++tries < 600 && vglRtSetupScenes) return;
+    g_started = true;
+    if (port_log_summary)
+        port_log_summary("gpu-scenes: GXV_GPU_SCENES=%d: %s%s", g_mode,
+                         g_timers ? "vertex and fragment completion of every scene (vitaGL scene timers, watchers on core 1)"
+                                  : "CPU-side counts only (this vitaGL has no scene timers, or its GPU timers are off)",
+                         g_mode >= 2 ? "; every 5 s also the top scene slots by 3D (gpu-scenes top: lines)" : "");
+}
+// Execute's end: the picture's last scene is closed, the finished scenes' times are taken, every 5 s the line.
+void FrameEnd() {
+    if (!g_on) return;
+    Close();
+    g_ordinal = 0;
+    ++g_cpuPictures;
+    if (g_timers) {
+        VgxRtGpuScene recs[64];
+        for (int rounds = 0; rounds < 4; ++rounds) {
+            const uint32_t got = vglRtReadScenes(recs, 64);
+            for (uint32_t i = 0; i < got; ++i) Take(recs[i]);
+            if (got < 64) break;
+        }
+    }
+    const double now = static_cast<double>(beprof::Now()) / 1000.0;
+    if (g_windowStartMs == 0.0) g_windowStartMs = now;
+    if (now - g_windowStartMs >= 5000.0) Report(now);
+}
+// (mode 2, the second part, after DrawAreaPx: the hooks the back end calls)
+void NoteMask(bool began);
+void NoteClear(bool colour, bool depth);
+void NoteQuad();
+void NoteDrawDetail(const CmdBuf& buf, const DrawRec& r);
+} // namespace gpuscenes
+
+// ---- GXV_MIDFLUSH=<n> (default 0, off; the console only): sceGxmMidSceneFlush after every n draws of an EFB scene
+// sceGxm starts a scene's vertex phase only when the scene is ended (or a ring buffer is full); the back end feeds the Observatory's
+// main EFB scene for ~15 ms of CPU, so its vertex phase (all its vertex shading and binning) then runs only after the last draw,
+// in series with that scene's pixel phase. A mid-scene flush hands the GPU the vertex work recorded so far: the vertex phase runs
+// while the CPU still records, and only the rest is left after sceGxmEndScene. Nothing is drawn differently: the pixel phase still
+// begins at the scene's end. The default uniform buffers are kept (SCE_GXM_MIDSCENE_PRESERVE_DEFAULT_UNIFORM_BUFFERS); to be safe the
+// GXM state cache (vitaGL patch 0011) forgets what the context holds and the next draw re-issues its program, so vitaGL points sceGxm
+// at its uniform buffers again (with GXV_VGL_UNIREUSE without copying). A failure is logged once and turns the switch off.
+// NOTE: vertex work done before sceGxmEndScene is not in the GPU timers' busy time (gpu_timers.py), so with this switch the "GPU" ms
+// of the floor/autoq lines falls by the part that moved before the scene's end: compare frame rate and "ready after" (present: line).
+// GXV_GPU_SCENES=1 shows how many scenes had all their vertex work done before EndScene.
+uint32_t g_midFlushEvery = 0, g_midFlushDraws = 0, g_midFlushes = 0;
+// ---- GXV_GPU_ATTRIB=<n> (default 0, off; a TEST switch: the picture is wrong while it is on): where the GPU time of the EFB goes.
+// Every draw keeps its program, uniforms, textures, render state, vertex layout and its own sceGxmDraw (the per-draw costs); what it
+// is asked to draw is cut:
+//   1  each EFB draw draws only its first triangle: GPU ms = per-draw costs + scene costs (no vertex or pixel work to speak of)
+//   2  each EFB draw is drawn into a 1x1 viewport: every vertex is shaded and every triangle set up as before, but almost none
+//      covers a pixel: GPU ms = per-draw + vertex (TA) costs, pixel work removed
+// With the normal picture (0): full - 2 = pixel work, 2 - 1 = vertex work beyond the per-draw cost, 1 = per-draw + scene costs.
+// Read the floor: line's GPU ms (and gpu-scenes: TA / 3D) at the same spot as a run with 0. Copies, passes and the present are untouched.
+int g_gpuAttrib = 0;
+bool g_beFast = true; // GXV_BE_FAST (read in Init; see DirectFor)
+#ifdef __VGX_VITA__
+// GXV_UNI_SHADOW=1 (default 0 until a console A/B; read in Init; needs the vitaGL of agent be8's vgl.diff, otherwise off): a
+// draw's uniform blocks go into vitaGL's per-program uniform buffers directly (vglGetUniformShadow at link), compared with what
+// vitaGL holds and written only where they differ, plus one vglUniformShadowWritten for the dirty flags, instead of a
+// glUniform4fv / glUniformMatrix4fv per changed block (~1200 calls a picture in the lit Observatory). See Draw.
+bool g_uniShadow = false;
+#endif
 
 // ------------------------------------------------------------ cached GL state
 // Nothing below calls GL unless the value changes. Invalidate() after
@@ -544,14 +1105,58 @@ inline void SceneDepth(int need, bool certain) {
         C.efbDepthLoads += load ? 1u : 0u;
         C.efbDepthStores += store ? 1u : 0u;
     }
+    if (gpuscenes::g_cur) { gpuscenes::g_cur->dLoad = load ? 1 : 0; gpuscenes::g_cur->dStore = store ? 1 : 0; } // (GXV_GPU_SCENES=2)
 #ifdef __VGX_VITA__
     if (mode > 0) vglSetNextSceneDepthModes(load ? GL_TRUE : GL_FALSE, store ? GL_TRUE : GL_FALSE);
 #else
     DepthSimScene(efb, certain, load, store);
 #endif
 }
+// ---- texture transfers (tex11; GXV_VITA_UPLOAD_SYNC=2, vgx_host_galaxy_vita.cpp): vitaGL hands a compressed level and the
+// generated levels of a texture to the GPU's transfer unit and returns at once. With the host's mode 2 the wait for them is
+// made here, once for all the transfers issued before it, at the points where anything could touch their memory: before a call
+// that may make vitaGL move a texture's storage (its realloc copies with the CPU), before a texture with pending transfers is
+// deleted or given new storage (vitaGL may free the old one at once), when a scene ends (a new target, the present, a
+// mid-scene flush: the first moments the GPU may sample an uploaded texture) and at the end of the frame. Modes 0 and 1: no-op.
+inline double NowMs();
+uint32_t g_xferEpoch = 1;          // bumped by every fence
+bool g_xferOpen = false;           // transfers issued since the last fence
+unsigned g_xferFrameFences = 0;    // (GXV_STUTTER_LOG) this frame's fences that waited, and their time
+double g_xferFrameMs = 0;
+inline bool XferLazy() {
+#ifdef __VGX_VITA__
+    static const bool on = vgxvita_uploadSyncMode && vgxvita_xferFence && vgxvita_uploadSyncMode() == 2;
+    return on;
+#else
+    return false;
+#endif
+}
+inline void XferFence() {
+#ifdef __VGX_VITA__
+    if (!g_xferOpen) return;
+    const double t0 = NowMs();
+    vgxvita_xferFence();
+    g_xferFrameMs += NowMs() - t0;
+    ++g_xferFrameFences;
+    g_xferOpen = false;
+    ++g_xferEpoch;
+#endif
+}
+// After a call that issued transfers for texture t.
+inline void XferIssued(Tex& t) {
+    if (!XferLazy()) return;
+    g_xferOpen = true;
+    t.xferEpoch = g_xferEpoch;
+}
+// Before t's storage may be freed or moved.
+inline void XferFenceFor(const Tex& t) {
+    if (g_xferOpen && t.xferEpoch == g_xferEpoch) XferFence();
+}
 inline void TouchTarget(int need = DN_KEEP) {
+    bool began = false; // (GXV_GPU_SCENES=2: this call begins the scene)
     if (S.fbo != g_inUseFbo || g_fbDirty) {
+        began = true;
+        XferFence(); // (tex11: the scene that ends here may sample a texture just uploaded)
         if (g_sceneLog) LogScene();
         ++C.scenes;
         if (S.fbo == g_efbFbo) ++C.efbScenes;
@@ -560,10 +1165,16 @@ inline void TouchTarget(int need = DN_KEEP) {
         dplan::g_afterHook = false;
         g_inUseFbo = S.fbo;
         g_fbDirty = false;
+        g_midFlushDraws = 0; // (GXV_MIDFLUSH counts a scene's draws)
+        if (gpuscenes::g_on) gpuscenes::Begin(S.fbo == g_efbFbo ? gpuscenes::kEfb : S.fbo == 0 ? gpuscenes::kDisp : gpuscenes::kTex); // (GXV_GPU_SCENES)
         SceneDepth(need, certain);
         MarkScissorDirty(); // (vitaGL, STORE_DEPTH_STENCIL: every scene on a framebuffer object rebuilds the mask)
     }
-    if (g_scissorDirty) { ++C.scissorUpdates; g_scissorDirty = false; }
+    if (g_scissorDirty) {
+        ++C.scissorUpdates;
+        g_scissorDirty = false;
+        if (gpuscenes::g_mode >= 2 && gpuscenes::g_cur) gpuscenes::NoteMask(began); // (vitaGL rebuilds its scissor mask now)
+    }
 }
 inline void BindFbo(GLuint fbo) {
     if (S.fbo == fbo) return;
@@ -602,6 +1213,7 @@ inline void UseProgram(GLuint id) {
     if (S.program == id) return;
     G(glUseProgram(id));
     ++C.programUses;
+    if (beprof::g_frame) ++beprof::g_progSwitches;
     S.program = id;
     g_uniDirtyV = g_uniDirtyF = true;
 }
@@ -610,6 +1222,7 @@ inline void BindTex(int unit, GLuint name) {
     if (S.unit != unit) { G(glActiveTexture(GL_TEXTURE0 + unit)); S.unit = unit; }
     G(glBindTexture(GL_TEXTURE_2D, name));
     ++C.texBinds;
+    if (beprof::g_frame) ++beprof::g_texBinds;
     S.tex[unit] = name;
 }
 // For glTexImage2D / glTexParameteri on `name`: bound on unit 0 and unit 0 active.
@@ -647,8 +1260,22 @@ inline void SetScissor(bool on, int x = 0, int y = 0, int w = 0, int h = 0) {
         MarkScissorDirty();
     }
 }
+// ---- vitaGL's viewport and odd sizes (GXV_RECT_LEGACY, see DrawQuad)
+// vitaGL's glViewport halves the size with an integer shift (source/misc.c: x_scale = width >> 1, x_port = x + x_scale, and alike
+// for y): a viewport of an odd width or height covers [x, x + w - 1), one column / row short of the GL's [x, x + w), and whatever
+// is drawn over it is squeezed into the pixels left. GXV_VGL_VIEWPORT=1 (host tests only) makes the desktop's viewport the same.
+#if !defined(__VGX_VITA__)
+inline bool VglViewportEmu() {
+    static const bool on = EnvInt("GXV_VGL_VIEWPORT", 0) != 0;
+    return on;
+}
+#endif
 inline void SetViewport(int x, int y, int w, int h) {
     if (S.vp[0] == x && S.vp[1] == y && S.vp[2] == w && S.vp[3] == h) return;
+#if !defined(__VGX_VITA__)
+    if (VglViewportEmu()) G(glViewport(x, y, w & ~1, h & ~1));
+    else
+#endif
     G(glViewport(x, y, w, h));
     ++C.viewportCalls;
     S.vp[0] = x; S.vp[1] = y; S.vp[2] = w; S.vp[3] = h;
@@ -779,7 +1406,7 @@ inline uint64_t GlRetryDelay(uint8_t failures) { return 60ull << (failures - 1);
 // GXV_RESOURCE_AUDIT=1: bounded basic-log evidence, including quiet player builds.
 // Read once, default off. This does not change allocation, retry or draw policy.
 bool ResourceAuditOn() {
-    return resourceaudit::Enabled();
+    return g_beFast2 ? g_f2.audit : resourceaudit::Enabled(); // (GXV_BE_FAST2: no guard per texture)
 }
 enum class ResourceStage { CreateShader, CompileVertex, CompileFragment, CreateProgram, Link, MissingSource, DrawSkip, WhiteFallback, CopyLink, Count };
 struct ResourceRecord {
@@ -1102,6 +1729,67 @@ void EfbSlotPut(const EfbSlot& cur) {
     *dst = cur;
 }
 
+// ---- area-entry stutter: where the back end's time goes (GXV_STUTTER_LOG, default 1: the basic log; 0 = off)
+// The 5-s "fps:" line counts program links, but cannot tell a draw's link in play from the warm-up's in a closed fade, and it does
+// not see program deletes (vitaGL's glDeleteProgram starts with sceGxmFinish: a wait for all of the GPU's work) or texture
+// uploads. Each Execute adds its costs to g_stFrame; a long frame with a large share of them gets a "stutter:" line, and every 5 s
+// one "stutter-5s:" line gives the window's totals, split into play and quiet moments (closed fades and wipes, the pause menu).
+// tex11: also texture frees (CMD_TEX_FREE: vitaGL's glDeleteTextures, a stage change's budget evictions), the transfer-unit waits
+// (GXV_VITA_UPLOAD_SYNC: inside "texture uploads" in mode 1; mode 2's fences outside them, counted in `xfer`), and of the uploads'
+// time the part in glGenTextures (`names`).
+struct StutterCosts {
+    unsigned frames = 0, demandProgs = 0, warmLinks = 0, stageItems = 0, stageLinks = 0, deletes = 0, texUploads = 0, bufUploads = 0;
+    unsigned texFrees = 0, xferFences = 0, xferWaits = 0;
+    double demandMs = 0, warmMs = 0, stageMs = 0, deleteMs = 0, texMs = 0, bufMs = 0, execMs = 0, worstMs = 0;
+    double texFreeMs = 0, xferMs = 0, xferWaitMs = 0, texNameMs = 0;
+    uint64_t texBytes = 0, bufBytes = 0;
+    void Add(const StutterCosts& o) {
+        frames += o.frames; demandProgs += o.demandProgs; warmLinks += o.warmLinks; stageItems += o.stageItems; stageLinks += o.stageLinks;
+        deletes += o.deletes; texUploads += o.texUploads; bufUploads += o.bufUploads;
+        texFrees += o.texFrees; xferFences += o.xferFences; xferWaits += o.xferWaits;
+        demandMs += o.demandMs; warmMs += o.warmMs; stageMs += o.stageMs; deleteMs += o.deleteMs; texMs += o.texMs; bufMs += o.bufMs;
+        texFreeMs += o.texFreeMs; xferMs += o.xferMs; xferWaitMs += o.xferWaitMs; texNameMs += o.texNameMs;
+        execMs += o.execMs; worstMs = std::max(worstMs, o.worstMs); texBytes += o.texBytes; bufBytes += o.bufBytes;
+    }
+    double Known() const { return demandMs + warmMs + stageMs + deleteMs + texMs + bufMs + texFreeMs + xferMs; }
+};
+StutterCosts g_stFrame, g_stPlay, g_stQuiet;
+double g_texNameMs = 0; // (Upload: this frame's glGenTextures time)
+bool StutterLogOn() {
+#if defined(PORT_LOGGING) && !PORT_LOGGING
+    return false;
+#else
+    static const bool on = EnvInt("GXV_STUTTER_LOG", 1) != 0;
+    return on && port_log_summary;
+#endif
+}
+// The screen is live: a stage is being played and no fade, wipe or pause menu hides it (the deferred warm-up's own test).
+bool ScreenLive() {
+    return port_scene_key && port_screen_quiet && port_scene_key() != 0 && !port_screen_quiet() &&
+           (!port_vgx_vita_splash_active || !port_vgx_vita_splash_active());
+}
+bool g_screenLive = false; // ScreenLive() at the start of the frame being executed
+// Every program delete of the eviction paths goes through here (timed: each one can wait for the GPU).
+void DeleteGlProgram(GLuint id) {
+    const double t0 = NowMs();
+    G(glDeleteProgram(id));
+    ++g_stFrame.deletes;
+    g_stFrame.deleteMs += NowMs() - t0;
+}
+// GXV_RECLAIM_QUIET (default 1): the housekeeping deletes (the program map's limit, the warm-up's capacity service) wait for a quiet
+// moment. In play each of them is a sceGxmFinish in the middle of the frame; the warm-up that wants the room only runs in quiet
+// moments anyway, and a draw that finds the slots full still makes room at once (ReclaimForDemand). Only a map more than 64 over its
+// limit is trimmed in play.
+bool ReclaimQuietOn() {
+    static const bool on = EnvInt("GXV_RECLAIM_QUIET", 1) != 0;
+    return on;
+}
+// (GXV_STAGEWARM) the programs of the stage being entered or played, by key: the housekeeping evictions spare them, and a draw's
+// emergency reclaim takes them last. g_optionalReserve: while it is set, the free program slots below which an optional link is
+// refused (the stage warm-up may use more of the slots than the generic warm-up; 0 = WarmProgramReserve()).
+std::unordered_set<uint32_t> g_stageProgs;
+unsigned g_optionalReserve = 0;
+
 // In front of g_programs: the program last asked for in each of 64 classes (entries of an
 // unordered_map do not move; EvictPrograms empties this when it deletes any).
 struct ProgramFront { uint32_t key; Program* p; };
@@ -1114,33 +1802,201 @@ ProgramFront g_programFront[1024] = {}; // (1024 like the shader and texture fro
 // no limit elsewhere), the programs that have gone longest without a draw are deleted, a
 // hundred at a time, never one drawn with in the last 600 frames. A deleted program is linked
 // again when a draw asks for it (its shaders stay compiled).
-void EvictPrograms() {
+// GXV_DEMAND_RECLAIM (default 1). The ground of the Observatory stayed invisible for a long while after a large warm-up (console,
+// 2 Nov; Mario stood on it): the warm-up had linked programs up to its reserve, every one of them stamped as used by its warm-up
+// triangle and so protected for 600 frames, and the ~200 programs a newly entered area draws with did not fit in the 124 slots
+// left. Each failed glCreateProgram skipped the draw and backed off for the frame, and nothing could be reclaimed until the warm-up
+// programs aged out. Now: (1) a warm-up triangle no longer counts as a draw for eviction, so a program only the warm-up has used is
+// the first victim, oldest link first, and only then the least recently drawn; (2) a draw that finds the slots full reclaims slots
+// at once, in the same frame, and links again (a program the current frame has used is never deleted; vitaGL's glDeleteProgram
+// waits for the GPU, so this is a short stall, not a corruption); (3) the warm-up stops at a larger reserve (kWarmProgramReserve).
+// GXV_DEMAND_RECLAIM=0: the previous policy.
+bool DemandReclaimOn() {
+    static const bool on = EnvInt("GXV_DEMAND_RECLAIM", 1) != 0;
+    return on;
+}
+// Victims in eviction order: (rank, key), rank = link frame for warm-up-only programs, (1 << 62) | last draw frame for drawn ones.
+// Drawn programs must not have been drawn for minDrawAge frames, warm-up-only ones not linked for minWarmAge frames; neither may be
+// used in this frame. (GXV_STAGEWARM) Programs of the current stage's set (g_stageProgs) are left out when spareStage, else ranked
+// after all others ((1 << 63) on top).
+void CollectProgramVictims(std::vector<std::pair<uint64_t, uint32_t>>& out, uint64_t minDrawAge, uint32_t keepKey, uint64_t minWarmAge = 0,
+                           bool spareStage = false) {
+    out.clear();
+    for (const auto& kv : g_programs) {
+        const Program& p = kv.second;
+        if (!p.id || !p.ok || kv.first == keepKey || p.usedSerial == g_serial || p.linkSerial == g_serial) continue;
+        const uint64_t stage = !g_stageProgs.empty() && g_stageProgs.count(kv.first) ? (uint64_t{1} << 63) : 0;
+        if (stage && spareStage) continue;
+        if (!p.drawSerial) { if (p.linkSerial + minWarmAge <= g_serial) out.emplace_back(stage | p.linkSerial, kv.first); }
+        else if (p.drawSerial + minDrawAge < g_serial) out.emplace_back(stage | (uint64_t{1} << 62) | p.drawSerial, kv.first);
+    }
+    std::sort(out.begin(), out.end());
+}
+unsigned DeleteProgramVictims(const std::vector<std::pair<uint64_t, uint32_t>>& victims, unsigned want) {
+    unsigned deleted = 0;
+    for (const auto& entry : victims) {
+        if (deleted == want) break;
+        const auto it = g_programs.find(entry.second);
+        if (it == g_programs.end()) continue;
+        if (it->second.id) {
+            if (S.program == it->second.id) S.program = ~0u;
+            DeleteGlProgram(it->second.id);
+            if (g_stats.programs) --g_stats.programs;
+        }
+        g_programs.erase(it);
+        ++deleted;
+    }
+    if (deleted) for (ProgramFront& f : g_programFront) f = ProgramFront{};
+    return deleted;
+}
+std::atomic<unsigned> g_demandReclaims{0}, g_demandReclaimed{0}; // (basic log: emergencies and programs they deleted)
+// A draw needs a program and vitaGL's slots are (nearly) full: make room now.
+unsigned ReclaimForDemand(uint32_t keepKey) {
+    if (!DemandReclaimOn()) return 0;
+    static std::vector<std::pair<uint64_t, uint32_t>> victims;
+    CollectProgramVictims(victims, 2, keepKey);  // (drawn programs: not in this or the previous frame)
+    const unsigned n = DeleteProgramVictims(victims, 24);
+    const unsigned count = g_demandReclaims.load(std::memory_order_relaxed) + 1;
+    if (n) {
+        g_demandReclaims.fetch_add(1, std::memory_order_relaxed);
+        g_demandReclaimed.fetch_add(n, std::memory_order_relaxed);
+    }
+    if (count <= 8 || !(count & 63))
+        autoq::Log("[programs] draw needed a program with the slots full: %u deleted at once (%u emergencies so far); %u linked",
+                   n, count, static_cast<unsigned>(g_programs.size()));
+    return n;
+}
+
+void EvictProgramMap(bool live) {
 #ifdef __VGX_VITA__
     static const size_t limit = static_cast<size_t>(EnvInt("GXV_MAXPROGRAMS", 900));
 #else
     static const size_t limit = static_cast<size_t>(EnvInt("GXV_MAXPROGRAMS", 0));
 #endif
     if (!limit || g_programs.size() <= limit) return;
+    // (GXV_RECLAIM_QUIET: in play only a map far over its limit is trimmed; the rest waits for a quiet moment)
+    if (live && ReclaimQuietOn() && g_programs.size() <= limit + 64) return;
+    size_t resident = 0;
+    for (const auto& kv : g_programs) if (kv.second.id && kv.second.ok) ++resident;
+    if (!limit || resident <= limit) return;
+    if (live && ReclaimQuietOn() && resident <= limit + 64) return;
     static std::vector<std::pair<uint64_t, uint32_t>> old; // (last use/link, key)
     old.clear();
+    if (DemandReclaimOn()) {
+        CollectProgramVictims(old, 600, ~0u, 0, true);
+        const size_t want = resident - (limit > 100 ? limit - 100 : 0);
+        const unsigned n = DeleteProgramVictims(old, static_cast<unsigned>(want));
+        if (n) VGX_LOG("%u programs deleted (warm-up only, or unused for 600 frames or more); %u linked now\n", n, static_cast<unsigned>(g_programs.size()));
+        return;
+    }
     for (const auto& kv : g_programs)
-        if (kv.second.usedSerial + 600 < g_serial)
+        if (kv.second.id && kv.second.ok && kv.second.usedSerial + 600 < g_serial)
             old.emplace_back(std::max(kv.second.usedSerial, kv.second.linkSerial), kv.first);
     if (old.empty()) return;
     std::sort(old.begin(), old.end());
-    const size_t want = g_programs.size() - (limit > 100 ? limit - 100 : 0);
+    const size_t want = resident - (limit > 100 ? limit - 100 : 0);
     size_t n = 0;
     for (; n < old.size() && n < want; ++n) {
         auto it = g_programs.find(old[n].second);
         if (it->second.id) {
             if (S.program == it->second.id) S.program = ~0u;
-            G(glDeleteProgram(it->second.id));
+            DeleteGlProgram(it->second.id);
             if (g_stats.programs) --g_stats.programs;
         }
         g_programs.erase(it);
     }
     for (ProgramFront& f : g_programFront) f = ProgramFront{};
     VGX_LOG("%u programs deleted (unused for 600 frames or more); %u linked now\n", static_cast<unsigned>(n), static_cast<unsigned>(g_programs.size()));
+}
+
+constexpr unsigned kWarmProgramReserve = 124;
+bool DemandReclaimOn();
+// Slots the optional warm-up leaves free for draws: 124 before, 256 with GXV_DEMAND_RECLAIM (an area's own programs, ~200, fit
+// without an emergency reclaim and its GPU wait).
+inline unsigned WarmProgramReserve() {
+    static const unsigned n = DemandReclaimOn() ? static_cast<unsigned>(EnvInt("GXV_WARM_RESERVE", 256)) : kWarmProgramReserve;
+    return n;
+}
+constexpr unsigned kCapacityReclaimBatch = 4;
+// GXV_WARM_NOCHURN=1 (default 0): the generic deferred warm-up (RunWarm: every program drawn on this console so far, ~14,000 units
+// in r49's "warm N left", far more than vitaGL's 1,024 program slots) no longer makes room for itself. Without it, a link the
+// warm-up is refused at its reserve sets g_nativeCapacityPressure, and EvictPrograms then deletes 4 programs unused for 600 frames
+// in every quiet frame so that the warm-up can link 4 more: in each pause, fade and dome transition the list goes round, linking
+// other galaxies' programs and deleting the ones of the area just left (the hub's while a dome is played; they are linked again on
+// the way back). The user's r41 dome round trip: one quiet stretch of 90 frames with 552 warm-up links (162 ms) and 328 program
+// deletes (167 ms), each delete a possible wait for the GPU. With the switch the generic warm-up stops at its reserve and waits for
+// room that something else frees (the map limit, a draw's or the stage warm-up's own reclaim, which are unchanged); its shaders and
+// links up to the reserve are done as before. The stage warm-up (GXV_STAGEWARM, g_optionalReserve set) still asks for room.
+bool WarmNoChurn() {
+    static const bool on = EnvInt("GXV_WARM_NOCHURN", 0) != 0;
+    return on;
+}
+bool g_nativeCapacityPressure = false;
+uint64_t g_capacityServiceSerial = ~uint64_t{0};
+uint64_t g_capacityNextScanSerial = 0;
+std::atomic<uint64_t> g_warmHeadIdentity{0}, g_warmCapacityHead{0};
+uint64_t g_warmNextIdentity = 0, g_warmCapacityBlockSerial = ~uint64_t{0};
+bool g_optionalCapacityRefused = false;
+uint32_t g_warmCapacityKey = 0;
+
+void WarmDemandProgramReady(uint32_t key) {
+    if (g_warmCapacityBlockSerial != ~uint64_t{0} && key == g_warmCapacityKey) {
+        g_warmCapacityHead.store(0, std::memory_order_release);
+        g_warmCapacityBlockSerial = ~uint64_t{0};
+    }
+}
+
+// Only Execute's existing retirement boundary may reclaim pressure victims.
+void EvictPrograms() {
+    EvictProgramMap(g_screenLive);
+#ifdef __VGX_VITA__
+    if (!g_nativeCapacityPressure || g_capacityServiceSerial == g_serial) return;
+    if (g_screenLive && ReclaimQuietOn()) return; // (GXV_RECLAIM_QUIET: room for the warm-up is made in quiet moments, where it runs)
+    g_capacityServiceSerial = g_serial;
+    unsigned free = vglGetFreeProgramSlots();
+    if (free > WarmProgramReserve()) { g_nativeCapacityPressure = false; return; }
+    static const int limit = EnvInt("GXV_MAXPROGRAMS", 900);
+    if (limit <= 0) return;
+    if (g_serial < g_capacityNextScanSerial) return;
+    static std::vector<std::pair<uint64_t, uint32_t>> old;
+    old.clear();
+    if (DemandReclaimOn()) {
+        // Room for more warm-up only from programs unused for 600 frames (drawn long ago, or warmed long ago and never drawn),
+        // never from recently warmed ones (that only churns) or anything recently drawn.
+        CollectProgramVictims(old, 600, ~0u, 601, true);
+        if (old.empty()) { g_capacityNextScanSerial = g_serial + 60; return; }
+        const unsigned want = free >= WarmProgramReserve() + kCapacityReclaimBatch ? 0u : WarmProgramReserve() + kCapacityReclaimBatch - free;
+        free += DeleteProgramVictims(old, std::min(want, kCapacityReclaimBatch));
+        if (free > WarmProgramReserve()) g_nativeCapacityPressure = false;
+        return;
+    }
+    uint64_t next = g_serial + 601;
+    for (const auto& kv : g_programs) {
+        const Program& p = kv.second;
+        const uint64_t last = std::max(p.usedSerial, p.linkSerial);
+        if (p.id && p.ok) {
+            if (last + 600 < g_serial) old.emplace_back(last, kv.first);
+            else next = std::min(next, last + 601);
+        }
+    }
+    // Successful insertion/retry stamps linkSerial now; demand use only moves
+    // eligibility later. After a zero-candidate scan, neither can beat next.
+    // Keep querying native occupancy each serial so utility releases still clear pressure.
+    if (old.empty()) { g_capacityNextScanSerial = next; return; }
+    g_capacityNextScanSerial = 0;
+    std::sort(old.begin(), old.end());
+    unsigned deleted = 0;
+    for (const auto& entry : old) {
+        if (deleted == kCapacityReclaimBatch || free >= WarmProgramReserve() + kCapacityReclaimBatch) break;
+        const auto it = g_programs.find(entry.second);
+        if (S.program == it->second.id) S.program = ~0u;
+        DeleteGlProgram(it->second.id);
+        if (g_stats.programs) --g_stats.programs;
+        g_programs.erase(it); ++deleted; ++free;
+    }
+    if (deleted) for (ProgramFront& f : g_programFront) f = ProgramFront{};
+    if (free > WarmProgramReserve()) g_nativeCapacityPressure = false;
+#endif
 }
 
 // ---- shaders: registered when the command says so, compiled then or at the first program that needs them
@@ -1205,10 +2061,13 @@ Program& UnavailableProgram() {
     return p;
 }
 
-Program& GetProgram(uint16_t vsId, uint16_t fsId) {
+Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false) {
     const uint32_t key = (static_cast<uint32_t>(vsId) << 16) | fsId;
     auto& fr = g_programFront[((vsId * 7u + fsId) * 2654435761u) >> 22];
-    if (fr.p && fr.key == key && (fr.p->ok || !GlRetry())) return *fr.p;
+    if (fr.p && fr.key == key && (fr.p->ok || !GlRetry())) {
+        if (!optional && fr.p->ok) WarmDemandProgramReady(key);
+        return *fr.p;
+    }
     auto it = g_programs.find(key);
     uint8_t failures = 0;
     if (it != g_programs.end()) {
@@ -1218,6 +2077,7 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
             GlAllocBackoff()) {
             fr.key = key;
             fr.p = &it->second;
+            if (!optional && it->second.ok) WarmDemandProgramReady(key);
             return it->second;
         }
         failures = old.failures;
@@ -1226,15 +2086,34 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
 #if VGX_COLDTRACE
     coldtrace::Scope trace(coldtrace::g_recorder,coldtrace::Key{g_progFrame,CMD_PROGRAM,vsId,fsId,0,0},coldtrace::Origin::DirectProgram);
 #endif
+    // (GXV_STUTTER_LOG) a draw's own program creation: its compiles, link and uniform queries, whatever the outcome
+    struct DemandTimer {
+        bool on; double t0;
+        ~DemandTimer() { if (on) { ++g_stFrame.demandProgs; g_stFrame.demandMs += NowMs() - t0; } }
+    } demandTimer{!optional, optional ? 0.0 : NowMs()};
     Program p;
     p.failures = failures;
     CompileShader(false, vsId);
     CompileShader(true, fsId);
     if (vsId < g_vs.size() && fsId < g_fs.size() && g_vs[vsId] && g_fs[fsId]) {
+#ifdef __VGX_VITA__
+        if (optional && vglGetFreeProgramSlots() <= (g_optionalReserve ? g_optionalReserve : WarmProgramReserve())) {
+            // (GXV_WARM_NOCHURN: the generic warm-up, g_optionalReserve 0, only waits; the stage warm-up still asks for room)
+            if (g_optionalReserve || !WarmNoChurn()) g_nativeCapacityPressure = true;
+            g_optionalCapacityRefused = true;
+            g_warmCapacityKey = key;
+            return UnavailableProgram();
+        }
+#endif
         if (it != g_programs.end()) g_programRetryFrame = g_serial;
         p.id = G(glCreateProgram());
+        // (GXV_DEMAND_RECLAIM) a draw's program with vitaGL's slots full: make room in this frame and create it again
+        if (BadGlName(p.id) && !optional && ReclaimForDemand(key)) p.id = G(glCreateProgram());
         if (BadGlName(p.id)) {
             g_glAllocFailSerial = g_serial;
+#ifdef __VGX_VITA__
+            if (vglGetFreeProgramSlots() == 0) g_nativeCapacityPressure = true;
+#endif
             if (ResourceAuditOn()) ResourceAudit(ResourceStage::CreateProgram, ResourcePair(vsId, fsId, failures + 1, "next-serial", "invalid-gl-name"));
             return UnavailableProgram();
         }
@@ -1335,6 +2214,24 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
                 else if (!std::strcmp(name, "u_tev")) { p.tev = loc; p.nTev = lim(size, dTev); }
                 else if (!std::strncmp(name, "u_tex", 5)) G(glUniform1i(loc, name[5] - '0'));
             }
+#ifdef __VGX_VITA__
+            // (GXV_UNI_SHADOW) where vitaGL keeps each block's values; a block whose upload would not fit what vitaGL says belongs
+            // to the uniform, or that is not an F32 vec4 / vec4 array / mat4 (a half precision u_tev), keeps glUniform*.
+            if (g_uniShadow && p.id) {
+                const GLint locs[US_COUNT] = {p.proj, p.mv, p.tm, p.ptm, p.pal, p.lt, p.tev};
+                const GLint vec4s[US_COUNT] = {4, p.nMv, p.nTm, p.nPtm, p.nPal, p.nLt, p.nTev};
+                for (int s = 0; s < US_COUNT; ++s) {
+                    void *v = nullptr, *f = nullptr;
+                    uint32_t room = 0;
+                    if (locs[s] == -1 || vec4s[s] <= 0 || !vglGetUniformShadow(p.id, locs[s], &v, &f, &room)) continue;
+                    if (static_cast<uint32_t>(vec4s[s]) * 16u > room || (!v && !f)) continue;
+                    p.sh[s].v = static_cast<float*>(v);
+                    p.sh[s].f = static_cast<float*>(f);
+                    p.sh[s].ok = true;
+                    p.shadow = true;
+                }
+            }
+#endif
 #endif
         }
         if (p.id) ++g_stats.programs; // (GXV_GL_RETRY: a failed link holds no GL program)
@@ -1346,9 +2243,12 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId) {
     if (it != g_programs.end()) {
         // (a retried link: the entry keeps its address, which g_programFront may hold)
         it->second = p;
+        if (!optional && p.ok) WarmDemandProgramReady(key);
         return it->second;
     }
-    return g_programs.emplace(key, p).first->second;
+    auto& inserted = g_programs.emplace(key, p).first->second;
+    if (!optional && inserted.ok) WarmDemandProgramReady(key);
+    return inserted;
 }
 
 GLenum MapBlend(uint8_t f) {
@@ -1374,12 +2274,123 @@ inline int Rnd(float v) {
     return i - (w < static_cast<float>(i) ? 1 : 0);
 }
 
+// ---- GXV_PX_*: cuts of the GPU's pixel work that keep the picture exactly (pixcut). Each switch is read once (Init); all default 0.
+//   GXV_PX_NOOP=1       a draw that cannot change colour, alpha or depth (PxNoEffect: nothing written, or blended ZERO / ONE with no
+//                       depth write) is not drawn: no fragment work, no program switch, no scene begun for it.
+//   GXV_PX_DEADCLEAR=1  a clear whose result the next draw overwrites whole before anything reads it is left out (vitaGL clears by
+//                       drawing a quad over the target: a full pass of pixels). An offscreen pass (BeginPass) that begins with a
+//                       rectangle over all of its target drops the colour part of its clear, and the depth part too when no draw of the
+//                       pass tests depth; an EFB clear (after a copy) followed at once by such a rectangle over the cleared area drops
+//                       its colour / alpha part (its depth part stays: the depth plan counts on it).
+//   GXV_PX_SCISSOR=1    a scissor change that cannot cut any pixel of the draw is not made: the scissor in place and the draw's own
+//                       both hold every pixel the draw can reach (a small screen-space draw whose extent is its vertices' bounds, with
+//                       a pixel to spare). vitaGL redraws its scissor mask at every change (tests.c update_scissor_test: one or two
+//                       passes over the target).
+// "pxcut:" basic-log line every 600 pictures while a switch is on: what was left out.
+struct PxCuts { bool noop = false, deadClear = false, scissor = false; } g_px;
+struct PxCounts { uint64_t noop = 0, clearColour = 0, clearDepth = 0, clearWhole = 0, scissorKept = 0; } g_pxN, g_pxTotal; // (this window's, the logged windows')
+const CmdBuf* g_pxBuf = nullptr; // the buffer being executed (ExecuteFrame)
+bool g_pxPassScan = false;       // the next BeginPass is the buffer's own CMD_PASS_BEGIN (dplan::g_cmd): it may look at the pass's commands
+// A draw that cannot change a pixel of colour, alpha or depth: no depth written, and colour and alpha either not written or blended with
+// source factor ZERO and destination factor ONE (dst * 1 + src * 0, or dst * 1 - src * 0: the target's own value; for alpha only when its
+// factors are the colour's: RenderState::dstAlphaZero 0).
+inline bool PxNoEffect(const RenderState& rs) {
+    if (rs.depthTest && rs.depthWrite) return false;
+    const bool keep = rs.blend && rs.blendSrc == BF_ZERO && rs.blendDst == BF_ONE;
+    return (!rs.colorWrite || keep) && (!rs.alphaWrite || (keep && rs.dstAlphaZero == 0));
+}
+// Where an extent [e0, e1] (EFB coordinates) lands in the bound target through a viewport (EFB vp0, vpW) at render scale s, with the
+// target's offset o: the same mapping ApplyRenderState's glViewport gives (u_proj maps the viewport onto -1..1 with no offset; Y is
+// flipped there so that rows run top to bottom as the EFB's do, vgx_draw.cpp BuildProjC).
+struct PxSpan { float lo, hi, v0, v1; };
+inline PxSpan PxMap(float e0, float e1, float vp0, float vpW, float s, int o) {
+    const float V0 = static_cast<float>(Rnd(vp0 * s) - o), VW = static_cast<float>(Rnd(vpW * s));
+    const float k = VW / vpW;
+    return PxSpan{V0 + (e0 - vp0) * k, V0 + (e1 - vp0) * k, V0, V0 + VW};
+}
+// Every pixel the draw can write lies in [x0, x1) x [y0, y1) (target coordinates), with a pixel to spare on each side. Only for a record
+// whose extent is its vertices' bounds (vgx_draw.cpp SmallDrawBounds, a small draw that is not depth-tested): one whose extent lies
+// strictly inside its scissor on all four sides (an extent the scissor cut, and that of a draw whose vertices are not known - the scissor
+// itself - touch it; a merged record's extent is the union of its draws').
+bool PxDrawInside(const DrawRec& d, int x0, int y0, int x1, int y1, float sx, float sy, int ox, int oy) {
+    const RenderState& rs = d.rs;
+    if (d.prim != PRIM_TRIANGLES || d.exW <= 0 || d.exH <= 0 || !(rs.vpW > 0.0f) || !(rs.vpH > 0.0f)) return false;
+    if (!(d.exX > rs.scX && d.exY > rs.scY && d.exX + d.exW < rs.scX + rs.scW && d.exY + d.exH < rs.scY + rs.scH)) return false;
+    const float e = 0.02f;
+    const PxSpan h = PxMap(static_cast<float>(d.exX) - e, static_cast<float>(d.exX + d.exW) + e, rs.vpX, rs.vpW, sx, ox);
+    const PxSpan v = PxMap(static_cast<float>(d.exY) - e, static_cast<float>(d.exY + d.exH) + e, rs.vpY, rs.vpH, sy, oy);
+    if (!std::isfinite(h.lo) || !std::isfinite(h.hi) || !std::isfinite(v.lo) || !std::isfinite(v.hi) || std::fabs(h.lo) > 16384.0f || std::fabs(h.hi) > 16384.0f ||
+        std::fabs(v.lo) > 16384.0f || std::fabs(v.hi) > 16384.0f)
+        return false;
+    // (pixel i is drawn only when its centre i + 0.5 lies in [lo, hi]: i in floor(lo) .. ceil(hi) - 1; one more on each side)
+    const int i0 = static_cast<int>(std::floor(h.lo)) - 1, i1 = static_cast<int>(std::ceil(h.hi)) + 1;
+    const int j0 = static_cast<int>(std::floor(v.lo)) - 1, j1 = static_cast<int>(std::ceil(v.hi)) + 1;
+    return x0 <= i0 && i1 <= x1 && y0 <= j0 && j1 <= y1;
+}
+// The draw's quad lies inside the clip volume's depth (|z| <= w, w > 0 at its vertices): nothing of it is clipped away by the near or far
+// plane. From its vertices through its own blocks, as DrawAreaPx; false when they are not at hand here.
+bool PxQuadInDepth(const CmdBuf& buf, const DrawRec& d) {
+    if (d.vbuf || d.idxCount == 0 || d.vsId >= g_vsSrc.size() || !g_vsSrc[d.vsId] || g_vsSrc[d.vsId]->nMv == 0) return false;
+    const uint32_t pb = d.ublock[UB_PROJ], mb = d.ublock[UB_MV];
+    if (pb == kNoBlock || mb == kNoBlock || pb > buf.uni.size() || buf.uni.size() - pb < 16 || mb > buf.uni.size() || buf.uni.size() - mb < 12) return false;
+    if (static_cast<size_t>(d.idxOffset) + d.idxCount > buf.idx.size()) return false;
+    size_t base = d.vtxOffset;
+    if (!buf.vtxChunks.empty()) {
+        if (d.vchunk >= buf.vtxChunks.size()) return false;
+        base += buf.vtxChunks[d.vchunk];
+    }
+    const uint32_t stride = MakeLayout(d.layoutMask).stride;
+    const float* P = buf.uni.data() + pb; // (column-major)
+    const float* M = buf.uni.data() + mb; // (rows: eye = M[r] . (x, y, z, 1))
+    for (uint32_t i = 0; i < d.idxCount; ++i) {
+        const size_t off = base + static_cast<size_t>(buf.idx[d.idxOffset + i]) * stride;
+        if (off > buf.vtx.size() || buf.vtx.size() - off < 12) return false;
+        float p[3];
+        std::memcpy(p, buf.vtx.data() + off, 12);
+        float eye[4];
+        for (int r = 0; r < 3; ++r) eye[r] = M[r * 4 + 0] * p[0] + M[r * 4 + 1] * p[1] + M[r * 4 + 2] * p[2] + M[r * 4 + 3];
+        eye[3] = 1.0f;
+        const float z = P[2] * eye[0] + P[6] * eye[1] + P[10] * eye[2] + P[14] * eye[3];
+        const float w = P[3] * eye[0] + P[7] * eye[1] + P[11] * eye[2] + P[15] * eye[3];
+        if (!(w > 1e-6f) || !std::isfinite(z) || !(std::fabs(z) <= 0.999f * w)) return false;
+    }
+    return true;
+}
+// The draw's program exists and is linked (a draw whose program is not ready draws nothing: a clear before it must stay).
+inline bool PxProgramReady(const DrawRec& d) {
+    const auto it = g_programs.find((static_cast<uint32_t>(d.vsId) << 16) | d.fsId);
+    return it != g_programs.end() && it->second.ok;
+}
+// The draw's first primitive writes every pixel of [x0, x1) x [y0, y1) (target coordinates) whatever was there: a record of one axis-aligned
+// rectangle (DrawRec::cover: four vertices, not blended, not depth-tested, no alpha test), inside the clip volume's depth, whose own scissor
+// leaves the rectangle whole, and whose edges (its extent's whole EFB pixels; the vertices lie within 0.01 of them) are at least an eighth
+// of a pixel beyond the rectangle's outer pixel centres; and nothing keeps it from being drawn.
+bool PxDrawCovers(const CmdBuf& buf, const DrawRec& d, int x0, int y0, int x1, int y1, float sx, float sy, int ox, int oy) {
+    const RenderState& rs = d.rs;
+    if (!d.cover || d.vtxCount != 4 || d.prim != PRIM_TRIANGLES || d.vbuf || d.idxCount == 0 || rs.blend || !rs.colorWrite) return false;
+    if (rs.depthTest && (rs.depthFunc & 7) != CMP_ALWAYS) return false;
+    if (!(rs.vpW > 0.0f) || !(rs.vpH > 0.0f) || x1 <= x0 || y1 <= y0) return false;
+    if (g_skipDraws || g_gpuAttrib || SanMode() || d.vchunk >= g_streamVbo.size() || !PxProgramReady(d)) return false;
+    // (its own scissor, as ApplyRenderState makes it)
+    if (Rnd(rs.scX * sx) - ox > x0 || Rnd(rs.scY * sy) - oy > y0 || Rnd((rs.scX + rs.scW) * sx) - ox < x1 || Rnd((rs.scY + rs.scH) * sy) - oy < y1) return false;
+    const float e = 0.01f, m = 0.125f;
+    PxSpan h = PxMap(static_cast<float>(d.exX) + e, static_cast<float>(d.exX + d.exW) - e, rs.vpX, rs.vpW, sx, ox);
+    PxSpan v = PxMap(static_cast<float>(d.exY) + e, static_cast<float>(d.exY + d.exH) - e, rs.vpY, rs.vpH, sy, oy);
+    // (a GL clips at the viewport)
+    h.lo = std::max(h.lo, h.v0); h.hi = std::min(h.hi, h.v1);
+    v.lo = std::max(v.lo, v.v0); v.hi = std::min(v.hi, v.v1);
+    if (!(h.lo <= static_cast<float>(x0) + 0.5f - m && h.hi >= static_cast<float>(x1) - 0.5f + m && v.lo <= static_cast<float>(y0) + 0.5f - m &&
+          v.hi >= static_cast<float>(y1) - 0.5f + m))
+        return false;
+    return PxQuadInDepth(buf, d);
+}
+
 // The draw state that was applied last (with the target it was applied for).
 RenderState g_rs;
 bool g_rsValid = false;
 
 // Returns false when nothing can be drawn (empty scissor).
-bool ApplyRenderState(const RenderState& rs) {
+bool ApplyRenderState(const RenderState& rs, const DrawRec* d = nullptr) {
     // The state of the last draw, applied for this same target (every change of target or
     // of GL state behind this function's back clears g_rsValid; a state whose scissor
     // came out empty is never remembered): nothing to do.
@@ -1410,7 +2421,20 @@ bool ApplyRenderState(const RenderState& rs) {
     if (x1 <= x0 || y1 <= y0) return false;
     // A scissor that covers the whole target is no scissor (and on vitaGL an enabled
     // scissor costs one more full-target draw per update than a disabled one).
-    if (x0 == 0 && y0 == 0 && x1 == tw && y1 == th) SetScissor(false);
+    const bool off = x0 == 0 && y0 == 0 && x1 == tw && y1 == th;
+    bool kept = false;
+    if (g_px.scissor && d && S.scissorOn >= 0) {
+        // (GXV_PX_SCISSOR: the scissor in place is kept when it and the draw's own both hold every pixel the draw can reach)
+        const bool same = off ? S.scissorOn == 0 : (S.scissorOn == 1 && S.sc[0] == x0 && S.sc[1] == y0 && S.sc[2] == x1 - x0 && S.sc[3] == y1 - y0);
+        if (!same) {
+            const bool on = S.scissorOn == 1;
+            const int c0 = on ? S.sc[0] : 0, c1 = on ? S.sc[1] : 0, c2 = on ? S.sc[0] + S.sc[2] : tw, c3 = on ? S.sc[1] + S.sc[3] : th;
+            kept = PxDrawInside(*d, c0, c1, c2, c3, sx, sy, ox, oy) && PxDrawInside(*d, x0, y0, x1, y1, sx, sy, ox, oy);
+            if (kept) ++g_pxN.scissorKept;
+        }
+    }
+    if (kept) {}
+    else if (off) SetScissor(false);
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     SetViewport(Rnd(rs.vpX * sx) - ox, Rnd(rs.vpY * sy) - oy, Rnd(rs.vpW * sx), Rnd(rs.vpH * sy));
     SetDepthRange(zNear, zFar);
@@ -1426,7 +2450,17 @@ bool ApplyRenderState(const RenderState& rs) {
     SetCull(rs.cull);
     SetColorMask(rs.colorWrite != 0, rs.alphaWrite != 0);
     g_rs = rs;
-    g_rsValid = true;
+    g_rsValid = !kept; // (a kept scissor is not this state's: the next draw with the same state decides again)
+    return true;
+}
+
+bool BackgroundPerspective(const CmdBuf& buf, const DrawRec& r) {
+    const size_t off = r.ublock[UB_PROJ];
+    if (off == kNoBlock || off > buf.uni.size() || buf.uni.size() - off < 16) return false;
+    const float* const p = buf.uni.data() + off;
+    if (p[3] != 0.0f || p[7] != 0.0f || p[11] != -1.0f || p[15] != 0.0f) return false;
+    for (unsigned i = 0; i < 16; ++i)
+        if (!std::isfinite(p[i])) return false;
     return true;
 }
 
@@ -1448,7 +2482,12 @@ void BindTexture(int unit, const TexBind& b, bool cheap = false) {
         else if (minF == FILT_NEAR_MIP_LIN) minF = FILT_NEAR_MIP_NEAR;
     }
     const bool anisoStale = minF == FILT_LIN_MIP_LIN && t.anisoGen != g_anisoGen; // (trilinear: the switch applies to it)
-    if (t.wrapS == b.wrapS && t.wrapT == b.wrapT && t.minF == minF && t.magF == b.magFilter && !anisoStale) return;
+    // GXV_RUNG_LODBIAS=<percent> (default 0 = off): below the top rung the picture is drawn smaller and stretched, so the GPU picks
+    // mip levels for the smaller pixels and textures look softer than at 960x544. A negative LOD bias of percent x log2(960 / width)
+    // levels, in vitaGL's 1/8-level steps (-4 levels at most), picks the level a 960-wide picture would have: sharper ground and
+    // walls for the same pixels, at the cost of some shimmer and texture reads. Only mip-mapped textures, never render targets.
+    const int8_t lodBias = (t.mips && !t.renderTarget) ? RungLodBiasSteps() : 0;
+    if (t.wrapS == b.wrapS && t.wrapT == b.wrapT && t.minF == minF && t.magF == b.magFilter && !anisoStale && t.lodBias == lodBias) return;
     if (S.unit != unit) { G(glActiveTexture(GL_TEXTURE0 + unit)); S.unit = unit; }
     if (t.wrapS != b.wrapS) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, static_cast<GLint>(kWrap[b.wrapS % 3]))); t.wrapS = b.wrapS; ++C.texParams; }
     if (t.wrapT != b.wrapT) { G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, static_cast<GLint>(kWrap[b.wrapT % 3]))); t.wrapT = b.wrapT; ++C.texParams; }
@@ -1456,6 +2495,11 @@ void BindTexture(int unit, const TexBind& b, bool cheap = false) {
         G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(kMin[minF % 6])));
         t.minF = minF;
         if (minF == FILT_LIN_MIP_LIN) t.anisoGen = g_anisoGen;
+        ++C.texParams;
+    }
+    if (t.lodBias != lodBias) {
+        G(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, lodBias));
+        t.lodBias = lodBias;
         ++C.texParams;
     }
     if (t.magF != b.magFilter) {
@@ -1505,6 +2549,97 @@ void SetLayout(GLuint vbo, uint32_t layoutMask, uint32_t base) {
     S.layoutBase = base;
 }
 
+#ifdef __VGX_VITA__
+// GXV_GXM_DIRECT=1 (read once; default 0 until a console run has compared it): the GXM rebuild's first layer. A scene draw goes to
+// vitaGL as ONE call, vglDrawElementsDirect (tools/vitagl/patches/0013-vgx-direct-draw.patch), instead of up to fourteen
+// glVertexAttribPointer calls and glDrawElements: every enabled attribute of a decoded vertex comes from the one interleaved buffer,
+// so vitaGL sets one vertex stream for all of them (plus one of stride 0 per constant attribute) where it set one per attribute,
+// and it keeps the patched vertex program per (program, layout) instead of hashing the whole attribute set on every draw. The
+// program, textures, uniforms, render state and indices are the ordinary path's. Lines and points keep the ordinary path; so does
+// every draw when the linked vitaGL lacks the call (a weak symbol).
+// (the table as tools/vitagl/patches/0013 declares it in vitaGL.h; spelled out here so the back end does not depend on which
+// vitaGL.h the dependency folder carries, and declared weak so a vitaGL without the call links and keeps the ordinary path)
+enum { VGL_DIRECT_F32 = 0, VGL_DIRECT_U8N = 1, VGL_DIRECT_U8 = 2 };
+struct VgxDirectLayout {
+    uint32_t key;
+    uint32_t enabled;
+    uint16_t stride;
+    uint8_t size[16];
+    uint8_t type[16];
+    uint16_t offset[16];
+};
+extern "C" GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idxOffset, GLuint vboName, uint32_t base,
+                                           const VgxDirectLayout* layout) __attribute__((weak));
+bool GxmDirectOnRead() {
+    static const bool on = [] {
+        const bool want = EnvInt("GXV_GXM_DIRECT", 0) != 0, have = vglDrawElementsDirect != nullptr;
+        if (want) autoq::Log("[gxm-direct] %s", have ? "on: scene draws go to vitaGL as one direct call each" : "asked for, but this vitaGL has no vglDrawElementsDirect: ordinary path");
+        return want && have;
+    }();
+    return on;
+}
+// (read once; then a plain byte, not a function-static guard with its memory barrier, on every draw)
+int8_t g_gxmDirect = -1;
+inline bool GxmDirectOn() {
+    if (g_gxmDirect < 0) g_gxmDirect = GxmDirectOnRead() ? 1 : 0;
+    return g_gxmDirect != 0;
+}
+// The table for a decoded-vertex layout (vgx_cmd.h MakeLayout), built once per layout mask: what SetLayout points the arrays at.
+const VgxDirectLayout* DirectLayoutTable(uint32_t layoutMask) {
+    static std::unordered_map<uint32_t, VgxDirectLayout> tables;
+    auto it = tables.find(layoutMask);
+    if (it != tables.end()) return &it->second;
+    const VtxLayout L = MakeLayout(layoutMask);
+    VgxDirectLayout d{};
+    d.key = layoutMask | 0x80000000u;
+    d.stride = L.stride;
+    auto set = [&](int loc, bool on, uint8_t size, uint8_t type, uint32_t offset) {
+        if (!on) return;
+        d.enabled |= 1u << loc;
+        d.size[loc] = size;
+        d.type[loc] = type;
+        d.offset[loc] = static_cast<uint16_t>(offset);
+    };
+    set(AT_POS, true, 4, VGL_DIRECT_F32, 0);
+    set(AT_NRM, (L.mask & VL_NRM) != 0, 3, VGL_DIRECT_F32, L.offNrm);
+    set(AT_COL0, (L.mask & VL_COL0) != 0, 4, VGL_DIRECT_U8N, L.offCol0);
+    set(AT_COL1, (L.mask & VL_COL1) != 0, 4, VGL_DIRECT_U8N, L.offCol1);
+    for (int t = 0; t < 8; ++t) set(AT_TEX0 + t, (L.mask & (VL_TEX0 << t)) != 0, 2, VGL_DIRECT_F32, L.offTex[t]);
+    set(AT_TMI0, (L.mask & VL_TMI) != 0, 4, VGL_DIRECT_U8, L.offTmi);
+    set(AT_TMI1, (L.mask & VL_TMI) != 0, 4, VGL_DIRECT_U8, L.offTmi + 4u);
+    return &tables.emplace(layoutMask, d).first->second;
+}
+// GXV_BE_FAST=1 (default; 0: as before): a draw's layout table and the attribute locations that layout leaves to constants come
+// from a small direct-mapped memo (16 entries, a frame uses a handful of layouts) instead of a hash-map lookup (a function-static
+// guard, a hash and a modulo) and SetLayoutConstants' rebuilding of the whole layout (MakeLayout) and thirteen tests, per draw.
+// (the entries point into the map above, whose values never move; nothing is ever removed from it)
+struct DirectMemo { uint32_t mask; uint32_t constBits; const VgxDirectLayout* table; };
+DirectMemo g_directMemo[16] = {};
+inline const DirectMemo& DirectFor(uint32_t layoutMask) {
+    DirectMemo& m = g_directMemo[(layoutMask ^ (layoutMask >> 4) ^ (layoutMask >> 8)) & 15u];
+    if (m.table && m.mask == layoutMask) return m;
+    m.table = DirectLayoutTable(layoutMask);
+    m.mask = layoutMask;
+    m.constBits = ((1u << AT_COUNT) - 1u) & ~m.table->enabled; // (every location SetLayoutConstants gives a constant)
+    return m;
+}
+const VgxDirectLayout* DirectLayoutFor(uint32_t layoutMask) { return g_beFast ? DirectFor(layoutMask).table : DirectLayoutTable(layoutMask); }
+// The constants of the attributes a layout does not supply, as SetLayout gives them (the arrays it switches on are not touched).
+void SetLayoutConstants(uint32_t layoutMask) {
+    const VtxLayout L = MakeLayout(layoutMask);
+    if (!(L.mask & VL_NRM)) SetAttrib(AT_NRM, false, 3, GL_FLOAT, GL_FALSE, 0, 0, 0, 0, 1, 0);
+    if (!(L.mask & VL_COL0)) SetAttrib(AT_COL0, false, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, 0, 1, 1, 1, 1);
+    if (!(L.mask & VL_COL1)) SetAttrib(AT_COL1, false, 4, GL_UNSIGNED_BYTE, GL_TRUE, 0, 0, 1, 1, 1, 1);
+    for (int t = 0; t < 8; ++t)
+        if (!(L.mask & (VL_TEX0 << t))) SetAttrib(AT_TEX0 + t, false, 2, GL_FLOAT, GL_FALSE, 0, 0, 0, 0, 0, 1);
+    if (!(L.mask & VL_TMI)) {
+        SetAttrib(AT_TMI0, false, 4, GL_UNSIGNED_BYTE, GL_FALSE, 0, 0, 60, 60, 60, 60);
+        SetAttrib(AT_TMI1, false, 4, GL_UNSIGNED_BYTE, GL_FALSE, 0, 0, 60, 60, 60, 60);
+    }
+}
+std::atomic<uint64_t> g_directDraws{0}, g_directFallbacks{0};
+#endif
+
 // Program variants (BlendKey / VariantCmd in vgx_cmd.h). vitaGL compares, per draw, the
 // blend function and colour mask with what the program was last drawn with and calls the
 // shader patcher when they differ (setup_frag_program in custom_shaders.c), and asks its
@@ -1530,6 +2665,7 @@ inline void NoteVariant(Program& p, uint16_t vsId, uint16_t fsId, uint32_t layou
     }
     if (p.blendKey != blendKey) {
         if (p.blendKey != ~0u) ++C.fragSwitches;
+        if (p.blendKey != ~0u && beprof::g_frame) ++beprof::g_blendRepatch; // (GXV_BE_PROF: vitaGL patches the fragment program again)
         p.blendKey = blendKey;
 #if !defined(PORT_RUNTIME_DIAGNOSTICS) || PORT_RUNTIME_DIAGNOSTICS
         const uint32_t legacy = (static_cast<uint32_t>(vsId) << 22) ^ (static_cast<uint32_t>(fsId) << 12) ^ (blendKey & 0xFFFu);
@@ -1548,8 +2684,8 @@ inline void NoteVariant(Program& p, uint16_t vsId, uint16_t fsId, uint32_t layou
 // program, vertex layout, blend function and colour mask a later draw will use, so that
 // the console builds the patched programs for it now. Draws nothing anywhere.
 GLuint g_warmVbo = 0, g_warmIbo = 0;
-void WarmVariant(const VariantCmd& v) {
-    Program& p = GetProgram(v.vsId, v.fsId);
+void WarmVariant(const VariantCmd& v, bool optional = false) {
+    Program& p = GetProgram(v.vsId, v.fsId, optional);
     if (!p.ok) return;
     static const bool dedup = EnvInt("GXV_WARM_DEDUP", 1) != 0;
     // Only the linked program's last compatible use is trusted, never the lossy statistic sets.
@@ -1588,6 +2724,7 @@ void WarmVariant(const VariantCmd& v) {
 
 // ---- the deferred warm-up: a queue of the list's commands, worked off at the start of frames
 struct WarmItem {
+    uint64_t identity = 0;
     uint32_t type = 0, arg = 0;
     const ShaderSource* src = nullptr;
     VariantCmd var{};
@@ -1600,6 +2737,12 @@ std::atomic<double> g_warmWorstMs{0.0}, g_warmTotalMs{0.0};
 inline unsigned WarmUnits(uint32_t type) { return type == CMD_SHADER ? 10u : (type == CMD_PROGRAM ? 2u : 1u); }
 void DeferWarm(const CmdBuf& buf, const Cmd& c) {
     WarmItem it;
+    it.identity = ++g_warmNextIdentity;
+    if (g_warm.empty()) {
+        g_warmCapacityHead.store(0, std::memory_order_release);
+        g_warmHeadIdentity.store(it.identity, std::memory_order_release);
+        g_warmCapacityBlockSerial = ~uint64_t{0};
+    }
     it.type = c.type;
     it.arg = c.arg;
     if (c.type == CMD_SHADER) {
@@ -1624,6 +2767,10 @@ const double g_warmBackoffMs = [] { const char* e = getenv("GXV_WARM_BACKOFF_MS"
 void RunWarm() {
     const double budgetMs = g_warmBudgetMs.load(std::memory_order_relaxed);
     if (g_warm.empty() || budgetMs <= 0.0 || GlAllocBackoff() || g_warmAllocFailSerial == g_serial) return;
+    if (g_warmCapacityBlockSerial == g_serial) return;
+    // Optional replay waits for quiet stages, but cannot hold up the startup overlay's own warm-up.
+    if (port_scene_key && port_screen_quiet && port_scene_key() != 0 && !port_screen_quiet() &&
+        (!port_vgx_vita_splash_active || !port_vgx_vita_splash_active())) return;
     if (g_warmBackoffLeft > 0) { --g_warmBackoffLeft; return; }
 #if VGX_COLDTRACE
     coldtrace::SpanScope sliceTrace(coldtrace::g_recorder,coldtrace::SpanKind::WarmSlice);
@@ -1632,6 +2779,7 @@ void RunWarm() {
     unsigned done = 0, compiles0 = g_sw.compiles, links0 = g_sw.links;
     while (!g_warm.empty()) {
         const WarmItem it = g_warm.front();
+        g_optionalCapacityRefused = false;
         {
 #if VGX_COLDTRACE
         const coldtrace::Key traceKey = it.type==CMD_SHADER ? coldtrace::Key{g_progFrame,it.type,it.src->id,it.src->fragment?1u:0u,0,0} :
@@ -1641,8 +2789,13 @@ void RunWarm() {
 #endif
         switch (it.type) {
         case CMD_SHADER: CompileShader(it.src->fragment, it.src->id); break;
-        case CMD_PROGRAM: GetProgram(static_cast<uint16_t>(it.arg >> 16), static_cast<uint16_t>(it.arg & 0xFFFFu)); break;
-        default: WarmVariant(it.var); break;
+        case CMD_PROGRAM: GetProgram(static_cast<uint16_t>(it.arg >> 16), static_cast<uint16_t>(it.arg & 0xFFFFu), true); break;
+        default: WarmVariant(it.var, true); break;
+        }
+        if (g_optionalCapacityRefused) {
+            g_warmCapacityBlockSerial = g_serial;
+            g_warmCapacityHead.store(it.identity, std::memory_order_release);
+            break;
         }
         }
         if (GlAllocBackoff()) {
@@ -1652,6 +2805,9 @@ void RunWarm() {
             break;
         }
         g_warm.pop_front();
+        g_warmCapacityBlockSerial = ~uint64_t{0};
+        g_warmCapacityHead.store(0, std::memory_order_release);
+        g_warmHeadIdentity.store(g_warm.empty() ? 0 : g_warm.front().identity, std::memory_order_release);
         g_warmLeft.fetch_sub(WarmUnits(it.type));
         ++done;
         if (NowMs() - t0 >= budgetMs) break;
@@ -1674,6 +2830,343 @@ void RunWarm() {
         VGX_LOG("deferred warm-up: slice %u did %u items in %.0f ms (%u compiles, %u links); %u units left of %u\n", slices, done, took, g_sw.compiles - compiles0,
                 g_sw.links - links0, g_warmLeft.load(), g_warmAll.load());
     g_stats.shaderWorkMs += took;
+    g_stFrame.warmMs += took;
+    g_stFrame.warmLinks += g_sw.links - links0;
+}
+
+// ---- per-stage warm-up (GXV_STAGEWARM, default 1; 0 = off: no recording, no file, no queue)
+// The deferred warm-up above replays the whole list (every shader, program and variant drawn on this console so far: 23,000 units in
+// the r21 log) in the order they were first met, in quiet moments only. When a stage is entered it links whatever comes next in that
+// list (other galaxies' programs, which then take program slots), and the stage's own programs are linked by its draws as they first
+// appear: 300-400 links in the 5 s of a stage entry, with hitches of 100-650 ms (r18/r21). So each draw's (vertex shader, fragment
+// shader, vertex layout, blend) is also recorded under the stage it is drawn in (port_scene_key), in the order first drawn, by the
+// shaders' key hashes (ids differ between runs), and the sets are kept in a file (GXV_STAGEWARM_FILE; appended in quiet moments, at
+// most every 120 frames; nothing is written without it). When the game starts loading a stage (port_scene_loading_key) that stage's
+// set becomes a queue of its own that goes before the generic warm-up: GXV_STAGEWARM_MS (default 30) ms a frame while the screen is
+// not live (the closed wipe and the load behind it), and GXV_STAGEWARM_LIVE_MS (default 0) ms a frame in play. GXV_STAGEWARM_IDLE=1
+// (default 0) also links the queue's programs between frames while the game's loading thread runs: links only, no warm draw, no
+// delete (see StageWarmIdle). Its optional links may use the program slots down to GXV_STAGEWARM_RESERVE (default 48) free; in a quiet moment it makes
+// room by deleting programs that are not the stage's and were not drawn in the last two frames (up to GXV_STAGEWARM_EVICT, default
+// 48, at a time). The housekeeping evictions spare the stage's programs, a draw's emergency reclaim takes them last.
+struct StageRec { uint64_t vs = 0, fs = 0; uint32_t lb = 0; }; // shader key hashes; layout mask << 13 | blend key
+struct StageFileRec { uint32_t stage, lb; uint64_t vs, fs; };  // 24 bytes, after an 8-byte magic
+static_assert(sizeof(StageFileRec) == 24, "stage warm-up file record");
+// (the duplicate check of a set is made only for the stage being recorded into, when its first new draw comes: the sets read from
+// the file cost their records alone, 24 bytes each)
+struct StageSet { std::vector<StageRec> recs; std::unordered_set<uint64_t> seen; size_t persisted = 0; bool indexed = false; };
+std::unordered_map<uint32_t, StageSet> g_stageSets;
+std::deque<VariantCmd> g_stageQueue;
+std::atomic<unsigned> g_stageLeft{0};
+uint32_t g_stageTarget = 0, g_stageRecKey = 0; // stage the queue was made for; stage this frame's draws are recorded under
+bool g_stageLoaded = false;
+uint64_t g_stageFlushSerial = 0;
+size_t g_stageFileRecs = 0;
+double g_stageQueueMs = 0;           // spent on the current queue so far
+size_t g_stageIdleCursor = 0;        // (GXV_STAGEWARM_IDLE) queue entries from the front whose programs the between-frames path has tried
+bool g_stageIdleBlocked = false;     // (GXV_STAGEWARM_IDLE) it met the slot reserve: the rest waits for the frames' slices
+unsigned g_stageQueueLinks = 0, g_stageQueued = 0;
+size_t g_stageRecs = 0;               // in memory, all stages
+constexpr size_t kStageMaxRecs = 2048, kStageMemMax = 32768, kStageFileMax = 65536; // per stage; in memory (768 KiB); in the file
+constexpr char kStageMagic[8] = {'V', 'G', 'X', 'S', 'T', 'W', '0', '1'};
+bool StageWarmOnRead() {
+    static const bool on = EnvInt("GXV_STAGEWARM", 1) != 0;
+    return on;
+}
+bool StageWarmOn() { return g_beFast2 ? g_f2.stageWarm : StageWarmOnRead(); } // (GXV_BE_FAST2: no guard per draw)
+const char* StageFile() {
+    static const char* const f = StageWarmOn() ? std::getenv("GXV_STAGEWARM_FILE") : nullptr;
+    return f && *f ? f : nullptr;
+}
+inline uint64_t StageMix(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+inline uint64_t StageTuple(const StageRec& r) { return StageMix(r.vs ^ StageMix(r.fs ^ StageMix(r.lb))); }
+// fromFile: the file holds no duplicates (only new records are appended), so they are not checked for.
+bool StageAdd(uint32_t stage, const StageRec& r, bool fromFile = false) {
+    if (g_stageRecs >= kStageMemMax) return false;
+    StageSet& set = g_stageSets[stage];
+    if (set.recs.size() >= kStageMaxRecs) return false;
+    if (!fromFile) {
+        if (!set.indexed) {
+            set.indexed = true;
+            set.seen.reserve(set.recs.size() + 64);
+            for (const StageRec& old : set.recs) set.seen.insert(StageTuple(old));
+        }
+        if (!set.seen.insert(StageTuple(r)).second) return false;
+    }
+    set.recs.push_back(r);
+    ++g_stageRecs;
+    return true;
+}
+void StageLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void StageLog(const char* fmt, ...) {
+#if defined(PORT_LOGGING) && !PORT_LOGGING
+    (void)fmt;
+#else
+    if (!port_log_summary) return;
+    char text[320];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(text, sizeof text, fmt, args);
+    va_end(args);
+    port_log_summary("%s", text);
+#endif
+}
+void StageLoad() {
+    g_stageLoaded = true;
+    const char* path = StageFile();
+    if (!path) return;
+    bool rewrite = true;
+    if (FILE* f = std::fopen(path, "rb")) {
+        char magic[8];
+        if (std::fread(magic, 1, sizeof magic, f) == sizeof magic && std::memcmp(magic, kStageMagic, sizeof magic) == 0) {
+            rewrite = false;
+            StageFileRec r;
+            size_t got;
+            while ((got = std::fread(&r, 1, sizeof r, f)) == sizeof r) {
+                ++g_stageFileRecs;
+                StageAdd(r.stage, StageRec{r.vs, r.fs, r.lb}, true);
+            }
+            if (got != 0 || std::ferror(f)) rewrite = true; // (a record cut short: appending after it would shift the rest)
+        }
+        std::fclose(f);
+    }
+    if (rewrite) {
+        // A new file (missing, another format, or cut short): what was read is written again whole by the next flush.
+        g_stageFileRecs = 0;
+        FILE* w = std::fopen(path, "wb");
+        if (w) {
+            const bool ok = std::fwrite(kStageMagic, 1, sizeof kStageMagic, w) == sizeof kStageMagic;
+            if (std::fclose(w) != 0 || !ok) g_stageFileRecs = kStageFileMax;
+        } else {
+            g_stageFileRecs = kStageFileMax; // (no file: recording stays in memory only)
+        }
+    }
+    size_t recs = 0;
+    for (auto& kv : g_stageSets) {
+        kv.second.persisted = rewrite ? 0 : kv.second.recs.size();
+        recs += kv.second.recs.size();
+    }
+    StageLog("stage warm-up: %u stages, %u draw variants read from %s%s", static_cast<unsigned>(g_stageSets.size()), static_cast<unsigned>(recs), path,
+             rewrite ? " (file started anew)" : "");
+}
+// Appends what was recorded since the last flush (quiet moments only: a few KiB to the memory card).
+void StageFlush() {
+    const char* path = StageFile();
+    if (!path || g_stageFileRecs >= kStageFileMax) return;
+    bool any = false;
+    for (const auto& kv : g_stageSets) if (kv.second.recs.size() > kv.second.persisted) { any = true; break; }
+    if (!any) return;
+    FILE* f = std::fopen(path, "ab");
+    if (!f) { g_stageFileRecs = kStageFileMax; return; }
+    bool ok = true;
+    for (auto& kv : g_stageSets) {
+        StageSet& set = kv.second;
+        for (; ok && set.persisted < set.recs.size() && g_stageFileRecs < kStageFileMax; ++set.persisted, ++g_stageFileRecs) {
+            const StageRec& r = set.recs[set.persisted];
+            const StageFileRec w{kv.first, r.lb, r.vs, r.fs};
+            ok = std::fwrite(&w, sizeof w, 1, f) == 1;
+        }
+    }
+    if (std::fclose(f) != 0 || !ok) g_stageFileRecs = kStageFileMax; // (a failed write: no more appends this run)
+}
+// The queue for a stage: its recorded variants in the order first drawn, for the shaders this run knows.
+void StageBuild(uint32_t target) {
+    g_stageTarget = target;
+    g_stageQueue.clear();
+    g_stageProgs.clear();
+    g_stageQueueMs = 0;
+    g_stageQueueLinks = 0;
+    g_stageQueued = 0;
+    g_stageIdleCursor = 0;
+    g_stageIdleBlocked = false;
+    g_stageLeft.store(0, std::memory_order_relaxed);
+    const auto it = g_stageSets.find(target);
+    if (!target || it == g_stageSets.end() || it->second.recs.empty()) return;
+    std::unordered_map<uint64_t, uint16_t> vsIds, fsIds;
+    vsIds.reserve(g_vsSrc.size());
+    fsIds.reserve(g_fsSrc.size());
+    for (size_t i = 0; i < g_vsSrc.size() && i <= 0xFFFFu; ++i) if (g_vsSrc[i]) vsIds.emplace(g_vsSrc[i]->keyHash, static_cast<uint16_t>(i));
+    for (size_t i = 0; i < g_fsSrc.size() && i <= 0xFFFFu; ++i) if (g_fsSrc[i]) fsIds.emplace(g_fsSrc[i]->keyHash, static_cast<uint16_t>(i));
+    unsigned unknown = 0;
+    for (const StageRec& r : it->second.recs) {
+        const auto v = vsIds.find(r.vs), f = fsIds.find(r.fs);
+        if (v == vsIds.end() || f == fsIds.end()) { ++unknown; continue; }
+        VariantCmd c;
+        c.vsId = v->second;
+        c.fsId = f->second;
+        c.layoutMask = static_cast<uint16_t>((r.lb >> 13) & 0xFFFu);
+        c.blendKey = static_cast<uint16_t>(r.lb & 0x1FFFu);
+        g_stageQueue.push_back(c);
+        g_stageProgs.insert((static_cast<uint32_t>(c.vsId) << 16) | c.fsId);
+    }
+    g_stageQueued = static_cast<unsigned>(g_stageQueue.size());
+    g_stageLeft.store(g_stageQueued, std::memory_order_relaxed);
+    StageLog("stage warm-up: stage %08x: %u draw variants of %u programs queued (%u with shaders this run does not know)", target, g_stageQueued,
+             static_cast<unsigned>(g_stageProgs.size()), unknown);
+}
+// Room for the stage's programs (quiet moments only): programs that are not the stage's, not drawn in the last two frames.
+bool StageEvict() {
+    static const unsigned per = static_cast<unsigned>(std::max(1L, EnvInt("GXV_STAGEWARM_EVICT", 48)));
+    static std::vector<std::pair<uint64_t, uint32_t>> victims;
+    CollectProgramVictims(victims, 2, ~0u, 0, true);
+    return DeleteProgramVictims(victims, per) != 0;
+}
+// A slice of the stage's queue. True when it did work or work is left (the generic warm-up then waits for a later frame).
+bool RunStageWarm(bool idle) {
+    if (!StageWarmOn() || g_stageQueue.empty()) return false;
+    static const double quietMs = static_cast<double>(EnvInt("GXV_STAGEWARM_MS", 30));
+    static const double liveMs = static_cast<double>(EnvInt("GXV_STAGEWARM_LIVE_MS", 0));
+    static const unsigned reserve = static_cast<unsigned>(std::max(8L, EnvInt("GXV_STAGEWARM_RESERVE", 48)));
+    const double budgetMs = g_screenLive ? liveMs : quietMs;
+    if (budgetMs <= 0.0) return true;
+    if (GlAllocBackoff() || g_warmAllocFailSerial == g_serial) return true;
+    const uint32_t capacityKey = g_warmCapacityKey;
+    g_optionalReserve = reserve;
+    const double t0 = NowMs();
+    const unsigned links0 = g_sw.links;
+    unsigned done = 0;
+    bool evicted = false;
+    while (!g_stageQueue.empty()) {
+        const VariantCmd v = g_stageQueue.front();
+        g_optionalCapacityRefused = false;
+        WarmVariant(v, true);
+        if (g_optionalCapacityRefused) {
+            // The slots are down to the reserve: make room once (never in play; the delete waits for the GPU), else wait for a frame.
+            if (!g_screenLive && !evicted && StageEvict()) { evicted = true; continue; }
+            break;
+        }
+        if (GlAllocBackoff()) {
+            g_warmAllocFailSerial = g_serial;
+            g_glAllocFailSerial = ~uint64_t{0};
+            break;
+        }
+        g_stageQueue.pop_front();
+        if (g_stageIdleCursor) --g_stageIdleCursor;
+        ++done;
+        if (NowMs() - t0 >= budgetMs) break;
+    }
+    g_optionalReserve = 0;
+    g_optionalCapacityRefused = false;
+    g_warmCapacityKey = capacityKey;
+    const double took = NowMs() - t0;
+    const unsigned links = g_sw.links - links0;
+    g_stats.shaderWorkMs += took;
+    g_stFrame.stageMs += took;
+    g_stFrame.stageItems += done;
+    g_stFrame.stageLinks += links;
+    g_stageQueueMs += took;
+    g_stageQueueLinks += links;
+    g_stageLeft.store(static_cast<unsigned>(g_stageQueue.size()), std::memory_order_relaxed);
+    if (g_stageQueue.empty())
+        StageLog("stage warm-up: stage %08x ready: %u draw variants, %u links, %.0f ms in all (the last slice %s)", g_stageTarget, g_stageQueued,
+                 g_stageQueueLinks, g_stageQueueMs, idle ? "between frames" : (g_screenLive ? "in play" : "in a quiet frame"));
+    return true;
+}
+// Start of a frame: the stage to record under and to prepare for; the file is read the first time, appended in quiet moments.
+void StageFrameBegin() {
+    if (!StageWarmOn()) return;
+    if (!g_stageLoaded) StageLoad();
+    g_stageRecKey = port_scene_key ? port_scene_key() : 0;
+    const uint32_t loading = port_scene_loading_key ? port_scene_loading_key() : 0;
+    const uint32_t target = loading ? loading : g_stageRecKey;
+    if (target != g_stageTarget) StageBuild(target);
+    if (!g_screenLive && g_serial >= g_stageFlushSerial + 120) {
+        g_stageFlushSerial = g_serial;
+        StageFlush();
+    }
+}
+// A draw: its variant goes into the set of the stage being played (once per stage; the program remembers its last one).
+inline void StageNote(Program& p, const DrawRec& r, uint32_t blendKey) {
+    if (!g_stageRecKey) return;
+    const uint32_t lb = ((static_cast<uint32_t>(r.layoutMask) & 0xFFFu) << 13) | (blendKey & 0x1FFFu);
+    if (p.recStage == g_stageRecKey && p.recLB == lb) return;
+    p.recStage = g_stageRecKey;
+    p.recLB = lb;
+    if (r.vsId >= g_vsSrc.size() || r.fsId >= g_fsSrc.size() || !g_vsSrc[r.vsId] || !g_fsSrc[r.fsId]) return;
+    if (StageAdd(g_stageRecKey, StageRec{g_vsSrc[r.vsId]->keyHash, g_fsSrc[r.fsId]->keyHash, lb}) && g_stageRecKey == g_stageTarget)
+        g_stageProgs.insert((static_cast<uint32_t>(r.vsId) << 16) | r.fsId);
+}
+
+// (GXV_STUTTER_LOG) the end of an Execute: its costs go to the window of play or of quiet moments; a long frame whose time is
+// mostly accounted for here (or that took 100 ms or more) gets a line, at most 6 every 5 s; every 5 s a summary of the window.
+void StutterFrameEnd(uint64_t frame, double ms) {
+    StutterCosts f = g_stFrame;
+    g_stFrame = StutterCosts{};
+    // (tex11) mode 2's fences (wherever they fell: the uploads' and frees' times leave them out), every transfer-unit wait of the
+    // host in any mode (mode 1: inside the uploads' time), and the glGenTextures part of the uploads
+    f.xferFences = g_xferFrameFences;
+    f.xferMs = g_xferFrameMs;
+    g_xferFrameFences = 0;
+    g_xferFrameMs = 0;
+    f.texNameMs = g_texNameMs;
+    g_texNameMs = 0;
+#ifdef __VGX_VITA__
+    if (vgxvita_xferStats) {
+        static uint64_t waits0 = 0, us0 = 0;
+        uint64_t waits = 0, us = 0;
+        vgxvita_xferStats(&waits, &us);
+        f.xferWaits = static_cast<unsigned>(waits - waits0);
+        f.xferWaitMs = static_cast<double>(us - us0) / 1000.0;
+        waits0 = waits;
+        us0 = us;
+    }
+#endif
+    f.frames = 1;
+    f.execMs = ms;
+    f.worstMs = ms;
+    (g_screenLive ? g_stPlay : g_stQuiet).Add(f);
+    if (!StutterLogOn()) return;
+    static const double minMs = static_cast<double>(EnvInt("GXV_STUTTER_MS", 50));
+    static double windowT0 = 0;
+    static unsigned lines = 0;
+    static uint64_t decode0 = 0;
+    const double now = NowMs();
+    if (windowT0 == 0) { windowT0 = now; decode0 = vgx_tex_decode_us ? vgx_tex_decode_us() : 0; }
+    if (ms >= minMs && (f.Known() >= 10.0 || ms >= 100.0) && lines < 6) {
+        ++lines;
+        port_log_summary("stutter: frame %llu took %.0f ms in the back end (%s): draws' new programs %u (%.0f ms), warm-up %.0f ms (%u links), stage warm-up %u (%.0f ms, "
+                         "%u links), program deletes %u (%.0f ms), texture uploads %u (%.0f KiB, %.0f ms; names %.1f ms, transfer waits %u, %.1f ms), "
+                         "texture frees %u (%.0f ms), upload fences %u (%.0f ms), buffer uploads %u (%.0f KiB, %.0f ms), the rest %.0f ms",
+                         static_cast<unsigned long long>(frame), ms, g_screenLive ? "in play" : "quiet", f.demandProgs, f.demandMs, f.warmMs, f.warmLinks, f.stageItems,
+                         f.stageMs, f.stageLinks, f.deletes, f.deleteMs, f.texUploads, f.texBytes / 1024.0, f.texMs, f.texNameMs, f.xferWaits, f.xferWaitMs,
+                         f.texFrees, f.texFreeMs, f.xferFences, f.xferMs, f.bufUploads, f.bufBytes / 1024.0, f.bufMs, std::max(0.0, ms - f.Known()));
+    }
+    if (now - windowT0 < 5000.0) return;
+    const uint64_t decode = vgx_tex_decode_us ? vgx_tex_decode_us() : 0;
+    const StutterCosts& a = g_stPlay;
+    const StutterCosts& q = g_stQuiet;
+    if (a.demandProgs || a.deletes || a.texUploads || a.stageItems || q.demandProgs || q.deletes || q.warmLinks || q.stageItems || q.texUploads ||
+        a.worstMs >= minMs) {
+        port_log_summary("stutter-5s: in play %u frames (longest %.0f ms): draws' new programs %u (%.0f ms), program deletes %u (%.0f ms), texture uploads %u "
+                         "(%.1f MiB, %.0f ms), buffer uploads %.1f MiB (%.0f ms), stage warm-up %u (%.0f ms); quiet %u frames: warm-up %.0f ms (%u links), "
+                         "stage warm-up %u (%.0f ms, %u links), draws' new programs %u (%.0f ms), program deletes %u (%.0f ms), texture uploads %u (%.0f ms); "
+                         "front-end texture decode %.0f ms; stage %08x queue %u left; %u programs",
+                         a.frames, a.worstMs, a.demandProgs, a.demandMs, a.deletes, a.deleteMs, a.texUploads, a.texBytes / 1048576.0, a.texMs,
+                         a.bufBytes / 1048576.0, a.bufMs, a.stageItems, a.stageMs, q.frames, q.warmMs, q.warmLinks, q.stageItems, q.stageMs, q.stageLinks,
+                         q.demandProgs, q.demandMs, q.deletes, q.deleteMs, q.texUploads, q.texMs, (decode - decode0) / 1000.0, g_stageTarget,
+                         g_stageLeft.load(std::memory_order_relaxed), static_cast<unsigned>(g_programs.size()));
+        // (tex11) the texture side of the window in detail: the uploads' glGenTextures time, the transfer-unit waits (GXV_VITA_UPLOAD_SYNC),
+        // mode 2's fences, the frees (CMD_TEX_FREE)
+        if (a.texUploads || q.texUploads || a.texFrees || q.texFrees)
+            port_log_summary("tex-upload-5s: in play %u uploads (%.0f ms; names %.1f ms), transfer waits %u (%.1f ms), fences %u (%.1f ms), frees %u (%.1f ms); "
+                             "quiet %u uploads (%.0f ms; names %.1f ms), transfer waits %u (%.1f ms), fences %u (%.1f ms), frees %u (%.1f ms); upload sync mode %d, chain reserve %s",
+                             a.texUploads, a.texMs, a.texNameMs, a.xferWaits, a.xferWaitMs, a.xferFences, a.xferMs, a.texFrees, a.texFreeMs,
+                             q.texUploads, q.texMs, q.texNameMs, q.xferWaits, q.xferWaitMs, q.xferFences, q.xferMs, q.texFrees, q.texFreeMs,
+#ifdef __VGX_VITA__
+                             vgxvita_uploadSyncMode ? vgxvita_uploadSyncMode() : -1, (vglReserveTextureLevels && EnvInt("GXV_TEX_RESERVE", 1) != 0) ? "on" : "off");
+#else
+                             -1, "off");
+#endif
+    }
+    g_stPlay = StutterCosts{};
+    g_stQuiet = StutterCosts{};
+    windowT0 = now;
+    decode0 = decode;
+    lines = 0;
 }
 
 // GXV_GLCACHE=0 (diagnostic): issue GL state the way this file did before it cached it
@@ -1830,12 +3323,47 @@ double g_dprof[8] = {};
 double g_dprofT = 0;
 // (kBackendDiagnostics is a constant: in the player build the stage marks of a draw (seven per draw) compile away instead of testing g_dprofOn each time)
 #define DP(i) do { if (kBackendDiagnostics && g_dprofOn) { const double n_ = DNow(); g_dprof[i] += n_ - g_dprofT; g_dprofT = n_; } } while (0)
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+#include "vgx_draw_reject.h"
+#endif
+#ifdef __VGX_VITA__
+// GXV_MIDFLUSH (see g_midFlushEvery): the open EFB scene's vertex work so far goes to the GPU now.
+void MidSceneFlush() {
+    g_midFlushDraws = 0;
+    XferFence(); // (tex11: the flushed part of the scene may sample a texture just uploaded)
+    if (&gxm_context == nullptr || gxm_context == nullptr) { g_midFlushEvery = 0; return; }
+    const int rc = sceGxmMidSceneFlush(gxm_context, SCE_GXM_MIDSCENE_PRESERVE_DEFAULT_UNIFORM_BUFFERS, nullptr, nullptr);
+    if (rc < 0) {
+        if (port_log_summary) port_log_summary("GXV_MIDFLUSH: sceGxmMidSceneFlush failed (0x%08X) after %u flushes: switched off", static_cast<unsigned>(rc), g_midFlushes);
+        g_midFlushEvery = 0;
+        return;
+    }
+    ++g_midFlushes;
+    // (the context's programs, textures and default uniform buffers are given again by the next draw)
+    if (&gxm_sc_fprog != nullptr) gxm_sc_fprog = nullptr;
+    if (&gxm_sc_vprog != nullptr) gxm_sc_vprog = nullptr;
+    if (&gxm_sc_ftex_valid != nullptr) gxm_sc_ftex_valid = 0;
+    G(glUseProgram(0));
+    S.program = ~0u;
+}
+#endif
 void Draw(const CmdBuf& buf, const DrawRec& r) {
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    if(r.idxCount) DrawRejectAdd(g_drawReject.nonempty);
+#endif
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    if (g_skipDraws) { DrawRejectNote(RejectSkip,buf,r); return; }
+#else
     if (g_skipDraws) return;
+#endif
+    if (g_px.noop && PxNoEffect(r.rs)) { ++g_pxN.noop; return; } // (GXV_PX_NOOP: it would change nothing)
     if (kBackendDiagnostics && g_dprofOn) g_dprofT = DNow();
     Program& p = GetProgram(r.vsId, r.fsId);
     DP(0);
     if (!p.ok || r.idxCount == 0) {
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+        if(!p.ok) { DrawRejectNote(RejectProgram,buf,r); DrawRejectProgramState(r,p); }
+#endif
         if (!p.ok && r.idxCount && ResourceAuditOn()) {
             unsigned failures = p.failures;
             if (r.vsId < g_vsAttempts.size()) failures = std::max(failures, unsigned(g_vsAttempts[r.vsId].failures));
@@ -1844,8 +3372,13 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
         }
         return;
     }
+    p.drawSerial = g_serial;
     if (g_validateFrame) ValidateDraw(buf, r, p);
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    if (SanMode() && SanitizeRefusesDraw(buf,r,p)) { DrawRejectNote(RejectSanitize,buf,r); return; }
+#else
     if (SanMode() && SanitizeRefusesDraw(buf, r, p)) return;
+#endif
     if (g_noCache) {
         S.program = ~0u;
         S.layoutVbo = ~0u;
@@ -1861,15 +3394,29 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     }
     GLuint vbo, ibo;
     if (r.vbuf) {
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+        if (r.vbuf >= g_sbuf.size() || !g_sbuf[r.vbuf].vbo) { DrawRejectNote(RejectStatic,buf,r); return; }
+#else
         if (r.vbuf >= g_sbuf.size() || !g_sbuf[r.vbuf].vbo) return;
+#endif
         vbo = g_sbuf[r.vbuf].vbo;
         ibo = g_sbuf[r.vbuf].ibo;
     } else {
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+        if (r.vchunk >= g_streamVbo.size()) { DrawRejectNote(RejectStream,buf,r); return; }
+#else
         if (r.vchunk >= g_streamVbo.size()) return;
+#endif
         vbo = g_streamVbo[r.vchunk];
         ibo = g_ibo;
     }
-    if (!ApplyRenderState(r.rs)) return;
+    if (g_gpuAttrib == 2) g_rsValid = false; // (GXV_GPU_ATTRIB=2: the viewport below is not the state's; set it again every draw)
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    if (!ApplyRenderState(r.rs, &r)) { DrawRejectNote(RejectState,buf,r); return; }
+#else
+    if (!ApplyRenderState(r.rs, &r)) return;
+#endif
+    if (g_gpuAttrib == 2 && S.fbo == g_efbFbo) SetViewport(S.vp[0], S.vp[1], 1, 1); // (TEST)
     DP(1);
     // The first draw of a scene gives its uniform blocks again when it continues with the
     // program of the last draw before the render-target change: vitaGL would otherwise keep
@@ -1878,10 +3425,11 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     // restores the viewport and the region clip, nothing else).
     const bool sceneStart = (S.fbo != g_inUseFbo || g_fbDirty) && S.program == p.id;
     UseProgram(p.id);
+    BEPROF_MARK(kDrawProg);
     const bool fresh = p.serial != g_serial || p.uniformBuffer != &buf || sceneStart;
     if (sceneStart) ++C.sceneReuploads;
     const float* u = buf.uni.data();
-    static const bool uniformReuse = EnvInt("GXV_UNIFORM_REUSE", 1) != 0;
+    const bool uniformReuse = g_beFast2 ? g_f2.uniformReuse : UniformReuseRead(); // (GXV_BE_FAST2: no guard per draw)
     auto need = [&](int b, GLint words, size_t skip = 0) {
         if (r.ublock[b] == kNoBlock) return false;
         if (fresh) return true;
@@ -1895,7 +3443,7 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
         if (old == kNoBlock || words <= 0 || !inRange(old) || !inRange(r.ublock[b])) return true;
         // Offsets identify arena allocations, not values. A non-adjacent repeat
         // can have a new offset while this program still holds identical bytes.
-        const bool different = std::memcmp(u + old + skip, u + r.ublock[b] + skip, static_cast<size_t>(words) * sizeof(float)) != 0;
+        const bool different = !SameUniforms(u + old + skip, u + r.ublock[b] + skip, static_cast<size_t>(words)); // (GXV_BE_FAST2: NEON)
         if (kBackendDiagnostics) {
             ++C.uniformCompares;
             C.uniformCompareHits += !different;
@@ -1907,24 +3455,71 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
         G(glUniform4fv(loc, n, v));
         ++C.uniformCalls;
         C.uniformBytes += static_cast<uint32_t>(n) * 16u;
+        if (beprof::g_frame) { ++beprof::g_uniCalls; beprof::g_uniBytes += static_cast<uint32_t>(n) * 16u; }
     };
-    if (p.proj != -1 && need(UB_PROJ, 16)) {
+#ifdef __VGX_VITA__
+    // GXV_UNI_SHADOW (see g_uniShadow): the program's uniforms that vitaGL keeps as plain F32 vec4s are compared with what it holds
+    // and written there directly, only where they differ, with one call for the dirty flags; the others (a half precision u_tev)
+    // keep glUniform*. On the first draw of the program in a buffer or a scene (fresh) the old path gave every block again, which
+    // also made vitaGL set its default uniform buffers again; here glUseProgram(0) + glUseProgram(id) does that last part (both
+    // stages dirty, the ring copy kept: GXV_VGL_UNIREUSE points sceGxm at it again), and only blocks whose values differ from
+    // vitaGL's are written. The same bytes reach vitaGL's buffers as with glUniform4fv / glUniformMatrix4fv.
+    const bool viaShadow = g_uniShadow && p.shadow;
+    if (viaShadow) {
+        if (fresh) {
+            G(glUseProgram(0));
+            G(glUseProgram(p.id));
+            g_uniDirtyV = g_uniDirtyF = true;
+        }
+        uint32_t wrote = 0;
+        auto shadowBlock = [&](int s, int b, GLint words, size_t skip) {
+            if (!p.sh[s].ok || r.ublock[b] == kNoBlock || (!fresh && p.applied[b] == r.ublock[b])) return;
+            const float* src = u + r.ublock[b] + skip;
+            const size_t bytes = static_cast<size_t>(words) * sizeof(float);
+            uint32_t w = 0;
+            if (float* v = p.sh[s].v; v && !SameUniforms(v, src, static_cast<size_t>(words))) { std::memcpy(v, src, bytes); w |= 1u; }
+            if (float* f = p.sh[s].f; f && !SameUniforms(f, src, static_cast<size_t>(words))) { std::memcpy(f, src, bytes); w |= 2u; }
+            if (!w) return;
+            wrote |= w;
+            ++C.uniformCalls;
+            C.uniformBytes += static_cast<uint32_t>(bytes);
+            if (beprof::g_frame) { ++beprof::g_uniCalls; beprof::g_uniBytes += static_cast<uint32_t>(bytes); } // (counted as glUniform calls)
+        };
+        shadowBlock(US_PROJ, UB_PROJ, 16, 0);
+        shadowBlock(US_MV, UB_MV, p.nMv * 4, 0);
+        shadowBlock(US_TM, UB_TEXM, p.nTm * 4, 0);
+        shadowBlock(US_PTM, UB_TEXM, p.nPtm * 4, 96);
+        shadowBlock(US_PAL, UB_PAL, p.nPal * 4, 0);
+        shadowBlock(US_LT, UB_LIGHT, p.nLt * 4, 0);
+        shadowBlock(US_TEV, UB_TEV, p.nTev * 4, 0);
+        if (wrote) {
+            vglUniformShadowWritten(p.id, wrote);
+            if (wrote & 1u) g_uniDirtyV = true;
+            if (wrote & 2u) g_uniDirtyF = true;
+        }
+    }
+    const auto viaGl = [&](int s) { return !viaShadow || !p.sh[s].ok; };
+#else
+    const auto viaGl = [](int) { return true; };
+#endif
+    if (viaGl(US_PROJ) && p.proj != -1 && need(UB_PROJ, 16)) {
         G(glUniformMatrix4fv(p.proj, 1, GL_FALSE, u + r.ublock[UB_PROJ]));
         ++C.uniformCalls;
         C.uniformBytes += 64;
+        if (beprof::g_frame) { ++beprof::g_uniCalls; beprof::g_uniBytes += 64; }
         g_uniDirtyV = true;
     }
-    if (p.mv != -1 && need(UB_MV, p.nMv * 4)) { up4(p.mv, p.nMv, u + r.ublock[UB_MV]); g_uniDirtyV = true; }
-    if (p.tm != -1 && need(UB_TEXM, p.nTm * 4)) { up4(p.tm, p.nTm, u + r.ublock[UB_TEXM]); g_uniDirtyV = true; }
-    if (p.ptm != -1 && need(UB_TEXM, p.nPtm * 4, 96)) { up4(p.ptm, p.nPtm, u + r.ublock[UB_TEXM] + 96); g_uniDirtyV = true; }
-    if (p.pal != -1 && need(UB_PAL, p.nPal * 4)) {
+    if (viaGl(US_MV) && p.mv != -1 && need(UB_MV, p.nMv * 4)) { up4(p.mv, p.nMv, u + r.ublock[UB_MV]); g_uniDirtyV = true; }
+    if (viaGl(US_TM) && p.tm != -1 && need(UB_TEXM, p.nTm * 4)) { up4(p.tm, p.nTm, u + r.ublock[UB_TEXM]); g_uniDirtyV = true; }
+    if (viaGl(US_PTM) && p.ptm != -1 && need(UB_TEXM, p.nPtm * 4, 96)) { up4(p.ptm, p.nPtm, u + r.ublock[UB_TEXM] + 96); g_uniDirtyV = true; }
+    if (viaGl(US_PAL) && p.pal != -1 && need(UB_PAL, p.nPal * 4)) {
         up4(p.pal, p.nPal, u + r.ublock[UB_PAL]);
         ++C.palCalls;
         C.palBytes += static_cast<uint32_t>(p.nPal) * 16u;
         g_uniDirtyV = true;
     }
-    if (p.lt != -1 && need(UB_LIGHT, p.nLt * 4)) { up4(p.lt, p.nLt, u + r.ublock[UB_LIGHT]); g_uniDirtyV = true; }
-    if (p.tev != -1 && need(UB_TEV, p.nTev * 4)) { up4(p.tev, p.nTev, u + r.ublock[UB_TEV]); g_uniDirtyF = true; }
+    if (viaGl(US_LT) && p.lt != -1 && need(UB_LIGHT, p.nLt * 4)) { up4(p.lt, p.nLt, u + r.ublock[UB_LIGHT]); g_uniDirtyV = true; }
+    if (viaGl(US_TEV) && p.tev != -1 && need(UB_TEV, p.nTev * 4)) { up4(p.tev, p.nTev, u + r.ublock[UB_TEV]); g_uniDirtyF = true; }
     for (int b = 0; b < UB_COUNT; ++b) {
         if (r.ublock[b] != kNoBlock || fresh) p.applied[b] = r.ublock[b];
     }
@@ -1932,11 +3527,12 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     p.uniformBuffer = &buf;
     if (g_uniDirtyV) { C.ringBytes += p.vsBytes; g_uniDirtyV = false; }
     if (g_uniDirtyF) { C.ringBytes += p.fsBytes; g_uniDirtyF = false; }
+    BEPROF_MARK(kDrawUni);
 
     DP(2);
-    // The cheaper background (g_stepBg): draws that sample a character's or key item's texture (the HD pack's list, vgx::IsCharaTexture
-    // of the front end; none in a build without it) keep their filters.
-    bool cheap = g_stepBg;
+    // Only known depth-tested perspective draws are candidates; ordinary orthographic UI keeps its filters even with AA off.
+    // Recognized character/key-item textures protect the whole draw (the pack's list, not a general actor classification).
+    bool cheap = g_stepBg && r.rs.depthTest && BackgroundPerspective(buf, r) && p.proj != -1;
     if (cheap && vgx::IsCharaTexture)
         for (int m = 0; m < 8 && cheap; ++m)
             if ((r.texMask & (1u << m)) && vgx::IsCharaTexture(r.tex[m].texId)) cheap = false;
@@ -1955,6 +3551,15 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
         }
     DP(3);
 
+#ifdef __VGX_VITA__
+    const bool direct = r.prim == PRIM_TRIANGLES && GxmDirectOn();
+    if (direct) {
+        // (GXV_BE_FAST: nothing to do when every location the layout leaves to a constant has its array off and its constant set,
+        // which is exactly when SetLayoutConstants would call nothing)
+        if (!g_beFast) SetLayoutConstants(r.layoutMask);
+        else if (const uint32_t cb = DirectFor(r.layoutMask).constBits; (cb & S.attrEnabled) || (cb & ~S.attrConstSet)) SetLayoutConstants(r.layoutMask);
+    } else
+#endif
     SetLayout(vbo, r.layoutMask, r.vtxOffset);
     BindElemBuf(ibo);
     DP(4);
@@ -1970,12 +3575,43 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
     if (SanMode() & sanitize::kFeedback) SanitizeFeedbackDraw(buf, r);
     TouchTarget();
     DP(5);
-    G(glDrawElements(mode, static_cast<GLsizei>(r.idxCount), GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<size_t>(r.idxOffset) * 2)));
+    BEPROF_MARK(kDrawTex);
+    // (GXV_GPU_ATTRIB=1, TEST: an EFB triangle draw keeps only its first triangle)
+    const uint32_t idxCount = g_gpuAttrib == 1 && S.fbo == g_efbFbo && mode == GL_TRIANGLES && r.idxCount > 3 ? 3u : r.idxCount;
+#ifdef __VGX_VITA__
+    if (direct) {
+        // (the arrays SetLayout pointed at are not what vitaGL last drew from any more: the next ordinary draw points them again)
+        S.layoutVbo = ~0u;
+        if (vglDrawElementsDirect(mode, static_cast<GLsizei>(idxCount), static_cast<uint32_t>(r.idxOffset) * 2u, vbo, r.vtxOffset,
+                                  DirectLayoutFor(r.layoutMask))) {
+            g_directDraws.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            g_directFallbacks.fetch_add(1, std::memory_order_relaxed);
+            SetLayout(vbo, r.layoutMask, r.vtxOffset);
+            G(glDrawElements(mode, static_cast<GLsizei>(idxCount), GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<size_t>(r.idxOffset) * 2)));
+        }
+    } else
+#endif
+    G(glDrawElements(mode, static_cast<GLsizei>(idxCount), GL_UNSIGNED_SHORT, reinterpret_cast<const void*>(static_cast<size_t>(r.idxOffset) * 2)));
     DP(6);
+    BEPROF_MARK(kDrawCall);
+    if (beprof::g_frame) ++beprof::g_draws;
+    if (gpuscenes::g_cur) {
+        gpuscenes::NoteDraw(r, r.vsId < g_vsSrc.size() ? g_vsSrc[r.vsId] : nullptr); // (GXV_GPU_SCENES)
+        if (gpuscenes::g_mode >= 2) gpuscenes::NoteDrawDetail(buf, r);
+    }
+#ifdef __VGX_VITA__
+    if (g_midFlushEvery && S.fbo == g_efbFbo && ++g_midFlushDraws >= g_midFlushEvery) MidSceneFlush(); // (GXV_MIDFLUSH)
+#endif
     ++C.draws;
     C.drawIndices += r.idxCount;
     ++g_stats.drawCallsThisFrame;
-    NoteVariant(p, r.vsId, r.fsId, r.layoutMask, BlendKey(r.rs), S.fbo == g_efbFbo && r.vtxOffset == 0 && r.prim == PRIM_TRIANGLES);
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    DrawRejectAdd(g_drawReject.submitted);
+#endif
+    const uint32_t blendKey = BlendKey(r.rs);
+    NoteVariant(p, r.vsId, r.fsId, r.layoutMask, blendKey, S.fbo == g_efbFbo && r.vtxOffset == 0 && r.prim == PRIM_TRIANGLES);
+    if (StageWarmOn()) StageNote(p, r, blendKey); // (GXV_STAGEWARM)
 }
 
 Tex& TexSlotFor(uint32_t id) {
@@ -1988,6 +3624,7 @@ inline bool KeepRenderTargets() {
     return keep;
 }
 void EfbBufferBack(Tex& t); // (GXV_EFBSWAP, below)
+bool AdoptEfbBuffer(Tex& t, int w, int h); // (GXV_EFBSWAP, below)
 // A texture about to be deleted is detached from every pooled framebuffer object first (as the Strikers port found on the
 // console, 160c3f9): vitaGL frees a texture's storage only when no framebuffer holds it, so one left attached stayed allocated
 // until that object went (with idle pool eviction, or never), and a reused name of the same size could be taken by AcquireFbo
@@ -2011,6 +3648,7 @@ void DetachFromPool(GLuint name) {
 }
 void DeleteTex(Tex& t) {
     if (!t.id) return;
+    XferFenceFor(t); // (tex11, GXV_VITA_UPLOAD_SYNC=2: vitaGL may free the storage its pending transfers write)
     if (!t.efbBuf && !(KeepRenderTargets() && t.renderTarget)) DetachFromPool(t.id);
     if (t.efbBuf) { EfbBufferBack(t); return; } // (a buffer the EFB had goes back to its spares)
     // GXV_KEEP_RT=1 (FOR VITA3K ONLY, scripts/run-vita.sh sets it): a texture that was drawn
@@ -2131,7 +3769,13 @@ void Upload(const TexUpload& up) {
     }
     Tex& t = TexSlotFor(up.texId);
     if (t.renderTarget && t.id) DeleteTex(t);
-    if (!t.id) { G(glGenTextures(1, &t.id)); ++g_stats.textures; }
+    XferFenceFor(t); // (tex11, GXV_VITA_UPLOAD_SYNC=2: new storage for a texture whose transfers are pending)
+    if (!t.id) {
+        const double tn = NowMs();
+        G(glGenTextures(1, &t.id));
+        ++g_stats.textures;
+        g_texNameMs += NowMs() - tn; // (GXV_STUTTER_LOG: vitaGL's glGenTextures walks its slots from the first)
+    }
     BindTexForEdit(t.id);
 #if !defined(__VGX_VITA__)
     // LA88 has odd-width two-byte rows. Restore the caller's alignment for this opt-in path.
@@ -2148,6 +3792,22 @@ void Upload(const TexUpload& up) {
         && (uint32_t(up.width) >> (up.levels.size() - 1)) >= 4 && (uint32_t(up.height) >> (up.levels.size() - 1)) >= 4;
 #else
     const bool lastSecond = false;
+#endif
+    // tex11 (GXV_TEX_RESERVE, default 1; vitaGL patch 0015): the level-0 call allocates the whole chain - a compressed chain of
+    // these levels, or the levels glGenerateMipmap makes - so that no later call reallocates: no CPU copy of the texture (reads of
+    // uncached video memory), no copy racing the level-0 transfer. The final storage, offsets and descriptor are the ones the
+    // reallocations end with. Without the patch (weak symbol absent) nothing changes.
+    const bool compressedUp = (up.format == TF_DXT1 && g_hasS3tc) || (up.format == TF_DXT5 && g_hasDxt5);
+    int reserveLevels = 0;
+#if defined(__VGX_VITA__)
+    static const bool reserveOn = EnvInt("GXV_TEX_RESERVE", 1) != 0 && vglReserveTextureLevels;
+    if (reserveOn) {
+        if (compressedUp && !up.genMips && up.levels.size() >= 2 && up.levels.size() < 16 && !(up.width & (up.width - 1u)) && !(up.height & (up.height - 1u))
+            && (uint32_t(up.width) >> (up.levels.size() - 1)) >= 4 && (uint32_t(up.height) >> (up.levels.size() - 1)) >= 4)
+            reserveLevels = static_cast<int>(up.levels.size());
+        else if (!compressedUp && up.genMips && up.levels.size() == 1)
+            reserveLevels = -1; // (the full chain glGenerateMipmap makes)
+    }
 #endif
     std::vector<uint8_t> tmp;
 #if defined(__VGX_VITA__)
@@ -2168,20 +3828,34 @@ void Upload(const TexUpload& up) {
         const uint32_t w = l == 0 ? up.width : (l < 32 ? std::max(1u, uint32_t(up.width) >> l) : 1u);
         const uint32_t h = l == 0 ? up.height : (l < 32 ? std::max(1u, uint32_t(up.height) >> l) : 1u);
         const std::vector<uint8_t>& lv = up.levels[l];
-        if ((up.format == TF_DXT1 && g_hasS3tc) || (up.format == TF_DXT5 && g_hasDxt5)) {
+#if defined(__VGX_VITA__)
+        if (i == 0 && reserveLevels) G(vglReserveTextureLevels(static_cast<GLsizei>(up.width), static_cast<GLsizei>(up.height), reserveLevels));
+#endif
+        if (compressedUp) {
+            // (GXV_VITA_UPLOAD_SYNC=2) a level past the chain allocated so far makes vitaGL reallocate it - a CPU copy of the levels
+            // the transfer unit may still be writing: the wait first. With the base first and then the last level (lastSecond)
+            // that is the second call only; with the chain reserved, none.
+            if (i > 0 && !reserveLevels && (!lastSecond || i == 1)) XferFence();
             G(glCompressedTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l),
                                      up.format == TF_DXT5 ? GL_COMPRESSED_RGBA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, static_cast<GLsizei>(w),
                                      static_cast<GLsizei>(h), 0, static_cast<GLsizei>(lv.size()), lv.data()));
+            XferIssued(t);
             g_stats.textureBytes += lv.size();
             C.texUploadBytes += static_cast<uint32_t>(lv.size());
         } else {
             const uint8_t* px = lv.data();
             if (up.format == TF_DXT1) { DecodeDxt1(lv.data(), w, h, tmp); px = tmp.data(); }
             if (up.format == TF_DXT5) { DecodeDxt5(lv.data(), w, h, tmp); px = tmp.data(); }
-            const GLenum format = up.format == TF_LA88 ? GL_LUMINANCE_ALPHA : GL_RGBA;
-            const uint64_t bytes = static_cast<uint64_t>(w) * h * (up.format == TF_LA88 ? 2u : 4u);
+            // (GXV_TEX16: internal format = format, so that vitaGL keeps the 16-bit words as they are, textures.c fast_store, and picks the
+            // GXM format of the same layout: U5U6U5_RGB, U5U5U5U1_RGBA, U4U4U4U4_RGBA)
+            const GLenum format = up.format == TF_LA88 ? GL_LUMINANCE_ALPHA : up.format == TF_RGB565 ? GL_RGB : GL_RGBA;
+            const GLenum type = up.format == TF_RGB565 ? GL_UNSIGNED_SHORT_5_6_5 : up.format == TF_RGBA5551 ? GL_UNSIGNED_SHORT_5_5_5_1
+                              : up.format == TF_RGBA4444 ? GL_UNSIGNED_SHORT_4_4_4_4 : GL_UNSIGNED_BYTE;
+            const bool two = up.format == TF_LA88 || type != GL_UNSIGNED_BYTE;
+            const uint64_t bytes = static_cast<uint64_t>(w) * h * (two ? 2u : 4u);
             if (!preserveI4) G(glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), format, static_cast<GLsizei>(w), static_cast<GLsizei>(h), 0, format,
-                                           GL_UNSIGNED_BYTE, px));
+                                           type, px));
+            if (!preserveI4 && l > 0) XferIssued(t); // (vitaGL makes a level above 0 itself, with transfer-unit downscales)
             g_stats.textureBytes += bytes;
             C.texUploadBytes += static_cast<uint32_t>(bytes);
         }
@@ -2192,6 +3866,7 @@ void Upload(const TexUpload& up) {
 #endif
     if (up.genMips) {
         G(glGenerateMipmap(GL_TEXTURE_2D));
+        XferIssued(t);
         ++C.mipGens;
     }
 #if !defined(__VGX_VITA__) && !defined(VGX_GL_STUB)
@@ -2299,10 +3974,32 @@ bool EnsureCopyVariant(copyvar::Form form) {
     return true;
 }
 
+// GXV_RECT_LEGACY=0 (default): the copy program's quad over a viewport of an odd width or height is drawn over a viewport one pixel
+// larger on that side (even: vitaGL then maps it exactly, see SetViewport), with its texture rectangle grown alike so that every
+// pixel of the real viewport samples the very point it would in the GL, and a scissor of the real viewport keeps the pixel added
+// from being written. Without it a copy into a target of an odd size never wrote its last row (column): at 720x404 the corner
+// tile the effects save and put back (BloomEffectSimple / DepthOfFieldBlur: 160x114 EFB pixels, a 180x101 target) came back
+// with its last row black, a line across the top-left quarter of the picture (Beach Bowl, the menus). On the Vita (and with
+// GXV_VGL_VIEWPORT=1 on the desktop) only: the desktop's GL needs nothing. =1: as before.
+inline bool QuadPadOn() {
+#if defined(__VGX_VITA__)
+    static const bool on = EnvInt("GXV_RECT_LEGACY", 0) == 0;
+#else
+    static const bool on = VglViewportEmu() && EnvInt("GXV_RECT_LEGACY", 0) == 0;
+#endif
+    return on;
+}
 // Draws the copy program's quad over the whole viewport: out = m * texel + add.
 // Raster state (target, viewport, scissor, masks) is the caller's.
 void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float* m16, const float* add4) {
     if (!EnsureCopyProgram()) return;
+    // (GXV_RECT_LEGACY: the viewport made even, see QuadPadOn)
+    const int vx = S.vp[0], vy = S.vp[1], vw = S.vp[2], vh = S.vp[3];
+    const bool pad = QuadPadOn() && vw > 0 && vh > 0 && ((vw | vh) & 1) != 0;
+    if (pad) {
+        rw = rw * static_cast<float>(vw + (vw & 1)) / static_cast<float>(vw);
+        rh = rh * static_cast<float>(vh + (vh & 1)) / static_cast<float>(vh);
+    }
     if (SanMode() & sanitize::kFeedback) { // (GXV_SANITIZE bit 4: a copy quad that reads the texture it writes)
         GLuint color, depth;
         const char* what;
@@ -2359,7 +4056,28 @@ void DrawQuad(GLuint srcTex, float rx, float ry, float rw, float rh, const float
         S.layoutBase = 0;
     }
     TouchTarget();
-    G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+    if (gpuscenes::g_mode >= 2) gpuscenes::NoteQuad(); // (GXV_GPU_SCENES=2)
+    if (!pad) {
+        G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        return;
+    }
+    // (the scissor: the real viewport, inside the caller's scissor when one is on; both put back afterwards)
+    const int8_t scOn = S.scissorOn;
+    const int sc[4] = {S.sc[0], S.sc[1], S.sc[2], S.sc[3]};
+    int x0 = vx, y0 = vy, x1 = vx + vw, y1 = vy + vh;
+    if (scOn == 1) {
+        x0 = std::max(x0, sc[0]); y0 = std::max(y0, sc[1]);
+        x1 = std::min(x1, sc[0] + sc[2]); y1 = std::min(y1, sc[1] + sc[3]);
+    }
+    if (x1 > x0 && y1 > y0) {
+        SetScissor(true, x0, y0, x1 - x0, y1 - y0);
+        SetViewport(vx, vy, vw + (vw & 1), vh + (vh & 1));
+        G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+        ++C.quadPads;
+        SetViewport(vx, vy, vw, vh);
+    }
+    if (scOn == 1) SetScissor(true, sc[0], sc[1], sc[2], sc[3]);
+    else SetScissor(false);
 }
 
 // The progress bar (SetProgressDisplay in vgx_cmd.h): a dark screen with a framed bar in its
@@ -2482,6 +4200,52 @@ void PicRelease() {
 // The clear that goes with a copy: it clears the rectangle that was copied
 // (EFB coordinates), not the whole frame buffer. The EFB is bound.
 void ClearEfb(const ClearSpec& c, const EfbRect& r);
+inline bool FxCmd(size_t i);       // (GXV_FXHALF, below)
+inline bool FxNeutral(uint8_t t);  // (GXV_FXHALF, below)
+// GXV_PX_DEADCLEAR (see PxDrawCovers): the colour / alpha part of an EFB clear made after a copy (Clear: the command being executed is the
+// copy, dplan::g_cmd) is dead when the next command that draws is a draw into the EFB that covers the cleared rectangle [x0, x1) x [y0, y1)
+// (target pixels) and writes every plane the clear writes. Between them only uploads and frees (nothing that draws or shows a picture).
+bool PxEfbClearDead(const ClearSpec& c, int x0, int y0, int x1, int y1) {
+    if (!g_pxBuf || !dplan::g_inClear || g_inPass) return false; // (an effects run has ended before any copy: ExecuteFrame)
+    const CmdBuf& buf = *g_pxBuf;
+    size_t j = dplan::g_cmd + 1;
+    while (j < buf.cmds.size() && FxNeutral(buf.cmds[j].type)) ++j;
+    if (j >= buf.cmds.size() || buf.cmds[j].type != CMD_DRAW || FxCmd(j)) return false;
+    const DrawRec& d = buf.draws[buf.cmds[j].arg];
+    if ((c.alpha && !d.rs.alphaWrite) || (c.color && !d.rs.colorWrite)) return false;
+    return PxDrawCovers(buf, d, x0, y0, x1, y1, ScaleX(), ScaleY(), 0, 0);
+}
+// GXV_PX_DEADCLEAR for the clear an offscreen pass begins with (BeginPass, the buffer's own CMD_PASS_BEGIN at dplan::g_cmd; the pass
+// target is set up: g_passX / Y / W / H, g_passScale): the planes it must still clear. Its colour is dead when the pass's first draw covers
+// the whole target writing colour and alpha (uploads and frees may come before it); then its depth too when no draw of the pass tests depth
+// (the pass ends at the copy that ends it, as FxDecide reads it, at another pass or at the end of the commands; nothing else reads a pass's
+// depth: a depth copy samples the EFB's).
+GLbitfield PxPassClearMask() {
+    const GLbitfield all = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+    if (!g_pxBuf || g_pass < 0) return all;
+    const CmdBuf& buf = *g_pxBuf;
+    const size_t n = buf.cmds.size();
+    size_t j = dplan::g_cmd + 1;
+    while (j < n && FxNeutral(buf.cmds[j].type)) ++j;
+    if (j >= n || buf.cmds[j].type != CMD_DRAW) return all;
+    const DrawRec& first = buf.draws[buf.cmds[j].arg];
+    if (!first.rs.alphaWrite) return all;
+    const float f = g_passScale;
+    if (!PxDrawCovers(buf, first, 0, 0, g_passW, g_passH, ScaleX() * f, ScaleY() * f, g_passX, g_passY)) return all;
+    for (size_t k = j; k < n; ++k) {
+        const Cmd& c = buf.cmds[k];
+        if (c.type == CMD_DRAW) {
+            const RenderState& rs = buf.draws[c.arg].rs;
+            if (rs.depthTest && (rs.depthFunc & 7) != CMP_ALWAYS) return GL_DEPTH_BUFFER_BIT;
+        } else if (c.type == CMD_COPY_TEX) {
+            const CopyTexCmd& t = buf.copyTex[c.arg];
+            if (t.skip ? t.fromPass : !(t.srcTex || (t.passMore && t.fromPass))) break;
+        } else if (c.type == CMD_PASS_BEGIN || c.type == CMD_COPY_DISP || c.type == CMD_SET_TARGET) {
+            break;
+        }
+    }
+    return 0;
+}
 void Clear(const ClearSpec& c, const EfbRect& r) {
     dplan::g_inClear = true; // (GXV_DEPTHPLAN: the position after the command's own)
     ClearEfb(c, r);
@@ -2501,6 +4265,11 @@ void ClearEfb(const ClearSpec& c, const EfbRect& r) {
     if (x0 == 0 && y0 == 0 && x1 == g_rtW && y1 == g_rtH) SetScissor(false);
     else SetScissor(true, x0, y0, x1 - x0, y1 - y0);
     bool colorByClear = c.color || c.alpha;
+    if (colorByClear && g_px.deadClear && PxEfbClearDead(c, x0, y0, x1, y1)) { // (GXV_PX_DEADCLEAR: the next draw covers it)
+        colorByClear = false;
+        ++g_pxN.clearColour;
+        if (!c.depth) ++g_pxN.clearWhole;
+    }
     if (colorByClear && c.color != c.alpha && g_quadClear) {
         // Colour without alpha or alpha without colour: glClear cannot be trusted
         // to honour the colour mask (vitaGL ignores it), a draw can.
@@ -2529,9 +4298,49 @@ void ClearEfb(const ClearSpec& c, const EfbRect& r) {
     if (mask) {
         // (scissor off: the whole target; the colour mask does not matter for the depth plane)
         TouchTarget((c.depth && x0 == 0 && y0 == 0 && x1 == g_rtW && y1 == g_rtH) ? DN_CLEARED : DN_KEEP);
+        if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(colorByClear, c.depth); // (GXV_GPU_SCENES=2)
         G(glClear(mask));
         ++C.clears;
     }
+}
+
+// GXV_POOL_MAX=<n> (default 16; 0 = no limit, the pool only shrinks by GXV_POOL_IDLE): a pool of n objects or more gives up the one
+// unused the longest for a new size instead of growing (RecycleFbo). Around water a copy can change size with every picture; each
+// size took an object with its own sceGxm render target, and they were let go only after GXV_POOL_IDLE pictures, so the system ran
+// out: sceGxmCreateRenderTarget failed, the scene did not begin and vitaGL wrote through a null uniform buffer (Beach Bowl, on a
+// console; from Producdevity's fork, 219837c). Objects used this picture are never given up, so a frame that needs more simply
+// grows the pool as before.
+size_t PoolMax() {
+    static const long n = EnvInt("GXV_POOL_MAX", 16);
+    return n > 0 ? static_cast<size_t>(n) : SIZE_MAX;
+}
+// A full pool: the object unused the longest becomes a new one of w x h, in its slot, so the indexes of open passes stay valid.
+// -1: nothing to give up (or GXV_KEEP_RT, the emulator's keeping), the pool grows.
+int RecycleFbo(int w, int h) {
+    if (KeepRenderTargets() || g_pool.size() < PoolMax()) return -1;
+    int oldest = -1;
+    for (size_t i = 0; i < g_pool.size(); ++i) {
+        const PoolFbo& f = g_pool[i];
+        if (f.held || !f.fbo || f.lastUse == g_presents || f.fbo == g_inUseFbo || f.fbo == S.fbo || static_cast<int>(i) == g_pass) continue;
+        if (oldest < 0 || f.lastUse < g_pool[oldest].lastUse) oldest = static_cast<int>(i);
+    }
+    if (oldest < 0) return -1;
+    GLuint fresh = 0;
+    G(glGenFramebuffers(1, &fresh));
+    if (!fresh) return -1; // (no name: nothing is given up)
+    PoolFbo& f = g_pool[oldest];
+    G(glDeleteFramebuffers(1, &f.fbo));
+    if (f.color) { ForgetTex(f.color); G(glDeleteTextures(1, &f.color)); }
+    if (f.depthTex) { ForgetTex(f.depthTex); G(glDeleteTextures(1, &f.depthTex)); }
+    if (f.depthRb) G(glDeleteRenderbuffers(1, &f.depthRb));
+    f = PoolFbo{};
+    f.w = w;
+    f.h = h;
+    f.fbo = fresh;
+    ++g_poolRecycled;
+    VGX_LOG("framebuffer object %dx%d made in the place of the oldest (%u pooled, %llu given up so far)\n", w, h, static_cast<unsigned>(g_pool.size()),
+            static_cast<unsigned long long>(g_poolRecycled));
+    return oldest;
 }
 
 // A pooled framebuffer object of w x h that has uses left this frame (bound on return).
@@ -2558,6 +4367,7 @@ int AcquireFbo(int w, int h, GLuint tex, bool wantDepth, bool guardName = false)
     if (idx < 0)
         for (size_t i = 0; i < g_pool.size(); ++i)
             if ((!guardName || g_pool[i].fbo) && g_pool[i].w == w && g_pool[i].h == h && g_pool[i].uses < g_fboMaxUses) { idx = static_cast<int>(i); break; }
+    if (idx < 0) idx = RecycleFbo(w, h);
     if (idx < 0) {
         PoolFbo f;
         f.w = w;
@@ -2609,12 +4419,15 @@ int AcquireFbo(int w, int h, GLuint tex, bool wantDepth, bool guardName = false)
 // (kept so that a change of scale can resample it to the size the next copy into it will want: ApplyRung).
 Tex& CopyTexture(uint32_t texId, int w, int h, int ew, int eh) {
     Tex& t = TexSlotFor(texId);
-    if (t.efbBuf) EfbBufferBack(t); // (GXV_EFBSWAP: written the ordinary way again, into a texture of its own)
+    // (GXV_EFBSWAP: written the ordinary way again. A buffer of the size wanted becomes the texture's own storage - no
+    // allocation, see AdoptEfbBuffer; another size goes back to the spares and the texture gets storage of its own)
+    if (t.efbBuf && !AdoptEfbBuffer(t, w, h)) EfbBufferBack(t);
     // (GXV_KEEP_RT, see DeleteTex: a render target that changes size gets a new texture there
     // instead of new storage, so that the emulator never meets its old memory again)
     if (KeepRenderTargets() && t.id && t.renderTarget && (t.w != w || t.h != h)) { DeleteTex(t); --g_stats.textures; }
     if (!t.id) { G(glGenTextures(1, &t.id)); ++g_stats.textures; }
     if (!t.renderTarget || t.w != w || t.h != h) {
+        XferFenceFor(t); // (tex11: new storage; the old may be freed at once)
         BindTexForEdit(t.id);
         G(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
         SetupNewTexture(GL_LINEAR);
@@ -2642,6 +4455,7 @@ bool CopyAllocationGuard() {
 int AcquireCopyTarget(uint32_t texId, int w, int h, int ew, int eh, bool guard) {
     if (!guard) return AcquireFbo(w, h, CopyTexture(texId, w, h, ew, eh).id, false);
     Tex& t = TexSlotFor(texId);
+    if (t.efbBuf) AdoptEfbBuffer(t, w, h); // (as in CopyTexture: no allocation for a buffer of the right size)
     if (t.id && t.renderTarget && !t.efbBuf && t.w == w && t.h == h) {
         BindTexForEdit(t.id);
         if (BoundTexHasStorage(w, h)) {
@@ -2687,6 +4501,8 @@ int AcquireCopyTarget(uint32_t texId, int w, int h, int ew, int eh, bool guard) 
 // only (the blur chain's last steps write alpha) while another plane of the
 // EFB holds the picture.
 void BeginPass(const PassCmd& p) {
+    const bool pxScan = g_pxPassScan; // (GXV_PX_DEADCLEAR: the buffer's own pass, at dplan::g_cmd)
+    g_pxPassScan = false;
     g_staticCrowdPassComplete = false;
     // (GXV_PASSHALF: a pass at a fraction of the render scale; its target, its copies' sizes and its draws' viewports follow)
     const float f = g_passScaleNext;
@@ -2751,9 +4567,19 @@ void BeginPass(const PassCmd& p) {
     SetDepthMask(true);
     G(glClearColor(p.rgba[0], p.rgba[1], p.rgba[2], p.rgba[3]));
     G(glClearDepthf(p.z));
-    TouchTarget(DN_CLEARED);
-    G(glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
-    ++C.clears;
+    GLbitfield clearMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
+    if (pxScan && g_px.deadClear && !p.atlasTex && st == GL_FRAMEBUFFER_COMPLETE) { // (GXV_PX_DEADCLEAR)
+        clearMask = PxPassClearMask();
+        if (!(clearMask & GL_COLOR_BUFFER_BIT)) ++g_pxN.clearColour;
+        if (!(clearMask & GL_DEPTH_BUFFER_BIT)) ++g_pxN.clearDepth;
+        if (!clearMask) ++g_pxN.clearWhole;
+    }
+    if (clearMask) { // (none left: the pass's scene begins with its first draw)
+        TouchTarget((clearMask & GL_DEPTH_BUFFER_BIT) ? DN_CLEARED : DN_KEEP);
+        if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear((clearMask & GL_COLOR_BUFFER_BIT) != 0, (clearMask & GL_DEPTH_BUFFER_BIT) != 0); // (GXV_GPU_SCENES=2)
+        G(glClear(clearMask));
+        ++C.clears;
+    }
     g_inPass = true;
     g_staticCrowdPassComplete = st == GL_FRAMEBUFFER_COMPLETE;
     g_rsValid = false;
@@ -2788,6 +4614,23 @@ void CopyTex(const CopyTexCmd& c) {
         if (c.fromPass && g_inPass) EndPass();
         Clear(c.clear, c.src);
         return;
+    }
+    // (census for the efbswap2 line: what the copies of a picture are)
+    ++C.copiesMade;
+    if (!c.fromPass && !c.srcTex && !c.dstTexW && !c.depth && !c.fill && c.src.x == 0 && c.src.y == 0 && c.src.w == g_efbW && c.src.h == g_efbH &&
+        c.dstW == g_efbW && c.dstH == g_efbH) {
+        ++C.wholeCopies;
+        bool rgb = true, a = true; // (rows r, g, b / row a: that channel unchanged)
+        for (int r = 0; r < 4; ++r) {
+            bool same = c.add[r] == 0;
+            for (int col = 0; col < 4; ++col) same = same && c.mat[r][col] == (r == col ? 1.0f : 0.0f);
+            if (r < 3) rgb = rgb && same;
+            else a = same;
+        }
+        if (rgb && !a) ++C.wholeRgb;
+        if (a && !rgb) ++C.wholeA;
+        if (c.swapOk) ++C.wholeOk;
+        if (c.swapPredictedNo) ++C.wholePredNo;
     }
     if (EfbSwap(c)) return; // (GXV_EFBSWAP)
     if (c.fromPass && g_pass >= 0 && g_passDirectTex == c.texId) {
@@ -2854,6 +4697,7 @@ void CopyTex(const CopyTexCmd& c) {
     if (c.depth && !g_hasDepthTex) {
         G(glClearColor(1, 1, 1, 1));
         TouchTarget();
+        if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(true, false); // (GXV_GPU_SCENES=2)
         G(glClear(GL_COLOR_BUFFER_BIT));
         ++C.clears;
     } else if (c.fill && !c.depth) {
@@ -2866,6 +4710,7 @@ void CopyTex(const CopyTexCmd& c) {
         for (int r = 0; r < 4; ++r) o[r] = c.mat[r][0] * q[0] + c.mat[r][1] * q[1] + c.mat[r][2] * q[2] + c.mat[r][3] * q[3] + c.add[r];
         G(glClearColor(o[0], o[1], o[2], o[3]));
         TouchTarget();
+        if (gpuscenes::g_mode >= 2) gpuscenes::NoteClear(true, false); // (GXV_GPU_SCENES=2)
         G(glClear(GL_COLOR_BUFFER_BIT));
         ++C.clears;
     } else {
@@ -2933,7 +4778,9 @@ void CapturePresented(const CopyDispCmd& c, int x, int y, int w, int h) {
         if (!PresentSharpened(fbo, x, y, w, h, 0, dy, pw, g_capPH, amount, false)) break;
         g_charaTint = g_capAB == 2 && pass == 2 ? 1 : (panels > 1 ? 0 : -1);
         if (g_capAB == 3) { g_charaKernel = pass == 1 ? 0 : 1; g_charaFull = pass == 3; } // (fxaa, sub, sub on the whole picture)
-        if (panels == 1 || pass >= 1) PresentCharaAA(fbo, x, y, w, h, 0, dy, pw, g_capPH, amount, false);
+        // (GXV_EDGE_AA: the whole picture again, smoothed, over the sharpened one; the character pass only where it did not draw)
+        if ((panels == 1 || pass >= 1) && !PresentEdgeAA(fbo, x, y, w, h, 0, dy, pw, g_capPH, amount, false))
+            PresentCharaAA(fbo, x, y, w, h, 0, dy, pw, g_capPH, amount, false);
     }
     g_charaTint = g_charaKernel = -1;
     g_charaFull = false;
@@ -2960,21 +4807,23 @@ void CopyDisp(const CopyDispCmd& c) {
         if (y + h > g_rtH) h = g_rtH - y;
         BindFbo(g_efbFbo);
         if (w > 0 && h > 0 && g_presentHook) {
+            bool sceneTransition = false;
             {
 #if VGX_COLDTRACE
             coldtrace::Scope presentTrace(coldtrace::g_recorder,coldtrace::Key{g_progFrame,0x10003u},coldtrace::Origin::Present);
 #endif
             EfbForRead();
+            XferFence(); // (tex11: the present ends the EFB's scene)
             g_charaDisp = &c; // (PresentCharaAA, called by the hook: this copy's rectangles)
-            g_presentHook(g_efbFbo, x, y, w, h);
+            sceneTransition = g_presentHook(g_efbFbo, x, y, w, h);
             g_charaDisp = nullptr;
             }
             // Whatever the hook did to the context: nothing cached is trusted any more,
             // and the EFB is the target again.
             Invalidate();
             g_rsValid = false;
-            g_inUseFbo = ~0u; // (the host presented: a new scene whatever comes next)
-            dplan::g_afterHook = true;
+            g_inUseFbo = ~0u; // (the hook may alter the target; only its result certifies a new scene)
+            dplan::g_afterHook = sceneTransition;
             BindFbo(g_efbFbo);
         }
         if (w > 0 && h > 0 && g_capture && CapturePresentSize()) {
@@ -3153,7 +5002,7 @@ void ResetCrowd();
 // expects) and the pooled framebuffer objects (those of the old sizes are let go).
 //   GXV_AUTOQ=1|0           the controller on (default on the Vita, where the GPU clock exists; off elsewhere) / off:
 //                           the EFB's own size, every build before this one
-//   GXV_AUTOQ_LEVEL=<rung>  a fixed rung, 0-8 (testing, no controller): 0 544x388, 1 592x422, 2 640x456, 3 720x480,
+//   GXV_AUTOQ_LEVEL=<rung>  a fixed rung, 0-8 (testing, no controller): 0 544x388, 1 592x424, 2 640x456, 3 720x480,
 //                           4 800x504, 5 880x520, 6 960x544, 7 960x544 with 2x multisampling, 8 960x544 4x (sizes for
 //                           the 640x456 EFB; another EFB scales alike)
 //   GXV_AUTOQ_MIN=<rung>, GXV_AUTOQ_MAX=<rung>   the lowest / highest rung the controller may use (default 0 / 8)
@@ -3435,6 +5284,9 @@ unsigned g_lastResampled = 0, g_lastPlain = 0; // (tests) render textures of the
 // false: the new EFB target got no memory; the old target, size and rung stay (the caller puts the controller back).
 bool ApplyRung(int rung, const char* why) {
     if (rung == g_rung || !g_efbFbo) return true;
+    // (the game's copies of whole pictures that it keeps across frames take a new one: the frozen pause picture, GameScene.cpp;
+    // told of every attempt, even one refused for memory below: a copy taken again at the same size costs one picture)
+    if (port_render_size_changed) port_render_size_changed();
     const int fromRung = g_rung, oldW = g_rtW, oldH = g_rtH, oldSamples = g_efbSamples;
     const double t0 = NowMs();
     const uint64_t before = RenderTargetBytes();
@@ -3771,6 +5623,22 @@ void AutoQualityInit() {
     }
     cfg.minRung = static_cast<int>(EnvInt("GXV_AUTOQ_MIN", cfg.minRung));
     cfg.maxRung = std::min(static_cast<int>(EnvInt("GXV_AUTOQ_MAX", cfg.maxRung)), TopRung());
+    // GXV_AUTOQ_START=<rung>: the rung a run starts at (default 2, 640x456). The Settings' "Locked 30" (GXV_FPS_LIMIT=30) starts at
+    // 6, the screen's own 960x544: at 30 pictures a second the GPU has twice the time, so the picture is spent on quality; an overload
+    // steps down as in any mode (GXV_AUTOQ_OVERLOAD).
+    {
+        const bool locked30 = EnvInt("GXV_FPS_LIMIT", 0) == 30;
+        // GXV_AUTOQ_LOCKED30_FLOOR=<rung> (default 6) / GXV_AUTOQ_LOCKED30_START (default 7): r57 console A/B, lit Observatory at zoom
+        // 1.0, Locked 30: 960x544 with 2x multisampling ran at 27.2 fps, 720x404 at 27.3 - the picture rate there is set by the game
+        // thread, and the "GPU load" the controller saw (122 %) counted the GPU's waits for that CPU-paced picture rate. So Locked 30
+        // starts at 960x544 2x and never goes below 960x544; an overload can still take the multisampling away. 0 = the old floor.
+        if (locked30) {
+            const long floor = EnvInt("GXV_AUTOQ_LOCKED30_FLOOR", 6);
+            if (floor > 0) cfg.minRung = std::max(cfg.minRung, static_cast<int>(std::min<long>(floor, cfg.maxRung)));
+        }
+        const long start = EnvInt("GXV_AUTOQ_START", locked30 ? EnvInt("GXV_AUTOQ_LOCKED30_START", 7) : cfg.startRung);
+        cfg.startRung = std::clamp(static_cast<int>(start), std::max(cfg.minRung, 0), cfg.maxRung);
+    }
     cfg.upTarget = static_cast<double>(EnvInt("GXV_AUTOQ_UP", calm ? 70 : 78)) / 100.0;
     // GXV_AUTOQ_RECOVER=1 (default 0; calm mode): the way back up after an overload without a pause or 120 s of room in a row
     // (vgx_autoq.h, "Recovery"). GXV_AUTOQ_RECOVER_SEC=<5..120> (default 20): the room in a row it needs. Read once, here.
@@ -3786,14 +5654,23 @@ void AutoQualityInit() {
     // GXV_AUTOQ_SPACING=<frames>: two changes at least this many frames apart (default 20; the Strikers port, 160c3f9)
     cfg.minChangeFrames = static_cast<int>(EnvInt("GXV_AUTOQ_SPACING", 20));
     // GXV_AUTOQ_FXSTEP=0|1|2 (default 0; target 30 or 60 only): floor protection by degrees (vgx_autoq.h). 1: at 640x456, a GPU-limited miss
-    // first halves the effects and blur passes (GXV_FXHALF / GXV_PASSHALF as a runtime state), before any smaller picture; 2: and
-    // then makes the background's textures cheaper (the nearest mip level, not the blend of two, for draws that sample no character's
-    // or key item's texture). Each step is kept only if it shortens the GPU's busy time; the way back is the reverse.
+    // halves the effects and blur passes (GXV_FXHALF / GXV_PASSHALF as a runtime state), before any smaller picture; 2: first tries
+    // cheaper mip filtering on eligible background draws, then half-size effects. GPU-timed trials; recovery is the reverse.
+    // 3: the cheaper background only, never half-size effects (the console, 1 Nov: at the Observatory half-size effects added ten
+    // render-target scenes and ten copy quads a picture, the renderer's CPU rose from 15 to 24 ms a picture and the picture rate
+    // did not rise; the step costs more than it saves wherever the renderer or the game is the limit).
     if (const long steps = targetFps ? EnvInt("GXV_AUTOQ_FXSTEP", 0) : 0; steps >= 1) {
         const bool fxStatic = EnvInt("GXV_FXHALF", 0) != 0 && EnvInt("GXV_PASSHALF", 0) != 0;
-        cfg.fxStep = !fxStatic;
+        cfg.fxStep = !fxStatic && steps != 3;
         cfg.bgStep = steps >= 2;
     }
+    // GXV_AUTOQ_EDGESTEP=1 (default 0; target 30 or 60, with GXV_EDGE_AA on; the Settings' Performance mode sets it): the present's
+    // whole-picture edge smoothing is the first step at 640x456's rung under GPU load (before the cheaper background), the last one back
+    // (vgx_autoq.h "Performance mode"). It needs no new render target and no program (the present without it is the start-up one).
+    cfg.edgeStep = targetFps && EnvInt("GXV_AUTOQ_EDGESTEP", 0) != 0 && EnvInt("GXV_EDGE_AA", 0) != 0;
+    // GXV_AUTOQ_FRONT=-1|0|1 (default -1): the front end's CPU a picture (stamped at each display copy by the player thread) as a stage of the
+    // whole-picture work in the decisions: target 60 only / never / in target 30 too. The floor census counts it whenever it is measured.
+    cfg.frontStage = static_cast<int>(std::clamp<long>(EnvInt("GXV_AUTOQ_FRONT", -1), -1, 1));
     // GXV_AUTOQ_ANISO=0|1|2|3 (default 0; target 30 or 60 only): anisotropic filtering as the top of the ladder (vgx_autoq.h): on when the GPU
     // has room at the highest rung, the first thing given up under load (before the multisampled rungs), on again last. 1 or 2: the
     // switch's filter value 2; 3: its value 3 (which of the two vitaGL's GXM minification filters is the anisotropic one is
@@ -3807,6 +5684,50 @@ void AutoQualityInit() {
             g_anisoFilter = an >= 3 ? 3u : 2u;
         }
     }
+    // Play-time quality (vgx_autoq.h; target 30 or 60 only, calm mode for the wipe rule; each default off here, on in the Vita's entry.cpp):
+    //   GXV_AUTOQ_FREE=<percent>   a step up (rung or anisotropic filtering) keeps the GPU's predicted busy time within this share of the
+    //                              picture interval the CPU stages set, and above today's rung a GPU that sets the pace steps back (50-100; 0 off)
+    //   GXV_AUTOQ_WIPE=1           fades, wipes and loads: no step up there, a rung above 640x456 back to it while the screen is closed
+    //   GXV_AUTOQ_LATEROOM=1       a late picture whose own work fits does not end a stretch of room (the front end's hitches)
+    //   GXV_AUTOQ_ANISO_RUNG=<r>   anisotropic filtering (GXV_AUTOQ_ANISO) may be on from rung r up (default: the top rung only)
+    if (targetFps) {
+        if (const long fr = EnvInt("GXV_AUTOQ_FREE", 0); fr > 0) cfg.freeFrac = static_cast<double>(std::clamp<long>(fr, 50, 100)) / 100.0;
+        // (Locked 30, the quality mode, keeps its picture size across fades and loads: GXV_AUTOQ_WIPE_LOCKED30=1 applies the rule there too)
+        cfg.newStage = calm && EnvInt("GXV_AUTOQ_NEWSTAGE", 1) != 0;  // (default on: r73, a tour kept Beach Bowl's small picture in every later stage)
+        cfg.wipe = calm && EnvInt("GXV_AUTOQ_WIPE", 0) != 0 && (EnvInt("GXV_FPS_LIMIT", 0) != 30 || EnvInt("GXV_AUTOQ_WIPE_LOCKED30", 0) != 0);
+        cfg.lateRoom = EnvInt("GXV_AUTOQ_LATEROOM", 0) != 0;
+        if (const long ar = EnvInt("GXV_AUTOQ_ANISO_RUNG", -9); cfg.aniso && ar >= 0) cfg.anisoRung = static_cast<int>(std::min<long>(ar, autoq::kRungs - 1));
+        // GXV_AUTOQ_OVERLOAD=0|1|2 (default 0; on in the Vita's entry.cpp): a severe GPU overload in play is acted on within about a
+        // second, in one change (vgx_autoq.h "Severe overload in play"); slow pictures that are the GPU's work are measured. 2: such an
+        // overload may also take half-size effects and blur when GXV_AUTOQ_FXSTEP leaves them out.
+        if (const long ov = EnvInt("GXV_AUTOQ_OVERLOAD", 0); ov > 0) {
+            cfg.overload = true;
+            cfg.overloadFx = ov >= 2 && !(EnvInt("GXV_FXHALF", 0) != 0 && EnvInt("GXV_PASSHALF", 0) != 0);
+        }
+        // GXV_AUTOQ_HOLD30=1|0 (default 1): Quality mode judged by the pictures (vgx_autoq.h, Config::hold30). Only at target 30 under the
+        // fixed 30 cap (GXV_FPS_LIMIT=30, the driver able to hold it) with a floor below 960x544, i.e. the Settings' Quality; Locked 30
+        // (floor 960x544) and Performance (target 60) keep their rules. r82: the lit Observatory held 147-151 of 150 pictures at 960x544
+        // with the GPU busy 32.5 ms, yet one ~102 % window took it to 784x440 for good. 0: the GPU-busy rules as before.
+        cfg.hold30 = targetFps == 30 && EnvInt("GXV_FPS_LIMIT", 0) == 30 && cfg.minRung < autoq::kTopSingle &&
+                     (!port_vgx_vita_fixed_cap_supported || port_vgx_vita_fixed_cap_supported() != 0) && EnvInt("GXV_AUTOQ_HOLD30", 1) != 0;
+        // GXV_AUTOQ_CADENCE_UP=1|0 (default 1; target 60 only): the way back on Performance mode's steady 30 (vgx_autoq.h,
+        // Config::cadenceUp). r98, Beach Bowl: the mode went 720x404 -> 608x348 chasing 60, then the steady 30 engaged (GPU 24-28 ms, none
+        // late) and it stayed at 608x348 with the cheaper background for good, the same 30 as Quality at 720x404, because every way back is
+        // judged against 16.7 ms. With it a window on the steady 30 climbs (to 720x404 at most) and takes its steps off against 33.3 ms,
+        // only where 60 is out of reach at any size: the reach is the steady 30's own release (GXV_STEADY30_ABOVE, 45 a second, read and
+        // bounded as port/perf.cpp does, so the two agree). 0: the old decisions.
+        cfg.cadenceUp = targetFps == 60 && EnvInt("GXV_AUTOQ_CADENCE_UP", 1) != 0;
+        if (cfg.cadenceUp) {
+            const long below = std::clamp<long>(EnvInt("GXV_STEADY30_BELOW", static_cast<long>(port::pace::kSteady30BelowFps)), 20, 58);
+            const long above = std::clamp<long>(EnvInt("GXV_STEADY30_ABOVE", static_cast<long>(port::pace::kSteady30AboveFps)), 31, 60);
+            cfg.cadenceReachFps = std::max(static_cast<double>(above), static_cast<double>(below) + 3.0);
+        }
+        // GXV_AUTOQ_EDGECHECK=1|0 (default 1; target 60 with GXV_AUTOQ_EDGESTEP): the edge step's trial over 4 s, kept for a 3 % fall of
+        // the GPU's time (vgx_autoq.h, Config::edgeCheck). Good Egg, 720x404 pinned: 20.9 -> 18.4 ms of GPU a picture without the present's
+        // edge smoothing, yet its 2 s trial in play read only 5 % through the camera's noise and undid it. 0: checkSec and betterFrac as
+        // before.
+        cfg.edgeCheck = targetFps == 60 && cfg.edgeStep && EnvInt("GXV_AUTOQ_EDGECHECK", 1) != 0;
+    }
     if (!autoq::clock::Start()) {
         autoq::Log("[autoq] off: no GPU clock here, the EFB's own size");
         return;
@@ -3814,20 +5735,57 @@ void AutoQualityInit() {
     g_autoq = std::make_unique<autoq::Controller>(cfg);
     const autoq::Config& c = g_autoq->Cfg();
     SetRungFactors(g_autoq->Current());
-    if (c.fxStep || c.bgStep)
-        autoq::Log("[autoq] GXV_AUTOQ_FXSTEP: at 640x456, a GPU-limited miss first takes %s%s%s before any smaller picture (each step kept only if it shortens the GPU's busy time; the way back is the reverse)",
-                   c.fxStep ? "half-size effects and blur" : "", c.fxStep && c.bgStep ? ", then " : "", c.bgStep ? "cheaper background textures" : "");
+    if (c.fxStep || c.bgStep || (c.edgeStep && !c.hold30))
+        autoq::Log("[autoq] GXV_AUTOQ_FXSTEP%s: at 640x456, a GPU-limited miss first takes %s%s%s%s%s before any smaller picture (GPU-timed trials; the way back is the reverse)",
+                   c.edgeStep && !c.hold30 ? "/EDGESTEP" : "", c.edgeStep && !c.hold30 ? "the present's edge smoothing off" : "",
+                   c.edgeStep && !c.hold30 && (c.bgStep || c.fxStep) ? ", then " : "",
+                   c.bgStep ? "cheaper background mip filtering" : "", c.fxStep && c.bgStep ? ", then " : "", c.fxStep ? "half-size effects and blur" : "");
     if (c.aniso) {
         char top[32];
         RungText(c.maxRung, top, sizeof top);
-        autoq::Log("[autoq] GXV_AUTOQ_ANISO: anisotropic filtering (filter %u) at rung %d (%s) after %.0f s of room, the first thing given up under load, on again last",
-                   g_anisoFilter, c.maxRung, top, c.anisoHoldSec);
+        if (c.anisoRung == autoq::kNoRung)
+            autoq::Log("[autoq] GXV_AUTOQ_ANISO: anisotropic filtering (filter %u) at rung %d (%s) after %.0f s of room, the first thing given up under load, on again last",
+                       g_anisoFilter, c.maxRung, top, c.anisoHoldSec);
+        else {
+            char low[32];
+            RungText(g_autoq->AnisoMinRung(), low, sizeof low);
+            autoq::Log("[autoq] GXV_AUTOQ_ANISO: anisotropic filtering (filter %u) at rungs %d (%s) to %d (%s) after %.0f s of room (GXV_AUTOQ_ANISO_RUNG), "
+                       "the first thing given up under load, off at any change of size", g_anisoFilter, g_autoq->AnisoMinRung(), low, c.maxRung, top, c.anisoHoldSec);
+        }
     }
+    if (c.freeFrac > 0.0)
+        autoq::Log("[autoq] GXV_AUTOQ_FREE: a step up only while the GPU stays within %.0f %% of the picture interval (quality never costs pictures); "
+                   "above 640x456 a GPU busy %.0f %% of it for %.0f s steps back", c.freeFrac * 100.0, c.freeDownFrac * 100.0, c.freeDownSec);
+    if (c.wipe) autoq::Log("[autoq] GXV_AUTOQ_WIPE: fades, wipes and loads lead into unmeasured areas: no step up there, above 640x456 back to it while the screen is closed");
+    if (c.overload)
+        autoq::Log("[autoq] GXV_AUTOQ_OVERLOAD: pictures whose GPU time each reaches the budget for %.1f s with a mean of %.0f %% of it take what the GPU "
+                   "time says is needed at once (%s%ssmaller sizes to %d); slow pictures that are the GPU's work are measured", c.overloadSec, c.overloadFrac * 100.0,
+                   c.bgStep ? "cheaper background, " : "", c.fxStep || c.overloadFx ? "half-size effects, " : "", c.minRung);
+    if (c.lateRoom) autoq::Log("[autoq] GXV_AUTOQ_LATEROOM: a late picture whose own work fits (the front end's hitches) does not end a stretch of room");
+    if (c.hold30)
+        autoq::Log("[autoq] GXV_AUTOQ_HOLD30: Quality judged by the pictures: a smaller size only after %d windows of %.0f s in a row with more than %.0f %% of the pictures "
+                   "late for the GPU (late for the game's CPU never costs size; GPU busy %% alone never does), one size at a time; below the start a trial one size up "
+                   "after %d windows with every picture on time and the GPU within %.0f %% of the budget, back and blocked if it loses pictures within %.0f s",
+                   c.holdMissWindows, c.holdWindowSec, c.holdMissFrac * 100.0, c.holdClimbWindows, c.holdClimbGpuFrac * 100.0, c.holdTrialSec);
+    if (c.hold30 && c.edgeStep)
+        autoq::Log("[autoq] GXV_AUTOQ_HOLD30/EDGESTEP: such a miss first takes the present's edge smoothing off at the size it happens (before any step or "
+                   "smaller size); on again after the size, when every picture came on time and the GPU plus its measured saving fits, as a trial (blocked "
+                   "60 s doubling after a failed one)");
+    if (c.cadenceUp)
+        autoq::Log("[autoq] GXV_AUTOQ_CADENCE_UP: on the steady 30, with 60 out of reach at any size (floor rung's GPU or the other stages "
+                   "at %.1f ms or more, under %.0f a second), sizes up to 720x404 and the quality steps come back against 33.3 ms (within "
+                   "%.0f %%, the cadence held, none late for the GPU); a climb that then loses pictures to the GPU goes back within %.0f s "
+                   "and that size is blocked", 1000.0 / c.cadenceReachFps, c.cadenceReachFps, c.cadenceUpFrac * 100.0, c.holdTrialSec);
+    if (c.edgeCheck)
+        autoq::Log("[autoq] GXV_AUTOQ_EDGECHECK: the edge step's trial is judged over %.0f s and kept when the GPU's time fell by %.1f %% "
+                   "or more",
+                   c.edgeCheckSec, 100.0 * std::min(0.5 * (1.0 - 1.0 / std::max(c.edgeRatio, 1.0)), c.edgeBetterFrac));
     if (targetFps == 30) autoq::Log("[autoq] target 30: whole-picture work (two game turns, renderer CPU, GPU busy; overlapping stages use max); emergency floor 480x340 after a sustained GPU miss at 544x388");
     if (targetFps == 60)
-        autoq::Log("[autoq] target 60 (Performance mode): as close to 60 pictures a second as the GPU allows; whole-picture work (one game turn, renderer CPU, GPU busy; "
-                   "overlapping stages use max) against 16.7 ms; only a GPU-limited miss lowers quality (cheaper effects and background first, then sizes to 544x388, "
-                   "480x340 last); a game-CPU-limited scene keeps its size");
+        autoq::Log("[autoq] target 60 (Performance mode): as close to 60 pictures a second as the GPU allows; whole-picture work (one game turn, front end CPU, "
+                   "renderer CPU, GPU busy; overlapping stages use max) against 16.7 ms; only a GPU-limited miss lowers quality (edge smoothing, cheaper background "
+                   "and effects first, then sizes to rung %d), and a series of smaller sizes is kept only when it shows more pictures; a CPU-limited scene keeps its "
+                   "size (under the pacing's steady 30 it is judged against 33.3 ms)", cfg.minRung);
     char lo[32], hi[32], st[32];
     RungText(c.minRung, lo, sizeof lo);
     RungText(c.maxRung, hi, sizeof hi);
@@ -3871,9 +5829,9 @@ void AutoQualityStatus() {
         autoq::Log("[autoq] status: rung %d (%dx%d, %d samples, for EFB %dx%d), render targets %.1f MiB in %u pooled objects (no controller)", g_rung, g_rtW, g_rtH,
                    g_efbSamples, g_efbW, g_efbH, static_cast<double>(RenderTargetBytes()) / 1048576.0, static_cast<unsigned>(g_pool.size()));
     if (g_autoq && g_autoq->Cfg().targetFps != 0)
-        autoq::Log("[autoq] target %d work: game %s %.1f ms, renderer CPU %.1f ms, GPU %.1f ms; overlapping maximum %.1f ms against %.3f ms",
-                   g_autoq->Cfg().targetFps, g_autoq->Cfg().targetFps == 60 ? "one turn" : "two turns", g_autoq->WindowGameMs(), g_autoq->WindowBackendMs(), g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs,
-                   g_autoq->WindowWorkMs(), g_autoq->Cfg().budgetMs);
+        autoq::Log("[autoq] target %d work: game %s %.1f ms, renderer CPU %.1f ms, front end CPU %.1f ms, GPU %.1f ms; overlapping maximum %.1f ms against %.3f ms",
+                   g_autoq->Cfg().targetFps, g_autoq->Cfg().targetFps == 60 ? "one turn" : "two turns", g_autoq->WindowGameMs(), g_autoq->WindowBackendMs(),
+                   g_autoq->WindowFrontMs(), g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs, g_autoq->WindowWorkMs(), g_autoq->Cfg().budgetMs);
     double freeMiB = 0;
     if (FreeVram(freeMiB))
         autoq::Log("[autoq] status: video memory free %.1f MiB (vitaGL's pool); %u retired render textures kept as spares (GXV_KEEP_RT)", freeMiB,
@@ -3898,32 +5856,63 @@ void FloorReport() {
     const autoq::FloorWindow w = g_autoq->TakeFloor();
     char rungText[32];
     RungText(g_rung, rungText, sizeof rungText);
-    char steps[128] = "";
-    if (g_autoq->Cfg().fxStep || g_autoq->Cfg().bgStep)
-        std::snprintf(steps, sizeof steps, "; half-size effects %s, cheaper background %s", g_autoq->FxStepOn() ? "on" : "off", g_autoq->BgStepOn() ? "on" : "off");
+    char steps[160] = "";
+    if (g_autoq->Cfg().fxStep || g_autoq->Cfg().bgStep || g_autoq->Cfg().edgeStep)
+        std::snprintf(steps, sizeof steps, "; half-size effects %s, cheaper background %s%s", g_autoq->FxStepOn() ? "on" : "off", g_autoq->BgStepOn() ? "on" : "off",
+                      g_autoq->Cfg().edgeStep ? (g_autoq->EdgeStepOn() ? ", edge smoothing off" : ", edge smoothing on") : "");
     if (g_autoq->Cfg().aniso) {
         const size_t used = std::strlen(steps);
         std::snprintf(steps + used, sizeof steps - used, "; anisotropic filtering %s", g_autoq->AnisoOn() ? "on" : "off");
     }
-    char extra[96] = "";
+    char extra[256] = "";
     if (w.stalls || w.quiet)
         std::snprintf(extra, sizeof extra, "; not counted: %u stalls (%.2f s), %u pause/fade pictures", w.stalls, static_cast<double>(w.stallUs) / 1e6, w.quiet);
+    if (w.cadence) {
+        // (target 60: pictures the pacing showed on its steady 30, judged against 33.3 ms, GXV_STEADY30)
+        const size_t used = std::strlen(extra);
+        std::snprintf(extra + used, sizeof extra - used, "; %u on the steady 30", w.cadence);
+    }
+    if (g_autoq->Windows() != 0) {
+        // (the GPU's room in play: its busy time a picture against the picture interval, last decision window; GXV_AUTOQ_FREE reads the same two)
+        const size_t used = std::strlen(extra);
+        std::snprintf(extra + used, sizeof extra - used, "; last window GPU %.1f ms a picture, a picture every %.1f ms", g_autoq->WindowLoad() * g_autoq->Cfg().budgetMs,
+                      g_autoq->WindowIntervalMs());
+    }
+    if (g_autoq->Cfg().hold30 && g_autoq->HoldWindows() != 0) {
+        // (GXV_AUTOQ_HOLD30: the last hold window the decisions read, and the runs of misses / calm windows in a row)
+        const autoq::Controller::HoldWindow& h = g_autoq->LastHold();
+        const size_t used = std::strlen(extra);
+        std::snprintf(extra + used, sizeof extra - used, "; hold30 %u/%u on time, %u late for GPU, runs miss %d calm %d", h.pictures - h.late, h.pictures,
+                      h.lateGpu, g_autoq->HoldMissRun(), g_autoq->HoldCalmRun());
+    }
     const double late = static_cast<double>(w.lateUs) / 1e6;
     if (w.late == 0) {
         autoq::LogSummary("floor: %.1f s, %u pictures, none under %d; rung %d (%s)%s%s", window, w.pictures, g_autoq->Cfg().targetFps, g_rung, rungText, steps, extra);
         return;
     }
     autoq::LogSummary("floor: %.1f s, %u pictures, %u late (over %.1f ms) = %.2f s below %d, worst %.0f ms; late by GPU %u, game CPU %u, renderer CPU %u, "
-                      "none of the three (front end, waits, pacing) %u, not measured %u; rung %d (%s)%s%s",
+                      "front end CPU %u, none of these (waits, pacing) %u, not measured %u; rung %d (%s)%s%s",
                       window, w.pictures, w.late, g_autoq->Cfg().budgetMs * 1.03, late, g_autoq->Cfg().targetFps, static_cast<double>(w.worstUs) / 1000.0, w.gpu, w.game, w.renderer,
-                      w.other, w.unknown, g_rung, rungText, steps, extra);
+                      w.front, w.other, w.unknown, g_rung, rungText, steps, extra);
 }
 
 void AutoQualityFrame() {
     g_stepFx = g_stepFxWanted; // (the steps latch here: a frame is wholly one state)
     g_stepBg = g_stepBgWanted;
+    g_stepEdge = g_stepEdgeWanted;
+    {
+        // GXV_QUIET_FXHALF=1 (default 0, a test switch): the pause menu and closed fades draw effects and blur at half size whatever the
+        // controller decided (it does not measure those pictures, so it never steps down for them; the pause screen measured GPU-bound
+        // at ~10 FPS on 4 Nov). The way back is immediate: the next picture that is not quiet has the controller's state again.
+        static const bool quietFx = EnvInt("GXV_QUIET_FXHALF", 0) != 0;
+        if (quietFx && port_screen_quiet && port_screen_quiet() != 0) {
+            static bool warmed = false;
+            if (!warmed) { WarmFxPrograms(); warmed = true; }
+            g_stepFx = true;
+        }
+    }
     AnisoLatch();
-    if (g_autoq && g_autoq->Cfg().fxStep) WarmFxPrograms();
+    if (g_autoq && (g_autoq->Cfg().fxStep || g_autoq->Cfg().overloadFx)) WarmFxPrograms();
     AutoQualityStatus();
     if (g_forceRung != autoq::kNoRung) {
         if (g_autoq && g_autoq->Cfg().aniso) g_anisoWanted = false; // (the controller that owned the switch is stopped: back to the plain picture)
@@ -3948,11 +5937,16 @@ void AutoQualityFrame() {
     autoq::FrameTimes f;
     int want = autoq::kNoRung;
     // (calm mode: the game's quiet moments and stage, as they are now; the frames handed over are a frame or two older)
-    const bool quiet = port_screen_quiet && port_screen_quiet() != 0;
+    // (port_screen_quiet: 1 the pause menu, 2 a fade or wipe that has the screen closed)
+    const int quietKind = port_screen_quiet ? port_screen_quiet() : 0;
+    const bool quiet = quietKind != 0;
+    const bool movie = port_skip_movie_playing && port_skip_movie_playing() != 0;  // (forkB: a movie neither measured nor a step)
     const uint32_t scene = port_scene_key ? port_scene_key() : 0;
     while (autoq::clock::NextDone(f)) {
         ++g_autoqTimed;
         f.quiet = quiet;
+        f.movie = movie;
+        f.wipe = quietKind == 2;
         f.scene = scene;
         if (g_autoq->Add(f)) want = g_autoq->Current();
     }
@@ -3964,14 +5958,20 @@ void AutoQualityFrame() {
         autoq::Log("[autoq] anisotropic filtering now %s at rung %d (%s): %s (GPU %.0f %% of the budget, %.1f ms a picture)", g_aniso ? "on" : "off", g_rung,
                    RungSizeText(g_rung), autoq::WhyText(ac.why), ac.load * 100.0, ac.intervalMs);
     }
-    if (g_autoq->FxStepOn() != g_stepFxWanted || g_autoq->BgStepOn() != g_stepBgWanted) {
+    if (double before = 0, after = 0; g_autoq->Cfg().aniso && g_autoq->TakeAnisoMeasure(before, after))
+        autoq::Log("[autoq] anisotropic filtering measured at rung %d (%s): GPU %.1f ms a picture before, %.1f ms over the %.0f s after (x%.2f; assumed x%.2f)", g_rung,
+                   RungSizeText(g_rung), before, after, g_autoq->Cfg().checkSec, before > 0.0 ? after / before : 0.0, g_autoq->Cfg().anisoRatio);
+    if (g_autoq->FxStepOn() != g_stepFxWanted || g_autoq->BgStepOn() != g_stepBgWanted || g_autoq->EdgeStepOn() != g_stepEdgeWanted) {
         const autoq::Change& fc = g_autoq->LastFxChange();
         g_stepFxWanted = g_autoq->FxStepOn();
         g_stepBgWanted = g_autoq->BgStepOn();
+        g_stepEdgeWanted = g_autoq->EdgeStepOn();
         g_stepFx = g_stepFxWanted;
         g_stepBg = g_stepBgWanted;
-        autoq::Log("[autoq] quality steps now: half-size effects and blur %s, cheaper background %s, at rung %d (%s): %s (GPU %.0f %% of the budget, %.1f ms a picture)",
-                   g_stepFx ? "on" : "off", g_stepBg ? "on" : "off", g_rung, RungSizeText(g_rung), autoq::WhyText(fc.why), fc.load * 100.0, fc.intervalMs);
+        g_stepEdge = g_stepEdgeWanted;
+        autoq::Log("[autoq] quality steps now: half-size effects and blur %s, cheaper background %s%s, at rung %d (%s): %s (GPU %.0f %% of the budget, %.1f ms a picture)",
+                   g_stepFx ? "on" : "off", g_stepBg ? "on" : "off", g_autoq->Cfg().edgeStep ? (g_stepEdge ? ", edge smoothing off" : ", edge smoothing on") : "",
+                   g_rung, RungSizeText(g_rung), autoq::WhyText(fc.why), fc.load * 100.0, fc.intervalMs);
     }
     double needMiB = 0, freeMiB = 0;
     // Short of video memory above 640x456 (textures of a new scene, other render targets): back to it now.
@@ -4012,7 +6012,7 @@ void AutoQualityFrame() {
         const autoq::Change& ch = g_autoq->LastChange();
         char why[200];
         if (ch.why == autoq::Why::NewScene) std::snprintf(why, sizeof why, "%s", autoq::WhyText(ch.why));
-        else if (quiet && ch.why == autoq::Why::Headroom)
+        else if (quiet && (ch.why == autoq::Why::Headroom || ch.why == autoq::Why::CadenceUp))
             std::snprintf(why, sizeof why, "%s, taken in a quiet moment (GPU load %.0f %%, back-end CPU %.0f %%, %.1f ms a frame in play)", autoq::WhyText(ch.why),
                           ch.load * 100.0, ch.cpu * 100.0, ch.intervalMs);
         else
@@ -4040,6 +6040,7 @@ void DebugSetQualitySteps(bool fxHalf, bool cheapBackground) {
     g_stepBgWanted = cheapBackground;
     if (fxHalf) WarmFxPrograms();
 }
+void DebugSetEdgeStep(bool off) { g_stepEdgeWanted = off; }
 void ForceQualityRung(int rung) { g_forceRung = std::clamp(rung, autoq::TargetEnabled() ? autoq::kEmergency : 0, TopRung()); }
 void DebugFailAllocation(int nth) { g_simFailAt = nth; g_simChecks = 0; }
 void DebugLastChange(unsigned& resampled, unsigned& plain) { resampled = g_lastResampled; plain = g_lastPlain; }
@@ -4048,6 +6049,12 @@ void QualityRungSize(int& w, int& h, int& samples) { w = g_rtW; h = g_rtH; sampl
 
 int QualityTopRung() { return TopRung(); }
 unsigned DebugEfbSwaps() { return g_efbSwapsTotal; }
+unsigned DebugEfbSwapsPartial() { return g_efbSwapsPartialTotal; }
+unsigned DebugRawConverts() { return g_rawConvertsTotal; }
+unsigned DebugEfbSwapHolds() { return g_efbSwapHoldsTotal; }
+unsigned DebugEfbLoadFroms() { return g_efbLoadFromsTotal; }
+void SetColorLoadHook(ColorLoadHook hook) { g_colorLoadHook = hook; }
+unsigned DebugEfbAdopts() { return g_efbAdoptsTotal; }
 const sanitize::Counts& DebugSanitizeCounts() { return g_san; } // (GXV_SANITIZE: tests)
 int EfbSamples() { return g_efbSamples; }
 
@@ -4111,7 +6118,9 @@ void DebugPoolStats(unsigned& pooled, uint64_t& renderTargetBytes, uint64_t& evi
     evicted = g_poolEvicted;
 }
 
+namespace { void RawConvertTexture(uint32_t texId); } // (GXV_EFBSWAP2, below)
 bool DebugReadTexture(uint32_t texId, std::vector<uint8_t>& rgba, int& width, int& height) {
+    RawConvertTexture(texId); // (GXV_EFBSWAP2: what the copy holds, not the EFB's buffer it was made with)
     if (texId >= g_tex.size() || !g_tex[texId].id) return false;
     const Tex& t = g_tex[texId];
     width = t.w;
@@ -4153,26 +6162,43 @@ bool EnsureSharpenProgram() {
         "         + texture2D(u_src, clamp(uv + vec2(0.0, u_size.w), u_lim.xy, u_lim.zw)) + texture2D(u_src, clamp(uv - vec2(0.0, u_size.w), u_lim.xy, u_lim.zw));\n"
         "  c = c + (c - b * 0.25) * u_p.z;\n"
         "  gl_FragColor = vec4(c.rgb, 1.0);\n}\n";
-    const GLuint v = Compile(GL_VERTEX_SHADER, vs, "sharpen vertex"), f = Compile(GL_FRAGMENT_SHADER, fs, "sharpen fragment");
-    GLint vok = 0, fok = 0, lok = 0;
+    static const char* fsHalf =
+        "#ifdef VITAGL\n#define RGBV half3\n#else\n#define RGBV vec3\n#endif\n"
+        "precision highp float;\nuniform sampler2D u_src;\nuniform vec4 u_size;\nuniform vec4 u_lim;\nuniform vec4 u_p;\nvarying vec2 v_uv;\nvoid main() {\n"
+        "  vec2 uv = clamp(v_uv, u_lim.xy, u_lim.zw);\n"
+        "  vec3 c = texture2D(u_src, uv).rgb;\n"
+        "  RGBV b = RGBV(texture2D(u_src, clamp(uv + vec2(u_size.z, 0.0), u_lim.xy, u_lim.zw)).rgb) + RGBV(texture2D(u_src, clamp(uv - vec2(u_size.z, 0.0), u_lim.xy, u_lim.zw)).rgb)\n"
+        "         + RGBV(texture2D(u_src, clamp(uv + vec2(0.0, u_size.w), u_lim.xy, u_lim.zw)).rgb) + RGBV(texture2D(u_src, clamp(uv - vec2(0.0, u_size.w), u_lim.xy, u_lim.zw)).rgb);\n"
+        "  vec3 result = vec3(c) + (vec3(c) - vec3(b) * 0.25) * u_p.z;\n"
+        "  gl_FragColor = vec4(result, 1.0);\n}\n";
+    const GLuint v = Compile(GL_VERTEX_SHADER, vs, "sharpen vertex");
+    GLint vok = 0;
     if (v) G(glGetShaderiv(v, GL_COMPILE_STATUS, &vok));
-    if (f) G(glGetShaderiv(f, GL_COMPILE_STATUS, &fok));
     GLuint prog = 0;
-    if (vok && fok) {
-        prog = G(glCreateProgram());
-        if (BadGlName(prog)) prog = 0;
-    }
-    if (prog) {
-        G(glAttachShader(prog, v));
-        G(glAttachShader(prog, f));
-        G(glBindAttribLocation(prog, AT_POS, "a_pos"));
-        G(glLinkProgram(prog));
-        G(glGetProgramiv(prog, GL_LINK_STATUS, &lok));
+    // Half precision is confined to the positive neighbor sum. Keep the original
+    // five-tap program as a single fallback before reverting to the existing blit.
+    for (unsigned attempt = 0; vok && attempt != 2; ++attempt) {
+        const GLuint f = Compile(GL_FRAGMENT_SHADER, attempt ? fs : fsHalf, "sharpen fragment");
+        GLint fok = 0, lok = 0;
+        if (f) G(glGetShaderiv(f, GL_COMPILE_STATUS, &fok));
+        if (fok) {
+            prog = G(glCreateProgram());
+            if (BadGlName(prog)) prog = 0;
+        }
+        if (prog) {
+            G(glAttachShader(prog, v));
+            G(glAttachShader(prog, f));
+            G(glBindAttribLocation(prog, AT_POS, "a_pos"));
+            G(glLinkProgram(prog));
+            G(glGetProgramiv(prog, GL_LINK_STATUS, &lok));
+        }
+        if (f) G(glDeleteShader(f));
+        if (lok) break;
+        if (prog) G(glDeleteProgram(prog));
+        prog = 0;
     }
     if (v) G(glDeleteShader(v));
-    if (f) G(glDeleteShader(f));
-    if (!lok) {
-        if (prog) G(glDeleteProgram(prog));
+    if (!prog) {
         g_sharp.failed = true;
         autoq::Log("[autoq] the sharpening shader did not build: the display copy is blitted as before");
         return false;
@@ -4188,8 +6214,15 @@ bool EnsureSharpenProgram() {
 }
 } // namespace
 
+namespace { // (GXV_PRESENT_FAST, "the fast present" below)
+int FastEnv();
+bool PresentFastDraw(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY, bool edge,
+                     unsigned* hudDrawn = nullptr);
+} // namespace
+
 bool PresentSharpened(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY) {
     if (w <= 0 || h <= 0 || dw <= 0 || dh <= 0) return true;
+    if (FastEnv() && PresentFastDraw(fbo, x, y, w, h, dx, dy, dw, dh, amount, flipY, false)) return true; // (GXV_PRESENT_FAST: in its place)
     if (!EnsureSharpenProgram()) return false; // (nothing of the GL state touched)
     BindFbo(fbo);
     SetViewport(dx, dy, dw, dh);
@@ -4470,6 +6503,14 @@ int PresentCharaAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int
     return drawn;
 }
 unsigned DebugLastFrameScenes() { return g_lastScenes; }
+void DebugPxCuts(uint64_t& noop, uint64_t& clearColour, uint64_t& clearDepth, uint64_t& clearWhole, uint64_t& scissorKept) {
+    // (totals: the "pxcut:" line's window counts plus what earlier windows logged)
+    noop = g_pxTotal.noop + g_pxN.noop;
+    clearColour = g_pxTotal.clearColour + g_pxN.clearColour;
+    clearDepth = g_pxTotal.clearDepth + g_pxN.clearDepth;
+    clearWhole = g_pxTotal.clearWhole + g_pxN.clearWhole;
+    scissorKept = g_pxTotal.scissorKept + g_pxN.scissorKept;
+}
 void CharaAACounters(uint64_t& presents, uint64_t& boxes, uint64_t& pixels, uint64_t& msaaSkips) {
     presents = g_charaStats.presents;
     boxes = g_charaStats.boxes;
@@ -4477,7 +6518,675 @@ void CharaAACounters(uint64_t& presents, uint64_t& boxes, uint64_t& pixels, uint
     msaaSkips = g_charaStats.msaaSkips;
 }
 
+// ================================================================ whole-picture edge smoothing (GXV_EDGE_AA)
+// (the front end's side, and why: vgx_draw.cpp "whole-picture edge smoothing".) PresentEdgeAA replaces the present itself: one quad
+// over the whole display rectangle with the edge filter below, then the HUD's rectangles (CopyDispCmd::hud) drawn again with the
+// sharpened present's own program, so that every HUD pixel is exactly what PresentSharpened / the blit would have shown. All of it is
+// in the display's own scene: no render target, no scene, no EFB store or load is added, and nothing else of the frame changes.
+// The filter: T. Lottes' FXAA 3.11 "console" form (the cheapest FXAA that still finds the edge's direction), as on SGX it is cheapest:
+//   - the centre and the four diagonal neighbours half a texel away (bilinear: each reads a 2x2 block, so the five cover the 3x3
+//     around the pixel) at coordinates the vertex shader computed, varyings TEXCOORD0-4 (v_uv, v_tex1..4: the semantics the Vita host
+//     binds), with no clamp: on the SGX these are non-dependent reads the hardware issues before the program runs;
+//   - flat pixels (luma contrast of the five below max(GXV_EDGE_AA_MIN, GXV_EDGE_AA_THRESHOLD x the brightest): FXAA's defaults
+//     0.0625 / 0.125) leave right there: the centre, plus the sharpened present's unsharp mask at `amount` from the same four reads
+//     (scaled by 4/3: each diagonal read holds a quarter of the centre texel), so at 960x544 (amount 0) exactly the blit's pixel;
+//   - edge pixels: the direction from the four diagonals, two reads half a texel along it and two up to four texels along it (clamped
+//     to the display copy), the wider blend kept unless its luma leaves the neighbourhood's range (FXAA's two-tap fallback).
+// Cost per screen pixel: 5 texture reads and about 20 instructions on flat pixels; 4 more reads (dependent) and about 25 more
+// instructions on edge pixels (typically 5-15 % of a game picture). Against the blit (1 read): about +4 reads a pixel over the
+// 960x544 screen, 522 240 pixels. The Strikers port's SMOOTH (6 computed reads, 89 instructions by the native compiler) runs on
+// every picture there; this is about a third of its instructions. Nothing on any CPU but one draw and a few uniforms per HUD rectangle.
+// Skipped (the present as before): the switch off, the copy not marked (CopyDispCmd::edge), the EFB multisampled (rungs 7-8, smooth
+// already), or a program that did not build. The programs are built at Init (WarmEdgeAA), never in play: this shader is not in the
+// package's compiled cache, so the first start ever compiles it once (libshacccg, behind the loading screen); later starts read it
+// from vitaGL's cache on the card.
+//   GXV_EDGE_AA_THRESHOLD=<per mille>  the relative edge threshold (default 125; 166 FXAA "quality", 250 fewer edges)
+//   GXV_EDGE_AA_MIN=<per mille>        the absolute one (default 63; dark edges below it are left alone)
+//   GXV_EDGE_AA_SHARPNESS=<n>          FXAA console's edge sharpness (default 8; 2 softens more, wider)
+namespace {
+struct EdgeProg {
+    GLuint prog = 0;
+    bool failed = false;
+    GLint rect = -1, size = -1, lim = -1, p = -1, q = -1;
+} g_edgeProg;
+struct EdgeStats { uint64_t presents = 0, hud = 0, msaaSkips = 0, otherSkips = 0, stepSkips = 0, nativeSkips = 0; } g_edgeStats;
+int EdgeEnv() {
+    static const int m = static_cast<int>(std::clamp<long>(EnvInt("GXV_EDGE_AA", 0), 0, 3));
+    return m;
+}
+// GXV_EDGE_AA_NATIVE=0 (default 1: as before): no edge smoothing for a display copy shown at its own size (the picture rendered at the
+// screen's 960x544, Quality's top rung), so the present there is the plain blit (one read a pixel, about 0.9 ms of the display scene
+// at 960x544) instead of the five-read edge pass and the HUD redraw (r61 console, GPU_SCENES: display scene 4.5 ms with edge smoothing,
+// 2.3 ms with the three-read plain present; h79full at 960x544: display/other 3D 4.6-4.9 ms a picture). NOT the same picture: the
+// edges of the 3D scene keep their staircase at 960x544 (the GPU renders them with one sample a pixel). Upscaled pictures (every
+// smaller rung) keep the edge smoothing. Read once.
+int EdgeNativeEnv() {
+    static const int m = static_cast<int>(std::clamp<long>(EnvInt("GXV_EDGE_AA_NATIVE", 1), 0, 1));
+    return m;
+}
+
+bool EnsureEdgeProgram() {
+    if (g_edgeProg.prog) return true;
+    if (g_edgeProg.failed || GlAllocBackoff()) return false;
+    static const char* vs =
+        "attribute vec4 a_pos;\nuniform vec4 u_rect;\nuniform vec4 u_size;\n"
+        "varying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\nvarying vec2 v_tex3;\nvarying vec2 v_tex4;\n"
+        "void main() {\n"
+        "  v_uv = vec2(u_rect.x + (a_pos.x * 0.5 + 0.5) * u_rect.z, u_rect.y + (a_pos.y * 0.5 + 0.5) * u_rect.w);\n"
+        "  vec2 h = u_size.zw * 0.5;\n"
+        "  v_tex1 = v_uv - h;\n"                  // (NW: -u -v)
+        "  v_tex2 = v_uv + vec2(h.x, -h.y);\n"    // (NE)
+        "  v_tex3 = v_uv + vec2(-h.x, h.y);\n"    // (SW)
+        "  v_tex4 = v_uv + h;\n"                  // (SE)
+        "  gl_Position = vec4(a_pos.xy, 0.0, 1.0);\n}\n";
+    // (H / H3: half precision for the colour arithmetic where vitaGL's translator has it, as the sharpened present's fsHalf; the
+    // coordinates stay float: half a texel of 960 is below half precision's step near 1.0)
+    static const char* fsBody =
+        "precision highp float;\nuniform sampler2D u_src;\nuniform vec4 u_size;\nuniform vec4 u_lim;\nuniform vec4 u_p;\nuniform vec4 u_q;\n"
+        "varying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\nvarying vec2 v_tex3;\nvarying vec2 v_tex4;\n"
+        "H L(H3 c) { return dot(c, H3(0.299, 0.587, 0.114)); }\n"
+        "H3 F(vec2 uv) { return H3(texture2D(u_src, clamp(uv, u_lim.xy, u_lim.zw)).rgb); }\n"
+        "void main() {\n"
+        "  H3 m = H3(texture2D(u_src, v_uv).rgb);\n"
+        "  H3 cNW = H3(texture2D(u_src, v_tex1).rgb), cNE = H3(texture2D(u_src, v_tex2).rgb);\n"
+        "  H3 cSW = H3(texture2D(u_src, v_tex3).rgb), cSE = H3(texture2D(u_src, v_tex4).rgb);\n"
+        "  H lM = L(m), lNW = L(cNW), lNE = L(cNE), lSW = L(cSW), lSE = L(cSE);\n"
+        "  H lMin = min(min(lNW, lNE), min(lSW, lSE)), lMax = max(max(lNW, lNE), max(lSW, lSE));\n"
+        "  H hi = max(lMax, lM);\n"
+        "  H3 o;\n"
+        "  if (hi - min(lMin, lM) < max(H(u_p.x), hi * H(u_p.y))) {\n"
+        "    o = m + (m - (cNW + cNE + cSW + cSE) * H(0.25)) * H(u_p.z);\n" // (flat: the sharpened present's value)
+        "  } else {\n"
+        "    vec2 dir = vec2(float((lSW + lSE) - (lNW + lNE)), float((lNW + lSW) - (lNE + lSE)));\n"
+        "    dir = dir * inversesqrt(max(dot(dir, dir), 1e-8));\n"
+        "    vec2 d1 = dir * u_size.zw * 0.5;\n"
+        "    vec2 d2 = clamp(dir / max(min(abs(dir.x), abs(dir.y)) * u_q.x, 1e-4), -2.0, 2.0) * u_size.zw * 2.0;\n"
+        "    H3 a = F(v_uv - d1) + F(v_uv + d1);\n"
+        "    H3 b = (F(v_uv - d2) + F(v_uv + d2)) * H(0.25) + a * H(0.25);\n"
+        "    H lb = L(b);\n"
+        "    o = (lb < lMin || lb > lMax) ? a * H(0.5) : b;\n"
+        "    if (u_p.w > 0.5) o = mix(o, H3(1.0, 0.0, 0.0), H(0.5));\n" // (GXV_EDGE_AA=2: the pixels it changed)
+        "  }\n"
+        "  gl_FragColor = vec4(vec3(o), 1.0);\n}\n";
+    static const std::string fsHalf = std::string("#ifdef VITAGL\n#define H half\n#define H3 half3\n#else\n#define H float\n#define H3 vec3\n#endif\n") + fsBody;
+    static const std::string fsFloat = std::string("#define H float\n#define H3 vec3\n") + fsBody;
+    const GLuint v = Compile(GL_VERTEX_SHADER, vs, "edge-aa vertex");
+    GLint vok = 0;
+    if (v) G(glGetShaderiv(v, GL_COMPILE_STATUS, &vok));
+    GLuint prog = 0;
+    // (the half form first; the float form as the one fallback, as for the sharpened present)
+    for (unsigned attempt = 0; vok && attempt != 2; ++attempt) {
+        const GLuint f = Compile(GL_FRAGMENT_SHADER, (attempt ? fsFloat : fsHalf).c_str(), "edge-aa fragment");
+        GLint fok = 0, lok = 0;
+        if (f) G(glGetShaderiv(f, GL_COMPILE_STATUS, &fok));
+        if (fok) {
+            prog = G(glCreateProgram());
+            if (BadGlName(prog)) prog = 0;
+        }
+        if (prog) {
+            G(glAttachShader(prog, v));
+            G(glAttachShader(prog, f));
+            G(glBindAttribLocation(prog, AT_POS, "a_pos"));
+            G(glLinkProgram(prog));
+            G(glGetProgramiv(prog, GL_LINK_STATUS, &lok));
+        }
+        if (f) G(glDeleteShader(f));
+        if (lok) break;
+        if (prog) G(glDeleteProgram(prog));
+        prog = 0;
+    }
+    if (v) G(glDeleteShader(v));
+    if (!prog) {
+        g_edgeProg.failed = true;
+        autoq::Log("[edgeaa] the edge-smoothing shader did not build: pictures are presented as before (GXV_EDGE_AA)");
+        return false;
+    }
+    g_edgeProg.prog = prog;
+    UseProgram(prog);
+    g_edgeProg.rect = G(glGetUniformLocation(prog, "u_rect"));
+    g_edgeProg.size = G(glGetUniformLocation(prog, "u_size"));
+    g_edgeProg.lim = G(glGetUniformLocation(prog, "u_lim"));
+    g_edgeProg.p = G(glGetUniformLocation(prog, "u_p"));
+    g_edgeProg.q = G(glGetUniformLocation(prog, "u_q"));
+    G(glUniform1i(glGetUniformLocation(prog, "u_src"), 0));
+    return true;
+}
+
+// The uv rectangle (u_rect) of the screen pixels X0..X1 x Y0..Y1 inside the present's rectangle (dx, dy, dw, dh) of the display copy
+// (x, y, w, h of the EFB target): each pixel centre samples where the full-screen present samples it (as PresentCharaAA's boxes).
+void PresentUvRect(int x, int y, int w, int h, int dx, int dy, int dw, int dh, bool flipY, int X0, int Y0, int X1, int Y1, float out[4]) {
+    const float tw = static_cast<float>(g_rtW), th = static_cast<float>(g_rtH);
+    const float u0 = static_cast<float>(x) / tw, du = static_cast<float>(w) / tw;
+    const float v0 = static_cast<float>(y) / th, dv = static_cast<float>(h) / th;
+    const float ul = u0 + du * static_cast<float>(X0 - dx) / static_cast<float>(dw), uw = du * static_cast<float>(X1 - X0) / static_cast<float>(dw);
+    const float fb = static_cast<float>(Y0 - dy) / static_cast<float>(dh), ft = static_cast<float>(Y1 - dy) / static_cast<float>(dh);
+    float vb, vt;
+    if (flipY) { vb = v0 + dv * (1.0f - fb); vt = v0 + dv * (1.0f - ft); }
+    else { vb = v0 + dv * fb; vt = v0 + dv * ft; }
+    out[0] = ul; out[1] = vb; out[2] = uw; out[3] = vt - vb;
+}
+} // namespace
+
+bool WarmPresentFast(); // (GXV_PRESENT_FAST, below)
+void WarmEdgeAA() {
+    const bool fastOk = WarmPresentFast(); // (GXV_PRESENT_FAST: its programs; the filter below is then only its fallback)
+    if (EdgeEnv() == 0 || (FastEnv() && fastOk)) return;
+    const double t0 = NowMs();
+    const bool ok = EnsureEdgeProgram() && EnsureSharpenProgram();
+    autoq::Log("[edgeaa] GXV_EDGE_AA=%d: whole-picture edge smoothing at the present%s; programs %s in %.1f ms (at start-up, not in play)", EdgeEnv(),
+               EdgeEnv() == 2 ? " (changed pixels tinted)" : (EdgeEnv() == 3 ? " (left half of the screen only)" : ""), ok ? "built" : "NOT built", NowMs() - t0);
+}
+
+bool PresentEdgeAA(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY) {
+    const int mode = EdgeEnv();
+    const CopyDispCmd* d = g_charaDisp;
+    if (mode == 0 || !d || !d->edge || w <= 0 || h <= 0 || dw <= 0 || dh <= 0) return false;
+    if (g_efbSamples > 1) { ++g_edgeStats.msaaSkips; return false; } // (rungs 7-8: the whole picture is multisampled)
+    if (g_stepEdge) { ++g_edgeStats.stepSkips; return false; }      // (GXV_AUTOQ_EDGESTEP: the controller has it off under GPU load)
+    if (EdgeNativeEnv() == 0 && dw == w && dh == h) { ++g_edgeStats.nativeSkips; return false; } // (GXV_EDGE_AA_NATIVE=0: 1:1, the blit)
+    if (FastEnv()) { // (GXV_PRESENT_FAST: the one-pass present with its edge term, the HUD drawn again plainly; this filter if it did not build)
+        unsigned hud = 0;
+        if (PresentFastDraw(fbo, x, y, w, h, dx, dy, dw, dh, amount, flipY, true, &hud)) {
+            g_edgeStats.hud += hud;
+            ++g_edgeStats.presents;
+            return true;
+        }
+    }
+    if (!EnsureEdgeProgram() || !EnsureSharpenProgram()) { ++g_edgeStats.otherSkips; return false; } // (nothing of the GL state touched)
+    // Thresholds (read once; see above)
+    static const float thr = static_cast<float>(std::clamp<long>(EnvInt("GXV_EDGE_AA_THRESHOLD", 125), 20, 500)) / 1000.0f;
+    static const float thrMin = static_cast<float>(std::clamp<long>(EnvInt("GXV_EDGE_AA_MIN", 63), 0, 500)) / 1000.0f;
+    static const float sharp = static_cast<float>(std::clamp<long>(EnvInt("GXV_EDGE_AA_SHARPNESS", 8), 1, 16));
+    // The display's scene on `fbo`, begun here as PresentSharpened begins it (so it is counted and tagged as the display's: GXV_GPU_SCENES
+    // gives this pass's GPU time as the display scene's 3D time). Called in place of PresentSharpened, at the same point of the hook.
+    BindFbo(fbo);
+    SetScissor(false);
+    SetBlendOff();
+    SetDepthTest(false);
+    SetCull(CULL_NONE);
+    SetDepthMask(false);
+    SetColorMask(true, true);
+    g_rsValid = false;
+    BindTex(0, g_efbColor);
+    ++C.layoutChanges;
+    BindArrayBuf(g_quadVbo);
+    for (int a = 1; a < AT_COUNT; ++a)
+        if (S.attrEnabled & (1u << a)) {
+            G(glDisableVertexAttribArray(static_cast<GLuint>(a)));
+            S.attrEnabled &= ~(1u << a);
+            S.attrConstSet &= ~(1u << a);
+            ++C.attrToggles;
+        }
+    if (!(S.attrEnabled & 1u)) { G(glEnableVertexAttribArray(AT_POS)); S.attrEnabled |= 1u; ++C.attrToggles; }
+    G(glVertexAttribPointer(AT_POS, 2, GL_FLOAT, GL_FALSE, 0, nullptr));
+    ++C.attrPointers;
+    S.layoutVbo = g_quadVbo;
+    S.layoutMask = 0;
+    S.layoutBase = 0;
+    const float tw = static_cast<float>(g_rtW), th = static_cast<float>(g_rtH);
+    const float lim[4] = {(static_cast<float>(x) + 0.5f) / tw, (static_cast<float>(y) + 0.5f) / th, (static_cast<float>(x + w) - 0.5f) / tw,
+                          (static_cast<float>(y + h) - 0.5f) / th};
+    float rect[4];
+    // 1. The filter over the picture (=3: its left half; the right half as PresentSharpened draws it, below with the HUD).
+    const int splitX = mode == 3 ? dx + dw / 2 : dx + dw;
+    UseProgram(g_edgeProg.prog);
+    PresentUvRect(x, y, w, h, dx, dy, dw, dh, flipY, dx, dy, splitX, dy + dh, rect);
+    SetViewport(dx, dy, splitX - dx, dh);
+    G(glUniform4fv(g_edgeProg.rect, 1, rect));
+    G(glUniform4f(g_edgeProg.size, tw, th, 1.0f / tw, 1.0f / th));
+    G(glUniform4fv(g_edgeProg.lim, 1, lim));
+    G(glUniform4f(g_edgeProg.p, thrMin, thr, amount * (4.0f / 3.0f), mode == 2 ? 1.0f : 0.0f));
+    G(glUniform4f(g_edgeProg.q, sharp, 0.0f, 0.0f, 0.0f));
+    C.uniformCalls += 5;
+    C.uniformBytes += 80;
+    TouchTarget();
+    G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+    // 2. The HUD (and =3's right half) as the sharpened present draws it: the same program and uniforms as PresentSharpened, the
+    // viewport and uv rectangle of each piece (outwards to whole screen pixels, inside the present's rectangle).
+    UseProgram(g_sharp.prog);
+    G(glUniform4f(g_sharp.size, tw, th, 1.0f / tw, 1.0f / th));
+    G(glUniform4fv(g_sharp.lim, 1, lim));
+    G(glUniform4f(g_sharp.p, static_cast<float>(dw) / static_cast<float>(w), static_cast<float>(dh) / static_cast<float>(h), amount, 0.0f));
+    C.uniformCalls += 3;
+    C.uniformBytes += 48;
+    auto plain = [&](int X0, int Y0, int X1, int Y1) {
+        X0 = std::max(X0, dx); Y0 = std::max(Y0, dy);
+        X1 = std::min(X1, dx + dw); Y1 = std::min(Y1, dy + dh);
+        if (X1 <= X0 || Y1 <= Y0) return;
+        PresentUvRect(x, y, w, h, dx, dy, dw, dh, flipY, X0, Y0, X1, Y1, rect);
+        SetViewport(X0, Y0, X1 - X0, Y1 - Y0);
+        G(glUniform4fv(g_sharp.rect, 1, rect));
+        ++C.uniformCalls;
+        TouchTarget();
+        G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+    };
+    if (splitX < dx + dw) plain(splitX, dy, dx + dw, dy + dh);
+    const float sx = ScaleX(), sy = ScaleY();
+    const float kx = static_cast<float>(dw) / static_cast<float>(w), ky = static_cast<float>(dh) / static_cast<float>(h);
+    for (int i = 0; i < d->hudN && i < kCharaBoxes; ++i) {
+        const EfbRect& b = d->hud[i];
+        // EFB pixels -> render-target pixels -> the screen's pixels (outwards)
+        const float rx0 = b.x * sx - static_cast<float>(x), rx1 = (b.x + b.w) * sx - static_cast<float>(x);
+        const float ry0 = b.y * sy - static_cast<float>(y), ry1 = (b.y + b.h) * sy - static_cast<float>(y);
+        const int X0 = dx + static_cast<int>(std::floor(rx0 * kx)), X1 = dx + static_cast<int>(std::ceil(rx1 * kx));
+        int Y0, Y1;
+        if (flipY) { Y0 = dy + dh - static_cast<int>(std::ceil(ry1 * ky)); Y1 = dy + dh - static_cast<int>(std::floor(ry0 * ky)); }
+        else { Y0 = dy + static_cast<int>(std::floor(ry0 * ky)); Y1 = dy + static_cast<int>(std::ceil(ry1 * ky)); }
+        plain(X0, Y0, std::min(X1, splitX), Y1); // (=3: what lies in the right half is drawn plainly already)
+        ++g_edgeStats.hud;
+    }
+    g_uniDirtyV = g_uniDirtyF = false;
+    ++g_edgeStats.presents;
+    return true;
+}
+void EdgeAACounters(uint64_t& presents, uint64_t& hudRects, uint64_t& msaaSkips, uint64_t& otherSkips) {
+    presents = g_edgeStats.presents;
+    hudRects = g_edgeStats.hud;
+    msaaSkips = g_edgeStats.msaaSkips;
+    otherSkips = g_edgeStats.otherSkips + g_edgeStats.stepSkips + g_edgeStats.nativeSkips; // (GXV_AUTOQ_EDGESTEP's and GXV_EDGE_AA_NATIVE's too)
+}
+
+// ================================================================ the fast present (GXV_PRESENT_FAST)
+// One pass from the display copy to the screen that does the upscale, the unsharp mask and (GXV_EDGE_AA) the edge smoothing together, in
+// place of PresentSharpened's program and of PresentEdgeAA's FXAA program. Console (r59, GXV_GPU_SCENES=1, lit Observatory, 720x404 shown
+// at 960x544), display scene 3D: blit 0.9 ms, PresentSharpened 5.3 ms, PresentEdgeAA 8.1 ms (7.8 ms even at 960x544 1:1: so not the
+// source's size nor its texture cache, but the work per screen pixel). Why, per screen pixel (hand counts from the Cg that vitaGL's
+// translator makes of the GLSL: there is no Vita shader compiler here):
+//   - the SGX543MP4 at 222 MHz: 4 cores x 4 USSE pipes, one instruction a clock per pipe, so each instruction over the 522 240 screen
+//     pixels costs about 0.15 ms; the blit (one read the hardware issues before the program runs, about two instructions) is the 0.9 ms
+//     floor of a full-screen pass (rasterising, iterating, the read, the tile store);
+//   - PresentSharpened: every read is DEPENDENT: each coordinate is clamped (min + max on float2) and four are offset in the fragment
+//     program, so the USSE computes them, issues five sample instructions and waits on them (with float registers few pixels are in flight
+//     to hide that); all maths in float32 (vitaGL defines highp / mediump / lowp away: every "float" is 32 bits): about 30 instructions
+//     -> 0.9 + 30 x 0.15 = 5.4 ms, as measured;
+//   - PresentEdgeAA: its five first reads are non-dependent, but each float result is converted to half (its half form), five luma dot
+//     products, eight min / max, the threshold, and a branch whose edge side (direction, rsqrt, two clamped coordinates, four DEPENDENT
+//     reads, two more lumas) the USSE runs for a whole group of pixels when any of them takes it: edges are spread over the picture, so
+//     most groups pay it; about 45-50 instructions a pixel -> 7.8-8.1 ms, as measured. Not the HUD redraw (tens of thousands of pixels),
+//     not a second pass (there is none), not the source's memory (the blit reads the same texture in 0.9 ms).
+// The fast present therefore: every read at a coordinate the vertex program computed (non-dependent: no clamp; the rectangle gives up one
+// texel on a side that is not the texture's own edge, so no read leaves the display copy), no branch, luma = green (FXAA's
+// FXAA_GREEN_AS_LUMA), the colour maths in half (vitaGL's translator keeps Cg's half) with half uniforms (no conversion per pixel).
+// Programs (u_k.x = the unsharp amount, as PresentSharpened's):
+//   plain3  three reads: the centre c and two half a texel off along one diagonal (each a 2x2 average through the bilinear filter: the
+//           Strikers port's MSC_VITA_UPSCALE=fast); o = c + (c - (a + b) / 2) * amount. Along either axis the mask's response is
+//           PresentSharpened's (0 at DC, 1/2 at half Nyquist, 1 at Nyquist); along one diagonal it is weaker. About 4 instructions
+//           (a+b, c-m, c+d*k, pack). Estimate 0.9 + 0.6 = about 1.5 ms.
+//   plain5  five reads: c and its four neighbours one texel away (left, right, up, down): PresentSharpened's own mask, the same value
+//           (within half precision), without its clamps and dependent reads. About 6 instructions; estimate about 1.8 ms.
+//   edge5   the same five reads and mask, plus the edge term: eh = |l - r|, ev = |u - n| (green); the strength
+//           w = saturate((eh + ev - T) / R) x saturate(|ev - eh| x 8 + diag); the direction td = saturate((ev - eh) x 4 + 0.5) (1: a
+//           horizontal edge); the pair ALONG the edge m = mix(u + n, l + r, td); the result moves from the plain present's value
+//           sp = c + (c - mean4) * amount towards (2c + m) / 4 (a [1 2 1] filter along the edge) by w. Along the edge, never across it:
+//           at 720x404 -> 960x544 the bilinear upscale has already softened every edge across it, and the host test shows that a blur
+//           across (a 3x3 tent on edge pixels, the first form of this kernel) moves the edges FURTHER from the ideal picture. So an
+//           edge whose direction the cross cannot tell (a diagonal: eh = ev) is left alone when upscaled (diag 0) and blended at the
+//           screen's own size (diag 1, 960x544, where nothing has softened it). About 18 instructions: sums 3, mask 1, eh / ev / dd 3,
+//           w 5, td 1-2, m 2, sp 1, target 2, blend 2, pack 1; no dependent read, no branch. Estimate 0.9 + 18 x 0.15 = about 3.6 ms with
+//           the pessimistic model above, about 2-2.5 ms if (as Sony's 28.8 GFLOPS figure implies) a vec3 / vec4 costs one instruction
+//           whatever the precision.
+// GXV_PRESENT_FAST=1: plain3 where no edge smoothing is asked (GXV_EDGE_AA off; a copy not marked; the HUD), edge5 with GXV_EDGE_AA.
+// GXV_PRESENT_FAST=2: plain5 there instead (the picture exactly as today's sharpened present: the A/B that isolates the cost of
+//                     dependent reads, clamps and float maths), edge5 with GXV_EDGE_AA.
+// The HUD is left as it is (as PresentEdgeAA does): its rectangles (CopyDispCmd::hud) are drawn again with the plain program, so a HUD
+// pixel is what the fast present without edge smoothing shows. The programs are built at Init (WarmEdgeAA -> WarmPresentFast) behind the
+// loading screen, never in play: they are not in the package's cache, so the first start ever compiles them once (libshacccg) and
+// vitaGL's cache keeps them.
+//   GXV_PRESENT_FAST=0|1|2             default 0: the present as before (PresentSharpened / PresentEdgeAA / the blit)
+//   GXV_PRESENT_FAST_EDGE=<per mille>  T, the edge measure (green levels / 255) where smoothing starts (default 100)
+//   GXV_PRESENT_FAST_RAMP=<per mille>  R, from T to full smoothing (default 150)
+namespace {
+int FastEnv() {
+    static const int m = static_cast<int>(std::clamp<long>(EnvInt("GXV_PRESENT_FAST", 0), 0, 2));
+    return m;
+}
+enum FastKind { kFastPlain3, kFastPlain5, kFastEdge5, kFastEdge5Tint, kFastKinds };
+struct FastProg {
+    GLuint prog = 0;
+    bool failed = false, half = false;
+    GLint rect = -1, size = -1, p = -1, k = -1;
+} g_fastProgs[kFastKinds];
+struct FastStats { uint64_t presents = 0, smoothed = 0, hud = 0; } g_fastStats;
+
+std::string FastFragmentSource(int kind, bool half) {
+    const bool five = kind != kFastPlain3, edge = kind >= kFastEdge5;
+    std::string s = half ? "#ifdef VITAGL\n#define H half\n#define H3 half3\n#define H4 half4\n#define SAT(x) saturate(x)\n#else\n" : "";
+    s += "#define H float\n#define H3 vec3\n#define H4 vec4\n#define SAT(x) clamp(x, 0.0, 1.0)\n";
+    if (half) s += "#endif\n";
+    s += "precision highp float;\nuniform sampler2D u_src;\nuniform H4 u_k;\n";
+    if (edge) s += "uniform H4 u_p;\n";
+    s += five ? "varying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\nvarying vec2 v_tex3;\nvarying vec2 v_tex4;\n"
+              : "varying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\n";
+    s += "void main() {\n"
+         "  H3 c = H3(texture2D(u_src, v_uv).rgb);\n";
+    if (!five) {
+        s += "  H3 a = H3(texture2D(u_src, v_tex1).rgb);\n"
+             "  H3 b = H3(texture2D(u_src, v_tex2).rgb);\n"
+             "  H3 d = c - (a + b) * H(0.5);\n" // (c minus 7 of the 3x3 through the filter)
+             "  gl_FragColor = vec4(vec3(c + d * u_k.x), 1.0);\n}\n";
+        return s;
+    }
+    s += "  H3 l = H3(texture2D(u_src, v_tex1).rgb);\n"
+         "  H3 r = H3(texture2D(u_src, v_tex2).rgb);\n"
+         "  H3 u = H3(texture2D(u_src, v_tex3).rgb);\n"
+         "  H3 n = H3(texture2D(u_src, v_tex4).rgb);\n"
+         "  H3 sh = l + r;\n"
+         "  H3 sv = u + n;\n"
+         "  H3 d = c - (sh + sv) * H(0.25);\n"; // (PresentSharpened's mask)
+    if (!edge) {
+        s += "  gl_FragColor = vec4(vec3(c + d * u_k.x), 1.0);\n}\n";
+        return s;
+    }
+    // w: 0 flat .. 1 edge (above); td: 1 for a horizontal edge (the vertical pair differs), 0 for a vertical one; m: the pair along the edge;
+    // the result moves from sp, the plain present's value, to (2c + m) / 4 by w. (No identifier s or t: vitaGL's translator header
+    // #defines them as swizzles.)
+    s += "  H eh = abs(l.g - r.g);\n"
+         "  H ev = abs(u.g - n.g);\n"
+         "  H dd = ev - eh;\n"
+         "  H w = SAT((eh + ev) * u_p.x + u_p.y) * SAT(abs(dd) * u_p.z + u_p.w);\n"
+         "  H td = SAT(dd * H(4.0) + H(0.5));\n"
+         "  H3 m = mix(sv, sh, td);\n"
+         "  H3 sp = c + d * u_k.x;\n"
+         "  H3 o = sp + ((c * H(0.5) + m * H(0.25)) - sp) * w;\n";
+    if (kind == kFastEdge5Tint) s += "  o = mix(o, H3(1.0, 0.0, 0.0), w * H(0.5));\n"; // (GXV_EDGE_AA=2: what it changed)
+    s += "  gl_FragColor = vec4(vec3(o), 1.0);\n}\n";
+    return s;
+}
+
+FastProg* EnsureFastProgram(int kind) {
+    FastProg& fp = g_fastProgs[kind];
+    if (fp.prog) return &fp;
+    if (fp.failed || GlAllocBackoff()) return nullptr;
+    // (v_tex1..4: TEXCOORD1-4, the names the Vita host binds; u_size.zw: the reads' offset, set per program)
+    static const char* vs3 =
+        "attribute vec4 a_pos;\nuniform vec4 u_rect;\nuniform vec4 u_size;\nvarying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\n"
+        "void main() {\n"
+        "  v_uv = vec2(u_rect.x + (a_pos.x * 0.5 + 0.5) * u_rect.z, u_rect.y + (a_pos.y * 0.5 + 0.5) * u_rect.w);\n"
+        "  v_tex1 = v_uv + u_size.zw;\n  v_tex2 = v_uv - u_size.zw;\n"
+        "  gl_Position = vec4(a_pos.xy, 0.0, 1.0);\n}\n";
+    static const char* vs5 =
+        "attribute vec4 a_pos;\nuniform vec4 u_rect;\nuniform vec4 u_size;\nvarying vec2 v_uv;\nvarying vec2 v_tex1;\nvarying vec2 v_tex2;\n"
+        "varying vec2 v_tex3;\nvarying vec2 v_tex4;\n"
+        "void main() {\n"
+        "  v_uv = vec2(u_rect.x + (a_pos.x * 0.5 + 0.5) * u_rect.z, u_rect.y + (a_pos.y * 0.5 + 0.5) * u_rect.w);\n"
+        "  v_tex1 = v_uv - vec2(u_size.z, 0.0);\n  v_tex2 = v_uv + vec2(u_size.z, 0.0);\n"
+        "  v_tex3 = v_uv - vec2(0.0, u_size.w);\n  v_tex4 = v_uv + vec2(0.0, u_size.w);\n"
+        "  gl_Position = vec4(a_pos.xy, 0.0, 1.0);\n}\n";
+    const GLuint v = Compile(GL_VERTEX_SHADER, kind == kFastPlain3 ? vs3 : vs5, "fast-present vertex");
+    GLint vok = 0;
+    if (v) G(glGetShaderiv(v, GL_COMPILE_STATUS, &vok));
+    GLuint prog = 0;
+    bool half = false;
+    // (the half form first; the float form as the one fallback, as for the sharpened present)
+    for (unsigned attempt = 0; vok && attempt != 2; ++attempt) {
+        const std::string text = FastFragmentSource(kind, attempt == 0);
+        const GLuint f = Compile(GL_FRAGMENT_SHADER, text.c_str(), "fast-present fragment");
+        GLint fok = 0, lok = 0;
+        if (f) G(glGetShaderiv(f, GL_COMPILE_STATUS, &fok));
+        if (fok) {
+            prog = G(glCreateProgram());
+            if (BadGlName(prog)) prog = 0;
+        }
+        if (prog) {
+            G(glAttachShader(prog, v));
+            G(glAttachShader(prog, f));
+            G(glBindAttribLocation(prog, AT_POS, "a_pos"));
+            G(glLinkProgram(prog));
+            G(glGetProgramiv(prog, GL_LINK_STATUS, &lok));
+        }
+        if (f) G(glDeleteShader(f));
+        if (lok) { half = attempt == 0; break; }
+        if (prog) G(glDeleteProgram(prog));
+        prog = 0;
+    }
+    if (v) G(glDeleteShader(v));
+    if (!prog) {
+        fp.failed = true;
+        static const char* const kName[kFastKinds] = {"plain (3 reads)", "plain (5 reads)", "edge", "edge (tinted)"};
+        autoq::Log("[present] the fast present's %s program did not build: pictures are presented as before (GXV_PRESENT_FAST)", kName[kind]);
+        return nullptr;
+    }
+    fp.prog = prog;
+    fp.half = half;
+    UseProgram(prog);
+    fp.rect = G(glGetUniformLocation(prog, "u_rect"));
+    fp.size = G(glGetUniformLocation(prog, "u_size"));
+    fp.p = G(glGetUniformLocation(prog, "u_p"));
+    fp.k = G(glGetUniformLocation(prog, "u_k"));
+    G(glUniform1i(glGetUniformLocation(prog, "u_src"), 0));
+    return &fp;
+}
+int FastPlainKind() { return FastEnv() == 2 ? kFastPlain5 : kFastPlain3; }
+int FastEdgeKind() { return EdgeEnv() == 2 ? kFastEdge5Tint : kFastEdge5; }
+
+// ---- GXV_EDGE_AA_HUDCUT: the edge pass of the fast present leaves the HUD's rectangles out (exact; default 0)
+// The fast present with edge smoothing draws the edge program over the whole screen and then the HUD's rectangles again with the plain
+// program, so every HUD pixel is shaded twice and the first time for nothing (the plain pass overwrites it). With the switch the edge
+// pass covers the screen minus the HUD rectangles instead (the complement cut into horizontal bands, vertically equal neighbours joined),
+// and the plain pass draws the rectangles as before: each screen pixel is written by the same program at the same texture coordinates
+// as before (PresentUvRect maps every piece as the whole quad), so the picture is the same. Saves the edge program's work (5 reads and
+// about 18 instructions a pixel) on the HUD's area: 960x544 with HUD rectangles covering f of the screen, about f x 3.6 ms (f = 5 %:
+// ~0.2 ms). Only with GXV_PRESENT_FAST (PresentFastDraw) and GXV_EDGE_AA=1/2; more than kHudPieces pieces: the whole quad, as before.
+//   GXV_EDGE_AA_HUDCUT=0|1   default 0 (the integrator's A/B; exact)
+bool HudCutEnv() {
+    static const bool on = EnvInt("GXV_EDGE_AA_HUDCUT", 0) != 0;
+    return on;
+}
+constexpr int kHudPieces = 48;
+struct HudPieces { int n = 0; int r[kHudPieces][4]; long hudPx = 0; };
+struct HudCutStats { uint64_t presents = 0, pieces = 0, hudPx = 0; } g_hudCutStats;
+// The screen rectangles (X0, Y0, X1, Y1) of the display rectangle (dx, dy, dw, dh) that no HUD rectangle of d covers, each HUD rectangle
+// taken exactly as PresentFastDraw's plain pass draws it (outward to whole screen pixels, cut to the display rectangle). False: no HUD
+// rectangle, or too many pieces (the caller draws the whole quad).
+bool HudComplement(const CopyDispCmd* d, int x, int y, int w, int h, int dx, int dy, int dw, int dh, bool flipY, HudPieces& out) {
+    out.n = 0;
+    out.hudPx = 0;
+    if (!d || d->hudN <= 0 || w <= 0 || h <= 0) return false;
+    int hr[kCharaBoxes][4], nh = 0;
+    const float sx = ScaleX(), sy = ScaleY();
+    const float kx = static_cast<float>(dw) / static_cast<float>(w), ky = static_cast<float>(dh) / static_cast<float>(h);
+    for (int i = 0; i < d->hudN && i < kCharaBoxes; ++i) {
+        const EfbRect& hb = d->hud[i];
+        // (the same arithmetic as the plain pass below)
+        const float rx0 = hb.x * sx - static_cast<float>(x), rx1 = (hb.x + hb.w) * sx - static_cast<float>(x);
+        const float ry0 = hb.y * sy - static_cast<float>(y), ry1 = (hb.y + hb.h) * sy - static_cast<float>(y);
+        int X0 = dx + static_cast<int>(std::floor(rx0 * kx)), X1 = dx + static_cast<int>(std::ceil(rx1 * kx));
+        int Y0, Y1;
+        if (flipY) { Y0 = dy + dh - static_cast<int>(std::ceil(ry1 * ky)); Y1 = dy + dh - static_cast<int>(std::floor(ry0 * ky)); }
+        else { Y0 = dy + static_cast<int>(std::floor(ry0 * ky)); Y1 = dy + static_cast<int>(std::ceil(ry1 * ky)); }
+        X0 = std::max(X0, dx); Y0 = std::max(Y0, dy);
+        X1 = std::min(X1, dx + dw); Y1 = std::min(Y1, dy + dh);
+        if (X1 <= X0 || Y1 <= Y0) continue;
+        hr[nh][0] = X0; hr[nh][1] = Y0; hr[nh][2] = X1; hr[nh][3] = Y1;
+        ++nh;
+    }
+    if (nh == 0) return false;
+    // Horizontal bands between all the rectangles' top and bottom rows.
+    int ys[2 * kCharaBoxes + 2], ny = 0;
+    ys[ny++] = dy;
+    ys[ny++] = dy + dh;
+    for (int i = 0; i < nh; ++i) { ys[ny++] = hr[i][1]; ys[ny++] = hr[i][3]; }
+    std::sort(ys, ys + ny);
+    ny = static_cast<int>(std::unique(ys, ys + ny) - ys);
+    int open[kHudPieces]; // (pieces that end at the current band's top: candidates to grow downwards)
+    int nOpen = 0;
+    for (int b = 0; b + 1 < ny; ++b) {
+        const int ya = ys[b], yb = ys[b + 1];
+        if (ya < dy || yb > dy + dh || yb <= ya) continue;
+        // The x intervals the HUD covers in this band (rectangles spanning all of it), sorted and merged.
+        struct Iv { int x0, x1; } iv[kCharaBoxes];
+        int ni = 0;
+        for (int i = 0; i < nh; ++i)
+            if (hr[i][1] <= ya && hr[i][3] >= yb) iv[ni++] = Iv{hr[i][0], hr[i][2]};
+        std::sort(iv, iv + ni, [](const Iv& a, const Iv& c) { return a.x0 < c.x0; });
+        int nextOpen[kHudPieces], nNext = 0;
+        int cx = dx;
+        auto gap = [&](int g0, int g1) {
+            if (g1 <= g0) return true;
+            for (int k = 0; k < nOpen; ++k) {
+                int* p = out.r[open[k]];
+                if (p[0] == g0 && p[2] == g1 && p[3] == ya) { p[3] = yb; nextOpen[nNext++] = open[k]; return true; }
+            }
+            if (out.n >= kHudPieces) return false;
+            out.r[out.n][0] = g0; out.r[out.n][1] = ya; out.r[out.n][2] = g1; out.r[out.n][3] = yb;
+            nextOpen[nNext++] = out.n++;
+            return true;
+        };
+        for (int k = 0; k < ni; ++k) {
+            if (iv[k].x1 <= cx) continue;
+            if (iv[k].x0 > cx && !gap(cx, iv[k].x0)) return false;
+            out.hudPx += static_cast<long>(iv[k].x1 - std::max(cx, iv[k].x0)) * (yb - ya);
+            cx = iv[k].x1;
+        }
+        if (!gap(cx, dx + dw)) return false;
+        std::copy(nextOpen, nextOpen + nNext, open);
+        nOpen = nNext;
+    }
+    return true;
+}
+
+// The fast present of the display copy (x, y, w, h of the EFB target) into (dx, dy, dw, dh) of `fbo`, in the display's own scene. edge:
+// with the edge term (the caller has checked GXV_EDGE_AA, the copy's mark and the samples), then the HUD rectangles (g_charaDisp->hud)
+// drawn again plainly (their number added to *hudDrawn). False: nothing drawn, no GL state touched (a program did not build; the caller
+// presents as before).
+bool PresentFastDraw(unsigned fbo, int x, int y, int w, int h, int dx, int dy, int dw, int dh, float amount, bool flipY, bool edge, unsigned* hudDrawn) {
+    if (FastEnv() == 0 || w < 4 || h < 4 || dw <= 0 || dh <= 0) return false;
+    const int edgeMode = edge ? EdgeEnv() : 0;
+    FastProg* plain = EnsureFastProgram(FastPlainKind());
+    FastProg* smooth = edgeMode ? EnsureFastProgram(FastEdgeKind()) : nullptr;
+    if (!plain || (edgeMode && !smooth)) return false; // (nothing of the GL state touched)
+    static const float thr = static_cast<float>(std::clamp<long>(EnvInt("GXV_PRESENT_FAST_EDGE", 100), 0, 900)) / 1000.0f;
+    static const float ramp = static_cast<float>(std::clamp<long>(EnvInt("GXV_PRESENT_FAST_RAMP", 150), 10, 1000)) / 1000.0f;
+    // No read may leave the display copy, and there is no clamp per pixel: on a side where the copy is not at the texture's edge (where
+    // the sampler's clamp-to-edge does it) the rectangle gives up one texel (a 0.3 % zoom on that axis; normally no side does).
+    const int l = x > 0 ? 1 : 0, r = x + w < g_rtW ? 1 : 0, b = y > 0 ? 1 : 0, t = y + h < g_rtH ? 1 : 0;
+    const int xi = x + l, yi = y + b, wi = w - l - r, hi = h - b - t;
+    BindFbo(fbo);
+    SetScissor(false);
+    SetBlendOff();
+    SetDepthTest(false);
+    SetCull(CULL_NONE);
+    SetDepthMask(false);
+    SetColorMask(true, true);
+    g_rsValid = false;
+    BindTex(0, g_efbColor);
+    ++C.layoutChanges;
+    BindArrayBuf(g_quadVbo);
+    for (int a = 1; a < AT_COUNT; ++a)
+        if (S.attrEnabled & (1u << a)) {
+            G(glDisableVertexAttribArray(static_cast<GLuint>(a)));
+            S.attrEnabled &= ~(1u << a);
+            S.attrConstSet &= ~(1u << a);
+            ++C.attrToggles;
+        }
+    if (!(S.attrEnabled & 1u)) { G(glEnableVertexAttribArray(AT_POS)); S.attrEnabled |= 1u; ++C.attrToggles; }
+    G(glVertexAttribPointer(AT_POS, 2, GL_FLOAT, GL_FALSE, 0, nullptr));
+    ++C.attrPointers;
+    S.layoutVbo = g_quadVbo;
+    S.layoutMask = 0;
+    S.layoutBase = 0;
+    const float tw = static_cast<float>(g_rtW), th = static_cast<float>(g_rtH);
+    float rect[4];
+    auto setup = [&](FastProg& fp, bool three) {
+        UseProgram(fp.prog);
+        // (three reads: half a texel along the diagonal; five: one texel along each axis)
+        const float o = three ? 0.5f : 1.0f;
+        G(glUniform4f(fp.size, tw, th, o / tw, o / th));
+        G(glUniform4f(fp.k, amount, 0.0f, 0.0f, 0.0f));
+        C.uniformCalls += 2;
+        C.uniformBytes += 32;
+        if (fp.p >= 0) {
+            // w = saturate((eh + ev - thr) / ramp) x saturate(|ev - eh| x 8 + diag): an edge whose direction the cross cannot tell (a
+            // diagonal: eh = ev) is smoothed only when the picture is shown at its own size (diag 1); upscaled (diag 0) the bilinear
+            // filter has smoothed it already and a blend across it only moves it away from the ideal picture (the host test)
+            const float diag = std::fabs(static_cast<float>(dw) / static_cast<float>(w) - 1.0f) < 0.02f ? 1.0f : 0.0f;
+            G(glUniform4f(fp.p, 1.0f / ramp, -thr / ramp, 8.0f, diag));
+            ++C.uniformCalls;
+            C.uniformBytes += 16;
+        }
+    };
+    auto quad = [&](FastProg& fp, int X0, int Y0, int X1, int Y1) {
+        X0 = std::max(X0, dx); Y0 = std::max(Y0, dy);
+        X1 = std::min(X1, dx + dw); Y1 = std::min(Y1, dy + dh);
+        if (X1 <= X0 || Y1 <= Y0) return;
+        PresentUvRect(xi, yi, wi, hi, dx, dy, dw, dh, flipY, X0, Y0, X1, Y1, rect);
+        SetViewport(X0, Y0, X1 - X0, Y1 - Y0);
+        G(glUniform4fv(fp.rect, 1, rect));
+        ++C.uniformCalls;
+        TouchTarget();
+        G(glDrawArrays(GL_TRIANGLE_STRIP, 0, 4));
+    };
+    // 1. The picture with the edge term (=3: its left half).
+    const int splitX = edgeMode == 3 ? dx + dw / 2 : dx + dw;
+    if (smooth) {
+        setup(*smooth, false);
+        // (GXV_EDGE_AA_HUDCUT: only the screen outside the HUD rectangles, which step 2 draws plainly over whatever step 1 left)
+        HudPieces cut;
+        if (edgeMode != 3 && HudCutEnv() && HudComplement(g_charaDisp, x, y, w, h, dx, dy, dw, dh, flipY, cut)) {
+            for (int i = 0; i < cut.n; ++i) quad(*smooth, cut.r[i][0], cut.r[i][1], cut.r[i][2], cut.r[i][3]);
+            g_hudCutStats.pieces += static_cast<uint64_t>(cut.n);
+            g_hudCutStats.hudPx += static_cast<uint64_t>(cut.hudPx);
+            if (++g_hudCutStats.presents % 1800 == 0) // (about once a minute at 30 pictures a second)
+                autoq::Log("[present] GXV_EDGE_AA_HUDCUT: %llu presents, %.1f edge pieces and %.1f%% of the screen (HUD) left to the plain pass a present",
+                           static_cast<unsigned long long>(g_hudCutStats.presents), static_cast<double>(g_hudCutStats.pieces) / g_hudCutStats.presents,
+                           100.0 * static_cast<double>(g_hudCutStats.hudPx) / (static_cast<double>(g_hudCutStats.presents) * dw * dh));
+        } else {
+            quad(*smooth, dx, dy, splitX, dy + dh);
+        }
+    }
+    // 2. Plainly: the whole picture without edge smoothing; or (=3) the right half, and the HUD rectangles.
+    setup(*plain, FastPlainKind() == kFastPlain3);
+    if (!smooth) quad(*plain, dx, dy, dx + dw, dy + dh);
+    else {
+        if (splitX < dx + dw) quad(*plain, splitX, dy, dx + dw, dy + dh);
+        const CopyDispCmd* d = g_charaDisp;
+        const float sx = ScaleX(), sy = ScaleY();
+        const float kx = static_cast<float>(dw) / static_cast<float>(w), ky = static_cast<float>(dh) / static_cast<float>(h);
+        for (int i = 0; d && i < d->hudN && i < kCharaBoxes; ++i) {
+            const EfbRect& hb = d->hud[i];
+            // EFB pixels -> render-target pixels -> the screen's pixels (outwards), as PresentEdgeAA
+            const float rx0 = hb.x * sx - static_cast<float>(x), rx1 = (hb.x + hb.w) * sx - static_cast<float>(x);
+            const float ry0 = hb.y * sy - static_cast<float>(y), ry1 = (hb.y + hb.h) * sy - static_cast<float>(y);
+            const int X0 = dx + static_cast<int>(std::floor(rx0 * kx)), X1 = dx + static_cast<int>(std::ceil(rx1 * kx));
+            int Y0, Y1;
+            if (flipY) { Y0 = dy + dh - static_cast<int>(std::ceil(ry1 * ky)); Y1 = dy + dh - static_cast<int>(std::floor(ry0 * ky)); }
+            else { Y0 = dy + static_cast<int>(std::floor(ry0 * ky)); Y1 = dy + static_cast<int>(std::ceil(ry1 * ky)); }
+            quad(*plain, X0, Y0, std::min(X1, splitX), Y1); // (=3: the right half is plain already)
+            ++g_fastStats.hud;
+            if (hudDrawn) ++*hudDrawn;
+        }
+        ++g_fastStats.smoothed;
+    }
+    g_uniDirtyV = g_uniDirtyF = false;
+    ++g_fastStats.presents;
+    return true;
+}
+} // namespace
+
+// Builds the fast present's programs at Init (see above). True when GXV_PRESENT_FAST is off or every program it needs built.
+bool WarmPresentFast() {
+    if (FastEnv() == 0) return true;
+    const double t0 = NowMs();
+    const FastProg* plain = EnsureFastProgram(FastPlainKind());
+    const FastProg* smooth = EdgeEnv() ? EnsureFastProgram(FastEdgeKind()) : nullptr;
+    const bool ok = plain && (!EdgeEnv() || smooth);
+    autoq::Log("[present] GXV_PRESENT_FAST=%d: one-pass present (non-dependent reads: %d plain, 5 with edge smoothing), edge smoothing %s; "
+               "programs %s (%s) in %.1f ms (at start-up, not in play)",
+               FastEnv(), FastEnv() == 2 ? 5 : 3, EdgeEnv() ? "on (GXV_EDGE_AA)" : "off", ok ? "built" : "NOT built",
+               ok ? (plain->half && (!smooth || smooth->half) ? "half form" : "float form") : "-", NowMs() - t0);
+    return ok;
+}
+void PresentFastCounters(uint64_t& presents, uint64_t& smoothed, uint64_t& hudRects) {
+    presents = g_fastStats.presents;
+    smoothed = g_fastStats.smoothed;
+    hudRects = g_fastStats.hud;
+}
+
 bool Init(int renderWidth, int renderHeight) {
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+    g_drawReject=DrawRejectCounters{};
+#endif
+    g_capacityNextScanSerial = 0;
 #if VGX_COLDTRACE && defined(__vita__)
     static bool captureAttempted=false;
     if(!captureAttempted && EnvInt("GXV_COLDTRACE",0)!=0) {
@@ -4512,6 +7221,51 @@ bool Init(int renderWidth, int renderHeight) {
 #endif
     g_quadClear = EnvInt("GXV_QUADCLEAR", 1) != 0;
     g_noCache = EnvInt("GXV_GLCACHE", 1) == 0;
+    beprof::Configure(); // (GXV_BE_PROF)
+    gpuscenes::g_mode = static_cast<int>(std::clamp<long>(EnvInt("GXV_GPU_SCENES", 0), 0, 2));
+    gpuscenes::g_on = gpuscenes::g_mode != 0;
+    g_px.noop = EnvInt("GXV_PX_NOOP", 0) != 0;
+    g_px.deadClear = EnvInt("GXV_PX_DEADCLEAR", 0) != 0;
+    g_px.scissor = EnvInt("GXV_PX_SCISSOR", 0) != 0;
+    if ((g_px.noop || g_px.deadClear || g_px.scissor) && port_log_summary)
+        port_log_summary("pxcut: GXV_PX_NOOP=%d GXV_PX_DEADCLEAR=%d GXV_PX_SCISSOR=%d (pixel-work cuts that keep the picture)", g_px.noop ? 1 : 0, g_px.deadClear ? 1 : 0,
+                         g_px.scissor ? 1 : 0);
+#ifdef __VGX_VITA__
+    g_midFlushEvery = static_cast<uint32_t>(std::clamp<long>(EnvInt("GXV_MIDFLUSH", 0), 0, 4096));
+    if (g_midFlushEvery && port_log_summary) port_log_summary("GXV_MIDFLUSH=%u: the EFB scene's vertex work goes to the GPU every %u draws", g_midFlushEvery, g_midFlushEvery);
+#endif
+    g_beFast = EnvInt("GXV_BE_FAST", 1) != 0;
+    g_gpuAttrib = static_cast<int>(std::clamp<long>(EnvInt("GXV_GPU_ATTRIB", 0), 0, 2));
+    if (g_gpuAttrib && port_log_summary)
+        port_log_summary("GXV_GPU_ATTRIB=%d (TEST, the picture is wrong): every EFB draw %s", g_gpuAttrib,
+                         g_gpuAttrib == 1 ? "draws only its first triangle (GPU ms = per-draw costs)" : "goes to a 1x1 viewport (GPU ms = per-draw + vertex costs)");
+    // GXV_BE_FAST2 (see g_beFast2): the per-draw switches latched here, before the first draw, from the same reads as before
+    g_f2.sanMode = SanModeRead();
+    g_f2.uniformReuse = UniformReuseRead();
+    g_f2.stageWarm = StageWarmOnRead();
+    g_f2.audit = resourceaudit::Enabled();
+    g_f2.lodPct = RungLodPctRead();
+    g_beFast2 = EnvInt("GXV_BE_FAST2", 1) != 0;
+#ifdef __VGX_VITA__
+    {
+        const bool want = EnvInt("GXV_UNI_SHADOW", 0) != 0, have = vglGetUniformShadow && vglUniformShadowWritten;
+        g_uniShadow = want && have;
+        if (want)
+            autoq::Log("[uni-shadow] %s", have ? "on: uniform blocks go into vitaGL's uniform buffers directly, compared first (GXV_UNI_SHADOW)"
+                                               : "asked for, but this vitaGL has no vglGetUniformShadow: glUniform* as before");
+    }
+#endif
+    // vitaGL's draw caches (tools/vitagl/patches/0014; a vitaGL without it has no such call and keeps its own behaviour):
+    // GXV_VGL_FRAGMEMO=1 (default): each program keeps the fragment programs it was patched for (blend, colour mask, target
+    // format, multisampling), so a program drawn alternately with two blends no longer asks the shader patcher on every switch.
+    // GXV_VGL_UNIREUSE=1 (default): a program whose uniform values did not change since its last draw points sceGxm at the copy
+    // that draw made in the uniform ring instead of copying its whole default uniform buffer again (after every program switch).
+    if (vglSetDrawCaches) {
+        const uint32_t flags = (EnvInt("GXV_VGL_FRAGMEMO", 1) != 0 ? 1u : 0u) | (EnvInt("GXV_VGL_UNIREUSE", 1) != 0 ? 2u : 0u);
+        vglSetDrawCaches(flags);
+        autoq::Log("[vgl-cache] fragment-program memo %s, uniform-ring re-use %s (GXV_VGL_FRAGMEMO, GXV_VGL_UNIREUSE)", (flags & 1u) ? "on" : "off",
+                (flags & 2u) ? "on" : "off");
+    }
     g_fboMaxUses = static_cast<uint32_t>(EnvInt("GXV_FBO_USES", 8));
     if (const char* e = std::getenv("GXV_STATIC_USAGE"); e && std::strcmp(e, "dynamic") == 0) g_staticUsage = GL_DYNAMIC_DRAW;
     // GXV_EFB0=WxH: the size the EFB object is first made with (default 640x528). The game
@@ -4548,6 +7302,7 @@ bool Init(int renderWidth, int renderHeight) {
         if (port_log_summary) port_log_summary("[vgx] back end set-up failed: the display copy program did not compile or link");
         return false;
     }
+    WarmEdgeAA(); // (GXV_EDGE_AA: its shaders built behind the loading screen, never at the first smoothed picture in play)
 #if !defined(__VGX_VITA__)
     MakeProgressDumpDisplay();
 #endif
@@ -4564,8 +7319,8 @@ double g_prof[CMD_TYPE_COUNT] = {};
 uint32_t g_profCount[CMD_TYPE_COUNT] = {};
 uint32_t g_profFrames = 0;
 double g_profTotal = 0, g_profStream = 0;
-uint64_t g_profSum[64] = {}; // the call census (VGX_GL_COUNTERS) summed over the same frames
-static_assert(sizeof(Counts) / sizeof(uint32_t) <= 64, "g_profSum too small");
+uint64_t g_profSum[80] = {}; // the call census (VGX_GL_COUNTERS) summed over the same frames
+static_assert(sizeof(Counts) / sizeof(uint32_t) <= 80, "g_profSum too small");
 inline double Now() { return NowMs(); }
 // Frame selection of the GPU timing diagnostics (GXV_PASSTIME, GXV_DRAWTIME): "7000,7010-7013".
 bool FrameInList(const char* list, uint64_t frame) {
@@ -5012,9 +7767,92 @@ void RunHoist(const CmdBuf& buf, size_t i, size_t j) {
 // later reads them through the same texture coordinates. This changes the picture (a blurrier bloom); GXV_PASSVERIFY gives
 // the PSNR against full size. Only passes of at most a quarter of the EFB, not into an atlas, of at least 8x8 pixels after.
 //   GXV_PASSHALF=0   off (default); 1 on
+//   GXV_PASSHALF=2   only the passes INSIDE a chain (the narrow form, below); the quality step (g_stepFx) still takes the form of 1
+// ---- GXV_PASSHALF=2: only the blur steps inside a chain at half size
+// GameScene's BloomEffect::postDraw (decomp Game/Screen/BloomEffect.cpp; EFB 640x456, render scale s = 1.5 x 1.19 at 960x544), as the
+// front end isolates it (tile = a cell of the 4x4 or 8x8 grid of the EFB, ImageEffectLocalUtil::capture's rectangles):
+//   EFB -> _28 320x228 (box-halved copy of the glow mask)  [an EFB copy: not a pass]
+//   P0 tile 0 160x114: _28 drawn at 1/2 (one bilinear read = the exact 2x2 box)  -> _2C 160x114, _40 I8   reads an EFB copy: KEPT
+//   P1 tile 2 160x114: _2C, then x threshold mask _40                            -> _44                     HALVED
+//   P2 tile 3 160x114: 6+6-tap ring blur of _44 (r 0.01 / 0.02 of the width)      -> _30, _34 80x57 (box)    HALVED
+//   P3 tile 20 80x57:  36-tap ring blur of _34 (r 0.04-0.09)                      -> _38                     HALVED
+//   P4 tile 7 160x114: _30 + _38                                                   -> _3C                     its copy is read by the EFB: KEPT
+//   EFB: _24 (the saved picture) drawn back, _3C added over the whole screen (full size, as always).
+// So the narrow form halves P1-P3 (about 0.11 + 0.42 + 0.32 ms of 0.9 ms of pass fill at 960x544 by the blit-cost model; they become a
+// quarter) and keeps P0 (a half-size P0 would read _28 4:1 with one bilinear tap: single glow-mask texels would flicker) and P4 (its
+// picture is stretched over the whole screen; at half size the glow would be blockier). BloomEffectSimple has no pass inside its chain
+// (its one blur goes straight to the screen): nothing changes there. Why the picture stays nearly the same: every halved pass draws a
+// picture that is only ever read by another pass of the chain through bilinear filtering, before more blurring or a 2x-4x upscale to
+// the screen; P1 at half size reads _2C / _40 2:1 at texel corners (the exact 2x2 box, no aliasing); the ring blurs' radii (2.4-21 render
+// pixels at 960x544) are fixed fractions of the screen, so they cover the same area at either size, and their output carries little above
+// the half size's Nyquist frequency; the copies of a halved pass are half size and every reader samples them through the same 0..1
+// coordinates. NOT exact (GXV_PASSVERIFY gives the PSNR on the desktop). Rule: a pass is halved when every texture its draws sample is a
+// copy this frame makes from a pass (CopyTexCmd::fromPass, or out of an atlas cell), and every copy that ends it (passMore chain) is read,
+// before it is written again this frame, only by draws inside passes; plus PASSHALF's own limits (at most a quarter of the EFB, no atlas,
+// at least 8x8 pixels after).
+bool PassInChain(const CmdBuf& buf, size_t begin) {
+    auto fromPassCopy = [&](uint32_t id) { // (the latest copy into id before `begin` was made from a pass)
+        int found = -1;
+        for (size_t j = 0; j < begin && j < buf.cmds.size(); ++j)
+            if (buf.cmds[j].type == CMD_COPY_TEX && buf.copyTex[buf.cmds[j].arg].texId == id) found = static_cast<int>(j);
+        if (found < 0) return false;
+        const CopyTexCmd& t = buf.copyTex[buf.cmds[static_cast<size_t>(found)].arg];
+        return !t.depth && !t.skip && (t.fromPass || t.srcTex != 0);
+    };
+    size_t end = begin + 1;
+    for (; end < buf.cmds.size() && buf.cmds[end].type != CMD_COPY_TEX; ++end) {
+        if (buf.cmds[end].type == CMD_PASS_BEGIN) return false;
+        if (buf.cmds[end].type != CMD_DRAW) continue;
+        const DrawRec& d = buf.draws[buf.cmds[end].arg];
+        for (int m = 0; m < 8; ++m)
+            if ((d.texMask & (1u << m)) && !fromPassCopy(d.tex[m].texId)) return false;
+    }
+    if (end >= buf.cmds.size()) return false;
+    // The copies that end the pass (the first, and the ones chained to it by passMore) and their readers.
+    uint32_t made[8];
+    int nMade = 0;
+    for (size_t j = end; j < buf.cmds.size() && buf.cmds[j].type == CMD_COPY_TEX; ++j) {
+        const CopyTexCmd& t = buf.copyTex[buf.cmds[j].arg];
+        if (!t.fromPass || t.depth || t.dstTexW || nMade == 8) return false;
+        if (!t.skip) made[nMade++] = t.texId;
+        if (!t.passMore) { end = j; break; }
+        end = j;
+    }
+    bool inPass = false;
+    for (size_t j = end + 1; j < buf.cmds.size() && nMade > 0; ++j) {
+        const Cmd& c = buf.cmds[j];
+        if (c.type == CMD_PASS_BEGIN) { inPass = true; continue; }
+        if (c.type == CMD_COPY_TEX) {
+            const CopyTexCmd& t = buf.copyTex[c.arg];
+            for (int k = 0; k < nMade; ++k)
+                if (t.srcTex == made[k]) return false; // (an atlas copy out of it: not a pass's draw)
+            if (t.fromPass && !t.passMore) inPass = false;
+            for (int k = 0; k < nMade; ++k)
+                if (t.texId == made[k]) { made[k] = made[--nMade]; break; } // (written again: later readers see another picture)
+            continue;
+        }
+        if (c.type == CMD_TEX_FREE || c.type == CMD_TEX_UPLOAD || c.type == CMD_SET_TARGET || c.type == CMD_COPY_DISP) {
+            if (c.type == CMD_SET_TARGET || c.type == CMD_COPY_DISP) inPass = false;
+            const uint32_t id = c.type == CMD_TEX_FREE ? c.arg : (c.type == CMD_TEX_UPLOAD ? buf.uploads[c.arg].texId : 0u);
+            for (int k = 0; k < nMade; ++k)
+                if (id && id == made[k]) { made[k] = made[--nMade]; break; }
+            continue;
+        }
+        if (c.type != CMD_DRAW) continue;
+        const DrawRec& d = buf.draws[c.arg];
+        for (int m = 0; m < 8; ++m) {
+            if (!(d.texMask & (1u << m))) continue;
+            for (int k = 0; k < nMade; ++k)
+                if (d.tex[m].texId == made[k] && !inPass) return false; // (the EFB reads it: the composite or anything else)
+        }
+    }
+    return true;
+}
 float PassScaleFor(const CmdBuf& buf, size_t begin, const PassCmd& ps) {
-    static const bool on = EnvInt("GXV_PASSHALF", 0) != 0;
+    static const long mode = EnvInt("GXV_PASSHALF", 0);
+    const bool on = mode != 0;
     if (!(on || g_stepFx) || GpupassOff(GP_PASSHALF) || ps.atlasTex || ps.crowd.valid()) return 1.0f;
+    if (mode == 2 && !g_stepFx && !PassInChain(buf, begin)) return 1.0f; // (GXV_PASSHALF=2: only passes inside a chain)
     if (static_cast<int>(ps.rect.w) * ps.rect.h * 4 > static_cast<int>(g_efbW) * g_efbH) return 1.0f;
     const float sx = static_cast<float>(g_rtW) / static_cast<float>(g_efbW) * 0.5f, sy = static_cast<float>(g_rtH) / static_cast<float>(g_efbH) * 0.5f;
     if (Rnd(ps.rect.w * sx) < 8 || Rnd(ps.rect.h * sy) < 8) return 1.0f;
@@ -5051,7 +7889,7 @@ float PassScaleFor(const CmdBuf& buf, size_t begin, const PassCmd& ps) {
 // or more use it. The EFB's depth as a texture: on the desktop the EFB's depth texture; on the console a vitaGL built with
 // DEPTH_SAMPLE (vglFramebufferDepthTexture: the depth buffer as its last scene stored it; the depth plan stores it for that).
 //   GXV_FXHALF=0   off (default until shown on the console);  =2  half size (a quarter of the pixels);  =4  a quarter of each side
-//   GXV_FXHALF_MIN=<vertices>   smallest run that is drawn so (default 400; 0: every run)
+//   GXV_FXHALF_MIN=<vertices>   smallest run that is drawn so (default 400; 0: every run); then the area test (GXV_FXHALF_AREA, below)
 int FxDiv() {
     static const int div = [] {
         const long v = EnvInt("GXV_FXHALF", 0);
@@ -5128,6 +7966,414 @@ GLuint FxDepthTexture() {
     return g_hasDepthTex ? g_efbDepthTex : 0;
 #endif
 }
+// ---- GXV_FXHALF_AREA: what a run of effect draws covers (and GXV_FXAREA, the census of it)
+// A reduced run is not free: the depth copy (1/div^2 of the picture), the composite (the whole picture, blended), and two more
+// scenes of the EFB (its colour and depth stored and loaded again; on the console, 1 Nov, ten such runs a picture took the renderer
+// from 15 to 24 ms a picture and the GPU gained nothing). It only pays where the run's own fill is larger than that: a run of
+// 400 vertices may be a hundred 4-pixel sparks or a screen-filling glow. So the run's pixels are measured, from its vertices:
+// each triangle through the draw's own matrix and projection blocks (u_mv rows and u_proj, as the vertex shader has them),
+// clipped against w > 0 and the clip box, scaled by the viewport. Only stream draws with u_mv positions can be measured;
+// a big draw is measured on every k-th of its triangles (at most kAreaTris) and scaled. An estimate, for choosing.
+//   GXV_FXHALF_AREA=<screens>   a run is drawn at the reduced size only when it covers at least this many screens (default 3;
+//                               0: the vertex count alone decides, as before). GXV_FXHALF_MIN=0 ("every run") also turns it off.
+//   GXV_FXHALF_RUNS=<n>         with the area test, at most this many runs a picture, the largest (default 2; 0: no limit)
+//   GXV_FXAREA=<n>              with GXV_WORKLOAD_PROBE=1: one picture in n is measured for the "workload: fx area" line (default
+//                               16; 0: off): the blended draws' coverage, the additive runs' coverage
+constexpr uint32_t kAreaTris = 64;
+// Polygon clipping in clip space against one plane (d = a plane's signed distance per vertex: dot(plane, v)).
+struct ClipV { float x, y, w; };
+// axis 0 / 1: the plane w + sign * x (or y) >= 0 (sign -1: x <= w; +1: x >= -w); axis 2: w >= 1e-5 (in front of the eye).
+inline int ClipPlane(const ClipV* in, int n, ClipV* out, int axis, float sign) {
+    auto dist = [axis, sign](const ClipV& v) { return axis == 2 ? v.w - 1e-5f : v.w + sign * (axis == 0 ? v.x : v.y); };
+    int m = 0;
+    for (int i = 0; i < n; ++i) {
+        const ClipV& a = in[i];
+        const ClipV& b = in[(i + 1) % n];
+        const float da = dist(a), db = dist(b);
+        if (da >= 0.0f) out[m++] = a;
+        if ((da >= 0.0f) != (db >= 0.0f)) {
+            const float t = da / (da - db);
+            out[m++] = ClipV{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.w + (b.w - a.w) * t};
+        }
+    }
+    return m;
+}
+// The area of one clip-space triangle inside the clip box, in NDC units (the box is 2 x 2).
+inline float ClipTriArea(const ClipV& a, const ClipV& b, const ClipV& c) {
+    const auto inside = [](const ClipV& v) { return v.w > 1e-5f && std::fabs(v.x) <= v.w && std::fabs(v.y) <= v.w; };
+    ClipV buf0[12], buf1[12];
+    int n = 3;
+    buf0[0] = a; buf0[1] = b; buf0[2] = c;
+    ClipV* poly = buf0;
+    if (!(inside(a) && inside(b) && inside(c))) {
+        // (all three outside one plane: nothing)
+        if (a.w <= 1e-5f && b.w <= 1e-5f && c.w <= 1e-5f) return 0.0f;
+        if (a.x > a.w && b.x > b.w && c.x > c.w) return 0.0f;
+        if (a.x < -a.w && b.x < -b.w && c.x < -c.w) return 0.0f;
+        if (a.y > a.w && b.y > b.w && c.y > c.w) return 0.0f;
+        if (a.y < -a.w && b.y < -b.w && c.y < -c.w) return 0.0f;
+        ClipV* src = buf0;
+        ClipV* dst = buf1;
+        static const int axes[5] = {2, 0, 0, 1, 1};
+        static const float signs[5] = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f};
+        for (int k = 0; k < 5 && n >= 3; ++k) {
+            n = ClipPlane(src, n, dst, axes[k], signs[k]);
+            std::swap(src, dst);
+        }
+        if (n < 3) return 0.0f;
+        poly = src;
+    }
+    float twice = 0.0f;
+    float px = poly[n - 1].x / poly[n - 1].w, py = poly[n - 1].y / poly[n - 1].w;
+    for (int i = 0; i < n; ++i) {
+        const float x = poly[i].x / poly[i].w, y = poly[i].y / poly[i].w;
+        twice += px * y - x * py;
+        px = x;
+        py = y;
+    }
+    return std::fabs(twice) * 0.5f;
+}
+// The pixels (EFB) a stream draw's triangles cover, counted with overlap (fill work); < 0: not known here.
+float DrawAreaPx(const CmdBuf& buf, const DrawRec& d) {
+    if (d.vbuf || d.prim != PRIM_TRIANGLES || d.idxCount < 3) return -1.0f;
+    if (d.vsId >= g_vsSrc.size() || !g_vsSrc[d.vsId] || g_vsSrc[d.vsId]->nMv == 0) return -1.0f; // (positions from a palette, or not known yet)
+    const uint32_t pb = d.ublock[UB_PROJ], mb = d.ublock[UB_MV];
+    if (pb == kNoBlock || mb == kNoBlock || pb > buf.uni.size() || buf.uni.size() - pb < 16 || mb > buf.uni.size() || buf.uni.size() - mb < 12) return -1.0f;
+    if (static_cast<size_t>(d.idxOffset) + d.idxCount > buf.idx.size()) return -1.0f;
+    size_t base = d.vtxOffset;
+    if (!buf.vtxChunks.empty()) {
+        if (d.vchunk >= buf.vtxChunks.size()) return -1.0f;
+        base += buf.vtxChunks[d.vchunk];
+    }
+    const uint32_t stride = MakeLayout(d.layoutMask).stride;
+    const float* P = buf.uni.data() + pb; // (column-major)
+    const float* M = buf.uni.data() + mb; // (rows: eye = M[r] . (x, y, z, 1))
+    // clip = P * (M * p): rows 0 (x), 1 (y), 3 (w) of the product, as a 3x4 matrix.
+    float R[3][4];
+    static const int rows[3] = {0, 1, 3};
+    for (int i = 0; i < 3; ++i) {
+        const int r = rows[i];
+        for (int k = 0; k < 4; ++k) R[i][k] = P[0 * 4 + r] * M[0 * 4 + k] + P[1 * 4 + r] * M[1 * 4 + k] + P[2 * 4 + r] * M[2 * 4 + k];
+        R[i][3] += P[12 + r];
+    }
+    const uint8_t* const vtx = buf.vtx.data();
+    const size_t vtxSize = buf.vtx.size();
+    const uint16_t* const ix = buf.idx.data() + d.idxOffset;
+    auto at = [&](uint16_t v, ClipV& o) {
+        const size_t off = base + static_cast<size_t>(v) * stride;
+        if (off > vtxSize || vtxSize - off < 12) return false;
+        float p[3];
+        std::memcpy(p, vtx + off, 12);
+        o.x = R[0][0] * p[0] + R[0][1] * p[1] + R[0][2] * p[2] + R[0][3];
+        o.y = R[1][0] * p[0] + R[1][1] * p[1] + R[1][2] * p[2] + R[1][3];
+        o.w = R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2] + R[2][3];
+        return std::isfinite(o.x) && std::isfinite(o.y) && std::isfinite(o.w);
+    };
+    const uint32_t tris = d.idxCount / 3;
+    const uint32_t step = tris > kAreaTris ? (tris + kAreaTris - 1) / kAreaTris : 1;
+    float ndc = 0.0f;
+    uint32_t measured = 0;
+    for (uint32_t t = 0; t < tris; t += step) {
+        ClipV a, b, c;
+        if (!at(ix[t * 3], a) || !at(ix[t * 3 + 1], b) || !at(ix[t * 3 + 2], c)) return -1.0f;
+        ndc += ClipTriArea(a, b, c);
+        ++measured;
+    }
+    if (!measured) return -1.0f;
+    // (NDC area 4 is the whole viewport)
+    return ndc * (static_cast<float>(tris) / static_cast<float>(measured)) * std::fabs(d.rs.vpW * d.rs.vpH) * 0.25f;
+}
+// The EFB's pixels: one screen.
+inline float ScreenPx() { return static_cast<float>(g_efbW > 0 ? g_efbW : 640) * static_cast<float>(g_efbH > 0 ? g_efbH : 456); }
+// ---- GXV_GPU_SCENES=2, the second part: what each scene drew, and the scene slots with the most 3D (see the first part, near the top)
+// Per scene (Detail, filled while the back end draws it):
+//  - draws by class: depth-only (no colour or alpha written), no effect (nothing written: PxNoEffect), discard (the fragment shader has a
+//    `discard`), blended, opaque (the rest); for each the pixels covered, in target pixels: measured (DrawAreaPx: a stream draw's
+//    triangles, at most 64 of them, through its own matrices and viewport, overlap counted) or, where the vertices are not at hand
+//    (static buffers, palette positions), bounded by the draw's rectangle (the front end's extent, cut to the viewport);
+//  - vitaGL's scissor-mask passes: tests.c update_scissor_test runs at the beginning of every scene on a framebuffer object and at every
+//    scissor change; with the scissor off it draws the mask over the whole target, with it on a "clear the mask" pass over the whole
+//    target (left out when the scene did not load its depth: MASK_SKIP) and the rectangle. Counted as the back end's TouchTarget sees
+//    vitaGL's dirty flag (an estimate of what vitaGL does);
+//  - glClear quads (vitaGL clears by drawing a quad over the scissor rectangle), copy and pass quads (DrawQuad);
+//  - whether its first operation cleared the whole target (then the colour load GXM made at the scene's beginning was dead work) and
+//    the depth hint it began with (load / store).
+// Per fragment shader, a per-pixel weight from its text, cached by id: statements of its main + 3 x texture reads (a rough count of
+// USSE instructions; a `discard` and the TEV stage count are shown with it). A draw's estimated cost is its pixels x that weight.
+// The slots: a scene is placed by its number in the back end's picture, its kind and its target size (the picture's structure is the
+// same from picture to picture in steady play). Every scene timed cleanly (see Take) adds its TA / 3D / feed and its Detail to its slot;
+// every 5 s the eight slots with the most 3D a picture get one line each:
+//   gpu-scenes top N: scene <number> <kind> <w>x<h> in P% of pictures: 3D x ms, TA y ms a picture (per scene x' / y'), feed z;
+//     D draws (B blended, X discard); <class> n draws m+<=b screens ...; scissor masks ...; clears ...; copy quads ...;
+//     depth load L% store S%, colour load dead C%; shaders by est. cost: fs <id> [stages, texture reads, statements, discard]
+//     draws, screens, share of the slot's estimated cost ...
+// "screens" are the slot's target pixels (w x h): 1.0 = every pixel once. "m+<=b": m measured, plus at most b for the draws known only by
+// their rectangles.
+namespace gpuscenes {
+// (per fragment shader id: bit 31 known, bit 30 discard, bits 16..23 TEV stages, bits 8..15 texture reads (255 = more), 0..7 statements / 2)
+uint32_t g_fsInfo[4096];
+uint32_t FsInfo(uint16_t fsId) {
+    if (fsId < 4096 && (g_fsInfo[fsId] & 0x80000000u)) return g_fsInfo[fsId];
+    uint32_t stages = 0, tex = 0, st = 0;
+    bool dis = false;
+    if (fsId < g_fsSrc.size() && g_fsSrc[fsId]) {
+        const std::string& t = g_fsSrc[fsId]->text;
+        for (size_t p = t.find("// stage "); p != std::string::npos; p = t.find("// stage ", p + 1)) ++stages;
+        for (size_t p = t.find("texture2D("); p != std::string::npos; p = t.find("texture2D(", p + 1)) ++tex;
+        const size_t m = t.find("void main");
+        for (size_t p = m == std::string::npos ? t.size() : m; p < t.size(); ++p) st += t[p] == ';';
+        dis = t.find("discard") != std::string::npos;
+    }
+    const uint32_t v = 0x80000000u | (dis ? 0x40000000u : 0u) | (std::min<uint32_t>(stages, 255) << 16) | (std::min<uint32_t>(tex, 255) << 8) |
+                       std::min<uint32_t>((st + 1) / 2, 255);
+    if (fsId < 4096) g_fsInfo[fsId] = v;
+    return v;
+}
+inline float FsWeight(uint32_t info) { return static_cast<float>((info & 0xFF) * 2 + ((info >> 8) & 0xFF) * 3); }
+inline Detail* CurDetail() {
+    if (!g_cur || g_mode < 2) return nullptr;
+    Detail& x = g_detail[g_cur->serial % kDetailRing];
+    return x.serial == g_cur->serial ? &x : nullptr;
+}
+// (Begin) the target's size and a clean record
+void BeginDetail(Desc& d) {
+    int w = 0, h = 0;
+    if (S.fbo == g_efbFbo) { w = g_rtW; h = g_rtH; }
+    else if (g_inPass && g_pass >= 0 && static_cast<size_t>(g_pass) < g_pool.size() && g_pool[g_pass].fbo == S.fbo) { w = g_passW; h = g_passH; }
+    else if (S.fbo == 0) { w = g_dispW; h = g_dispH; }
+    else
+        for (const PoolFbo& f : g_pool)
+            if (f.fbo == S.fbo) { w = f.w; h = f.h; break; }
+    d.w = static_cast<uint16_t>(std::clamp(w, 0, 0xFFFF));
+    d.h = static_cast<uint16_t>(std::clamp(h, 0, 0xFFFF));
+    Detail& x = g_detail[d.serial % kDetailRing];
+    x = Detail{};
+    x.serial = d.serial;
+}
+// The pixels of the bound target inside the GL scissor (target coordinates), or all of them.
+inline float ScissoredPx(int x0, int y0, int x1, int y1) {
+    const Desc& d = *g_cur;
+    if (S.scissorOn == 1) {
+        x0 = std::max(x0, S.sc[0]); y0 = std::max(y0, S.sc[1]);
+        x1 = std::min(x1, S.sc[0] + S.sc[2]); y1 = std::min(y1, S.sc[1] + S.sc[3]);
+    }
+    x1 = std::min(x1, static_cast<int>(d.w)); y1 = std::min(y1, static_cast<int>(d.h));
+    x0 = std::max(x0, 0); y0 = std::max(y0, 0);
+    return x1 > x0 && y1 > y0 ? static_cast<float>(x1 - x0) * static_cast<float>(y1 - y0) : 0.0f;
+}
+// (TouchTarget, when vitaGL will rebuild its scissor mask) began: this call began the scene
+void NoteMask(bool began) {
+    Detail* x = CurDetail();
+    if (!x) return;
+    const float full = static_cast<float>(g_cur->w) * static_cast<float>(g_cur->h);
+    ++x->masks;
+    if (S.scissorOn == 1) {
+        if (!(began && g_cur->dLoad == 0)) { ++x->maskFull; x->maskPx += full; } // (the "clear the mask" pass; MASK_SKIP leaves it out)
+        x->maskPx += ScissoredPx(0, 0, g_cur->w, g_cur->h);
+    } else {
+        ++x->maskFull;
+        x->maskPx += full;
+    }
+}
+// (a clear, after TouchTarget) colour / depth: what it clears
+void NoteClear(bool colour, bool depth) {
+    Detail* x = CurDetail();
+    if (!x) return;
+    const float px = ScissoredPx(0, 0, g_cur->w, g_cur->h), full = static_cast<float>(g_cur->w) * static_cast<float>(g_cur->h);
+    if (!x->touched && px >= full && full > 0.0f) x->firstClear = static_cast<uint8_t>((colour ? 1 : 0) | (depth ? 2 : 0));
+    x->touched = true;
+    ++x->clears;
+    x->clearPx += px;
+}
+// (DrawQuad, after TouchTarget) over the viewport
+void NoteQuad() {
+    Detail* x = CurDetail();
+    if (!x) return;
+    x->touched = true;
+    ++x->quads;
+    x->quadPx += ScissoredPx(S.vp[0], S.vp[1], S.vp[0] + S.vp[2], S.vp[1] + S.vp[3]);
+}
+// (Draw, after its draw call)
+void NoteDrawDetail(const CmdBuf& buf, const DrawRec& r) {
+    Detail* x = CurDetail();
+    if (!x) return;
+    x->touched = true;
+    const RenderState& rs = r.rs;
+    const uint32_t info = FsInfo(r.fsId);
+    const uint8_t cls = PxNoEffect(rs) ? kNoEffect : (!rs.colorWrite && !rs.alphaWrite) ? kDepthOnly : (info & 0x40000000u) ? kDiscard : rs.blend ? kBlended : kOpaque;
+    const float ps = g_inPass ? g_passScale : 1.0f;
+    const float s2 = ScaleX() * ps * ScaleY() * ps;
+    float px = DrawAreaPx(buf, r);
+    bool bound = false;
+    if (px >= 0.0f) {
+        px *= s2;
+    } else {
+        // (the draw's rectangle - the front end's extent, inside its scissor - cut to its viewport)
+        const float x0 = std::max(static_cast<float>(r.exX), rs.vpX), y0 = std::max(static_cast<float>(r.exY), rs.vpY);
+        const float x1 = std::min(static_cast<float>(r.exX + r.exW), rs.vpX + rs.vpW), y1 = std::min(static_cast<float>(r.exY + r.exH), rs.vpY + rs.vpH);
+        px = x1 > x0 && y1 > y0 ? (x1 - x0) * (y1 - y0) * s2 : 0.0f;
+        bound = true;
+    }
+    ++x->clsDraws[cls];
+    if (bound) { ++x->clsBound[cls]; x->clsBoundPx[cls] += px; }
+    else x->clsPx[cls] += px;
+    const float cost = px * FsWeight(info);
+    int k = 0;
+    while (k < x->nSh && x->sh[k].fs != r.fsId) ++k;
+    if (k == x->nSh && x->nSh < kSceneShaders) { x->sh[k] = ShaderUse{}; x->sh[k].fs = r.fsId; ++x->nSh; }
+    if (k < x->nSh) { ++x->sh[k].draws; x->sh[k].px += px; x->sh[k].cost += cost; }
+    else { ++x->otherDraws; x->otherPx += px; x->otherCost += cost; }
+}
+// ---- the slots of the window
+constexpr int kSlotShaders = 16;
+struct Slot {
+    uint16_t ordinal = 0, w = 0, h = 0;
+    uint8_t kind = 0;
+    bool tagged = false;
+    uint32_t n = 0, withDetail = 0;
+    uint64_t taUs = 0, fUs = 0, feedUs = 0, draws = 0, blend = 0, discard = 0;
+    uint32_t dLoad = 0, dStore = 0, dKnown = 0, colourDead = 0;
+    uint64_t clsDraws[kClasses] = {}, clsBound[kClasses] = {};
+    double clsPx[kClasses] = {}, clsBoundPx[kClasses] = {};
+    uint64_t masks = 0, maskFull = 0, clears = 0, quads = 0;
+    double maskPx = 0, clearPx = 0, quadPx = 0;
+    ShaderUse sh[kSlotShaders];
+    int nSh = 0;
+    uint64_t otherDraws = 0;
+    double otherPx = 0, otherCost = 0;
+};
+constexpr int kSlots = 48; // (the last one takes whatever does not fit)
+Slot g_slots[kSlots];
+int g_nSlots = 0;
+void TakeSlot(const Desc& d, uint32_t ta, uint32_t f, uint32_t feed) {
+    const bool tagged = d.serial != 0;
+    int i = 0;
+    while (i < g_nSlots && !(g_slots[i].tagged == tagged && g_slots[i].ordinal == d.ordinal && g_slots[i].kind == d.kind && g_slots[i].w == d.w && g_slots[i].h == d.h)) ++i;
+    if (i == g_nSlots) {
+        if (g_nSlots < kSlots) {
+            g_slots[i] = Slot{};
+            g_slots[i].tagged = tagged; g_slots[i].ordinal = d.ordinal; g_slots[i].kind = d.kind; g_slots[i].w = d.w; g_slots[i].h = d.h;
+            ++g_nSlots;
+        } else {
+            i = kSlots - 1;
+        }
+    }
+    Slot& s = g_slots[i];
+    ++s.n;
+    s.taUs += ta; s.fUs += f; s.feedUs += feed;
+    s.draws += d.draws; s.blend += d.blend; s.discard += d.discard;
+    if (d.dLoad >= 0) { ++s.dKnown; s.dLoad += static_cast<uint32_t>(d.dLoad); s.dStore += static_cast<uint32_t>(d.dStore > 0); }
+    const Detail& x = g_detail[d.serial % kDetailRing];
+    if (!tagged || x.serial != d.serial) return;
+    ++s.withDetail;
+    s.colourDead += x.firstClear & 1u;
+    for (int c = 0; c < kClasses; ++c) {
+        s.clsDraws[c] += x.clsDraws[c]; s.clsBound[c] += x.clsBound[c];
+        s.clsPx[c] += x.clsPx[c]; s.clsBoundPx[c] += x.clsBoundPx[c];
+    }
+    s.masks += x.masks; s.maskFull += x.maskFull; s.maskPx += x.maskPx;
+    s.clears += x.clears; s.clearPx += x.clearPx; s.quads += x.quads; s.quadPx += x.quadPx;
+    for (int k = 0; k < x.nSh; ++k) {
+        int j = 0;
+        while (j < s.nSh && s.sh[j].fs != x.sh[k].fs) ++j;
+        if (j == s.nSh && s.nSh < kSlotShaders) { s.sh[j] = ShaderUse{}; s.sh[j].fs = x.sh[k].fs; ++s.nSh; }
+        if (j < s.nSh) { s.sh[j].draws += x.sh[k].draws; s.sh[j].px += x.sh[k].px; s.sh[j].cost += x.sh[k].cost; }
+        else { s.otherDraws += x.sh[k].draws; s.otherPx += x.sh[k].px; s.otherCost += x.sh[k].cost; }
+    }
+    s.otherDraws += x.otherDraws; s.otherPx += x.otherPx; s.otherCost += x.otherCost;
+}
+void ReportTop(double seconds) {
+    static const char* const kName[kKinds] = {"EFB", "texture/pass", "display/other"};
+    static const char* const kCls[kClasses] = {"opaque", "blended", "discard", "depth-only", "no effect"};
+    const uint64_t pictures = g_timers ? g_gpuPictures : g_cpuPictures; // (no scene timers: every picture executed, no GPU times)
+    const double gp = pictures ? static_cast<double>(pictures) : 1.0;
+    auto out = [](const char* text) {
+        if (port_log_summary) port_log_summary("%s", text);
+        else std::fprintf(stderr, "%s\n", text);
+    };
+    char line[1600];
+    double slots3d = 0;
+    for (int i = 0; i < g_nSlots; ++i) slots3d += static_cast<double>(g_slots[i].fUs);
+    if (g_timers)
+        std::snprintf(line, sizeof line, "gpu-scenes top: %.1f s, %llu pictures timed, %d scene slots, 3D %.2f ms a picture in them; scenes after an untimed scene: %.1f a picture, "
+                      "TA %.2f, 3D %.2f ms a picture (not in the slots); the slots by 3D a picture follow (pixels in screens of the slot's target, measured from "
+                      "vertices + at most the bounded rest; est. cost = pixels x (statements + 3 x texture reads))",
+                      seconds, static_cast<unsigned long long>(g_gpuPictures), g_nSlots, slots3d / 1000.0 / gp, g_gapScenes / gp, g_gapTaUs / 1000.0 / gp, g_gapFUs / 1000.0 / gp);
+    else
+        std::snprintf(line, sizeof line, "gpu-scenes top: %.1f s, %llu pictures, %d scene slots, NO GPU times (this vitaGL has no scene timers): the slots by estimated pixel "
+                      "cost follow (pixels in screens of the slot's target, measured from vertices + at most the bounded rest; est. cost = pixels x (statements + 3 x "
+                      "texture reads))", seconds, static_cast<unsigned long long>(g_cpuPictures), g_nSlots);
+    out(line);
+    int order[kSlots];
+    double cost[kSlots];
+    for (int i = 0; i < g_nSlots; ++i) {
+        order[i] = i;
+        cost[i] = g_slots[i].otherCost;
+        for (int j = 0; j < g_slots[i].nSh; ++j) cost[i] += g_slots[i].sh[j].cost;
+    }
+    if (g_timers) std::sort(order, order + g_nSlots, [](int a, int b) { return g_slots[a].fUs > g_slots[b].fUs; });
+    else std::sort(order, order + g_nSlots, [&cost](int a, int b) { return cost[a] > cost[b]; });
+    for (int r = 0; r < g_nSlots && r < 8; ++r) {
+        const Slot& s = g_slots[order[r]];
+        if (!s.n) continue;
+        const double n = static_cast<double>(s.n), nd = s.withDetail ? static_cast<double>(s.withDetail) : 1.0;
+        const double scr = s.w && s.h ? static_cast<double>(s.w) * s.h : 1.0;
+        int k = 0;
+        if (s.tagged && !g_timers)
+            k = std::snprintf(line, sizeof line, "gpu-scenes top %d: scene %u %s %ux%u%s in %.0f%% of pictures: %.0f draws (%.0f blended, %.0f discard)", r + 1, s.ordinal,
+                              kName[s.kind], s.w, s.h, order[r] == kSlots - 1 && g_nSlots == kSlots ? " (+ others)" : "", 100.0 * n / gp, s.draws / n, s.blend / n, s.discard / n);
+        else if (s.tagged)
+            k = std::snprintf(line, sizeof line, "gpu-scenes top %d: scene %u %s %ux%u%s in %.0f%% of pictures: 3D %.2f ms, TA %.2f ms a picture (a scene %.2f / %.2f), feed %.2f; "
+                              "%.0f draws (%.0f blended, %.0f discard)", r + 1, s.ordinal, kName[s.kind], s.w, s.h, order[r] == kSlots - 1 && g_nSlots == kSlots ? " (+ others)" : "",
+                              100.0 * n / gp, s.fUs / 1000.0 / gp, s.taUs / 1000.0 / gp, s.fUs / 1000.0 / n, s.taUs / 1000.0 / n, s.feedUs / 1000.0 / n, s.draws / n, s.blend / n,
+                              s.discard / n);
+        else
+            k = std::snprintf(line, sizeof line, "gpu-scenes top %d: scenes the back end did not begin (the host's) in %.0f%% of pictures: 3D %.2f ms, TA %.2f ms a picture",
+                              r + 1, 100.0 * n / gp, s.fUs / 1000.0 / gp, s.taUs / 1000.0 / gp);
+        if (s.withDetail) {
+            for (int c = 0; c < kClasses && k > 0 && k < static_cast<int>(sizeof line); ++c)
+                if (s.clsDraws[c])
+                    k += std::snprintf(line + k, sizeof line - k, "; %s %.1f draws %.2f+<=%.2f screens (%.1f bounded)", kCls[c], s.clsDraws[c] / nd, s.clsPx[c] / nd / scr,
+                                       s.clsBoundPx[c] / nd / scr, s.clsBound[c] / nd);
+            if (k > 0 && k < static_cast<int>(sizeof line))
+                k += std::snprintf(line + k, sizeof line - k, "; scissor masks %.1f (%.1f full-target, %.2f screens); clears %.1f (%.2f screens); copy quads %.1f (%.2f screens)",
+                                   s.masks / nd, s.maskFull / nd, s.maskPx / nd / scr, s.clears / nd, s.clearPx / nd / scr, s.quads / nd, s.quadPx / nd / scr);
+            if (k > 0 && k < static_cast<int>(sizeof line))
+                k += std::snprintf(line + k, sizeof line - k, "; depth load %.0f%% store %.0f%%, colour load dead %.0f%%", s.dKnown ? 100.0 * s.dLoad / s.dKnown : 0.0,
+                                   s.dKnown ? 100.0 * s.dStore / s.dKnown : 0.0, 100.0 * s.colourDead / nd);
+            int top[kSlotShaders];
+            for (int j = 0; j < s.nSh; ++j) top[j] = j;
+            std::sort(top, top + s.nSh, [&s](int a, int b) { return s.sh[a].cost > s.sh[b].cost; });
+            double all = s.otherCost;
+            for (int j = 0; j < s.nSh; ++j) all += s.sh[j].cost;
+            if (all <= 0) all = 1;
+            if (s.nSh && k > 0 && k < static_cast<int>(sizeof line)) k += std::snprintf(line + k, sizeof line - k, "; shaders by est. cost:");
+            for (int j = 0; j < s.nSh && j < 5 && k > 0 && k < static_cast<int>(sizeof line); ++j) {
+                const ShaderUse& u = s.sh[top[j]];
+                const uint32_t info = FsInfo(u.fs);
+                k += std::snprintf(line + k, sizeof line - k, " fs %u [%u stages, %u tex, %u st%s] %.1f draws %.2f screens %.0f%%,", u.fs, (info >> 16) & 0xFF, (info >> 8) & 0xFF,
+                                   (info & 0xFF) * 2, (info & 0x40000000u) ? ", discard" : "", u.draws / nd, u.px / nd / scr, 100.0 * u.cost / all);
+            }
+            if (s.otherDraws && k > 0 && k < static_cast<int>(sizeof line))
+                k += std::snprintf(line + k, sizeof line - k, " others %.1f draws %.2f screens %.0f%%", s.otherDraws / nd, s.otherPx / nd / scr, 100.0 * s.otherCost / all);
+        }
+        out(line);
+    }
+    g_nSlots = 0;
+}
+} // namespace gpuscenes
+// GXV_FXAREA: whether the picture being decided is one the census measures (one in n, with the workload probe on).
+bool AreaCensusPicture() {
+    if (!workload::Enabled() || g_verify.shadow) return false;
+    static const uint32_t every = [] {
+        const int savedErrno = errno;
+        const long v = EnvInt("GXV_FXAREA", 16);
+        errno = savedErrno;
+        return v > 0 ? static_cast<uint32_t>(v) : 0u;
+    }();
+    static uint32_t count = 0;
+    return every && (count++ % every) == 0;
+}
 // Before the frame's plan: which draws go to the reduced-size target.
 void FxDecide(const CmdBuf& buf) {
     g_fxCmd.clear();
@@ -5159,19 +8405,74 @@ void FxDecide(const CmdBuf& buf) {
     bool inPass = false, any = false;
     size_t runStart = ~static_cast<size_t>(0);
     uint32_t runVerts = 0;
+    // GXV_FXHALF_AREA / GXV_FXHALF_RUNS (above): read once, and only when a run may be reduced (errno as the switches above).
+    // GXV_FXHALF_MIN=0 asks for every run: no area test then (the host tests' fixtures are runs of a few pixels).
+    static float areaMin = -1.0f;
+    static uint32_t maxRuns = 0;
+    if (on && areaMin < 0.0f) {
+        const int savedErrno = errno;
+        const char* e = std::getenv("GXV_FXHALF_AREA");
+        const double v = e && *e ? std::strtod(e, nullptr) : 3.0;
+        areaMin = minVerts == 0 || !(v > 0.0) ? 0.0f : static_cast<float>(v);
+        const long r = EnvInt("GXV_FXHALF_RUNS", 2);
+        maxRuns = areaMin > 0.0f && r > 0 ? static_cast<uint32_t>(r) : 0u;
+        errno = savedErrno;
+    }
+    const bool gate = on && areaMin > 0.0f;
+    // GXV_FXAREA: whether this picture is measured for the census (decided at its first blended draw, so that a picture without
+    // one asks nothing of the workload switch).
+    int census = -1;
+    uint32_t censusBlend = 0, censusAdd = 0, censusUnknown = 0;
+    float runArea = 0.0f;
+    bool runAreaKnown = false;
+    struct FxRun { size_t start, end; float area; };
+    static std::vector<FxRun> runs;
+    runs.clear();
     auto close = [&](size_t end) {
         if (runStart != ~static_cast<size_t>(0) && !g_verify.shadow) workload::CandidateRun(runVerts);
+        if (runStart != ~static_cast<size_t>(0) && census == 1 && runAreaKnown) workload::AreaRun(static_cast<uint32_t>(runArea / ScreenPx() * 1000.0f));
         if (runStart != ~static_cast<size_t>(0) && on && runVerts >= minVerts) {
-            if (g_fxCmd.empty()) g_fxCmd.assign(n, 0);
-            for (size_t k = runStart; k < end; ++k)
-                if (buf.cmds[k].type == CMD_DRAW) g_fxCmd[k] = 1;
-            any = true;
+            float area = 0.0f;
+            if (gate) {
+                // (measured here unless the census did already; the measuring stops once the run is surely big enough)
+                if (census == 1) {
+                    area = runArea;
+                } else {
+                    const float enough = areaMin * 4.0f * ScreenPx();
+                    for (size_t k = runStart; k < end && area < enough; ++k)
+                        if (buf.cmds[k].type == CMD_DRAW) {
+                            const float a = DrawAreaPx(buf, buf.draws[buf.cmds[k].arg]);
+                            if (a > 0.0f) area += a;
+                        }
+                }
+            }
+            if (!gate || area >= areaMin * ScreenPx()) runs.push_back(FxRun{runStart, end, area});
         }
         runStart = ~static_cast<size_t>(0);
         runVerts = 0;
+        runArea = 0.0f;
+        runAreaKnown = false;
     };
     for (size_t i = 0; i < n; ++i) {
         const Cmd& c = buf.cmds[i];
+        if (c.type == CMD_DRAW && !inPass && buf.draws[c.arg].rs.blend && buf.draws[c.arg].rs.colorWrite) {
+            if (census < 0) census = AreaCensusPicture() ? 1 : 0;
+            if (census == 1) {
+                const DrawRec& d = buf.draws[c.arg];
+                const float a = DrawAreaPx(buf, d);
+                if (a < 0.0f) {
+                    ++censusUnknown;
+                } else {
+                    const uint32_t milli = static_cast<uint32_t>(a / ScreenPx() * 1000.0f);
+                    censusBlend += milli;
+                    if (FxEligible(d)) {
+                        censusAdd += milli;
+                        runArea += a;
+                        runAreaKnown = true;
+                    }
+                }
+            }
+        }
         if (c.type == CMD_DRAW && !inPass && FxEligible(buf.draws[c.arg])) {
             ++C.fxCandidates;
             if (runStart == ~static_cast<size_t>(0)) runStart = i;
@@ -5189,6 +8490,18 @@ void FxDecide(const CmdBuf& buf) {
         }
     }
     close(n);
+    if (census == 1 && !g_verify.shadow) workload::AreaPicture(censusBlend, censusAdd, censusUnknown);
+    // (GXV_FXHALF_RUNS: the largest runs only; each further run is two more EFB scenes and a full-size composite)
+    if (maxRuns && runs.size() > maxRuns) {
+        std::stable_sort(runs.begin(), runs.end(), [](const FxRun& a, const FxRun& b) { return a.area > b.area; });
+        runs.resize(maxRuns);
+    }
+    for (const FxRun& r : runs) {
+        if (g_fxCmd.empty()) g_fxCmd.assign(n, 0);
+        for (size_t k = r.start; k < r.end; ++k)
+            if (buf.cmds[k].type == CMD_DRAW) g_fxCmd[k] = 1;
+        any = true;
+    }
     if (any && !FxDepthTexture()) { // (the console: no DEPTH_SAMPLE vitaGL, or no EFB depth buffer yet)
         g_fxCmd.clear();
         GPUPASS_NOTE(2, "GXV_FXHALF: frame %llu: no depth texture of the EFB: effects at full size\n", static_cast<unsigned long long>(g_progFrame));
@@ -5408,22 +8721,267 @@ bool EfbSwapEnabled() {
     static const bool on = EnvInt("GXV_EFBSWAP", 1) != 0;
     return on;
 }
+// ---- GXV_VGL_LOADFROM=1 (default 0; needs vitaGL with patches/0019 COLOR_LOAD_FROM, the host's SetColorLoadHook): the EFB's
+// new colour buffer gets the old picture from the next scene's own tile load (GXM loads a scene's colour tiles from the colour
+// surface's background texture; for that one scene it points at the old buffer) instead of a full-screen quad drawn at the
+// start of that scene: the quad's texture read and shading (~0.4-0.6 ms at 960x544) are gone, the load is made anyway. All four
+// channels are loaded, as GXV_EFBSWAP_FULLMASK's quad writes them. Single-sampled EFB only. A 2x2 corner is still drawn back by
+// the quad (the same pixels the load gives) so that the scene begins at once, before anything could read the new buffer.
+// Desktop (tests): with no hook the load is emulated by a blit from the old buffer at the swap.
+#if !defined(__VGX_VITA__)
+bool EmuColorLoad(unsigned tex) {
+    static GLuint readFbo = 0;
+    if (!readFbo) G(glGenFramebuffers(1, &readFbo));
+    if (!readFbo) return false;
+    const GLenum kRead = 0x8CA8, kDraw = 0x8CA9; // GL_READ_FRAMEBUFFER, GL_DRAW_FRAMEBUFFER
+    G(glBindFramebuffer(kRead, readFbo));
+    G(glFramebufferTexture2D(kRead, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0));
+    G(glBindFramebuffer(kDraw, g_efbFbo));
+    if (S.scissorOn == 1) G(glDisable(GL_SCISSOR_TEST));
+    G(glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
+    glBlitFramebuffer(0, 0, g_rtW, g_rtH, 0, 0, g_rtW, g_rtH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    S.colorMask = -1;
+    if (S.scissorOn == 1) G(glEnable(GL_SCISSOR_TEST));
+    G(glFramebufferTexture2D(kRead, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0));
+    G(glBindFramebuffer(GL_FRAMEBUFFER, S.fbo));
+    return true;
+}
+#endif
+bool EfbLoadFrom(GLuint old) {
+    static const bool on = EnvInt("GXV_VGL_LOADFROM", 0) != 0;
+    if (!on || g_efbSamples > 1 || S.fbo != g_efbFbo) return false;
+    ColorLoadHook hook = g_colorLoadHook;
+#if !defined(__VGX_VITA__)
+    if (!hook && !g_dsim.on) hook = EmuColorLoad;
+#endif
+    return hook && hook(old);
+}
+// ---- GXV_EFBSWAP2: the EFB's buffer for a copy with a conversion (the front end's MarkSwapCopies, vgx_draw.cpp)
+// The texture holds the EFB's pixels, not the converted copy: right for every sampler of the frame the copy was made in (the
+// front end saw them all), not known for later frames. Each such texture is listed here with the conversion it lacks; at the
+// start of every frame (RawPrescan, before anything is drawn) a draw that samples one of them before the texture is written
+// again, and reads a channel the conversion changes, has it converted first: the copy quad of the ordinary copy, from the
+// buffer into a texture of its own, a scene before the frame's first: what the ordinary copy cost, once, in the rare frame that
+// needs it (the pause freeze, the camera cover or a wipe drawing an earlier picture's capture with a shader that reads the alpha
+// RGB565 sets to 1, say). An entry holds while the texture still has that buffer (Tex::efbBuf, the same name): any other
+// write into the texture gives the buffer back and ends it.
+struct RawEntry {
+    uint32_t texId = 0;
+    GLuint gl = 0;       // the buffer the texture was given
+    uint32_t valid = 0;  // channels (bit 0 r .. bit 3 a) the buffer already has as the copy would
+    uint16_t ew = 0, eh = 0;
+    float mat[4][4] = {}, add[4] = {};
+};
+std::vector<RawEntry> g_raw;
+// GXV_EFBSWAP2_HOLD=<pictures> (default 1800, about a minute; 0 = off): a texture whose swapped buffer had to be converted for a
+// later frame's reader (RawConvert) gets ordinary copies for that many pictures. A reader of the previous picture that the copy's
+// own frame cannot see (MarkSwapCopies' prediction looks only at this frame) then costs one conversion, not one every picture: a
+// swap that is converted next frame is a copy scene anyway, plus the renderer CPU of a target change and a buffer leaving the
+// rotation (the r84 Good Egg slowdown). Exact either way: it only chooses the ordinary copy.
+struct RawHold { uint32_t texId; uint64_t until; };
+std::vector<RawHold> g_rawHolds;
+long RawHoldFrames() {
+    static const long n = std::max(0L, EnvInt("GXV_EFBSWAP2_HOLD", 1800));
+    return n;
+}
+void RawHoldNote(uint32_t texId) {
+    if (RawHoldFrames() <= 0) return;
+    const uint64_t until = g_progFrame + static_cast<uint64_t>(RawHoldFrames());
+    for (RawHold& h : g_rawHolds)
+        if (h.texId == texId) { h.until = until; return; }
+    if (g_rawHolds.size() < 64) g_rawHolds.push_back(RawHold{texId, until});
+}
+bool RawHeld(uint32_t texId) {
+    for (size_t i = 0; i < g_rawHolds.size(); ++i) {
+        if (g_rawHolds[i].texId != texId) continue;
+        if (g_progFrame < g_rawHolds[i].until) return true;
+        g_rawHolds[i] = g_rawHolds.back();
+        g_rawHolds.pop_back();
+        return false;
+    }
+    return false;
+}
+void RawNote(const CopyTexCmd& c, GLuint gl, uint32_t valid) {
+    size_t i = 0;
+    while (i < g_raw.size() && g_raw[i].texId != c.texId) ++i;
+    if (valid == 0xFu) { // (no conversion: the buffer is the copy)
+        if (i < g_raw.size()) { g_raw[i] = g_raw.back(); g_raw.pop_back(); }
+        return;
+    }
+    if (i == g_raw.size()) g_raw.emplace_back();
+    RawEntry& e = g_raw[i];
+    e.texId = c.texId;
+    e.gl = gl;
+    e.valid = valid;
+    e.ew = c.dstW;
+    e.eh = c.dstH;
+    std::memcpy(e.mat, c.mat, sizeof e.mat);
+    std::memcpy(e.add, c.add, sizeof e.add);
+    ++C.efbSwapsPartial;
+    ++g_efbSwapsPartialTotal;
+}
+inline bool RawLive(const RawEntry& e) {
+    return e.texId < g_tex.size() && g_tex[e.texId].efbBuf && g_tex[e.texId].id == e.gl;
+}
+// The buffer of entry e into an ordinary copy texture of the same size (the conversion the copy would have made).
+void RawConvert(const RawEntry& e) {
+    if (!RawLive(e)) return;
+    Tex held = g_tex[e.texId]; // (the buffer: given back to the spares below, after the quad has read it)
+    const int w = held.w, h = held.h;
+    // (r32 fix: the destination is a spare buffer of this size when there is one - it leaves the rotation as the texture's own
+    // storage -, a new texture only with kFxVramMin of video memory free; else the texture stays unconverted for now (its
+    // reader sees the EFB's alpha / colours this frame) rather than risk an allocation that waits: see AdoptEfbBuffer)
+    GLuint dest = 0;
+    for (size_t i = 0; i < g_efbSpares.size() && !KeepRenderTargets(); ++i)
+        if (g_efbSpares[i].w == w && g_efbSpares[i].h == h) {
+            dest = g_efbSpares[i].id;
+            g_efbSpares[i] = g_efbSpares.back();
+            g_efbSpares.pop_back();
+            --g_efbBufs;
+            break;
+        }
+    if (!dest && VramFree() < kFxVramMin) {
+        GPUPASS_NOTE(4, "GXV_EFBSWAP2: frame %llu: texture %u left unconverted (no spare buffer, video memory free %u KiB)\n",
+                     static_cast<unsigned long long>(g_progFrame), e.texId, static_cast<unsigned>(std::min<size_t>(VramFree() / 1024u, 0xFFFFFFFFu)));
+        return;
+    }
+    g_tex[e.texId] = Tex{};
+    if (dest) {
+        Tex& t = g_tex[e.texId];
+        t.id = dest;
+        t.w = static_cast<uint16_t>(w);
+        t.h = static_cast<uint16_t>(h);
+        t.renderTarget = true;
+        t.wrapS = t.wrapT = t.minF = t.magF = 0xFF;
+    }
+    if (AcquireCopyTarget(e.texId, w, h, e.ew, e.eh, false) < 0) {
+        // (no target: the texture keeps the buffer, unconverted, as before this function)
+        Tex& t = g_tex[e.texId];
+        DeleteTex(t);
+        t = held;
+        return;
+    }
+    SetViewport(0, 0, w, h);
+    SetScissor(false);
+    SetBlendOff();
+    SetDepthTest(false);
+    SetCull(CULL_NONE);
+    SetDepthMask(false);
+    SetColorMask(true, true);
+    g_rsValid = false;
+    float m[16];
+    for (int r = 0; r < 4; ++r)
+        for (int col = 0; col < 4; ++col) m[col * 4 + r] = e.mat[r][col];
+    DrawQuad(held.id, 0.0f, 0.0f, 1.0f, 1.0f, m, e.add);
+    ++C.copyQuads;
+    ++C.rawConverts;
+    ++g_rawConvertsTotal;
+    RawHoldNote(e.texId); // (GXV_EFBSWAP2_HOLD)
+    EfbBufferBack(held);
+    BindFbo(g_efbFbo);
+    g_rsValid = false;
+    GPUPASS_NOTE(3, "GXV_EFBSWAP2: frame %llu: texture %u converted after all (a later frame reads a channel its copy changes)\n",
+                 static_cast<unsigned long long>(g_progFrame), e.texId);
+}
+void RawConvertTexture(uint32_t texId) {
+    for (size_t i = 0; i < g_raw.size(); ++i)
+        if (g_raw[i].texId == texId) {
+            RawConvert(g_raw[i]);
+            g_raw[i] = g_raw.back();
+            g_raw.pop_back();
+            return;
+        }
+}
+// Start of a frame: the listed textures that a draw (or an atlas copy) of this frame reads, before writing them, in a channel the
+// buffer does not have as the copy would, are converted now. Entries whose texture has let its buffer go are dropped.
+void RawPrescan(const CmdBuf& buf) {
+    if (g_raw.empty()) return;
+    for (size_t i = 0; i < g_raw.size();) {
+        if (RawLive(g_raw[i])) ++i;
+        else { g_raw[i] = g_raw.back(); g_raw.pop_back(); }
+    }
+    if (g_raw.empty()) return;
+    // (entries whose old picture may still be read / to convert, one bit each: the first 32 entries - there are one or two)
+    uint32_t open = g_raw.size() >= 32 ? 0xFFFFFFFFu : (1u << g_raw.size()) - 1u, convert = 0;
+    auto index = [&](uint32_t texId) -> int {
+        for (size_t i = 0; i < g_raw.size() && i < 32; ++i)
+            if ((open & (1u << i)) && g_raw[i].texId == texId) return static_cast<int>(i);
+        return -1;
+    };
+    for (size_t k = 0; k < buf.cmds.size() && open; ++k) {
+        const Cmd& c = buf.cmds[k];
+        if (c.type == CMD_DRAW) {
+            const DrawRec& d = buf.draws[c.arg];
+            for (int m = 0; m < 8; ++m) {
+                if (!(d.texMask & (1u << m))) continue;
+                const int i = index(d.tex[m].texId);
+                if (i < 0) continue;
+                const uint32_t chan = d.fsId < g_fsSrc.size() && g_fsSrc[d.fsId] ? g_fsSrc[d.fsId]->texChan : 0xFFFFFFFFu;
+                if (((chan >> (4 * m)) & 0xFu) & ~g_raw[i].valid) { convert |= 1u << i; open &= ~(1u << i); }
+            }
+        } else if (c.type == CMD_COPY_TEX) {
+            const CopyTexCmd& t = buf.copyTex[c.arg];
+            int i = index(t.srcTex);
+            if (t.srcTex && i >= 0) { convert |= 1u << i; open &= ~(1u << i); }
+            i = index(t.texId);
+            if (i >= 0) open &= ~(1u << i); // (written: nothing after it sees the old picture)
+        } else if (c.type == CMD_TEX_FREE || c.type == CMD_TEX_UPLOAD) {
+            const int i = index(c.type == CMD_TEX_FREE ? c.arg : buf.uploads[c.arg].texId);
+            if (i >= 0) open &= ~(1u << i);
+        }
+    }
+    if (!convert) return;
+    for (size_t i = 0; i < g_raw.size() && i < 32; ++i)
+        if (convert & (1u << i)) RawConvert(g_raw[i]);
+    for (size_t i = 0; i < g_raw.size();) {
+        if (RawLive(g_raw[i])) ++i;
+        else { g_raw[i] = g_raw.back(); g_raw.pop_back(); }
+    }
+}
 void EfbBufferBack(Tex& t) {
     if (t.id) {
-        if (g_efbSpares.size() < kEfbSparesMax || KeepRenderTargets()) g_efbSpares.push_back(EfbSpare{t.id, t.w, t.h});
+        // (r32 fix: a spare is not kept while video memory is short - a stage load's uploads need it, and vitaGL's allocator
+        // waits for its collector when it has none; the next swap makes a buffer again only above kFxVramMin)
+        if (KeepRenderTargets() || (g_efbSpares.size() < kEfbSparesMax && VramFree() >= kFxVramMin)) g_efbSpares.push_back(EfbSpare{t.id, t.w, t.h});
         else EfbBufLetGo(t.id);
     }
     t = Tex{};
+}
+// r32 fix (the console froze at a stage load with GXV_EFBSWAP2 on): a texture that holds an EFB buffer and is now written the
+// ordinary way (a capture whose readers see its conversion - the system wipe's, the pause freeze's -, or a copy into it of
+// another kind) used to give the buffer back and get new storage: a 640x456 allocation in the middle of the frame, right when
+// a stage load's texture uploads fill video memory, where vitaGL's allocator can wait for a collector cycle that does not come
+// while the scene is open. The buffer is an ordinary RGBA texture of the render size: when the copy wants that size it simply
+// becomes the texture's own storage (it leaves the rotation: g_efbBufs counts it no more). No allocation, no new memory.
+bool AdoptEfbBuffer(Tex& t, int w, int h) {
+    if (!t.efbBuf || !t.id || t.w != w || t.h != h || KeepRenderTargets()) return false;
+    t.efbBuf = false;
+    t.renderTarget = true;
+    t.mips = false;
+    t.wrapS = t.wrapT = t.minF = t.magF = 0xFF; // (set at the next bind)
+    --g_efbBufs;
+    ++g_efbAdoptsTotal;
+    GPUPASS_NOTE(3, "GXV_EFBSWAP: frame %llu: an EFB buffer held by a texture becomes its own storage (ordinary copy into it, no allocation; video memory free %u KiB)\n",
+                 static_cast<unsigned long long>(g_progFrame), static_cast<unsigned>(std::min<size_t>(VramFree() / 1024u, 0xFFFFFFFFu)));
+    return true;
 }
 bool EfbSwap(const CopyTexCmd& c) {
     if (!EfbSwapEnabled() || GpupassOff(GP_EFBSWAP) || g_inPass || g_skipDraws) return false;
     if (c.skip || c.fromPass || c.depth || c.fill || c.srcTex || c.dstTexW || c.texId == 0 || c.passMore) return false;
     if (c.src.x != 0 || c.src.y != 0 || c.src.w != g_efbW || c.src.h != g_efbH || c.dstW != g_efbW || c.dstH != g_efbH) return false;
+    // (the channels the copy's conversion leaves as they are; a conversion at all only with GXV_EFBSWAP2's word that this frame's
+    // samplers do not see it: CopyTexCmd::swapOk; later frames' are looked after by RawPrescan)
+    uint32_t valid = 0;
     for (int r = 0; r < 4; ++r) {
-        if (c.add[r] != 0) return false;
-        for (int col = 0; col < 4; ++col)
-            if (c.mat[r][col] != (r == col ? 1.0f : 0.0f)) return false;
+        bool same = c.add[r] == 0;
+        for (int col = 0; col < 4 && same; ++col) same = c.mat[r][col] == (r == col ? 1.0f : 0.0f);
+        if (same) valid |= 1u << r;
     }
+    if (valid != 0xFu && !c.swapOk) return false;
+    if (valid != 0xFu && RawHeld(c.texId)) { ++C.swapHolds; ++g_efbSwapHoldsTotal; return false; } // (GXV_EFBSWAP2_HOLD)
+    // (r32 fix: none of GXV_EFBSWAP2's while a stage loads - its loading thread runs: the buffers then stay where they are, and the
+    // captures of the closing scene are made the ordinary way into storage the textures already have)
+    if (valid != 0xFu && port_scene_loading_active && port_scene_loading_active()) return false;
     Tex& t = TexSlotFor(c.texId);
     if (t.id == g_efbColor) return false; // (cannot happen)
     // (a new buffer is made only when no spare has the current render size - spares of an older size, left by a change of the
@@ -5482,6 +9040,7 @@ bool EfbSwap(const CopyTexCmd& c) {
     t.renderTarget = true;
     t.efbBuf = true;
     t.wrapS = t.wrapT = t.minF = t.magF = 0xFF; // (whatever the buffer's sampler state is: set at its next use)
+    RawNote(c, old, valid); // (GXV_EFBSWAP2: what the buffer still lacks of the copy)
     g_efbColor = fresh;
     BindFbo(g_efbFbo);
     AttachColor(fresh);
@@ -5507,6 +9066,20 @@ bool EfbSwap(const CopyTexCmd& c) {
 #endif
     static const long brk = DiagnosticInt("GXV_GPUPASS_BREAK", 0);
     if (brk & 2) keepC = keepA = false; // (=2, diagnostic: never drawn back - wrong on purpose, for GXV_PASSVERIFY)
+    // GXV_EFBSWAP_FULLMASK=1 (default): the drawing back writes all four channels whenever it is made at all. A plane the plan
+    // calls dead is overwritten whole before anything reads it, so its old value is as good as the new buffer's garbage: same
+    // picture. But a colour-only or alpha-only mask is another blend state for vitaGL, i.e. another patched fragment program of
+    // the copy program, made in play the first time (no warm-up knows it) and re-patched whenever the copy program alternates
+    // between the copies' full mask and the drawing back's (vitaGL keeps one patched program per program): the GXV_EFBSWAP2
+    // in-play links of r84. =0: the planes' own mask, as before.
+    static const bool fullMask = EnvInt("GXV_EFBSWAP_FULLMASK", 1) != 0;
+    if (fullMask && (keepC || keepA)) keepC = keepA = true;
+    const bool loaded = (keepC || keepA) && EfbLoadFrom(old); // (GXV_VGL_LOADFROM: the next scene's load draws it back)
+    if (loaded) {
+        keepC = keepA = true;
+        ++C.efbLoadFroms;
+        ++g_efbLoadFromsTotal;
+    }
     if (keepC || keepA) {
         static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}, zero4[4] = {0, 0, 0, 0};
         BindTexForEdit(old);
@@ -5520,7 +9093,14 @@ bool EfbSwap(const CopyTexCmd& c) {
         SetDepthMask(false);
         SetCull(CULL_NONE);
         SetColorMask(keepC, keepA);
-        DrawQuad(old, 0.0f, 0.0f, 1.0f, 1.0f, identity, zero4);
+        if (loaded) {
+            // (the 2x2 corner, even so that the quad is not padded: texel (x, y) to pixel (x, y) as every EFB copy maps them)
+            SetViewport(0, 0, 2, 2);
+            DrawQuad(old, 0.0f, 0.0f, 2.0f / static_cast<float>(g_rtW), 2.0f / static_cast<float>(g_rtH), identity, zero4);
+            SetViewport(0, 0, g_rtW, g_rtH);
+        } else {
+            DrawQuad(old, 0.0f, 0.0f, 1.0f, 1.0f, identity, zero4);
+        }
         ++C.copyQuads;
         ++C.efbRestores;
         if (g_verify.read) g_verify.restorePlanes |= (keepC ? 1u : 0u) | (keepA ? 2u : 0u);
@@ -5742,7 +9322,14 @@ static void ExecuteFrame(const CmdBuf& buf) {
     g_sceneLogKeep = sceneLogMin > 0;
     g_sceneLog = g_sceneLogKeep || (sceneLogFrame >= 0 && static_cast<int64_t>(buf.frame) == sceneLogFrame);
     g_sceneLogBuf.clear();
+    beprof::FrameBegin(); // (GXV_BE_PROF)
+    gpuscenes::FrameBegin(); // (GXV_GPU_SCENES)
+    g_pxBuf = &buf; // (GXV_PX_DEADCLEAR looks ahead in it)
     ++g_serial;
+    // (GXV_STUTTER_LOG) this frame's costs, logged when it ends
+    struct StutterScope { uint64_t frame; double t0; ~StutterScope() { StutterFrameEnd(frame, NowMs() - t0); } } stutterScope{buf.frame, NowMs()};
+    g_screenLive = ScreenLive();
+    StageFrameBegin(); // (GXV_STAGEWARM)
     EvictPrograms();
     AutoQualityFrame(); // (a new render scale, if the controller wants one, takes effect here: between frames)
     g_stats.drawCallsThisFrame = 0;
@@ -5849,8 +9436,12 @@ static void ExecuteFrame(const CmdBuf& buf) {
     FxDecide(buf);   // (GXV_FXHALF)
     PlanHoists(buf); // (GXV_PASSHOIST)
     PlanFrame(buf); // (GXV_DEPTHPLAN, GXV_EFBSWAP)
+    RawPrescan(buf); // (GXV_EFBSWAP2: a later frame's reader of a copy made without its conversion)
     if (cutAt != ~static_cast<size_t>(0) || passTime || drawTime) dplan::g_valid = false; // (diagnostic waits and cuts: no plan)
-    RunWarm();  // (what an earlier buffer left of the deferred warm-up: a slice of it, before this frame's own commands)
+    // What an earlier buffer left of the deferred warm-up: a slice of it, before this frame's own commands. The stage being entered
+    // goes first (GXV_STAGEWARM); the generic list waits for a frame the stage's queue leaves alone.
+    if (!RunStageWarm(false)) RunWarm();
+    BEPROF_MARK(kSetup);
     for (size_t commandIndex = 0; commandIndex < buf.cmds.size(); ++commandIndex) {
         const Cmd& c = buf.cmds[commandIndex];
         dplan::g_cmd = commandIndex;
@@ -5890,15 +9481,23 @@ static void ExecuteFrame(const CmdBuf& buf) {
             }
             if (!retainCrowd) Draw(buf, buf.draws[c.arg]);
             break;
-        case CMD_TEX_UPLOAD:
+        case CMD_TEX_UPLOAD: {
             ForgetCrowd(buf.uploads[c.arg].texId);
+            const double tUp = NowMs(), x0 = g_xferFrameMs;
             Upload(buf.uploads[c.arg]);
+            g_stFrame.texMs += NowMs() - tUp - (g_xferFrameMs - x0); // (GXV_STUTTER_LOG; tex11: a mode-2 fence in it is counted as a fence)
+            ++g_stFrame.texUploads;
+            for (const auto& level : buf.uploads[c.arg].levels) g_stFrame.texBytes += level.size();
             break;
+        }
         case CMD_TEX_FREE:
             ForgetCrowd(c.arg);
             if (c.arg < g_tex.size() && g_tex[c.arg].id) {
+                const double tf = NowMs(), x0 = g_xferFrameMs; // (GXV_STUTTER_LOG, tex11)
                 DeleteTex(g_tex[c.arg]);
                 --g_stats.textures;
+                g_stFrame.texFreeMs += NowMs() - tf - (g_xferFrameMs - x0);
+                ++g_stFrame.texFrees;
             }
             break;
         case CMD_SHADER: {
@@ -5909,6 +9508,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
         }
         case CMD_BUF_UPLOAD: {
             const BufUpload& u = buf.bufUploads[c.arg];
+            const double tUp = NowMs(); // (GXV_STUTTER_LOG)
             if (g_validation) g_validation->Upload(u);
             if (g_sbuf.size() <= u.bufId) g_sbuf.resize(u.bufId + 64);
             StaticBuf& sb = g_sbuf[u.bufId];
@@ -5920,6 +9520,9 @@ static void ExecuteFrame(const CmdBuf& buf) {
             C.staticUploads += 2;
             C.staticBytes += static_cast<uint32_t>(u.vtx.size() + u.idx.size() * 2);
             if (S.layoutVbo == sb.vbo) S.layoutVbo = ~0u; // new contents: pointers are set again
+            g_stFrame.bufMs += NowMs() - tUp;
+            ++g_stFrame.bufUploads;
+            g_stFrame.bufBytes += u.vtx.size() + u.idx.size() * 2;
             break;
         }
         case CMD_BUF_FREE:
@@ -5950,6 +9553,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
                 if (LateDirect(buf, commandIndex, ps, f)) // (GXV_PASSDIRECT2: may draw it straight into its destination)
                     GPUPASS_NOTE(3, "GXV_PASSDIRECT2: frame %llu: pass %dx%d drawn straight into texture %u\n", static_cast<unsigned long long>(g_progFrame), ps.rect.w, ps.rect.h, ps.directTex);
                 g_passScaleNext = f;
+                g_pxPassScan = true; // (GXV_PX_DEADCLEAR: this pass's commands follow this one)
                 BeginPass(ps);
             }
             break;
@@ -5996,6 +9600,17 @@ static void ExecuteFrame(const CmdBuf& buf) {
             g_rsValid = false;
             break;
         default: break;
+        }
+        if (beprof::g_frame) { // (GXV_BE_PROF: the command's time, or for a draw what follows its draw call)
+            switch (c.type) {
+            case CMD_DRAW: beprof::Mark(beprof::kDrawAfter); break;
+            case CMD_COPY_TEX: beprof::Mark(beprof::kCopy); break;
+            case CMD_PASS_BEGIN: beprof::Mark(beprof::kPass); break;
+            case CMD_COPY_DISP: beprof::Mark(beprof::kDisp); break;
+            case CMD_TEX_UPLOAD: case CMD_TEX_FREE: case CMD_BUF_UPLOAD: case CMD_BUF_FREE: beprof::Mark(beprof::kUpload); break;
+            case CMD_SHADER: case CMD_PROGRAM: case CMD_VARIANT: beprof::Mark(beprof::kWarmCmd); break;
+            default: beprof::Mark(beprof::kOther); break;
+            }
         }
         // GXV_PROBE="x,y[,frame[,x2,y2]]" (diagnosis): after every command of the first frame from
         // `frame` on that has at least 250 commands, the EFB pixel(s) at these EFB coordinates
@@ -6220,12 +9835,31 @@ static void ExecuteFrame(const CmdBuf& buf) {
             std::fflush(stderr);
         }
     }
+    XferFence(); // (tex11, GXV_VITA_UPLOAD_SYNC=2: no texture transfer outlives its frame)
 #ifdef VGX_GL_STUB
     ReportGlMem(buf.frame);
 #endif
     if (g_verify.read) g_verify.counts = C;
     if (!g_verify.shadow) GpupassMemReport(buf.frame);
     g_lastScenes = C.scenes;
+    if (!g_verify.shadow && port_log_summary) {
+        // GXV_EFBSWAP2 (basic log, every 600 pictures while it does anything): whole-EFB copies made without a copy scene
+        // (identity / with a conversion the samplers do not see), the later conversions, and the scenes, per picture.
+        static uint32_t pics = 0, sw = 0, part = 0, conv = 0, scenes = 0, made = 0, whole = 0, wRgb = 0, wA = 0, wOk = 0, wPred = 0, holds = 0;
+        ++pics; sw += C.efbSwaps; part += C.efbSwapsPartial; conv += C.rawConverts; scenes += C.scenes;
+        made += C.copiesMade; whole += C.wholeCopies; wRgb += C.wholeRgb; wA += C.wholeA; wOk += C.wholeOk;
+        wPred += C.wholePredNo; holds += C.swapHolds;
+        if (pics >= 600) {
+            const double n = static_cast<double>(pics);
+            if (whole || conv)
+                port_log_summary("efbswap2: %u pictures, a picture: %.2f texture copies, %.2f of the whole EFB (%.2f colour only as RGB565, %.2f alpha only as A8, "
+                                 "%.2f whose samplers see no conversion), %.2f made without a copy scene (%.2f of them with a conversion: GXV_EFBSWAP2=%d), "
+                                 "converted later %u; scenes %.2f a picture; left ordinary: %.2f for an earlier reader (GXV_EFBSWAP2_PREDICT), %u held "
+                                 "(GXV_EFBSWAP2_HOLD)", pics, made / n, whole / n, wRgb / n, wA / n, wOk / n, sw / n, part / n,
+                                 static_cast<int>(EnvInt("GXV_EFBSWAP2", 0) != 0), conv, scenes / n, wPred / n, holds);
+            pics = sw = part = conv = scenes = made = whole = wRgb = wA = wOk = wPred = holds = 0;
+        }
+    }
     if (workload::Enabled() && !g_verify.shadow) {
         uint32_t draws = 0, copies = 0, displays = 0, passes = 0;
         for (const Cmd& c : buf.cmds) {
@@ -6236,6 +9870,23 @@ static void ExecuteFrame(const CmdBuf& buf) {
         }
         workload::Picture(draws, copies, displays, passes, C.scenes, C.copyQuads, C.fxCandidates, C.fxRuns);
     }
+    if ((g_px.noop || g_px.deadClear || g_px.scissor) && !g_verify.shadow && port_log_summary) {
+        // (GXV_PX_*: basic log every 600 pictures, what was left out)
+        static uint32_t pics = 0;
+        if (++pics >= 600) {
+            const double n = static_cast<double>(pics);
+            port_log_summary("pxcut: %u pictures, a picture: GXV_PX_NOOP draws left out %.2f; GXV_PX_DEADCLEAR clears without their colour %.2f, without their depth %.2f, "
+                             "left out whole %.2f; GXV_PX_SCISSOR scissor changes not made %.2f", pics, g_pxN.noop / n, g_pxN.clearColour / n, g_pxN.clearDepth / n,
+                             g_pxN.clearWhole / n, g_pxN.scissorKept / n);
+            pics = 0;
+            g_pxTotal.noop += g_pxN.noop; g_pxTotal.clearColour += g_pxN.clearColour; g_pxTotal.clearDepth += g_pxN.clearDepth;
+            g_pxTotal.clearWhole += g_pxN.clearWhole; g_pxTotal.scissorKept += g_pxN.scissorKept;
+            g_pxN = PxCounts{};
+        }
+    }
+    g_pxBuf = nullptr;
+    beprof::FrameEnd(C.scenes, C.copyQuads); // (GXV_BE_PROF)
+    gpuscenes::FrameEnd(); // (GXV_GPU_SCENES)
     C = Counts{};
     // The host presents (and swaps) between frames: whatever is drawn next starts a scene.
     g_inUseFbo = ~0u;
@@ -6461,6 +10112,11 @@ void ReleasePicture() { PicRelease(); }
 void SetProgressHostDraws(bool hostDraws) { g_hostDrawsProgress = hostDraws; }
 void SetWarmBudget(double budgetMs) { g_warmBudgetMs.store(budgetMs, std::memory_order_relaxed); }
 unsigned WarmPending() { return g_warmLeft.load(std::memory_order_relaxed); }
+bool WarmCapacityYielded() {
+    const uint64_t head = g_warmHeadIdentity.load(std::memory_order_acquire);
+    return head && g_warmCapacityHead.load(std::memory_order_acquire) == head &&
+           g_warmHeadIdentity.load(std::memory_order_acquire) == head && WarmPending() != 0;
+}
 void WarmIdle() {
     if (g_warm.empty() || g_warmBudgetMs.load(std::memory_order_relaxed) <= 0.0) return;
     // (the state a frame starts from, see the top of Execute)
@@ -6470,6 +10126,70 @@ void WarmIdle() {
     RunWarm();
 }
 unsigned WarmTotal() { return g_warmAll.load(std::memory_order_relaxed); }
+unsigned StageWarmPending() { return StageWarmOn() ? g_stageLeft.load(std::memory_order_relaxed) : 0; }
+// GXV_STAGEWARM_IDLE=1 (default 0): between frames, while the game's loading thread runs, the programs of the stage's queue are linked
+// (compile + glLinkProgram, as a draw's own link) - and nothing else. Two console runs (r32 15:30, r36 16:52) froze for good right after
+// "stage warm-up: stage ... queued" with the first version of this path, which did the queue's warm draws here: an empty triangle into
+// the EFB between frames makes vitaGL begin a GXM scene outside any frame (scene_reset: the display copy's scene ended at the swap),
+// which then stays open, unsubmitted, for as long as the load hands over no frame; everything that waits for the GPU or for vitaGL's
+// collector meanwhile (allocation recovery: sceGxmFinish + collector cycles, a stage load's texture uploads short of video memory)
+// waits on work that cannot complete. So: no draw (no scene), no program delete (no sceGxmFinish), no framebuffer binding here; the
+// warm draws (vitaGL's patched variants) and any room-making stay in the slices at the start of quiet frames, where the frame's own
+// scene is open anyway. A link refused at the slot reserve stops this path for the queue (it never deletes to make room).
+bool StageWarmIdleWanted() {
+    static const bool idleOn = EnvInt("GXV_STAGEWARM_IDLE", 0) != 0;
+    if (!idleOn || !StageWarmOn()) return false;
+    // (also when the stage being loaded has no queue yet: the game may hand over no frame for seconds while it loads)
+    const uint32_t loading = port_scene_loading_key ? port_scene_loading_key() : 0;
+    if (loading && loading != g_stageTarget) return true;
+    return !g_stageIdleBlocked && g_stageIdleCursor < g_stageQueue.size();
+}
+void StageWarmIdleSlice();
+void StageWarmIdle() {
+    if (!StageWarmIdleWanted()) return;
+    if (!g_stageLoaded) StageLoad();
+    const uint32_t loading = port_scene_loading_key ? port_scene_loading_key() : 0;
+    if (loading && loading != g_stageTarget) StageBuild(loading);
+    StageWarmIdleSlice();
+}
+// (the links themselves; no GL call here or below draws, binds a framebuffer or deletes)
+void StageWarmIdleSlice() {
+    if (g_stageIdleBlocked || g_stageIdleCursor >= g_stageQueue.size()) return;
+    if (GlAllocBackoff() || g_warmAllocFailSerial == g_serial) return;
+    static const double budgetMs = static_cast<double>(std::max(1L, EnvInt("GXV_STAGEWARM_MS", 30)));
+    static const unsigned reserve = static_cast<unsigned>(std::max(8L, EnvInt("GXV_STAGEWARM_RESERVE", 48)));
+    const uint32_t capacityKey = g_warmCapacityKey;
+    g_optionalReserve = reserve;
+    const double t0 = NowMs();
+    const unsigned links0 = g_sw.links;
+    while (g_stageIdleCursor < g_stageQueue.size()) {
+        const VariantCmd v = g_stageQueue[g_stageIdleCursor];
+        g_optionalCapacityRefused = false;
+        GetProgram(v.vsId, v.fsId, true); // (optional: refused at the reserve; a failed link is the draw's problem, as always)
+        if (g_optionalCapacityRefused) { g_stageIdleBlocked = true; break; }
+        if (GlAllocBackoff()) {
+            g_warmAllocFailSerial = g_serial;
+            g_glAllocFailSerial = ~uint64_t{0};
+            break;
+        }
+        ++g_stageIdleCursor;
+        if (NowMs() - t0 >= budgetMs) break;
+    }
+    g_optionalReserve = 0;
+    g_optionalCapacityRefused = false;
+    g_warmCapacityKey = capacityKey;
+    const double took = NowMs() - t0;
+    const unsigned links = g_sw.links - links0;
+    g_stats.shaderWorkMs += took;
+    g_stFrame.stageMs += took;
+    g_stFrame.stageLinks += links;
+    g_stageQueueMs += took;
+    g_stageQueueLinks += links;
+    if (g_stageIdleCursor >= g_stageQueue.size() || g_stageIdleBlocked)
+        StageLog("stage warm-up: stage %08x: programs linked between frames (%u links so far, %.0f ms)%s; its %u warm draws follow in quiet frames",
+                 g_stageTarget, g_stageQueueLinks, g_stageQueueMs, g_stageIdleBlocked ? ", stopped at the slot reserve" : "",
+                 static_cast<unsigned>(g_stageQueue.size()));
+}
 void WarmSliceStats(unsigned& slices, double& worstMs, double& totalMs) {
     slices = g_warmSlices.load();
     worstMs = g_warmWorstMs.load();
@@ -6486,6 +10206,29 @@ void SetProgressPolicy(uint64_t startupFrames, unsigned afterMs) {
     g_progAfterMs = afterMs;
 }
 void SetSkipDraws(bool skip) { g_skipDraws = skip; }
+#if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
+void DrawRejectReport() {
+    // PerfFrame calls this on the render owner, after Execute, at its existing log cadence.
+    if(!port_log_summary) return;
+    const auto c=g_drawReject;
+    g_drawReject=DrawRejectCounters{};
+    const uint32_t stage=port_scene_key ? port_scene_key() : 0;
+    port_log_summary("draw-reject: stage_now=%08x nonempty=%llu submitted_calls=%llu rejected=%llu overflow=%u; Draw entries only, not pixels/actor identity",
+        stage,(unsigned long long)c.nonempty,(unsigned long long)c.submitted,(unsigned long long)c.rejected,c.overflow?1u:0u);
+    port_log_summary("draw-reject: exclusive skip_behind=%llu program=%llu static_vbo=%llu stream_chunk=%llu sanitize=%llu render_state=%llu",
+        (unsigned long long)c.reason[0],(unsigned long long)c.reason[1],(unsigned long long)c.reason[2],
+        (unsigned long long)c.reason[3],(unsigned long long)c.reason[4],(unsigned long long)c.reason[5]);
+    port_log_summary("draw-reject: program_state_overlap alloc_backoff=%llu compile_failure=%llu link_unavailable=%llu missing_source=%llu shader_pending=%llu exhausted=%llu other=%llu",
+        (unsigned long long)c.programState[0],(unsigned long long)c.programState[1],(unsigned long long)c.programState[2],
+        (unsigned long long)c.programState[3],(unsigned long long)c.programState[4],(unsigned long long)c.programState[5],(unsigned long long)c.programState[6]);
+    static const char* const names[]={"skip_behind","program","static_vbo","stream_chunk","sanitize","render_state"};
+    for(unsigned i=0;i<RejectCount;++i) if(c.reason[i]) {
+        const auto& e=c.first[i];
+        port_log_summary("draw-reject: first reason=%s frame=%llu vs=%u fs=%u vbuf=%u vchunk=%u indices=%u; stage_now is report-time only",
+            names[i],(unsigned long long)e.frame,e.vs,e.fs,e.vbuf,e.vchunk,e.indices);
+    }
+}
+#endif
 Stats GetStats() { return g_stats; }
 
 } // namespace vgx::backend

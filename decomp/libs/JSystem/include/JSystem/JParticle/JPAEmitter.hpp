@@ -386,6 +386,11 @@ public:
     /* 0x111 */ u8 mTexAnmIdx;
     /* 0x112 */ u8 mGroupID;
     /* 0x113 */ u8 mResMgrID;
+#ifdef TARGET_PC
+    // GXV_JPA_LOOK (logic12, 5 Nov; JPAResource.cpp): set when a calc left out its particles' look functions (colour, alpha,
+    // scale and texture-index animation); the next draw of this emitter runs them first, for the particles as they are then.
+    /* 0x114 */ u8 mPortLookStale = 0;
+#endif
 };
 
 enum {

@@ -10,6 +10,7 @@ unsigned frames = 0;
 bool deferred = false;
 bool truncatedVariant = false;
 bool alphaZero = false;
+bool extraShader = false; // (bad-program / bad-variant: a valid fragment key with one texture coordinate, then a pair that misuses it)
 unsigned Blend(unsigned pair) { return 0xC01u | ((alphaZero && (pair & 1u)) ? 0x1000u : 0u); }
 void Require(bool ok, const char* why) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -46,10 +47,16 @@ std::vector<uint8_t> Recipe() {
 }
 void Observe(vgx::CmdBuf& buf) {
     const auto& commands = deferred ? buf.warm : buf.cmds;
-    const size_t work = frames == 0 ? kVs + kFs + 2 * kPairs - (truncatedVariant ? 1 : 0) : 0;
+    const size_t originalWork = kVs + kFs + 2 * kPairs - (truncatedVariant ? 1 : 0);
+    const size_t work = frames == 0 ? originalWork + unsigned(extraShader) : 0;
     Require(commands.size() == work + (deferred ? 0 : 1), "replay produces every unique work command exactly once");
     for (size_t i = 0; i < work; ++i) {
         const auto& c = commands[i];
+        if (i == originalWork) {
+            Require(extraShader && c.type == vgx::CMD_SHADER && buf.shaders.at(c.arg)->fragment &&
+                    buf.shaders.at(c.arg)->id == kFs, "valid key survives rejection of its incompatible pair");
+            continue;
+        }
         if (i < kVs + kFs) {
             Require(c.type == vgx::CMD_SHADER, "shader commands precede all programs/variants");
             const auto* shader = buf.shaders.at(c.arg);
@@ -83,7 +90,18 @@ int main(int argc, char** argv) {
     alphaZero = mode == "alpha-zero" || mode == "alpha-zero-duplicate";
     const auto expected = Recipe();
     auto canonical = expected, input = expected;
-    if (mode == "duplicate" || mode == "alpha-zero-duplicate") input.insert(input.end(), expected.end() - 20, expected.end());
+    if (mode == "bad-program" || mode == "bad-variant") {
+        // (a pair of shaders with different texture coordinate counts: no draw makes one; from Producdevity's fork, 9624529)
+        extraShader = true;
+        vgx::FsKey incompatible{};
+        incompatible.numTexGens = 1;
+        Bytes(input, 2u); Bytes(input, incompatible);
+        const size_t keyEnd = expected.size() - kPairs * (12u + 20u);
+        canonical.insert(canonical.begin() + keyEnd, input.begin() + expected.size(), input.end());
+        Bytes(input, mode == "bad-program" ? 3u : 4u);
+        Bytes(input, 0u); Bytes(input, kFs);
+        if (mode == "bad-variant") { Bytes(input, 0u); Bytes(input, 0xC01u); }
+    } else if (mode == "duplicate" || mode == "alpha-zero-duplicate") input.insert(input.end(), expected.end() - 20, expected.end());
     else if (mode.rfind("tail-", 0) == 0) {
         const unsigned n = std::stoul(mode.substr(5));
         Require(n >= 1 && n <= 3, "tail fixture is an incomplete record type");

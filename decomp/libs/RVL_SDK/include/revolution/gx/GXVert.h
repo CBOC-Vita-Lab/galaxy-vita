@@ -24,6 +24,7 @@ volatile PPCWGPipe GXWGFifo : 0xCC008000;
         return;                                                                                                                                      \
     }
 
+#ifdef __MWERKS__
 #define __GXCDEF2(func, ts, td)                                                                                                                      \
     static void func(const ts x, const ts y) {                                                                                                       \
         __GXFIFO_WRITE(td, x);                                                                                                                         \
@@ -47,6 +48,47 @@ volatile PPCWGPipe GXWGFifo : 0xCC008000;
         __GXFIFO_WRITE(td, w);                                                                                                                         \
         return;                                                                                                                                      \
     }
+#else
+/* Immediate vertex attributes of three or four elements (particles, layouts, direct drawing): the same bytes as one batched
+   command when it fits before the FIFO's limit (GXV_FIFO_BATCH, port/gx_fifo.h), else element by element as before. */
+#define __GXBATCH_PUT(td, p, v) __PortGXPut_##td((p), (td)(v))
+#define __GXCDEF2(func, ts, td)                                                                                                                      \
+    static void func(const ts x, const ts y) {                                                                                                       \
+        __GXFIFO_WRITE(td, x);                                                                                                                         \
+        __GXFIFO_WRITE(td, y);                                                                                                                         \
+        return;                                                                                                                                      \
+    }
+
+#define __GXCDEF3(func, ts, td)                                                                                                                      \
+    static void func(const ts x, const ts y, const ts z) {                                                                                           \
+        uint8_t* p;                                                                                                                                  \
+        if (__PortGXFifoRoom(&p, 3 * sizeof(td))) {                                                                                                  \
+            p = __GXBATCH_PUT(td, p, x);                                                                                                             \
+            p = __GXBATCH_PUT(td, p, y);                                                                                                             \
+            __PortGXFifoCommit(__GXBATCH_PUT(td, p, z));                                                                                             \
+            return;                                                                                                                                  \
+        }                                                                                                                                            \
+        __GXFIFO_WRITE(td, x);                                                                                                                       \
+        __GXFIFO_WRITE(td, y);                                                                                                                       \
+        __GXFIFO_WRITE(td, z);                                                                                                                       \
+    }
+
+#define __GXCDEF4(func, ts, td)                                                                                                                      \
+    static void func(const ts x, const ts y, const ts z, const ts w) {                                                                               \
+        uint8_t* p;                                                                                                                                  \
+        if (__PortGXFifoRoom(&p, 4 * sizeof(td))) {                                                                                                  \
+            p = __GXBATCH_PUT(td, p, x);                                                                                                             \
+            p = __GXBATCH_PUT(td, p, y);                                                                                                             \
+            p = __GXBATCH_PUT(td, p, z);                                                                                                             \
+            __PortGXFifoCommit(__GXBATCH_PUT(td, p, w));                                                                                             \
+            return;                                                                                                                                  \
+        }                                                                                                                                            \
+        __GXFIFO_WRITE(td, x);                                                                                                                       \
+        __GXFIFO_WRITE(td, y);                                                                                                                       \
+        __GXFIFO_WRITE(td, z);                                                                                                                       \
+        __GXFIFO_WRITE(td, w);                                                                                                                       \
+    }
+#endif
 
 __GXCDEF(GXCmd, 1, u8)
 __GXCDEF(GXCmd, 1, u16)

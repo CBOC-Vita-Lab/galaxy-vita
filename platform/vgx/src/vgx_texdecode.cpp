@@ -1,4 +1,5 @@
 #include "vgx_texdecode.h"
+#include "vgx_cmd.h"
 #include "vgx_common.h"
 
 #if defined(__ARM_NEON)
@@ -145,8 +146,9 @@ uint32_t TexDataSize(uint32_t w, uint32_t h, uint32_t fmt, uint32_t levels) {
     return total;
 }
 
-void DecodeTexture(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, const uint8_t* tlut, uint32_t tlutFmt,
-                   uint32_t tlutEntries, uint8_t* d) {
+namespace detail {
+void DecodeTextureRef(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, const uint8_t* tlut, uint32_t tlutFmt,
+                      uint32_t tlutEntries, uint8_t* d) {
     uint8_t c[4];
     switch (fmt) {
     case 0x0: // I4
@@ -289,6 +291,189 @@ void DecodeTexture(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, const
     }
 }
 
+} // namespace detail
+
+// GXV_TEXDEC_FAST (default 1; 0 = DecodeTextureRef only): the same texels, written a whole row of a tile at a time. The reference
+// path above places every texel through Put (a bounds test and four byte stores) and decodes a palette entry again for every
+// texel; on the console that is where the front end's "texture decode" time of a stage arrival goes (r49: 94 ms in the 5 s of
+// the lit Observatory's arrival). The fast path takes levels made of whole tiles only (every level of 8x8 and up in the formats
+// of 4-texel tiles; partial edge tiles stay with the reference) and gives byte-identical output (tests/vgx_texdecode_fast.cpp
+// compares the two over every format, random texels and palettes, and odd sizes).
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+namespace {
+// One RGBA8 texel as the 32-bit word whose little-endian bytes are R, G, B, A.
+inline uint32_t Px(uint32_t r, uint32_t g, uint32_t b, uint32_t a) { return r | (g << 8) | (b << 16) | (a << 24); }
+inline void St(uint8_t* d, uint32_t v) { std::memcpy(d, &v, 4); }
+inline uint32_t Px565(uint32_t v) {
+    const uint32_t r = (v >> 11) & 0x1F, g = (v >> 5) & 0x3F, b = v & 0x1F;
+    return Px((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2), 255);
+}
+inline uint32_t Px5A3(uint32_t v) {
+    if (v & 0x8000) {
+        const uint32_t r = (v >> 10) & 0x1F, g = (v >> 5) & 0x1F, b = v & 0x1F;
+        return Px((r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255);
+    }
+    const uint32_t a = (v >> 12) & 0x7, r = (v >> 8) & 0xF, g = (v >> 4) & 0xF, b = v & 0xF;
+    return Px(r * 17, g * 17, b * 17, ((a << 5) | (a << 2) | (a >> 1)) & 0xFF);
+}
+inline uint32_t PxTlut(const uint8_t* tlut, uint32_t fmt, uint32_t entries, uint32_t idx) {
+    uint8_t c[4];
+    DecTlut(tlut, fmt, entries, idx, c);
+    return Px(c[0], c[1], c[2], c[3]);
+}
+// Whole tiles of tw x th texels: `row(src, y, out)` writes texel row y of the tile at src to out (tw texels).
+template <uint32_t tw, uint32_t th, uint32_t bytes, typename Row>
+inline void Tiles(const uint8_t* s, uint32_t w, uint32_t h, uint8_t* d, Row row) {
+    const size_t stride = static_cast<size_t>(w) * 4;
+    for (uint32_t ty = 0; ty < h; ty += th) {
+        uint8_t* band = d + static_cast<size_t>(ty) * stride;
+        for (uint32_t tx = 0; tx < w; tx += tw, s += bytes)
+            for (uint32_t y = 0; y < th; ++y) row(s, y, band + y * stride + tx * 4);
+    }
+}
+} // namespace
+
+namespace detail {
+bool DecodeTextureFast(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, const uint8_t* tlut, uint32_t tlutFmt,
+                       uint32_t tlutEntries, uint8_t* d) {
+    if (!w || !h) return false;
+    const TileInfo t = Tile(fmt);
+    if ((w % t.tw) || (h % t.th)) return false; // (a partial tile: the reference's bounded writes)
+    switch (fmt) {
+    case 0x0: // I4
+        Tiles<8, 8, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) {
+                const uint32_t b = p[y * 4 + x], hi = (b >> 4) * 17u, lo = (b & 0xF) * 17u;
+                St(o + x * 8, hi * 0x01010101u);
+                St(o + x * 8 + 4, lo * 0x01010101u);
+            }
+        });
+        return true;
+    case 0x1: // I8 (the reference has NEON for this one)
+#if defined(__ARM_NEON)
+        return false;
+#else
+        Tiles<8, 4, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 8; ++x) St(o + x * 4, p[y * 8 + x] * 0x01010101u);
+        });
+        return true;
+#endif
+    case 0x2: // IA4
+        Tiles<8, 4, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 8; ++x) {
+                const uint32_t b = p[y * 8 + x], i = (b & 0xF) * 17u, a = (b >> 4) * 17u;
+                St(o + x * 4, Px(i, i, i, a));
+            }
+        });
+        return true;
+    case 0x3: // IA8
+        Tiles<4, 4, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) {
+                const uint8_t* q = p + (y * 4 + x) * 2;
+                St(o + x * 4, Px(q[1], q[1], q[1], q[0]));
+            }
+        });
+        return true;
+    case 0x4: // RGB565
+        Tiles<4, 4, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) St(o + x * 4, Px565(be16(p + (y * 4 + x) * 2)));
+        });
+        return true;
+    case 0x5: // RGB5A3
+        Tiles<4, 4, 32>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) St(o + x * 4, Px5A3(be16(p + (y * 4 + x) * 2)));
+        });
+        return true;
+    case 0x6: // RGBA8
+        Tiles<4, 4, 64>(s, w, h, d, [](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) {
+                const uint8_t* ar = p + (y * 4 + x) * 2;
+                const uint8_t* gb = ar + 32;
+                St(o + x * 4, Px(ar[1], gb[0], gb[1], ar[0]));
+            }
+        });
+        return true;
+    case 0x8: { // C4: the 16 entries decoded once
+        uint32_t pal[16];
+        for (uint32_t i = 0; i < 16; ++i) pal[i] = PxTlut(tlut, tlutFmt, tlutEntries, i);
+        Tiles<8, 8, 32>(s, w, h, d, [&pal](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) {
+                const uint32_t b = p[y * 4 + x];
+                St(o + x * 8, pal[b >> 4]);
+                St(o + x * 8 + 4, pal[b & 0xF]);
+            }
+        });
+        return true;
+    }
+    case 0x9: { // C8: the 256 entries decoded once (when the level has at least as many texels; else per texel)
+        if (static_cast<uint64_t>(w) * h < 256) {
+            Tiles<8, 4, 32>(s, w, h, d, [&](const uint8_t* p, uint32_t y, uint8_t* o) {
+                for (uint32_t x = 0; x < 8; ++x) St(o + x * 4, PxTlut(tlut, tlutFmt, tlutEntries, p[y * 8 + x]));
+            });
+            return true;
+        }
+        uint32_t pal[256];
+        for (uint32_t i = 0; i < 256; ++i) pal[i] = PxTlut(tlut, tlutFmt, tlutEntries, i);
+        Tiles<8, 4, 32>(s, w, h, d, [&pal](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 8; ++x) St(o + x * 4, pal[p[y * 8 + x]]);
+        });
+        return true;
+    }
+    case 0xA: // C14X2 (16384 possible entries: decoded per texel)
+        Tiles<4, 4, 32>(s, w, h, d, [&](const uint8_t* p, uint32_t y, uint8_t* o) {
+            for (uint32_t x = 0; x < 4; ++x) St(o + x * 4, PxTlut(tlut, tlutFmt, tlutEntries, be16(p + (y * 4 + x) * 2) & 0x3FFFu));
+        });
+        return true;
+    case 0xE: { // CMPR: 8x8 tiles of four 4x4 blocks
+        const size_t stride = static_cast<size_t>(w) * 4;
+        for (uint32_t ty = 0; ty < h; ty += 8)
+            for (uint32_t tx = 0; tx < w; tx += 8)
+                for (uint32_t sub = 0; sub < 4; ++sub, s += 8) {
+                    const uint32_t bx = tx + (sub & 1) * 4, by = ty + (sub >> 1) * 4;
+                    const uint16_t c0 = be16(s), c1 = be16(s + 2);
+                    uint8_t p0[4], p1[4];
+                    Dec565(c0, p0);
+                    Dec565(c1, p1);
+                    uint32_t pal[4];
+                    pal[0] = Px(p0[0], p0[1], p0[2], 255);
+                    pal[1] = Px(p1[0], p1[1], p1[2], 255);
+                    if (c0 > c1) {
+                        pal[2] = Px(((p0[0] * 5 + p1[0] * 3) >> 3) & 0xFF, ((p0[1] * 5 + p1[1] * 3) >> 3) & 0xFF, ((p0[2] * 5 + p1[2] * 3) >> 3) & 0xFF, 255);
+                        pal[3] = Px(((p1[0] * 5 + p0[0] * 3) >> 3) & 0xFF, ((p1[1] * 5 + p0[1] * 3) >> 3) & 0xFF, ((p1[2] * 5 + p0[2] * 3) >> 3) & 0xFF, 255);
+                    } else {
+                        const uint32_t r = ((p0[0] + p1[0]) >> 1) & 0xFF, g = ((p0[1] + p1[1]) >> 1) & 0xFF, b = ((p0[2] + p1[2]) >> 1) & 0xFF;
+                        pal[2] = Px(r, g, b, 255);
+                        pal[3] = Px(r, g, b, 0);
+                    }
+                    uint8_t* o = d + static_cast<size_t>(by) * stride + static_cast<size_t>(bx) * 4;
+                    for (uint32_t y = 0; y < 4; ++y, o += stride) {
+                        const uint32_t rowBits = s[4 + y];
+                        St(o, pal[(rowBits >> 6) & 3]);
+                        St(o + 4, pal[(rowBits >> 4) & 3]);
+                        St(o + 8, pal[(rowBits >> 2) & 3]);
+                        St(o + 12, pal[rowBits & 3]);
+                    }
+                }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+} // namespace detail
+#else
+namespace detail {
+bool DecodeTextureFast(const uint8_t*, uint32_t, uint32_t, uint32_t, const uint8_t*, uint32_t, uint32_t, uint8_t*) { return false; }
+} // namespace detail
+#endif
+
+void DecodeTexture(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, const uint8_t* tlut, uint32_t tlutFmt,
+                   uint32_t tlutEntries, uint8_t* d) {
+    const bool fast = VGX_KNOB(EnvInt("GXV_TEXDEC_FAST", 1) != 0) != 0;
+    if (fast && detail::DecodeTextureFast(s, w, h, fmt, tlut, tlutFmt, tlutEntries, d)) return;
+    detail::DecodeTextureRef(s, w, h, fmt, tlut, tlutFmt, tlutEntries, d);
+}
+
 bool DecodeTextureLA88(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, uint8_t* d) {
     if (fmt > 3 || !w || !h || !s || !d) return false;
 #if defined(__ARM_NEON)
@@ -331,6 +516,73 @@ bool CmprToDxt1(const uint8_t* s, uint32_t w, uint32_t h, uint8_t* d, bool allow
             }
         }
     return true;
+}
+
+// GXV_CMPRA (see the header; the Strikers port's CmprToDxt5, unchanged)
+void CmprToDxt5(const uint8_t* s, uint32_t w, uint32_t h, uint8_t* d) {
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4; // blocks
+    const uint32_t tw = (w + 7) / 8;                   // CMPR tiles per row
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx, d += 16) {
+            const uint8_t* b = s + ((static_cast<size_t>(by >> 1) * tw + (bx >> 1)) * 4 + (by & 1) * 2 + (bx & 1)) * 8;
+            const uint32_t c0 = be16(b), c1 = be16(b + 2);
+            const bool three = c0 <= c1;
+            // The colour block of DXT5 always has four colours, and the larger endpoint goes first so that no decoder can take it for a three-colour block.
+            const uint32_t e0 = three ? c1 : c0, e1 = three ? c0 : c1;
+            d[8] = static_cast<uint8_t>(e0); d[9] = static_cast<uint8_t>(e0 >> 8);
+            d[10] = static_cast<uint8_t>(e1); d[11] = static_cast<uint8_t>(e1 >> 8);
+            uint64_t alpha = 0; // 3-bit indices, first texel lowest: 0 = 255, 1 = 0
+            for (uint32_t y = 0; y < 4; ++y) {
+                const uint32_t r = b[4 + y];
+                uint32_t row = 0;
+                for (uint32_t x = 0; x < 4; ++x) {
+                    uint32_t i = (r >> (6 - x * 2)) & 3u; // GX: the leftmost texel in the top two bits
+                    if (three) {
+                        if (i == 3) alpha |= 1ull << ((y * 4 + x) * 3);
+                        if (c0 == c1) i = 0; // (one colour: no decoder can get this block wrong)
+                        else i = i < 2 ? (i ^ 1u) : (((bx * 4 + x + by * 4 + y) & 1u) ? 3u : 2u); // (the endpoints changed places; the middle colour: see the header)
+                    }
+                    row |= i << (x * 2);
+                }
+                d[12 + y] = static_cast<uint8_t>(row);
+            }
+            d[0] = 255; d[1] = 0;
+            for (int k = 0; k < 6; ++k) d[2 + k] = static_cast<uint8_t>(alpha >> (k * 8));
+        }
+}
+
+// GXV_TEX16 (see the header; the Strikers port's Rgba16Format / PackRgba16, unchanged)
+uint8_t Rgba16Format(const std::vector<std::vector<uint8_t>>& levels, bool allow5551) {
+    enum : uint32_t { F565 = 1, F5551 = 2, F4444 = 4 };
+    const auto rep5 = [](uint32_t v) { return ((v >> 3) << 3 | v >> 5) == v; };
+    const auto rep6 = [](uint32_t v) { return ((v >> 2) << 2 | v >> 6) == v; };
+    const auto rep4 = [](uint32_t v) { return (v >> 4) == (v & 15u); };
+    uint32_t can = F565 | (allow5551 ? F5551 : 0u) | F4444;
+    for (const std::vector<uint8_t>& lv : levels) {
+        for (size_t i = 0; can && i + 4 <= lv.size(); i += 4) {
+            const uint32_t r = lv[i], g = lv[i + 1], b = lv[i + 2], a = lv[i + 3];
+            const bool c5 = rep5(r) && rep5(b);
+            if (!(c5 && rep6(g) && a == 255)) can &= ~static_cast<uint32_t>(F565);
+            if (!(c5 && rep5(g) && (a == 0 || a == 255))) can &= ~static_cast<uint32_t>(F5551);
+            if (!(rep4(r) && rep4(g) && rep4(b) && rep4(a))) can &= ~static_cast<uint32_t>(F4444);
+        }
+        if (!can) return 0;
+    }
+    return (can & F565) ? TF_RGB565 : (can & F5551) ? TF_RGBA5551 : (can & F4444) ? TF_RGBA4444 : 0;
+}
+
+void PackRgba16(std::vector<uint8_t>& lv, uint8_t format) {
+    const size_t n = lv.size() / 4;
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t r = lv[i * 4], g = lv[i * 4 + 1], b = lv[i * 4 + 2], a = lv[i * 4 + 3];
+        uint32_t v;
+        if (format == TF_RGB565) v = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
+        else if (format == TF_RGBA5551) v = (r >> 3) << 11 | (g >> 3) << 6 | (b >> 3) << 1 | a >> 7;
+        else v = (r >> 4) << 12 | (g >> 4) << 8 | (b >> 4) << 4 | a >> 4;
+        lv[i * 2] = static_cast<uint8_t>(v);
+        lv[i * 2 + 1] = static_cast<uint8_t>(v >> 8);
+    }
+    lv.resize(n * 2);
 }
 
 void EncodeDxt1(const uint8_t* rgba, uint32_t w, uint32_t h, uint8_t* d) {

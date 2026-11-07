@@ -32,6 +32,9 @@ namespace MR {
     bool isStarPointerPointing2POnTriggerButton(const LiveActor*, const char*, bool, bool);
     bool isStarPointerPointingFileSelect(const LiveActor*);
     bool isStarPointerPointing1Por2P(const LiveActor*, const char*, bool, bool);
+#ifdef TARGET_PC
+    bool isStarPointerPointingStarPieceAssist(const LiveActor*);
+#endif
     bool requestTicoSeedGuidanceForce();
     bool requestPointerGuidanceNoInformation();
     bool isExistStarPointerGuidance();

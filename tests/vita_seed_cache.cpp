@@ -39,11 +39,19 @@ std::vector<uint8_t> Text(const std::string& value) { return {value.begin(),valu
 // copy renames); without it they run against the default, the seed read in place (laid out as v3, the folder of the vitaGL in use).
 bool copyMode = false;
 std::vector<uint8_t> MarkerText(const std::string& stamp) { return Text(copyMode ? stamp : stamp + " lookup"); }
+// A warm-up list: vgx_draw.cpp's header (magic, key sizes, generator version) and then `body` (from Producdevity's fork, 9ed7f64).
+std::vector<uint8_t> List(uint32_t generator, const std::vector<uint8_t>& body) {
+    std::vector<uint8_t> bytes = Text("VGXSHL01");
+    for (uint32_t word : {100u, 412u, generator, 0u})
+        for (int i = 0; i < 4; ++i) bytes.push_back(static_cast<uint8_t>(word >> (8 * i)));
+    bytes.insert(bytes.end(), body.begin(), body.end());
+    return bytes;
+}
 void Fixture() {
-    File(packageList, std::vector<uint8_t>(100, 0x31));
+    File(packageList, List(3, std::vector<uint8_t>(76, 0x31)));
     File(seed + (copyMode ? "/v2" : "/v3") + "/v/00/111.gxp", {1,2,3,4});
     File(std::string(cache) + "/v2/f/02/personal.gxp", {9,8,7,6});
-    File(kShaderListFile, Text("personal learned shader list"));
+    File(kShaderListFile, List(3, Text("personal learned shader list")));
 }
 std::vector<std::string> Children(const std::string& parent) {
     std::set<std::string> names;
@@ -307,6 +315,34 @@ int main(int argc, char** argv) {
                 SeedShaderCache(cache);
                 Require(directoryOpens==0 && outputOpens==beforeWrites,"unchanged package avoids directory rescans and writes");
             }
+        }
+    } else if(mode=="other-generator" || mode=="short-list" || mode=="other-generator-partial" || mode=="other-generator-seeded") {
+        // An update whose generator changed: its cache folder is new, so no marker says the package is new, and the card's list
+        // is one the renderer would start over empty.
+        const auto old = mode=="short-list" ? Text("VGXSHL") : List(2, Text("an older generator's list"));
+        File(kShaderListFile, old);
+        if(mode=="other-generator-seeded") {
+            File(kShaderListFile, personal); SeedShaderCache(cache); SeedShaderList(); File(kShaderListFile, old);
+        }
+        if(mode=="other-generator-partial") {
+            if(copyMode) dirError=seed+"/v2/v";  // (the copy fails part way)
+            else {  // (read in place: the package has no version folder, nothing to read)
+                const std::string v3=seed+"/v3";
+                for(auto it=files.begin();it!=files.end();) it=it->first.rfind(v3,0)==0 ? files.erase(it) : std::next(it);
+                for(auto it=dirs.begin();it!=dirs.end();) it=it->rfind(v3,0)==0 ? dirs.erase(it) : std::next(it);
+            }
+        }
+        SeedShaderCache(cache);
+        Require(!g_seedIsNew,"a first copy into a new folder is not a changed package");
+        SeedShaderList();
+        if(mode=="other-generator-partial") {
+            Require(files.at(kShaderListFile)==old,"a partial copy keeps the card's list: the package's would compile what is missing");
+        } else {
+            Require(files.at(kShaderListFile)==files.at(packageList),"another generator's list is replaced by the package's");
+            char stamp[80]; Require(PackageStamp(stamp,sizeof stamp) && files.at(marker)==MarkerText(stamp),"the completed copy keeps its marker");
+            const unsigned beforeWrites=personalOutputOpens;
+            SeedShaderCache(cache); SeedShaderList();
+            Require(personalOutputOpens==beforeWrites,"the adopted list is not written again at the next start");
         }
     } else if(mode=="stamp-read-error" || mode=="stamp-close-error") {
         SeedShaderCache(cache); const auto good=files.at(marker); g_seedIsNew=false;

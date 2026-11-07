@@ -114,12 +114,18 @@ public:
     }
 
     void swapDrawMtx() {
+#ifdef TARGET_PC
+        ++mPortSerial;
+#endif
         Mtx* tmp = mpDrawMtxArr[0][mCurrentViewNo];
         mpDrawMtxArr[0][mCurrentViewNo] = mpDrawMtxArr[1][mCurrentViewNo];
         mpDrawMtxArr[1][mCurrentViewNo] = tmp;
     }
 
     void swapNrmMtx() {
+#ifdef TARGET_PC
+        ++mPortSerial;
+#endif
         Mtx33* tmp = mpNrmMtxArr[0][mCurrentViewNo];
         mpNrmMtxArr[0][mCurrentViewNo] = mpNrmMtxArr[1][mCurrentViewNo];
         mpNrmMtxArr[1][mCurrentViewNo] = tmp;
@@ -141,6 +147,28 @@ public:
     /* 0x2C */ u32 mMtxNum;
     /* 0x30 */ u32 mCurrentViewNo;
     /* 0x34 */ Mtx* mpUserAnmMtx;
+#ifdef TARGET_PC
+    // (draw7, GXV_VIEW_KEEP: decomp/src/Game/LiveActor/ModelManager.cpp) moved by every swap of, write into or new pointer for the
+    // draw / normal matrices (the swaps above; calcDrawMtx, calcNrmMtx, calcBBoardMtx; J3DModelX's own view passes): a view pass may
+    // be left out only if nothing moved it since its model's last one.
+    u32 mPortSerial;
+    void portTouch() {
+        ++mPortSerial;
+    }
+    // (par13, GXV_PAR_VIEW: J3DMtxBuffer.cpp) calcDrawMtx / calcNrmMtx / calcBBoardMtx with every input and output named; they read
+    // nothing global and write only `draw` / `nrm`, so a view pass can be computed on another thread. The members call them.
+    static void portCalcDrawMtxCore(J3DJointTree* tree, u32 mdlFlag, Vec const& scale, Mtx const& base, MtxPtr view, Mtx* anm, Mtx* wevlp,
+                                    Mtx* draw);
+    static void portCalcNrmMtxCore(J3DJointTree* tree, const u8* scaleFlag, const u8* envScaleFlag, Mtx* draw, Mtx33* nrm);
+    static void portCalcBBoardMtxCore(J3DJointTree* tree, Mtx* draw, Mtx33* nrm);
+    static void portSetNrmMtx(Mtx33& dst, const Mtx mtx) {
+        for (int r = 0; r < 3; r++) {
+            dst[r][0] = mtx[r][0];
+            dst[r][1] = mtx[r][1];
+            dst[r][2] = mtx[r][2];
+        }
+    }
+#endif
 
     virtual ~J3DMtxBuffer() {
     }

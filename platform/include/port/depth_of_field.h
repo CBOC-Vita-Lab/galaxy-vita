@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdlib>
+#include "hot_knob.h"
 
 namespace port {
 namespace dof {
@@ -21,8 +22,7 @@ inline bool ParseSwitch(const char* v) {
 
 // GXV_DOF, read once. The Settings menu sets it at start-up (platform/src/settings/settings_launch.cpp); env.txt wins.
 inline bool Enabled() {
-    static const bool on = ParseSwitch(std::getenv("GXV_DOF"));
-    return on;
+    return PORT_HOT_KNOB(bool, ParseSwitch(std::getenv("GXV_DOF")));  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
 }
 
 }  // namespace dof

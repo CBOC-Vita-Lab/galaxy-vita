@@ -57,5 +57,7 @@ Open the pause menu with **START**:
 |---|---|
 | **L / R** | Camera zoom, from 1.0× to 2.0× (default 1.5×) |
 | **Triangle** | Rear touch aiming on / off |
+| **Square** | Right stick: camera or pointer |
+| **Select** | Star Bit reach: off (the game's own), 1.5×, 2×, 3× or All (All collects every Star Bit on screen without aiming) |
 
 Settings are saved the moment you return to the game.

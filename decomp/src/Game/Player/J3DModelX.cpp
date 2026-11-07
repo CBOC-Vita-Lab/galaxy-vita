@@ -1,5 +1,13 @@
 #include "Game/Player/J3DModelX.hpp"
 #include "port/offset32.h"
+#ifdef TARGET_PC
+extern "C" int port_mtx_notify_on(void);  // (see J3DModel.cpp: matrix buffers need no write notification)
+#define J3D_MTX_STORE(p, n) do { if (port_mtx_notify_on()) DCStoreRange((p), (n)); } while (0)
+#define J3D_MTX_STORE_NOSYNC(p, n) do { if (port_mtx_notify_on()) DCStoreRangeNoSync((p), (n)); } while (0)
+#else
+#define J3D_MTX_STORE(p, n) DCStoreRange((p), (n))
+#define J3D_MTX_STORE_NOSYNC(p, n) DCStoreRangeNoSync((p), (n))
+#endif
 #include "Game/System/ShapePacketUserData.hpp"
 #include "Game/Util/DirectDraw.hpp"
 #include "Game/Util/MathUtil.hpp"
@@ -18,6 +26,9 @@
 class J3DMtxBuffer2 : public J3DMtxBuffer {
 public:
     void rotationMtx(MtxPtr mtx) {
+#ifdef TARGET_PC
+        portTouch();  // (GXV_VIEW_KEEP: J3DMtxBuffer.hpp)
+#endif
         mpDrawMtxArr[1][mCurrentViewNo] = reinterpret_cast< Mtx* >(mtx);
     }
     void calcNrmMtx2();
@@ -29,8 +40,14 @@ class J3DShapeX : public J3DShape {};
 
 class J3DShapePacketX : public J3DShapePacket {};
 
+#ifdef TARGET_PC
+extern "C" void port_gx_view_write_from(void*);
+#endif
 void J3DModelX::viewCalc2() {
     J3DMtxBuffer2* buffer = static_cast< J3DMtxBuffer2* >(mMtxBuffer);
+#ifdef TARGET_PC
+    port_gx_view_write_from(__builtin_return_address(0));
+#endif
     buffer->swapDrawMtx();
     buffer->swapNrmMtx();
     buffer->calcDrawMtx(getMtxCalcMode(), mBaseScale, mBaseTransformMtx);
@@ -38,7 +55,7 @@ void J3DModelX::viewCalc2() {
 
     calcBBoardMtx();
     calcBumpMtx();
-    DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+    J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
     prepareShapePackets();
 }
 
@@ -47,6 +64,9 @@ void J3DModelX::setDrawView(u32 view) {
 }
 
 void J3DModelX::setDrawViewBuffer(MtxPtr mtx) {
+#ifdef TARGET_PC
+    mMtxBuffer->portTouch();  // (GXV_VIEW_KEEP: J3DMtxBuffer.hpp)
+#endif
     mMtxBuffer->mpDrawMtxArr[1][mMtxBuffer->mCurrentViewNo] = reinterpret_cast< Mtx* >(mtx);
 }
 
@@ -71,7 +91,7 @@ void J3DModelX::viewCalc3(u32 view, MtxPtr mtx) {
 
     calcBBoardMtx();
     calcBumpMtx();
-    DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+    J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
     prepareShapePackets();
 }
 
@@ -79,7 +99,7 @@ void J3DModelX::viewCalcRef(u32 view, J3DModel* model) {
     J3DMtxBuffer2* buffer = static_cast< J3DMtxBuffer2* >(mMtxBuffer);
     buffer->rotationMtx(*mExtraMtxBuffer[view + _DC]);
     buffer->calcDrawMtx2(getMtxCalcMode(), mBaseScale, mBaseTransformMtx, model->getMtxBuffer());
-    DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+    J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
     prepareShapePackets();
 }
 
@@ -87,21 +107,27 @@ void J3DModelX::viewCalcRefPos(u32 view, J3DModel* model, const TVec3f& pos, con
     J3DMtxBuffer2* buffer = static_cast< J3DMtxBuffer2* >(mMtxBuffer);
     buffer->rotationMtx(*mExtraMtxBuffer[view + _DC]);
     buffer->calcDrawMtx3(getMtxCalcMode(), mBaseScale, mBaseTransformMtx, model->getMtxBuffer(), pos, normal);
-    DCStoreRangeNoSync(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
+    J3D_MTX_STORE_NOSYNC(getDrawMtxPtr(), mModelData->getDrawMtxNum() * sizeof(Mtx));
     prepareShapePackets();
 }
 
 void J3DMtxBuffer2::calcNrmMtx2() {
+#ifdef TARGET_PC
+    portTouch();  // (GXV_VIEW_KEEP: J3DMtxBuffer.hpp)
+#endif
     u16 count = mJointTree->getDrawMtxNum();
 
     for (u16 i = 0; i < count; i++) {
         J3DPSCalcInverseTranspose(*getDrawMtx(i), *getNrmMtx(i));
     }
 
-    DCStoreRange(getNrmMtxPtr(), count * sizeof(Mtx33));
+    J3D_MTX_STORE(getNrmMtxPtr(), count * sizeof(Mtx33));
 }
 
 void J3DMtxBuffer2::calcDrawMtx2(u32 mode, const Vec& scale, const Mtx& base, J3DMtxBuffer* buffer) {
+#ifdef TARGET_PC
+    portTouch();  // (GXV_VIEW_KEEP: J3DMtxBuffer.hpp)
+#endif
     Mtx viewBase;
     J3DCalcViewBaseMtx(j3dSys.getViewMtx(), scale, base, viewBase);
 
@@ -115,6 +141,9 @@ void J3DMtxBuffer2::calcDrawMtx2(u32 mode, const Vec& scale, const Mtx& base, J3
 }
 
 void J3DMtxBuffer2::calcDrawMtx3(u32 mode, const Vec& scale, const Mtx& base, J3DMtxBuffer* buffer, const TVec3f& pos, const TVec3f& normal) {
+#ifdef TARGET_PC
+    portTouch();  // (GXV_VIEW_KEEP: J3DMtxBuffer.hpp)
+#endif
     Mtx viewBase;
     J3DCalcViewBaseMtx(j3dSys.getViewMtx(), scale, base, viewBase);
     u16 count = mJointTree->getDrawFullWgtMtxNum();

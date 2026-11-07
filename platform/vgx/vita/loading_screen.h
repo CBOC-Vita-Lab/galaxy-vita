@@ -100,6 +100,45 @@ inline void FillNeutralBackground(uint32_t* bg) {
     }
 }
 
+inline void RemoveStartPrompt(uint32_t* bg) {
+    constexpr int x0 = 224, y0 = 416, width = 512, height = 34, pad = 5;
+    uint8_t mask[height][width] = {};
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+            const uint32_t p = bg[(y0 + y) * W + x0 + x];
+            const int r = p & 255, g = (p >> 8) & 255, b = (p >> 16) & 255;
+            const int low = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            const int high = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            if (low >= 180 && high - low <= 28) mask[y][x] = 1;
+        }
+    // Grow only neutral bright glyphs to cover their antialiasing and dark outline; cyan sky stays unmasked.
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            if (mask[y][x] & 1)
+                for (int dy = -pad; dy <= pad; ++dy)
+                    for (int dx = -pad; dx <= pad; ++dx)
+                        if (y + dy >= 0 && y + dy < height && x + dx >= 0 && x + dx < width) mask[y + dy][x + dx] |= 2;
+    for (int y = 0; y < height; ++y) {
+        uint32_t* row = bg + (y0 + y) * W;
+        for (int x = 0; x < width;) {
+            if (!mask[y][x]) { ++x; continue; }
+            const int first = x;
+            while (x < width && mask[y][x]) ++x;
+            const uint32_t left = row[x0 + first - 1], right = row[x0 + x];
+            const int span = x - first + 1;
+            for (int at = first; at < x; ++at) {
+                const int t = at - first + 1;
+                uint32_t p = 0;
+                for (int shift = 0; shift < 32; shift += 8) {
+                    const int a = (left >> shift) & 255, b = (right >> shift) & 255;
+                    p |= static_cast<uint32_t>((a * (span - t) + b * t + span / 2) / span) << shift;
+                }
+                row[x0 + at] = p;
+            }
+        }
+    }
+}
+
 inline void BuildBackground() {
     g_bg = static_cast<uint32_t*>(malloc(kBackgroundBytes));
     if (!g_bg) return;
@@ -107,10 +146,8 @@ inline void BuildBackground() {
         FillNeutralBackground(g_bg);
         return;
     }
-    // Replace only the captured start prompt with nearby clean starfield, leaving the logo and
-    // copyright pixel-identical. The live title restores its own prompt after the existing fade.
-    for (int y = 416; y < 450; ++y)
-        memcpy(g_bg + y * W + 224, g_bg + (y - 58) * W + 224, 512 * sizeof(uint32_t));
+    // Initialize once from local same-row sky, not unrelated rows of the moving planet horizon.
+    RemoveStartPrompt(g_bg);
 }
 
 inline void DrawText(uint32_t* frame, const char* source, int left, int right, int y, bool centered,
@@ -165,10 +202,9 @@ inline void Release() {
     detail::g_bg = nullptr;
 }
 
-inline void Render(uint32_t* frame, double, const State& st) {
-    using namespace detail;
-    if (!g_bg || !frame) return;
-    memcpy(frame, g_bg, kBackgroundBytes);
+namespace detail {
+// The progress bar, its caption, the percentage and the footer, drawn over a frame that already holds the background.
+inline void DrawOverlay(uint32_t* frame, const State& st) {
     float progress = !(st.progress >= 0.0f) ? 0.0f : (st.progress > 1.0f ? 1.0f : st.progress);
     if (vgx::bootguard::Enabled() && !st.titleReady && progress > 0.99f) progress = 0.99f;
     const int bx = 220, by = 426, bw = 520, bh = 14;
@@ -194,7 +230,14 @@ inline void Render(uint32_t* frame, double, const State& st) {
     DrawText(frame, percent, bx + bw - 52, bx + bw, 395, false, 174, 233, 250);
     DrawText(frame, st.footer, 192, 768, 448, true, st.alert ? 255 : 186, st.alert ? 200 : 219, st.alert ? 170 : 234);
     if (st.footer2) DrawText(frame, st.footer2, 192, 768, 466, true, st.alert ? 255 : 186, st.alert ? 200 : 219, st.alert ? 170 : 234);
+}
+}  // namespace detail
 
+inline void Render(uint32_t* frame, double, const State& st) {
+    using namespace detail;
+    if (!g_bg || !frame) return;
+    memcpy(frame, g_bg, kBackgroundBytes);
+    DrawOverlay(frame, st);
     if (st.fade > 0.0f) {
         const float fade = st.fade > 1.0f ? 1.0f : st.fade;
         const uint32_t k = static_cast<uint32_t>((1.0f - fade) * 256.0f);
@@ -203,6 +246,17 @@ inline void Render(uint32_t* frame, double, const State& st) {
             frame[i] = 0xFF000000u | (((d & 0x00FF00FFu) * k >> 8) & 0x00FF00FFu) | (((d & 0x0000FF00u) * k >> 8) & 0x0000FF00u);
         }
     }
+}
+
+// The band of rows the overlay (bar, caption, percentage, footer) can touch, for a frame that already holds a finished picture of
+// the same background: only these rows are restored from the background and drawn again (about a sixth of a full render).
+constexpr int kBandTop = 372, kBandBottom = 484;  // rows [top, bottom)
+
+inline void RenderBand(uint32_t* frame, const State& st) {
+    using namespace detail;
+    if (!g_bg || !frame) return;
+    memcpy(frame + kBandTop * W, g_bg + kBandTop * W, static_cast<size_t>(kBandBottom - kBandTop) * W * 4);
+    DrawOverlay(frame, st);
 }
 
 #if defined(__vita__)

@@ -30,6 +30,9 @@ int port_zoom_menu_active() { return 0; }
 int port_zoom_adjust(int) { return 15; }
 int port_rear_aim_enabled() { return 0; }
 int port_rear_aim_toggle() { return 0; }
+int port_star_bit_reach_next() { return 1; }
+int port_stick_pointer_enabled() { return 0; }
+int port_stick_pointer_toggle() { return 0; }
 int64_t port_host_time_ns() { return 1; }
 int port_skip_inject_a() { return -1; }
 int port_handheld() { return 1; }

@@ -33,6 +33,10 @@
 #include <JSystem/JMath/JMATrigonometric.hpp>
 #include <JSystem/JMath/JMath.hpp>
 #include <revolution/mtx.h>
+#ifdef TARGET_PC
+#include "Game/Map/CollisionParts.hpp"
+#include "port/shadow_memo_hooks.h"
+#endif
 
 void WaterBazooka_FORCE_MATCH_SDATA2() {
     (void)0.0f;
@@ -629,6 +633,13 @@ void WaterBazooka::makeActorDead() {
     mCapsule->makeActorDead();
     mBreakModel->makeActorDead();
     mDemoActor->makeActorDead();
+#ifdef TARGET_PC
+    if (port_shadowmemo_armed && mCannonCollisionParts->_CC) {  // (shadowmemo2: a direct _CC write, reported, port/shadow_memo_hooks.h)
+        const f32* base = reinterpret_cast< const f32* >(&mCannonCollisionParts->mBaseMatrix);
+        const f32 trans[3] = {base[3], base[7], base[11]};
+        port_shadowmemo_part(mCannonCollisionParts, trans, mCannonCollisionParts->_D8, 1, trans, mCannonCollisionParts->_D8, 0);
+    }
+#endif
     mCannonCollisionParts->_CC = false;
     LiveActor::makeActorDead();
 }

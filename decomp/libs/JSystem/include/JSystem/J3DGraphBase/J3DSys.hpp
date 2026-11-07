@@ -21,6 +21,13 @@ enum J3DError {
     kJ3DError_Alloc = 4,
 };
 
+#ifdef TARGET_PC
+// GXV_PAR_VIEW=2 (decomp/src/Game/LiveActor/ModelManager.cpp): while the drawn turn's view jobs are outstanding (finished on a worker
+// during the draw), a draw or normal half is made complete before it is handed to GX below.
+extern bool gPortParViewAsync;
+extern "C" void port_par_view_touch_out(const void* out);
+#endif
+
 class J3DMtxCalc;
 class J3DModel;
 class J3DMatPacket;
@@ -117,11 +124,21 @@ public:
     }
 
     void setModelDrawMtx(Mtx* pMtxArr) {
+#ifdef TARGET_PC
+        if (gPortParViewAsync) {
+            port_par_view_touch_out(pMtxArr);  // (GXV_PAR_VIEW=2: the front end's indexed loads and J3DShapeMtx's immediate ones read it)
+        }
+#endif
         mModelDrawMtx = pMtxArr;
         GXSetArray(GX_POS_MTX_ARRAY, mModelDrawMtx, sizeof(*mModelDrawMtx));
     }
 
     void setModelNrmMtx(Mtx33* pMtxArr) {
+#ifdef TARGET_PC
+        if (gPortParViewAsync) {
+            port_par_view_touch_out(pMtxArr);
+        }
+#endif
         mModelNrmMtx = pMtxArr;
         GXSetArray(GX_NRM_MTX_ARRAY, mModelNrmMtx, sizeof(*mModelNrmMtx));
     }

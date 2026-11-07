@@ -137,6 +137,7 @@ void port_irq_poll_at(void* site);  // the same, naming the code to blame in the
 // Boots the OS layer and runs `entry` as the Wii default thread (priority 16).
 void port_os_boot(void (*entry)(void));
 int port_is_game_thread(void);
+int port_lc_mutex_fast(void); /* GXV_LC_MUTEX_FAST (os_thread.cpp): 1 = OSMutex.c skips its diagnostic caller check */
 // Stronger than TLS membership: a parked guest thread does not own the CPU.
 int port_owns_game_cpu(void);
 int64_t port_host_time_ns(void);  // monotonic

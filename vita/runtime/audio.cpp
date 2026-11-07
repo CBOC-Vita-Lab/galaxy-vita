@@ -13,6 +13,9 @@
 #endif
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// The fourth core (port/core_layout.h; vita/runtime/memory.cpp): part 1 the output thread, 2 the DSP mixer. Weak: the host tests that
+// build this file have no such function, and then nothing moves.
+extern "C" int port_vita_thread_core3(int part, int planned) __attribute__((weak));
 
 namespace {
 const int kFrames = 512;
@@ -68,6 +71,10 @@ void startResumeWatcher() {}
 #endif
 
 int audioThread(SceSize, void*) {
+    // GXV_CORE3_AUDIO=1 or 2 (2 is the default when GXV_CORE3 is not set) with a proven fourth core: this thread runs there; refused or
+    // not honoured, it goes back to the helper cores it was made on. It shares no lock with the game's threads (the ring it drains is
+    // lock-free), so a late slice on the system core can only cost a device underrun (counted in the audio line), not a game stall.
+    if (port_vita_thread_core3) port_vita_thread_core3(1, HelperMask());
     unsigned next = 0;
     unsigned heldGeneration = 0, silentOutputs = 0;
     const unsigned myGeneration = sThreadGeneration.load(std::memory_order_acquire);
@@ -163,9 +170,34 @@ extern "C" void port_vita_audio_mixer_boost(void) {
     const int mask = wanted == 1 ? 0x20000 : wanted == 2 ? 0x40000 : wanted == 3 ? 0x80000 : kBoth;
     int ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);
     if (ar < 0 && mask != kBoth) ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kBoth);
+    // GXV_CORE3_AUDIO=1 (or GXV_CORE3=1) with a proven fourth core: the mixer moves on there from the place chosen above, and goes back to
+    // that place if the system refuses it. Not the default: the mixer takes locks the game thread also takes (the job and mail mutexes, the
+    // interrupt raise), and on the system core it can be preempted while it holds one; the game thread would then wait for it.
+    if (port_vita_thread_core3) port_vita_thread_core3(2, 0);  // (0: back to the mask it has now, the one chosen above)
     port_log("audio: DSP mixer thread priority 0x%X -> 0x50: 0x%08X, cpu mask 0x%X requested -> 0x%08X (now 0x%X)", static_cast<unsigned>(before),
              static_cast<unsigned>(pr), static_cast<unsigned>(mask), static_cast<unsigned>(ar),
              static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
+}
+
+// GXV_AUDIO_CPU1=1 (platform/src/os/os_thread.cpp): called once by the game's audio thread (JASAudioThread) on its own host thread.  It
+// may now run on a second virtual CPU while the game thread works, so it leaves core 0: the core GXV_AUDIO_THREAD_CORE gives the DSP mixer
+// (default 1, the render thread's, which has room; 0: cores 1-2), at priority 0x4F, just above the mixer (0x50): a run (one wake-up's
+// work) is not cut by the mix of the sub-frame it has just released, so it ends sooner (the game thread may be waiting for it to enter
+// a critical section) and the mix follows.  Above the renderer threads.  Its runs on the game's CPU (when the game thread sleeps, or
+// outside the windows) run there too: the game thread then waits for it either way.
+extern "C" int port_vita_audio_cpu1_boost(int* priority) {
+    static const long wanted = [] {
+        const char* e = getenv("GXV_AUDIO_THREAD_CORE");
+        return e && *e ? strtol(e, nullptr, 0) : 0L;
+    }();
+    sceKernelChangeThreadPriority(0, 0x4F);
+    const int kBoth = 0x60000;  // SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2
+    const int mask = wanted == 1 ? 0x20000 : wanted == 2 ? 0x40000 : kBoth;
+    int ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);
+    if (ar < 0 && mask != kBoth) ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kBoth);
+    // (the caller writes the basic log's line; port_log would not reach log.txt in a build without runtime diagnostics)
+    if (priority) *priority = sceKernelGetThreadCurrentPriority();
+    return ar < 0 ? ar : sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId());
 }
 
 extern "C" int port_vita_audio_open(PortVitaAudioDrain drain) {

@@ -1,4 +1,9 @@
 #include "JSystem/JAudio2/JAIStreamMgr.hpp"
+#ifdef TARGET_PC
+#include "port/audio_cpu1.h"
+#else
+#define PORT_AUDIO_TOUCH() ((void)0)
+#endif
 #include "JSystem/JAudio2/JAISoundHandles.hpp"
 #include "JSystem/JAudio2/JAISoundInfo.hpp"
 #include "JSystem/JAudio2/JAIStreamDataMgr.hpp"
@@ -13,6 +18,7 @@ JAIStreamMgr::JAIStreamMgr(bool setInstance) : JASGlobalInstance< JAIStreamMgr >
 }
 
 bool JAIStreamMgr::startSound(JAISoundID id, JAISoundHandle* handle, const JGeometry::TVec3< f32 >* posPtr) {
+    PORT_AUDIO_TOUCH();  // (GXV_AUDIO_CPU1: the main thread drives JAudio here, never in a window; port/audio_cpu1.h)
     if (handle != nullptr && handle->isSoundAttached()) {
         (*handle)->stop();
     }
@@ -65,6 +71,7 @@ void JAIStreamMgr::freeDeadStream_() {
 }
 
 void JAIStreamMgr::calc() {
+    PORT_AUDIO_TOUCH();
     JSULink< JAIStream >* i;
     mParams.calc();
     for (i = mStreamList.getFirst(); i != nullptr; i = i->getNext()) {
@@ -74,6 +81,7 @@ void JAIStreamMgr::calc() {
 }
 
 void JAIStreamMgr::stop() {
+    PORT_AUDIO_TOUCH();
     JSULink< JAIStream >* i;
     for (i = mStreamList.getFirst(); i != nullptr; i = i->getNext()) {
         i->getObject()->stop();
@@ -81,6 +89,7 @@ void JAIStreamMgr::stop() {
 }
 
 void JAIStreamMgr::stop(u32 fadeTime) {
+    PORT_AUDIO_TOUCH();
     JSULink< JAIStream >* i;
     for (i = mStreamList.getFirst(); i != nullptr; i = i->getNext()) {
         i->getObject()->stop(fadeTime);
@@ -88,6 +97,7 @@ void JAIStreamMgr::stop(u32 fadeTime) {
 }
 
 void JAIStreamMgr::stopSoundID(JAISoundID id) {
+    PORT_AUDIO_TOUCH();
     JSULink< JAIStream >* i;
     for (i = mStreamList.getFirst(); i != nullptr; i = i->getNext()) {
         if ((u32)i->getObject()->getID() == (u32)id) {
@@ -97,6 +107,7 @@ void JAIStreamMgr::stopSoundID(JAISoundID id) {
 }
 
 void JAIStreamMgr::mixOut() {
+    PORT_AUDIO_TOUCH();
     JSULink< JAIStream >* i;
     for (i = mStreamList.getFirst(); i != nullptr; i = i->getNext()) {
         i->getObject()->JAIStreamMgr_mixOut_(mParams.mParams, mActivity);

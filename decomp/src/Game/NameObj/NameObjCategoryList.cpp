@@ -1,6 +1,26 @@
 #include "Game/NameObj/NameObjCategoryList.hpp"
 #include <algorithm>
 
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#if PORT_LOGGING
+// GXV_ANIM_PROF (platform/src/port/perf.cpp): every object of a list timed, when asked for (one test of a constant otherwise).
+extern "C" int port_anim_prof_on(void);
+extern "C" void port_anim_prof_begin(void);
+extern "C" void port_anim_prof_end(const char* objName);
+#define PORT_ANIM_PROF_CALL(call, obj)        \
+    do {                                      \
+        if (port_anim_prof_on()) {            \
+            port_anim_prof_begin();           \
+            call(obj);                        \
+            port_anim_prof_end((obj)->mName); \
+        } else {                              \
+            call(obj);                        \
+        }                                     \
+    } while (0)
+#endif
+#endif
+
 NameObjCategoryList::NameObjCategoryList(u32 count, const CategoryListInitialTable* pTable, NameObjMethod pMethod, bool allocateByCheck,
                                          const char*) {
     NameObjMethod method;
@@ -37,7 +57,11 @@ void NameObjCategoryList::execute(int idx) {
     }
 
     for (NameObj** pNameObj = pCategoryInfo->mNameObjArr.begin(); pNameObj != pCategoryInfo->mNameObjArr.end(); pNameObj++) {
+#if defined(TARGET_PC) && PORT_LOGGING
+        PORT_ANIM_PROF_CALL((*mDelegator), *pNameObj);
+#else
         (*mDelegator)(*pNameObj);
+#endif
     }
 }
 

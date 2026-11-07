@@ -25,6 +25,28 @@ SegmentGravity::SegmentGravity()
     }
 }
 
+#ifdef TARGET_PC
+// (an accepted position is within the range of the point it is drawn to: an end, or the point of the axis at axisY, which runs from
+// mHemisphereExtension[0] to mAxisLength - mHemisphereExtension[1])
+f32 SegmentGravity::calcReach(TVec3f* pCentre) const {
+    pCentre->set((mWorldGravityPoints[0].x + mWorldGravityPoints[1].x) * 0.5f, (mWorldGravityPoints[0].y + mWorldGravityPoints[1].y) * 0.5f,
+                 (mWorldGravityPoints[0].z + mWorldGravityPoints[1].z) * 0.5f);
+    if (mRange < 0.0f) {
+        return -1.0f;
+    }
+    const f32 half = mAxisLength * 0.5f;
+    f32 extent = half;
+    const f32 toBase = __builtin_fabsf(mHemisphereExtension[0] - half), toEnd = __builtin_fabsf(half - mHemisphereExtension[1]);
+    if (extent < toBase) {
+        extent = toBase;
+    }
+    if (extent < toEnd) {
+        extent = toEnd;
+    }
+    return extent + mRange + mDistant;
+}
+#endif
+
 bool SegmentGravity::calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPos) const {
     TVec3f relPosFromBase = rPos - mWorldGravityPoints[0];
     f32 axisY = relPosFromBase.dot(mAxis);

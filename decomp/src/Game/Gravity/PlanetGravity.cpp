@@ -1,5 +1,8 @@
 #include "Game/Gravity.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "port/grav_memo.h"  // (GXV_MO_GRAVMEMO, mapobjcut: writers of a gravity's fields move port_grav_gen)
+#endif
 
 void PlanetGravity_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -19,10 +22,17 @@ PlanetGravity::PlanetGravity() {
     mValidFollower = true;
     mIsRegistered = false;
     mAppeared = true;
+#ifdef TARGET_PC
+    mReachSquared = -1.0f;
+    mReachCentre.x = mReachCentre.y = mReachCentre.z = 0.0f;
+#endif
 }
 
 void PlanetGravity::setPriority(s32 priority) {
     mPriority = priority;
+#ifdef TARGET_PC
+    PortGravBump();
+#endif
 }
 
 bool PlanetGravity::calcGravity(TVec3f* pDest, const TVec3f& rPosition) const {
@@ -110,4 +120,23 @@ void PlanetGravity::updateIdentityMtx() {
     TPos3f mtx;
     mtx.identity();
     updateMtx(mtx);
+#ifdef TARGET_PC
+    PortGravBump();
+    updateReach();
+#endif
 }
+
+#ifdef TARGET_PC
+void PlanetGravity::updateReach() {
+    mReachSquared = -1.0f;  // (no sphere while the centre is rewritten)
+    TVec3f centre(0.0f, 0.0f, 0.0f);
+    const f32 reach = calcReach(&centre);
+    if (!(reach >= 0.0f) || !(reach <= 1e18f)) {
+        return;
+    }
+    // (widened far beyond the rounding of the shapes' arithmetic, including that of a centre far from the origin; as the fork's)
+    const f32 limit = reach * 1.001f + (__builtin_fabsf(centre.x) + __builtin_fabsf(centre.y) + __builtin_fabsf(centre.z)) * 1e-5f + 1.0f;
+    mReachCentre = centre;
+    mReachSquared = limit * limit;
+}
+#endif

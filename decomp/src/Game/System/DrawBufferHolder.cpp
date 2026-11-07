@@ -1,5 +1,8 @@
 #include "Game/System/DrawBufferHolder.hpp"
 #include "Game/System/DrawBufferGroup.hpp"
+#ifdef TARGET_PC
+#include "Game/Scene/SceneFunction.hpp"
+#endif
 #include "Game/Util/MemoryUtil.hpp"
 #include <algorithm>
 
@@ -86,6 +89,27 @@ void DrawBufferHolder::findLightInfo(LiveActor* pActor, s32 drawBufferType, s32 
 void DrawBufferHolder::entry(s32 drawBufferType) {
     std::for_each(mExecuteLists[drawBufferType].begin(), mExecuteLists[drawBufferType].end(), std::mem_func(&DrawBufferGroup::entry));
 }
+
+#ifdef TARGET_PC
+// PETARI_VIEW_PLAYER (forkB; split from Producdevity's fork, ee487a3): the view pass of the 3D list in two parts, the player's group
+// alone (MarioActor::calcViewAndEntry also carries per-turn state: decideShadowMode, the lighting, footprints) and the rest. A group
+// is visited only if it is in the list, as entry() does.
+void DrawBufferHolder::entryPlayer() {
+    for (DrawBufferGroup** ppGroup = mExecuteLists[MR::CameraType_3D].begin(); ppGroup != mExecuteLists[MR::CameraType_3D].end(); ppGroup++) {
+        if (*ppGroup == &mBufferGroups[MR::DrawBufferType_Player]) {
+            (*ppGroup)->entry();
+        }
+    }
+}
+
+void DrawBufferHolder::entryExceptPlayer(s32 cameraType) {
+    for (DrawBufferGroup** ppGroup = mExecuteLists[cameraType].begin(); ppGroup != mExecuteLists[cameraType].end(); ppGroup++) {
+        if (*ppGroup != &mBufferGroups[MR::DrawBufferType_Player]) {
+            (*ppGroup)->entry();
+        }
+    }
+}
+#endif
 
 void DrawBufferHolder::drawOpa(s32 drawBufferType) const {
     if (isBufferGroupEmpty(drawBufferType)) {

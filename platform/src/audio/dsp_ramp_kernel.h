@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "../../include/port/hot_knob.h"
 #if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(PORT_DSPRAMP_NO_NEON)
 #include <arm_neon.h>
 #endif
@@ -17,7 +18,7 @@ inline long EnvInt(const char* name, long fallback) {
 }
 inline int Mode() {
     // GXV_DSPRAMP: 1 uses exact NEON ramps; 2 compares PCM/final volume with the original path. Default off, read once.
-    static const long mode = EnvInt("GXV_DSPRAMP", 0);
+    const long mode = PORT_HOT_KNOB(long, EnvInt("GXV_DSPRAMP", 0));  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h; every voice of every mixed sub-frame asks)
     return mode == 1 || mode == 2 ? int(mode) : 0;
 }
 inline bool PartialOverlap(const int16_t* dst, const int16_t* src) {

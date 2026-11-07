@@ -75,7 +75,18 @@ public:
     u32 checkArea3D(Fxyz*, Fxyz*, KC_PrismData**, u32);
     u32 checkSphere(Fxyz*, f32, f32, u32, KC_PrismData**, f32*, u8*);
     u32 checkSphereWithThickness(Fxyz*, f32, f32, u32, KC_PrismData**, f32*, u8*, f32);
+#ifdef TARGET_PC
+    // nearestOnly (PETARI_RAY_NEAREST, MapUtil.cpp): the walk may end once a cell starts beyond the nearest hit found so far
+    KC_PrismData* checkArrow(const TVec3f&, const TVec3f&, f32*, u8*, u32*, KC_PrismData**, u32, bool nearestOnly = false) const;
+#else
     KC_PrismData* checkArrow(const TVec3f&, const TVec3f&, f32*, u8*, u32*, KC_PrismData**, u32) const;
+#endif
+    // GXV_KCL_MEMO (kcl, KCollision.cpp): the octree walks behind checkArea3D / checkSphere / checkSphereWithThickness / checkArrow,
+    // with the prism memo on or off (the public functions choose, and in verify mode run both)
+    u32 checkArea3DWalk(Fxyz*, Fxyz*, KC_PrismData**, u32, bool);
+    u32 checkSphereWalk(Fxyz*, f32, f32, u32, KC_PrismData**, f32*, u8*, bool);
+    u32 checkSphereWithThicknessWalk(Fxyz*, f32, f32, u32, KC_PrismData**, f32*, u8*, f32, bool);
+    KC_PrismData* checkArrowWalk(const TVec3f&, const TVec3f&, f32*, u8*, u32*, KC_PrismData**, u32, bool, bool nearestOnly = false) const;
     bool KCHitSphere(KC_PrismData*, Fxyz*, f32, f32, f32*, u8*);
     bool KCHitSphereWithThickness(KC_PrismData*, Fxyz*, f32, f32, f32*, u8*, f32);
     bool isNearParallelNormal(const KC_PrismData*) const;

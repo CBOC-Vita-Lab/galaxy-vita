@@ -222,6 +222,12 @@ void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
 
     addr = id << 2;
     reg = CP_XF_LOADREGS(addr, 11);
+#if defined(TARGET_PC)
+    if (__PortGXFx) {  // (GXV_FXMERGE: gathered with the particle loop's other calls, GXDisplayList.c)
+        __PortGXFxXF(reg, &mtx[0][0], 12);
+        return;
+    }
+#endif
     GX_WRITE_U8(CP_OPCODE(0, CP_CMD_XF_LOADREGS));
     GX_WRITE_U32(reg);
     WriteMTXPS4x3(mtx, (volatile void*)GX_FIFO_ADDR);
@@ -233,6 +239,24 @@ void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
     addr = 0x400 + (id * 3);
     reg = CP_XF_LOADREGS(addr, 3 * 3 - 1);
 
+#if defined(TARGET_PC)
+    {
+        // GXV_FIFO_BATCH (port/gx_fifo.h): the header and the nine words as one batched command, the same bytes.
+        u8* p;
+        if (__PortGXFifoRoom(&p, 5 + 36)) {
+            int r, c;
+            p = __PortGXPut_u8(p, CP_OPCODE(0, CP_CMD_XF_LOADREGS));
+            p = __PortGXPut_u32(p, reg);
+            for (r = 0; r < 3; r++) {
+                for (c = 0; c < 3; c++) {
+                    p = __PortGXPut_f32(p, mtx[r][c]);
+                }
+            }
+            __PortGXFifoCommit(p);
+            return;
+        }
+    }
+#endif
     GX_WRITE_U8(CP_OPCODE(0, CP_CMD_XF_LOADREGS));
     GX_WRITE_U32(reg);
 
@@ -257,6 +281,12 @@ void GXLoadTexMtxImm(const f32 mtx[3][4], u32 id, GXTexMtxType type) {
     count = (u32)((type == GX_MTX2x4) ? (2 * 4) : (3 * 4));
     reg = CP_XF_LOADREGS(addr, count - 1);
 
+#if defined(TARGET_PC)
+    if (__PortGXFx) {  // (GXV_FXMERGE: gathered, as GXLoadPosMtxImm)
+        __PortGXFxXF(reg, &mtx[0][0], count);
+        return;
+    }
+#endif
     GX_WRITE_U8(CP_OPCODE(0, CP_CMD_XF_LOADREGS));
     GX_WRITE_U32(reg);
 

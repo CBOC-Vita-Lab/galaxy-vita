@@ -311,6 +311,15 @@ bool CubeGravity::calcCornerGravity(const TVec3f& rPosition, s32 area, TVec3f* p
     return true;
 }
 
+#ifdef TARGET_PC
+// (an accepted position is inside the cube or within the range of a point of it; every point of the cube is within lenX + lenY +
+// lenZ of its centre, whether the axes are at right angles or not)
+f32 CubeGravity::calcReach(TVec3f* pCentre) const {
+    mPosition.getTrans(*pCentre);
+    return mRange < 0.0f ? -1.0f : lenX + lenY + lenZ + mRange + mDistant;
+}
+#endif
+
 bool CubeGravity::calcOwnGravityVector(TVec3f* pDest, f32* pScalar, const TVec3f& rPosition) const {
     int area = calcGravityArea(rPosition);
     if (area < 0) {

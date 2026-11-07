@@ -10,6 +10,10 @@ public:
 
     bool calcScreenPosition(TVec2f*) const;
     bool isPointing(const TVec2f&, f32, f32) const;
+#ifdef TARGET_PC
+    bool isPointingScaled(const TVec2f&, f32, f32) const;  // (the port's Star Bit reach, MR::isStarPointerPointingStarPieceAssist)
+    bool isOnScreen() const;
+#endif
     void calcPosition(TVec3f*) const;
     f32 calcRadius2d(f32, f32, f32) const;
     bool calcScreenPositionFromView(TVec2f*, const TVec3f&) const;

@@ -40,6 +40,10 @@ public:
     void registerGravity(PlanetGravity* pGravity);
 
 private:
+#ifdef TARGET_PC
+    // GXV_MO_GRAVMEMO (mapobjcut, PlanetGravityManager.cpp): the original query, which the memo wraps.
+    bool calcTotalGravityVectorRaw(TVec3f* pGravity, GravityInfo* pInfo, const TVec3f& rPosition, u32 gravityType, u32 requester) const;
+#endif
     /// @brief Sorts all PlanetGravity instances by their priority in reverse order. The higher the priority is, the lower
     /// it gets positioned in the array.
     void sortGravities();

@@ -77,7 +77,11 @@ int main(int argc,char** argv) {
             }
         }
         if (mode == "capacity") Require(linked == 1280 && rejected == 0 && peak < 1024,"ordering-only change does not protect fresh links from capacity control");
-        if (mode == "used-pressure") {
+        if (mode == "used-pressure" && vgx::backend::DemandReclaimOn()) {
+            // GXV_DEMAND_RECLAIM: a full table reclaims programs of earlier frames at once; no demanded program is refused
+            Require(linked == 1280 && peak <= 1024,"demand reclaims earlier frames' programs instead of skipping draws");
+            ++linked;
+        } else if (mode == "used-pressure") {
             Require(linked == 1023 && rejected == 9,"recently used capacity pressure retries at most once each affected frame");
             g_serial = 2000; const auto oldDeletes = deletes; EvictPrograms(); evictionFrames += deletes != oldDeletes;
             Require(GetProgram(3,1279).ok && rejected == 9,"a deferred program recovers after ordinary boundary eviction frees capacity");

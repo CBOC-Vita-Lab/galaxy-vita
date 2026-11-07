@@ -1,0 +1,140 @@
+diff -ruN a/textures.c b/textures.c
+--- a/src/textures.c	2026-11-05 11:36:33.281256194 -0500
++++ b/src/textures.c	2026-11-05 11:36:56.510411039 -0500
+@@ -75,6 +75,7 @@
+ 
+ texture_unit texture_units[COMBINED_TEXTURE_IMAGE_UNITS_NUM]; // Available texture units
+ texture texture_slots[TEXTURES_NUM]; // Available texture slots
++GLuint vgl_tex_first_free = 1; // (patch 0015) every slot in [1, vgl_tex_first_free) is in use
+ sampler *samplers[COMBINED_TEXTURE_IMAGE_UNITS_NUM] = {NULL}; // Sampler objects bindings
+ 
+ void *color_table = NULL; // Current in-use color table
+@@ -1726,10 +1727,13 @@
+ #endif
+ 
+ 	// Reserving a texture and returning its id if available
++	// (Galaxy port, patch 0015) from the first slot that may be free (vgl_tex_first_free): every slot below it is in use, so the
++	// names are the ones the walk from 1 finds - without reading hundreds of slots for every new texture.
+ 	int j = 0;
+-	for (GLuint i = 1; i < TEXTURES_NUM; i++) {
++	for (GLuint i = vgl_tex_first_free; i < TEXTURES_NUM; i++) {
+ 		if (texture_slots[i].status == TEX_UNUSED) {
+ 			res[j++] = i;
++			vgl_tex_first_free = i + 1;
+ 			texture_slots[i].status = TEX_UNINITIALIZED;
+ 
+ 			// Resetting texture parameters to their default values
+@@ -1848,6 +1852,7 @@
+ 				break;
+ 			case TEX_UNINITIALIZED:
+ 				texture_slots[i].status = TEX_UNUSED;
++				vgl_tex_slot_freed(i);
+ 				break;
+ 			case TEX_UNUSED:
+ 			default:
+diff -ruN a/utils/gpu_utils.c b/utils/gpu_utils.c
+--- a/src/utils/gpu_utils.c	2026-11-05 11:36:33.347949246 -0500
++++ b/src/utils/gpu_utils.c	2026-11-05 11:36:56.504153792 -0500
+@@ -389,6 +389,32 @@
+ 	}
+ }
+ 
++// (Galaxy port, patch 0015) vglReserveTextureLevels: the one-shot hint for the next level-0 allocation of that size.
++static uint32_t vgl_reserve_w = 0, vgl_reserve_h = 0;
++static int32_t vgl_reserve_levels = 0;
++void vglReserveTextureLevels(GLsizei width, GLsizei height, GLint levels) {
++	vgl_reserve_w = width;
++	vgl_reserve_h = height;
++	vgl_reserve_levels = levels;
++}
++// The hint's levels for a level-0 allocation of w x h (0: none), cleared in any case.
++static int32_t vgl_take_reserve(uint32_t w, uint32_t h) {
++	const int32_t levels = (vgl_reserve_w == w && vgl_reserve_h == h) ? vgl_reserve_levels : 0;
++	vgl_reserve_levels = 0;
++	return levels;
++}
++// The bytes gpu_alloc_mipmaps(-1, ...) reallocates a w x h linear texture to (the same arithmetic).
++static uint32_t vgl_linear_chain_size(uint32_t orig_w, uint32_t orig_h, uint32_t bpp) {
++	uint32_t w = nearest_po2(orig_w), h = nearest_po2(orig_h), size = 0;
++	while ((w > 1) && (h > 1)) {
++		size += MAX(w, 8) * h * bpp;
++		w /= 2;
++		h /= 2;
++	}
++	size += MAX(w, 8) * h * bpp;
++	return size;
++}
++
+ void gpu_alloc_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, const void *data, texture *tex, uint8_t src_bpp, uint32_t (*read_cb)(void *), void (*write_cb)(void *, uint32_t), GLboolean fast_store) {
+ 	// If there's already a texture in passed texture object we first dealloc it
+ 	if (tex->status == TEX_VALID) {
+@@ -401,7 +427,14 @@
+ 	// Allocating texture data buffer
+ 	const int aligned_w = VGL_ALIGN(w, 8);
+ 	const int tex_size = aligned_w * h * bpp;
+-	void *texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++	// (patch 0015) with the hint for the generated chain the block is the size gpu_alloc_mipmaps(-1) wants: its realloc keeps it in place
++	int alloc_size = tex_size;
++	if (vgl_take_reserve(w, h) < 0) {
++		const uint32_t chain = vgl_linear_chain_size(w, h, bpp);
++		if (chain > (uint32_t)alloc_size)
++			alloc_size = chain;
++	}
++	void *texture_data = gpu_alloc_mapped_for_gpu(alloc_size);
+ 
+ 	if (texture_data) {
+ 		// Initializing texture data buffer
+@@ -748,7 +781,14 @@
+ 		mip_count = mip_level;
+ 		tex_width = w;
+ 		tex_height = h;
+-		texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++		// (patch 0015) the hinted chain at once: later levels find it allocated (mip_count) and are not reallocated. The size and
++		// the level offsets are the ones the reallocations would end with.
++		const int32_t reserve = vgl_take_reserve(w, h);
++		if (reserve > 1 && reserve <= 16) {
++			mip_count = reserve - 1;
++			texture_data = gpu_alloc_mapped_for_gpu(gpu_get_compressed_mipchain_size(mip_count, aligned_max_width, aligned_max_height, format));
++		} else
++			texture_data = gpu_alloc_mapped_for_gpu(tex_size);
+ 	}
+ 
+ 	// Initializing texture data buffer
+diff -ruN a/utils/gpu_utils.h b/utils/gpu_utils.h
+--- a/src/utils/gpu_utils.h	2026-11-05 11:36:33.379730546 -0500
++++ b/src/utils/gpu_utils.h	2026-11-05 11:37:06.102416083 -0500
+@@ -202,10 +202,20 @@
+ 	}
+ }
+ 
++// (patch 0015) glGenTextures' walk starts at the lowest slot that may be free: a slot made free lowers it.
++extern GLuint vgl_tex_first_free;
++extern texture texture_slots[];
++static inline __attribute__((always_inline)) void vgl_tex_slot_freed(GLuint i) {
++	if (i >= 1 && i < vgl_tex_first_free)
++		vgl_tex_first_free = i;
++}
++
+ // Dealloc a texture
+ static inline __attribute__((always_inline)) void gpu_free_texture(texture *tex) {
+ 	gpu_free_texture_data(tex);
+ 	tex->status = TEX_UNUSED;
++	if (tex >= &texture_slots[0] && tex < &texture_slots[TEXTURES_NUM])
++		vgl_tex_slot_freed((GLuint)(tex - &texture_slots[0]));
+ }
+ 
+ // Alloc a palette
+diff -ruN a/vitaGL.h b/vitaGL.h
+--- a/src/vitaGL.h	2026-11-05 11:36:33.263949241 -0500
++++ b/src/vitaGL.h	2026-11-05 11:36:56.498148995 -0500
+@@ -1358,6 +1358,10 @@
+ 
+ // Like vglUseLowPrecision, but only fragment shaders are translated with low precision (vertex shaders keep float).
+ void vglUseLowPrecisionFragmentOnly(GLboolean val);
++/* (Galaxy port, patch 0015) The next level-0 allocation of a width x height texture (glTexImage2D / glCompressedTexImage2D on the
++ * bound 2D texture) holds `levels` mip levels (-1: the whole chain glGenerateMipmap makes), so that the later levels or the mip
++ * generation do not reallocate (and copy with the CPU) the storage. One-shot: any level-0 allocation clears it. */
++void vglReserveTextureLevels(GLsizei width, GLsizei height, GLint levels);
+ 
+ // Allows to swap between triple and double buffering. Default value: GL_TRUE.
+ void vglUseTripleBuffering(GLboolean usage);

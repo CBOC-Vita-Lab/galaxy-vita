@@ -27,6 +27,13 @@ public:
     /* 0x0C */ f32 mStartFrame;
     /* 0x10 */ f32 mEndFrame;
     /* 0x14 */ bool mContinueAnimEnd;
+#ifdef TARGET_PC
+    // (port) The last name looked up and the index of its resource (-1: none). SyncBckEffectChecker asks with the same name, a
+    // pointer into the actor's animation table, several times a turn for each emitter.
+    s32 portFind(const char* pName) const;
+    mutable const char* mPortLookupName;
+    mutable s32 mPortLookupIndex;
+#endif
 };
 
 namespace MR {

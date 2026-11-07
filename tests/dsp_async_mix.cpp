@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #include <atomic>
 #include <chrono>
@@ -41,6 +42,16 @@ void port_log_summary(const char*, ...) {}
 int64_t port_host_time_ns(void) {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+int64_t port_thread_cpu_us(void) {
+    timespec ts{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+}
+void port_vita_audio_clock_boost(void) {}
+void port_vita_audio_mixer_boost(void) {}
+// GXV_AUDIO_HOLD (os_thread.cpp): the DSP tells the scheduler whether a sync frame has sub-frames left (its interrupts are not held).
+static int sUrgent = -1;
+void port_audio_irq_urgent(int urgent) { sUrgent = urgent; }
 void port_host_sleep_ns(int64_t) {}
 int port_is_paused(void) { return 0; }
 int port_handheld(void) { return 0; }
@@ -264,6 +275,7 @@ int main(int, char** argv) {
     for (unsigned block = 0; block < kBlocks; block++) {
         const uint32_t sync[5] = {0x82000000u | (kSubs << 16) | (0x3000u + block * 0x40), Low(sOutL), Low(sOutR), 0, 0};
         Send(sync, 5);
+        Require(sUrgent == 1, "a sync frame with sub-frames to render is urgent (GXV_AUDIO_HOLD)");
         for (unsigned sub = 0; sub < kSubs; sub++) {
             GuestUpdates(static_cast<int>(block), static_cast<int>(sub));
             Release(0);
@@ -291,6 +303,7 @@ int main(int, char** argv) {
                 Require(WaitMails(1, 0), "reply to the release");
             }
             HashState(sub, static_cast<int>(block));
+            Require(sUrgent == (sub + 1 < kSubs ? 1 : 0), "urgent until the frame's last sub-frame is released (GXV_AUDIO_HOLD)");
         }
         // The next block's sync frame is only sent once the last sub-frame has been answered (as JASDriver does).
         if (block % 9 == 4) {
@@ -298,6 +311,7 @@ int main(int, char** argv) {
             const uint32_t w[5] = {0x81000000u | kVoices, Low(sVoices), Low(table), Low(afc), Low(sFx)};
             Send(w, 5);
             Require(WaitMails(0, 1), "table set-up reply (middle)");
+            Require(sUrgent == 0, "a command between frames is not urgent (GXV_AUDIO_HOLD)");
         }
     }
 
