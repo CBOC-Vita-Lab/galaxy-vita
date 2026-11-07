@@ -10,8 +10,8 @@
   "recipeId": "galaxy",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "8fa38c852cf3fb211ad1b2ddd16f4a5d1ea9a08df2521c8d0119b2cb6aef9aef",
-    "runtimeSha256": "8512cfc6bd12f5d1571c4405e1157138b82901d956ea32474409fa56001c313e"
+    "sha256": "7cf0572a4d24a030633d13d0bf7e9152f96aae4075e46ebc1e9828cb4f7017cb",
+    "runtimeSha256": "60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563"
   },
   "requiredInputs": [
     {

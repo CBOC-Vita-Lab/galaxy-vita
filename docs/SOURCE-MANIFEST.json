@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v2.0",
+  "release": "galaxy-v2.1",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -18500,7 +18500,7 @@
     },
     {
       "path": "platform/include/port/core_layout.h",
-      "sha256": "cecd496beb889b53455bccd66967e53c4f379a42b2ffef1d2afb82f2c9a3e640"
+      "sha256": "399ba84dd048f90f9ef1efccc0ab249e1fa5cc8cb4e98bf27f82a40464a2926e"
     },
     {
       "path": "platform/include/port/depth_of_field.h",
@@ -19135,6 +19135,10 @@
       "sha256": "ccf2251a1a58dd01ffa21b5ee39ba829e08687591237e929fa989c4acdade7f6"
     },
     {
+      "path": "platform/vgx/src/vgx_async_shaders.h",
+      "sha256": "2e59f0f475fbcac02f16710edb15597a68af5092a3bf6a1cd09ee96b1e0bfb3c"
+    },
+    {
       "path": "platform/vgx/src/vgx_autoq.cpp",
       "sha256": "78b921108e1a4f2aff2de4f44ba38f65b18b0dadfccd8be2e755499e496e94ce"
     },
@@ -19144,7 +19148,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
-      "sha256": "b4cfc0092772be4151e6e8583e7b783fb6cfdb9498d35553aae056b3f8ba4973"
+      "sha256": "d70fb35fe75180fc179de99d81257e3e4af16ddafb7f2a1ec084496406f61b42"
     },
     {
       "path": "platform/vgx/src/vgx_backend_null.cpp",
@@ -19336,7 +19340,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "93a3c4b80284a68b7ec861edddd01ffaa8273c160cbe21b22749b3441487a289"
+      "sha256": "7980466c1333dff96e925900e9ffb9c88beadc8b16378581c650b25a079a685d"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",
@@ -19408,7 +19412,7 @@
     },
     {
       "path": "tests/core_layout_test.cpp",
-      "sha256": "467ff70c6a9770af752fc1f256fa403c3a42fc50ee3992cc505c2145f5b16121"
+      "sha256": "be6e92ccbc536dd6de4c4630601904447eccd23791dce5491fdc23e749c6671f"
     },
     {
       "path": "tests/depth_of_field.cpp",
@@ -19947,6 +19951,14 @@
       "sha256": "dd3161e391e3de81365def760a85706293937f88e90c6deb3d598fdb4e99caf8"
     },
     {
+      "path": "tests/vgx_async_shaders.cpp",
+      "sha256": "5946c154d4635372840222a471b719c37e87f16e80b1d976863925ab390cee1e"
+    },
+    {
+      "path": "tests/vgx_async_shaders_backend.cpp",
+      "sha256": "fe34a5655b151a9f88a5e9919ea5b416616f06ea7615472a0f298e03d2b8a6d6"
+    },
+    {
       "path": "tests/vgx_autoq_60.cpp",
       "sha256": "26eccd5ae7d74a74b1a9fddea04859667f868be698264a1fffa88e269194f161"
     },
@@ -20348,7 +20360,7 @@
     },
     {
       "path": "tests/vgx_stage_warm.cpp",
-      "sha256": "651a5f8b3478d95d94eab86de10283433e160b3d35d20a367997921a4acbd648"
+      "sha256": "c006427213890e32d1e7df4daf139e27c4cb90658b5a65f658884568cee79d46"
     },
     {
       "path": "tests/vgx_staticcull_gl.cpp",
@@ -21459,6 +21471,10 @@
       "sha256": "1017c0f2dfe869718d0de820ff9fd1112fe77934c44ade5be0646a1df1195175"
     },
     {
+      "path": "tools/test_vgx_async_shaders.sh",
+      "sha256": "37c5f9c93aa63edb64f5019239d654cf85ab611faaf3ff0a578fd9db5b5ee87e"
+    },
+    {
       "path": "tools/test_vgx_autoq.sh",
       "sha256": "68923581eeada2e3d3a7e7e941decc58cbb25300a31203fe0d7775f47f50734d"
     },
@@ -22044,7 +22060,7 @@
     },
     {
       "path": "tools/vitagl/README.md",
-      "sha256": "1c7335eaf795134491571a6ecffed4072d892bbe0fcb83ad873bd235f862bd72"
+      "sha256": "4bf95234c7e7d10f060239342622d749d5f8b38a13933031c0576249f3685878"
     },
     {
       "path": "tools/vitagl/build-release.sh",
@@ -22137,6 +22153,10 @@
     {
       "path": "tools/vitagl/patches/0019-color-load-from.patch",
       "sha256": "eec9d4d952d4be4475aeff3a0b77c32b774904f57b0db3c5c0bd829901e0b442"
+    },
+    {
+      "path": "tools/vitagl/patches/0020-async-shader-compile.patch",
+      "sha256": "7c9378e71d995a8b2110ae32519e42d2e98d899c292f3c8a00adb8c6de3114eb"
     },
     {
       "path": "vita/CMakeLists.txt",
@@ -22320,7 +22340,7 @@
     },
     {
       "path": "vita/runtime/memory.cpp",
-      "sha256": "4b35f1c21ba03c29ee0a3c7867c38df5f63774cd38a710d9066e541aa908e881"
+      "sha256": "afd8552266d6357050809b6467427c9f784651afca91c24876a43a6b19301716"
     },
     {
       "path": "vita/runtime/memory.h",
@@ -22344,7 +22364,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "142cae571ce72e44d639748797fd900dd5c4b74e917dc3ef6d7440fb1da7ce91"
+      "sha256": "7f3af3d8cae96966bb14fcd7947238e9d5168715eaa9e71e1559eaae5d4acf5d"
     },
     {
       "path": "vita/vgx-game/coldtrace_export.cpp",
