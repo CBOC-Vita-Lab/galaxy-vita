@@ -1,0 +1,29 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the package against its release record
+        run: |
+          want=$(python3 -c "import json;print(json.load(open('cboc-release.json'))['package']['sha256'])")
+          have=$(sha256sum Galaxy-Vita.vpk | cut -d' ' -f1)
+          test "$want" = "$have"
+      - name: Release notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if [ -f "docs/RELEASE-NOTES-$v.md" ]; then cp "docs/RELEASE-NOTES-$v.md" notes.md
+          else awk '/^# Version /{n++} n==1' CHANGELOG.md | tail -n +2 > notes.md; fi
+      - name: Install ZIP
+        run: git archive --format=zip --prefix=Galaxy-Vita/ -o Galaxy-Vita-install.zip HEAD
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "Super Mario Galaxy ${GITHUB_REF_NAME#v}" --notes-file notes.md --latest \
+            Galaxy-Vita.vpk Galaxy-Vita-install.zip cboc-release.json SHA256SUMS
