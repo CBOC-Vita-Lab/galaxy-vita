@@ -10,7 +10,7 @@
     "runtimeSha256": "8512cfc6bd12f5d1571c4405e1157138b82901d956ea32474409fa56001c313e"
   },
   "source": {
-    "revision": "PENDING-COMMIT",
+    "revision": "0f6e1f9a0d17b6fc4225f09e1e2b18a7568a2dcc",
     "manifest": "docs/SOURCE-MANIFEST.json"
   },
   "buildOptions": {
