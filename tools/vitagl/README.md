@@ -34,6 +34,12 @@ that exact library.
    store them into its own buffer as usual: the host's `GXV_EFBSWAP` hands the EFB's colour buffer to a copy texture and continues
    on a fresh one, which then starts with the old picture by the scene's own tile load instead of a full-screen quad
    (`GXV_VGL_LOADFROM=1`, default off; `vglGetColorLoadsFrom()` counts them). UNTESTED on hardware.
+   `0020` (`vglEnableAsyncCompiler`, `vglCompileShaderPairToCache`; inert until the host calls the first): a recursive lock around the GLSL
+   translator and the runtime compiler (`compile_shader`, `glsl_translator_process`, `glsl_translator_set_process`), and one function a worker thread may
+   call to translate a GLSL pair and write what the shader cache lacks, through the same `vgl_cache_compiled_shader` as `glLinkProgram`: no GL object, no
+   `sceGxmShaderPatcherRegisterProgram` (the GL thread registers when it later loads the files), none of the GL thread's globals written (the translator
+   reads `glsl_override` while the worker holds the lock). The back end's `GXV_ASYNC_SHADERS=1` (default) uses it; a library without the patch leaves every
+   shader on the blocking path. Compiled-shader files are byte for byte the same, so the seed's key does not change.
 3. **[gpu_timers.py](gpu_timers.py)**: `GPU_TIMERS`, the per-scene GPU time the automatic picture
    quality reads (since 5 Nov also the per-scene vertex and fragment completion for the back end's `GXV_GPU_SCENES=1`:
    `vglRtSetupScenes`, `vglRtTagScene`, `vglRtReadScenes`, off until called; host test `tools/test_vgx_gpu_timer_ring.sh`), and `ANISO_SWITCH` (off unless the game asks for it; it acts when a texture's filters are set, in

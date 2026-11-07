@@ -109,7 +109,7 @@ struct ProofApi {
 
 // What the basic log calls each part, for the "clocks/cores" and "threads: core 3" lines.
 const char* Core3PartName(int part) {
-    return part == 1 ? "audio output thread" : part == 2 ? "DSP mixer thread" : part == 3 ? "front-end finishing thread" : "thread";
+    return part == 1 ? "audio output thread" : part == 2 ? "DSP mixer thread" : part == 3 ? "front-end finishing thread" : part == 4 ? "shader compile worker" : "thread";
 }
 
 } // namespace
@@ -288,10 +288,10 @@ extern "C" int port_vita_core3_available(void) {
         int tries = 0;
         const port::cores::Proof r = port::cores::ProveSystemCoreRetry(api, &tries);
         if (r.proven) {
-            BasicLog("clocks/cores: fourth core available (CPU %d, mask 0x%X, %u%% of a %u ms spin, probe %d of %d); used by:%s%s%s%s", r.cpu,
+            BasicLog("clocks/cores: fourth core available (CPU %d, mask 0x%X, %u%% of a %u ms spin, probe %d of %d); used by:%s%s%s%s%s", r.cpu,
                      static_cast<unsigned>(r.mask), r.sharePct, port::cores::kProofSpinUs / 1000, tries, port::cores::kProofTries, s.core3Io ? " disc read-ahead and movie decoder 3;" : "",
                      s.core3Audio ? (s.core3Audio == 1 ? " audio output and DSP mixer;" : " audio output;") : "",
-                     s.core3Split ? " front-end finishing thread;" : "", (s.core3Io || s.core3Audio || s.core3Split) ? "" : " nothing");
+                     s.core3Split ? " front-end finishing thread;" : "", s.core3Shaders ? " shader compile worker;" : "", (s.core3Io || s.core3Audio || s.core3Split || s.core3Shaders) ? "" : " nothing");
         } else {
             BasicLog("clocks/cores: fourth core not available (%s; create 0x%X, move 0x%X, start 0x%X, wait 0x%X, cpu %d, mask 0x%X, share %u%%, %d probe(s)): nothing moves",
                      r.why, static_cast<unsigned>(r.createRc), static_cast<unsigned>(r.changeRc), static_cast<unsigned>(r.startRc),
@@ -308,7 +308,7 @@ extern "C" int port_vita_core3_available(void) {
 // ask (switch off, core not proven): then the caller's own placement stands. One basic-log line per part.
 extern "C" int port_vita_thread_core3(int part, int planned) {
     static std::atomic<unsigned> reported{0};
-    if (part < 1 || part > 3) return 0;
+    if (part < 1 || part > 4) return 0;
     const port::cores::Switches switches = CoreSwitches();
     // (the switch first: no probe for a part that is off)
     if (!port::cores::Core3Uses(switches, static_cast<port::cores::Core3Part>(part), true) || !port_vita_core3_available()) return 0;
