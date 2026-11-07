@@ -1,3 +1,18 @@
+# Version 2.1 — November 7, 2026
+
+The smooth-play update. No more pauses while the game prepares new graphics.
+
+### Smoother play
+- **No more shader pauses.** When the game meets an effect it hasn't drawn before, it now prepares it in the background on a spare CPU core while you keep playing. At worst a new sparkle or effect appears a moment late; Mario, the HUD and the level itself never do.
+- **Many more graphics ready out of the box.** The package now carries ready-made shaders from every mission of every galaxy, not just the first, so most players will never see a new one prepared at all.
+- **Galaxies warm up while they load.** Each galaxy prepares the graphics it's known to need during its loading screen, adding at most a second or so, so the first steps in a new galaxy are as smooth as the rest.
+
+### Under the hood
+- The shader compiler can now run on a second core, the list of each galaxy's graphics ships with the game, and the package no longer carries a stray macOS file.
+- Background preparation can be switched off with `GXV_ASYNC_SHADERS=0` in `env.txt` if you ever want 2.0's behaviour back.
+
+**Updating?** Install the new VPK over the old one. Your saves and settings stay.
+
 # Version 2.0 — November 7, 2026
 
 The full-resolution update. Super Mario Galaxy now runs at the Vita's native 960×544 at a steady 30 FPS, with a new Performance mode that reaches for 60.

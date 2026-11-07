@@ -23,6 +23,10 @@
 //                        still keeps its part off.
 //   GXV_CORE3_AUDIO=1    the audio output thread and the DSP mixer thread; =2 the output thread only; =0 neither.
 //   GXV_CORE3_SPLIT=1    the front-end split's finishing thread (default off unless GXV_CORE3=1); a SplitGuard moves it back.
+//   GXV_CORE3_SHADERS=0  the asynchronous shader compiler's worker thread (GXV_ASYNC_SHADERS, platform/vgx/src/vgx_async_shaders.h) stays
+//                        on cores 1-2 at the lowest priority. Default ON (the work is delay-tolerant by construction: a draw whose shader is
+//                        not ready is skipped, never waited for): it asks for the system core when the core is proven, and stays on
+//                        cores 1-2 when it is not. GXV_CORE3=0 turns it off like every part.
 // A thread that asks moves itself, keeps the core only when the call succeeded AND the mask reads back as asked, and otherwise goes
 // back to the place it had planned (PlaceOnSystemCore).
 #pragma once
@@ -43,6 +47,7 @@ struct Switches {
     bool core3Io = false;      // GXV_CORE3_IO=1 (or GXV_CORE3=1), and not GXV_CORE3=0
     int core3Audio = 0;        // GXV_CORE3_AUDIO resolved: 0 none, 1 output + DSP mixer, 2 output only
     bool core3Split = false;   // GXV_CORE3_SPLIT=1 (or GXV_CORE3=1)
+    bool core3Shaders = false; // GXV_CORE3_SHADERS (default on, off with GXV_CORE3=0): the asynchronous shader compiler's worker
 };
 
 // A part switch: 1 on, 0 off, -1 not set (or not understood: the umbrella's default applies). `top` is the highest "on" value.
@@ -67,14 +72,17 @@ template <class Get> Switches ReadSwitches(Get get) {
     s.core3Io = io == 1 || (io < 0 && all == 1);                    // (unset: off in code; vita/vgx-game/entry.cpp sets 1)
     s.core3Audio = audio >= 0 ? audio : all == 1 ? 1 : 2;           // (unset: the output thread only, the mixer only with GXV_CORE3=1)
     s.core3Split = split == 1 || (split < 0 && all == 1);           // (unset: off; GXV_CORE3=1 or GXV_CORE3_SPLIT=1)
+    const int shaders = PartSwitch(get("GXV_CORE3_SHADERS"), 1);
+    const char* async = get("GXV_ASYNC_SHADERS");                   // (0: there is no worker, so no part for the core and no reason to probe for it)
+    s.core3Shaders = shaders != 0 && !(async && async[0] == '0');   // (unset: ON, the worker is delay-tolerant; GXV_CORE3=0 returned above)
     return s;
 }
 
 // Whether any part could use the fourth core: if not, there is no probe at all.
-constexpr bool Core3Wanted(const Switches& s) { return s.core3Io || s.core3Audio != 0 || s.core3Split; }
+constexpr bool Core3Wanted(const Switches& s) { return s.core3Io || s.core3Audio != 0 || s.core3Split || s.core3Shaders; }
 
 // The parts of the fourth core plan, in the order port_vita_thread_core3 numbers them.
-enum class Core3Part { AudioOutput = 1, AudioMixer = 2, SplitFinisher = 3 };
+enum class Core3Part { AudioOutput = 1, AudioMixer = 2, SplitFinisher = 3, ShaderWorker = 4 };
 
 // Whether a thread of this part asks for the system core: its switch is on AND the probe proved the core.
 constexpr bool Core3Uses(const Switches& s, Core3Part part, bool proven) {
@@ -83,6 +91,7 @@ constexpr bool Core3Uses(const Switches& s, Core3Part part, bool proven) {
     case Core3Part::AudioOutput: return s.core3Audio == 1 || s.core3Audio == 2;
     case Core3Part::AudioMixer: return s.core3Audio == 1;
     case Core3Part::SplitFinisher: return s.core3Split;
+    case Core3Part::ShaderWorker: return s.core3Shaders;
     }
     return false;
 }

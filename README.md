@@ -13,6 +13,10 @@ aim Star Bits, touch the screen where you used to point the Wii Remote, and tilt
 
 You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
+## New In Version 2.1
+
+No more pauses while the game prepares new graphics: anything new is prepared in the background on a spare core while you play, and the download now carries ready-made graphics for every mission of every galaxy.
+
 ## New In Version 2.0
 
 The biggest update yet. Galaxy now runs at the Vita's full 960×544 resolution at a locked-in 30 FPS, and a new Performance mode pushes toward 60.

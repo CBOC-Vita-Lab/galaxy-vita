@@ -37,7 +37,7 @@ The release VPK (`Galaxy-Vita.vpk`, title ID `SMGV00001`) holds:
 | `eboot.bin` | the build above |
 | `sce_sys/param.sfo`, `sce_sys/livearea/contents/template.xml` | `vita/vgx-game` (CMake, `vita_create_vpk`) |
 | `sce_sys/icon0.png`, `pic0.png`, `livearea/contents/bg.png`, `startup.png` | `vita/vgx-game/sce_sys/`, drawn by `tools/handheld/make_livearea.py` (original art; the package carries no game artwork, the game makes its own pictures on the console, see [ASSETS.md](ASSETS.md)) |
-| `shadercache/` | the compiled-shader seed: the shaders the port generates, compiled once with the Vita's own compiler, so the first launch has less to do |
+| `shadercache/` | the compiled-shader seed: the shaders the port generates, compiled once with the Vita's own compiler, so the first launch has less to do. Its top folder also holds the two learned lists, copied from a console that has played the game: `shadercache/vgx_shaderlist.bin` (the programs linked behind the title) and `shadercache/vgx_stagewarm.bin` (per galaxy, the programs it draws; copy it from `ux0:data/smg/shadercache/` of the same console and build, so it matches the seed's `<key>`). The stage list is optional: without it the first visit to each galaxy has no load-time warm-up; the console merges it with its own (`GXV_STAGEWARM_PKG=0` ignores it) |
 
 `cmake --build /build/vita-vgx-game` makes `smg-vgx.vpk` from the first three. The release adds
 the seed to it. A VPK without the seed works too; the console then compiles the shaders as the game

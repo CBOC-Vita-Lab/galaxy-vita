@@ -80,6 +80,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -1642,6 +1643,22 @@ void PrepareFrontEnd() {
     // moments, used to link a stage's programs while it loads. env.txt may name another file; GXV_STAGEWARM=0 turns it all off.
     setenv("GXV_STAGEWARM_FILE", kStageWarmFile, 0);
     {
+        // The stage list that came with the package (app0:shadercache/vgx_stagewarm.bin, read-only; the renderer merges it with the card's:
+        // GXV_STAGEWARM_PKG=0 = card only). It names shaders by the generator's key hashes, so it is offered only to a build whose key is
+        // the package's: the package's seed folder for this key (as SeedShaderCache needs it) must be there, else the list is stale.
+        const char* const folderKey = std::strrchr(ShaderCacheFolder(), '/');
+        char keyDir[200], pkgList[200];
+        std::snprintf(keyDir, sizeof keyDir, "%s%s", kSeedDir, folderKey ? folderKey : "/none");
+        std::snprintf(pkgList, sizeof pkgList, "%s/vgx_stagewarm.bin", kSeedDir);
+        const char* const seedMode = std::getenv("GXV_VITA_SEED");
+        if (!(seedMode && std::strcmp(seedMode, "off") == 0) && Exists(keyDir) && Exists(pkgList)) {
+            setenv("GXV_STAGEWARM_PKG_FILE", pkgList, 0);
+            port_log("[vgx-vita] stage warm-up list in the package (%s) for this key: merged with the card's", pkgList);
+        } else {
+            port_log("[vgx-vita] no stage warm-up list in the package for this key: the card's own is used");
+        }
+    }
+    {
         // The warm-up list's 7 s of compiling and linking used to hold up the game's first frame, and with it everything the game does
         // after it (the loading of the title above all); now they are done in slices behind it (GXV_WARM_DEFER=0: all in the first frame).
         // The warm-up's compiles read the shader cache from the card, which the game is loading from at the same time: while they run
@@ -2791,6 +2808,115 @@ extern "C" SceUID vgxvita_openShaderCacheFallback_v1(const char* path, SceUID fa
     (fd >= 0 ? g_seedFallbackHits : g_seedFallbackMisses).fetch_add(1, std::memory_order_relaxed);
     return fd >= 0 ? fd : failed;
 }
+// ---- GXV_ASYNC_SHADERS (platform/vgx/src/vgx_async_shaders.h, vgx_backend_gl.cpp AsyncEngine): the Vita's side of the shader worker
+// vitaGL with tools/vitagl/patches/0020 compiles a GLSL pair into its cache files from a thread that owns no GL object
+// (vglCompileShaderPairToCache) and takes a recursive lock around its translator and the runtime compiler (vglEnableAsyncCompiler) so that
+// the render thread's own links and this worker never run the compiler together (the compiler keeps one output, the translator file-level
+// state). Nothing here calls GL, the shader patcher or any GXM function.
+extern "C" int vglEnableAsyncCompiler(void) __attribute__((weak));
+extern "C" int vglCompileShaderPairToCache(const char* vs, const char* fs, GLboolean fsLowPrecision, int* compiled) __attribute__((weak));
+extern "C" int port_vita_thread_class(int cls) __attribute__((weak));
+extern "C" int port_vita_thread_core3(int part, int planned) __attribute__((weak));
+namespace {
+std::unordered_set<uint64_t> g_asyncKnownHashes[2]; // (vertex / fragment texts known to be in the cache; only the render thread asks)
+struct AsyncStart { void (*fn)(void*); void* arg; };
+std::atomic<int> g_asyncMask{-1};                   // the affinity mask the worker ended up with (-1: not placed yet)
+std::atomic<SceUID> g_asyncTid{-1};
+std::atomic<int> g_asyncBasePriority{0};
+int AsyncWorkerEntry(SceSize, void* argp) {
+    const AsyncStart start = *static_cast<AsyncStart*>(argp);
+    // The lowest priority on cores 1-2 first (port_thread_class 4: background work), then the system core when the fourth core is proven and
+    // GXV_CORE3_SHADERS allows (default); a refused core leaves it on cores 1-2 (port_vita_thread_core3 puts it back to its planned mask).
+    if (port_vita_thread_class) port_vita_thread_class(4);
+    else sceKernelChangeThreadPriority(0, 0xBF);
+    int mask = port::cores::kHelpers;
+    if (port_vita_thread_core3) {
+        const int got = port_vita_thread_core3(4, port::cores::kHelpers);
+        if (got == port::cores::kSystem) mask = got;
+    }
+    g_asyncBasePriority.store(sceKernelGetThreadCurrentPriority(), std::memory_order_relaxed);
+    g_asyncMask.store(mask, std::memory_order_release);
+    start.fn(start.arg);
+    return 0;
+}
+} // namespace
+extern "C" int vgxvita_asyncShaderInCache_v1(const char* joined, int fragment) {
+    if (!joined || &vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) return 0;
+    const uint64_t hash = XXH3_64bits(joined, std::strlen(joined));
+    auto& known = g_asyncKnownHashes[fragment ? 1 : 0];
+    if (known.count(hash)) return 1;
+    char path[320];
+    if (!vgx::bootwatch::ShaderCachePath(path, sizeof(path), vgl_shader_cache_path, fragment != 0, hash)) return 0;
+#if defined(GXV_SHADER_CACHE_PACK) && GXV_SHADER_CACHE_PACK
+    {
+        const void* bytes = nullptr;
+        size_t size = 0;
+        if (g_shaderPack.Find(path, &bytes, &size)) { known.insert(hash); return 1; }
+    }
+#endif
+    // The same open vitaGL does at a link: the card's cache, then (coldtrace_wrap.cpp's __wrap_sceIoOpen) the package's seed behind it.
+    const SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
+    if (fd < 0) return 0;
+    sceIoClose(fd);
+    known.insert(hash);
+    return 1;
+}
+extern "C" int vgxvita_asyncShaderCompile_v1(const char* vs, const char* fs, int fsHalf, int* compiled) {
+    if (!vglCompileShaderPairToCache) return -1;
+    return vglCompileShaderPairToCache(vs, fs, fsHalf ? GL_TRUE : GL_FALSE, compiled);
+}
+// Makes vitaGL's lock and the worker thread (on the calling thread, which owns GL). 1 on success, with `where` saying where the worker runs;
+// 0 with the reason in `where` (the renderer then keeps every shader on the blocking path).
+extern "C" int vgxvita_asyncShaderStart_v1(void (*fn)(void*), void* arg, char* where, size_t whereSize) {
+    static bool done = false;
+    if (done || !fn) return 0;
+    done = true;
+    if (!vglEnableAsyncCompiler || !vglCompileShaderPairToCache) {
+        std::snprintf(where, whereSize, "this vitaGL has no patch 0020 (vglCompileShaderPairToCache)");
+        return 0;
+    }
+    if (&is_shark_online == nullptr || !is_shark_online) {
+        std::snprintf(where, whereSize, "the shader compiler is not online");
+        return 0;
+    }
+    if (&vgl_shader_cache_path[0] == nullptr || vgl_shader_cache_path[0] == 0) {
+        std::snprintf(where, whereSize, "vitaGL has no shader cache path");
+        return 0;
+    }
+    const int lock = vglEnableAsyncCompiler();
+    if (lock < 0) {
+        std::snprintf(where, whereSize, "vitaGL's compiler lock failed: 0x%08X", static_cast<unsigned>(lock));
+        return 0;
+    }
+    static AsyncStart start;
+    start = AsyncStart{fn, arg};
+    const long stackKb = vgx::EnvInt("GXV_ASYNC_SHADERS_STACK_KB", 1024);
+    const SceUID tid = sceKernelCreateThread("smg_shaders", &AsyncWorkerEntry, 0xBF, static_cast<SceSize>((stackKb < 128 ? 128 : stackKb) * 1024), 0,
+                                             port::cores::kHelpers, nullptr);
+    if (tid < 0) {
+        std::snprintf(where, whereSize, "thread create failed: 0x%08X", static_cast<unsigned>(tid));
+        return 0;
+    }
+    g_asyncTid.store(tid, std::memory_order_relaxed);
+    const int rc = sceKernelStartThread(tid, sizeof(start), &start);
+    if (rc < 0) {
+        std::snprintf(where, whereSize, "thread start failed: 0x%08X", static_cast<unsigned>(rc));
+        sceKernelDeleteThread(tid);
+        return 0;
+    }
+    for (int i = 0; i < 300 && g_asyncMask.load(std::memory_order_acquire) < 0; ++i) sceKernelDelayThread(1000); // (placed within a few ms)
+    const int mask = g_asyncMask.load(std::memory_order_acquire);
+    if (mask == port::cores::kSystem) std::snprintf(where, whereSize, "on the fourth core (mask 0x%X)", static_cast<unsigned>(mask));
+    else std::snprintf(where, whereSize, "on cores 1-2 at the lowest priority (0x%X)", static_cast<unsigned>(g_asyncBasePriority.load(std::memory_order_relaxed)));
+    return 1;
+}
+// The render thread is about to compile (or wait for the worker's compile) itself while the worker may hold the compiler's lock: the worker's
+// priority becomes the render thread's, then goes back. (The lock has no priority inheritance; the worker runs at the lowest priority.)
+extern "C" void vgxvita_asyncShaderBoost_v1(int on) {
+    const SceUID tid = g_asyncTid.load(std::memory_order_relaxed);
+    if (tid < 0) return;
+    sceKernelChangeThreadPriority(tid, on ? sceKernelGetThreadCurrentPriority() : g_asyncBasePriority.load(std::memory_order_relaxed));
+}
 extern "C" GLuint vgxvita_glCreateShader(GLenum type) {
     const GLuint shader = glCreateShader(type);
 #if VGX_COLDTRACE
@@ -2834,7 +2960,8 @@ extern "C" void vgxvita_cacheFolderStats(unsigned* made, unsigned* ms) {
 // warnings (four or five per compile) are logged six times only.
 extern "C" int msc_vgl_printf(const char* format, ...) {
     if (!PORT_LOGGING) return 0;
-    static uint32_t count = 0, compilerWarnings = 0;
+    // (GXV_ASYNC_SHADERS: the compiler's messages now also come from the shader worker thread: the two counters are atomic)
+    static std::atomic<uint32_t> countAtomic{0}, compilerWarningsAtomic{0};
     char text[512];
     va_list args;
     va_start(args, format);
@@ -2842,10 +2969,11 @@ extern "C" int msc_vgl_printf(const char* format, ...) {
     va_end(args);
     vgx::resourceaudit::DriverMessage(text); // Separate bounded basic-log path before ordinary warning/rate limits.
     if (std::strstr(text, "Shader Compiler: W]")) {
-        if (++compilerWarnings > 6) return 0;
+        const uint32_t compilerWarnings = compilerWarningsAtomic.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (compilerWarnings > 6) return 0;
         if (compilerWarnings == 6) port_log("[vitaGL] (further shader compiler warnings are not logged)");
     }
-    ++count;
+    const uint32_t count = countAtomic.fetch_add(1, std::memory_order_relaxed) + 1;
     if (count > 400 && count % 500 != 0) return 0;
     size_t length = std::strlen(text);
     while (length != 0 && (text[length - 1] == '\n' || text[length - 1] == '\r')) text[--length] = '\0';

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "releaseId": "galaxy-v2.0",
+  "releaseId": "galaxy-v2.1",
   "titleId": "SMGV00001",
   "displayName": "Super Mario Galaxy",
-  "version": "2.0",
+  "version": "2.1",
   "minInstallerVersion": "1.1",
   "visibility": "public",
   "releaseState": "ready",
@@ -52,6 +52,7 @@
   "appUpdateFrom": [
     "49352f73a44c9d026566b531215c4c498e8146d312e15354d10a05e7099f7a9b",
     "dc7a1e51f873ed8eaf1829eee07be814e023aa36c504609e85491b352d93326a",
-    "2435735b633df3047cea89eea424e891e5ee3105d5c04911900345310fb7b264"
+    "2435735b633df3047cea89eea424e891e5ee3105d5c04911900345310fb7b264",
+    "8512cfc6bd12f5d1571c4405e1157138b82901d956ea32474409fa56001c313e"
   ]
 }

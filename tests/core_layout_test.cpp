@@ -189,6 +189,14 @@ int main() {
         gEnv.clear();
         Switches s = ReadSwitches(Get);
         Require(!s.core3Io && s.core3Audio == 2 && !s.core3Split, "nothing set: IO off in code (entry.cpp sets it), audio output only, no split");
+        Require(s.core3Shaders && Core3Uses(s, Core3Part::ShaderWorker, true) && !Core3Uses(s, Core3Part::ShaderWorker, false),
+                "nothing set: the shader compile worker asks for a proven core (delay-tolerant work, default on)");
+        gEnv["GXV_CORE3_SHADERS"] = "0";
+        Require(!ReadSwitches(Get).core3Shaders, "GXV_CORE3_SHADERS=0: the shader worker stays on cores 1-2");
+        gEnv.erase("GXV_CORE3_SHADERS");
+        gEnv["GXV_ASYNC_SHADERS"] = "0";
+        Require(!ReadSwitches(Get).core3Shaders, "GXV_ASYNC_SHADERS=0: no worker, no part for the fourth core");
+        gEnv.erase("GXV_ASYNC_SHADERS");
         Require(Core3Wanted(s), "nothing set: the probe runs (the audio output thread may use a proven core)");
         gEnv["GXV_CORE3_IO"] = "1";
         s = ReadSwitches(Get);
@@ -209,14 +217,22 @@ int main() {
         gEnv["GXV_CORE3_AUDIO"] = "0";
         gEnv["GXV_CORE3_IO"] = "0";
         s = ReadSwitches(Get);
+        Require(s.core3Shaders && Core3Wanted(s), "GXV_CORE3=1 with every other part at 0: the shader worker (default on) still wants the core");
+        gEnv["GXV_CORE3_SHADERS"] = "0";
+        s = ReadSwitches(Get);
         Require(!Core3Wanted(s), "GXV_CORE3=1 with every part at 0: no probe");
+        gEnv.erase("GXV_CORE3_SHADERS");
         gEnv.clear();
         gEnv["GXV_CORE3"] = "0";
         gEnv["GXV_CORE3_IO"] = "1";
         gEnv["GXV_CORE3_AUDIO"] = "1";
         gEnv["GXV_CORE3_SPLIT"] = "1";
         s = ReadSwitches(Get);
-        Require(!s.core3Io && s.core3Audio == 0 && !s.core3Split && !Core3Wanted(s), "GXV_CORE3=0 (Core plan Off): nothing, whatever the parts say, no probe");
+        gEnv["GXV_CORE3_SHADERS"] = "1";
+        s = ReadSwitches(Get);
+        Require(!s.core3Io && s.core3Audio == 0 && !s.core3Split && !s.core3Shaders && !Core3Wanted(s), "GXV_CORE3=0 (Core plan Off): nothing, whatever the parts say, no probe");
+        Require(!Core3Uses(s, Core3Part::ShaderWorker, true), "GXV_CORE3=0: the shader worker stays on cores 1-2 even with GXV_CORE3_SHADERS=1");
+        gEnv.erase("GXV_CORE3_SHADERS");
         Require(!MayUseSystemCore(s, IoKind::DiscReader, 0), "GXV_CORE3=0: the disc worker does not ask even with GXV_CORE3_IO=1");
         gEnv["GXV_CORE3"] = "auto";
         s = ReadSwitches(Get);

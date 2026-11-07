@@ -1,0 +1,355 @@
+diff -ruN a/source/custom_shaders.c b/source/custom_shaders.c
+--- a/source/custom_shaders.c	2026-11-07 10:53:21.097949090 -0500
++++ b/source/custom_shaders.c	2026-11-07 10:54:51.305710893 -0500
+@@ -808,6 +808,8 @@
+ #endif
+ 	if (s->prog || !s->source)
+ 		return;
++	// (patch 0020: the compiler and its output are one thread's at a time, see glsl_utils.c; no mutex exists unless vglEnableAsyncCompiler was called)
++	vgl_compiler_lock();
+ 	shader candidate = {0};
+ 	// The compiler owns its output. Do not publish it or clobber the source length.
+ 	// The size argument is in/out: vitaShaRK reads the SOURCE length from it (shark_input.size = *size, see the disassembly of
+@@ -879,6 +881,7 @@
+ 	shark_log = NULL;
+ #endif
+ 	shark_clear_output();
++	vgl_compiler_unlock();
+ #ifdef HAVE_SHADER_CACHE
+ 	if (cache_ready)
+ 		vgl_cache_compiled_shader(s, save_bindings, cache_fname);
+@@ -4123,6 +4126,146 @@
+ 	glsl_precision_fs_only = val;
+ }
+ 
++#ifdef HAVE_SHADER_CACHE
++/* ---- Asynchronous compile (patch 0020) -----------------------------------------------------------------------------------------------
++ * vglCompileShaderPairToCache(vs_src, fs_src, fs_low_precision) does, on the calling thread (a worker, never the GL thread), what
++ * glLinkProgram does on a miss of the compiled-shader cache: translate the GLSL pair (VGL_MODE_SHADER_PAIR), compile what is missing
++ * with the runtime compiler, and write each result to <vgl_shader_cache_path>/{v,f}/<HH>/<hash>.gxp through the same
++ * vgl_cache_compiled_shader that glLinkProgram uses, so the files are byte for byte what the GL thread would have written. The
++ * sources are the texts as glShaderSource joins them (the cache key is the XXH3_64 of exactly that text); fs_low_precision is
++ * vglUseLowPrecisionFragmentOnly's setting at the link the GL thread will do later.
++ *
++ * What it never does: it creates no GL object, registers nothing with the GXM shader patcher (sceGxmShaderPatcherRegisterProgram is
++ * not thread-safe against the GL thread's own patcher calls: the registration happens when the GL thread later links the program and
++ * loads these files), changes none of the GL thread's globals (the translator reads glsl_override while this holds the compiler lock),
++ * and does not start the compiler (is_shark_online must already be set by the GL thread's first glLinkProgram/glCompileShader).
++ * Returns 0 when both entries are in the cache afterwards (written now or there before), a bitmask of 1 (vertex) | 2 (fragment) with
++ * bit 8 set (0x100) when a compile failed or a file could not be written, and -1 when this cannot run (no cache, the compiler is not
++ * online, vglEnableAsyncCompiler was not called). *compiled (if given) is how many compiles were made (0..2). */
++static GLboolean async_cache_has(const char *fname) {
++	SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777);
++	if (f < 0)
++		return GL_FALSE;
++	sceIoClose(f);
++	return GL_TRUE;
++}
++
++static void async_cache_name(char *out, size_t size, GLboolean fragment, const char *src) {
++	uint64_t hash = XXH3_64bits(src, strlen(src));
++	uint8_t subdir_hash = hash >> 56;
++	snprintf(out, size, "%s/%s/%02X/%llX.gxp", vgl_shader_cache_path, fragment ? "f" : "v", subdir_hash, hash);
++}
++
++/* The compile half of compile_shader, without its registration: the program stays unregistered, is serialized into the cache and freed. */
++static GLboolean async_compile_to_cache(shader *s, const char *fname) {
++	shader candidate = {0};
++	GLboolean ok = GL_FALSE;
++	vgl_compiler_lock();
++	candidate.size = (uint32_t)strlen((const char *)s->source);
++	const SceGxmProgram *output = shark_compile_shader_extended((const char *)s->source, &candidate.size, s->type == GL_FRAGMENT_SHADER ? SHARK_FRAGMENT_SHADER : SHARK_VERTEX_SHADER, compiler_opts, compiler_fastmath, compiler_fastprecision, compiler_fastint);
++	if (output && candidate.size) {
++		SceGxmProgram *res = (SceGxmProgram *)vglMalloc(candidate.size);
++		if (res) {
++			candidate.prog = res;
++			vgl_fast_memcpy(res, output, candidate.size);
++			SceShaccCgCompileOutput *cout = (SceShaccCgCompileOutput *)shark_get_internal_compile_output();
++			SceShaccCgParameter param = sceShaccCgGetFirstParameter(cout);
++			ok = GL_TRUE;
++			while (param) {
++				if (sceShaccCgGetParameterClass(param) == SCE_SHACCCG_PARAMETERCLASS_MATRIX) {
++					const SceGxmProgramParameter *ptr = sceGxmProgramFindParameterByName(res, sceShaccCgGetParameterName(param));
++					if (ptr) { /* (else the compiler optimized the matrix out) */
++						matrix_uniform *m = (matrix_uniform *)vglMalloc(sizeof(matrix_uniform));
++						if (!m) {
++							ok = GL_FALSE;
++							break;
++						}
++						m->ptr = ptr;
++						m->chain = candidate.mat;
++						candidate.mat = m;
++					}
++				}
++				param = sceShaccCgGetNextParameter(param);
++			}
++		}
++	}
++#ifdef HAVE_SHARK_LOG
++	if (shark_log) { /* (the compiler's log of this compile: nobody reads it here) */
++		vgl_free(shark_log);
++		shark_log = NULL;
++	}
++#endif
++	shark_clear_output();
++	vgl_compiler_unlock();
++	if (ok) {
++		/* serialize_shader reads s->prog, s->size, s->mat, s->semantics and s->sized_samplers (set by the translator) */
++		s->prog = candidate.prog;
++		s->size = candidate.size;
++		s->mat = candidate.mat;
++		vgl_cache_compiled_shader(s, GL_TRUE, fname);
++		s->prog = NULL;
++		s->mat = NULL;
++	}
++	discard_shader_candidate(&candidate);
++	return ok && async_cache_has(fname);
++}
++
++int vglCompileShaderPairToCache(const char *vs_src, const char *fs_src, GLboolean fs_low_precision, int *compiled) {
++	if (compiled)
++		*compiled = 0;
++	if (!vs_src || !fs_src || !vgl_shader_cache_path[0] || !is_shark_online || !vgl_compiler_enabled())
++		return -1;
++	char vert_fname[256], frag_fname[256];
++	async_cache_name(vert_fname, sizeof(vert_fname), GL_FALSE, vs_src);
++	async_cache_name(frag_fname, sizeof(frag_fname), GL_TRUE, fs_src);
++	const GLboolean have_v = async_cache_has(vert_fname), have_f = async_cache_has(frag_fname);
++	if (have_v && have_f)
++		return 0;
++	shader vs = {0}, fs = {0};
++	vs.type = GL_VERTEX_SHADER;
++	fs.type = GL_FRAGMENT_SHADER;
++	vs.is_glsl = fs.is_glsl = GL_TRUE;
++	size_t vlen = strlen(vs_src), flen = strlen(fs_src);
++	vs.source = (char *)vglMalloc(vlen + 1);
++	fs.source = (char *)vglMalloc(flen + 1);
++	int result = 0x100;
++	if (vs.source && fs.source && vlen < UINT32_MAX && flen < UINT32_MAX) {
++		vgl_fast_memcpy(vs.source, vs_src, vlen + 1);
++		vgl_fast_memcpy(fs.source, fs_src, flen + 1);
++		vs.size = vlen;
++		fs.size = flen;
++		/* both are translated afresh, as a pair, whichever of them is in the cache: the semantic bindings the translator ends with
++		   are the ones the cached shader was translated with (they are deterministic), so the second shader comes out the same
++		   as it would after glsl_translator_set_process had been given the cached first one. */
++		vgl_compiler_lock();
++		glsl_override.mode = VGL_MODE_SHADER_PAIR;
++		glsl_override.low = fs_low_precision;
++		glsl_override.fs_only = fs_low_precision;
++		glsl_override.active = GL_TRUE;
++		glsl_translator_set_process(&vs, &fs);
++		glsl_override.active = GL_FALSE;
++		vgl_compiler_unlock();
++		result = 0;
++		int n = 0;
++		if (!have_v) {
++			n++;
++			if (!async_compile_to_cache(&vs, vert_fname))
++				result |= 1 | 0x100;
++		}
++		if (!have_f) {
++			n++;
++			if (!async_compile_to_cache(&fs, frag_fname))
++				result |= 2 | 0x100;
++		}
++		if (compiled)
++			*compiled = n;
++	}
++	vgl_free(vs.source);
++	vgl_free(fs.source);
++	return result;
++}
++#endif
++
+ void vglSetSemanticBindingMode(GLenum mode) {
+ 	glsl_sema_mode = mode;
+ }
+diff -ruN a/source/utils/glsl_utils.c b/source/utils/glsl_utils.c
+--- a/source/utils/glsl_utils.c	2026-11-07 10:53:21.099025645 -0500
++++ b/source/utils/glsl_utils.c	2026-11-07 10:54:35.596854679 -0500
+@@ -168,6 +168,43 @@
+ GLboolean glsl_precision_low = GL_FALSE;
+ GLboolean glsl_precision_fs_only = GL_FALSE;
+ GLenum glsl_sema_mode = VGL_MODE_POSTPONED;
++
++/* Asynchronous shader compilation (patch 0020). The translator below keeps its working state in file-level variables, and the shader
++ * compiler (vitaShaRK, libshacccg) keeps its output in its own, so only one thread may translate or compile at a time. A worker thread
++ * (vglCompileShaderPairToCache) and the GL thread (glLinkProgram, glCompileShader) therefore take this recursive lock around every
++ * translation and every compile. Until vglEnableAsyncCompiler is called the lock does nothing at all (no mutex exists): a build or a
++ * run that never calls it behaves exactly as before. The lock is created once, on the GL thread, before the worker thread exists. */
++static SceKernelLwMutexWork vgl_compiler_mutex;
++static volatile int vgl_compiler_mutex_on = 0;
++
++int vglEnableAsyncCompiler(void) {
++	if (vgl_compiler_mutex_on)
++		return 0;
++	int r = sceKernelCreateLwMutex(&vgl_compiler_mutex, "vgl compiler", SCE_KERNEL_MUTEX_ATTR_RECURSIVE, 0, NULL);
++	if (r < 0)
++		return r;
++	vgl_compiler_mutex_on = 1;
++	return 0;
++}
++
++int vgl_compiler_enabled(void) {
++	return vgl_compiler_mutex_on;
++}
++
++void vgl_compiler_lock(void) {
++	if (vgl_compiler_mutex_on)
++		sceKernelLockLwMutex(&vgl_compiler_mutex, 1, NULL);
++}
++
++void vgl_compiler_unlock(void) {
++	if (vgl_compiler_mutex_on)
++		sceKernelUnlockLwMutex(&vgl_compiler_mutex, 1);
++}
++
++/* While the worker holds the lock it sets these, and the translator reads them in place of the three globals the GL thread sets on its own
++ * (glsl_sema_mode: glBindAttribLocation and glGetShaderiv read it outside any lock; glsl_precision_*: vglUseLowPrecisionFragmentOnly is
++ * called around glLinkProgram). The worker never writes those globals. */
++glsl_override_t glsl_override;
+ binds_map glsl_bindings_map;
+ #ifdef HAVE_FIXED_ATTRIBUTES
+ char glsl_attributes[VERTEX_ATTRIBS_NUM][128];
+@@ -1292,6 +1329,7 @@
+ }
+ 
+ void glsl_translator_process(shader *s) {
++	vgl_compiler_lock();
+ #ifdef HAVE_FIXED_ATTRIBUTES
+ 	glsl_attributes_num = 0;
+ #endif
+@@ -1301,13 +1339,13 @@
+ 	GLboolean hasPointSize = GL_FALSE, hasFragDepth = GL_FALSE, hasFrontFacing = GL_FALSE, hasFrontColor = GL_FALSE;
+ 	GLboolean hasColor = GL_FALSE;
+ 	size += strlen(glsl_hdr);
+-	if (glsl_precision_low && (!glsl_precision_fs_only || s->type == GL_FRAGMENT_SHADER))
++	if (GLSL_LOW() && (!GLSL_FS_ONLY() || s->type == GL_FRAGMENT_SHADER))
+ 		size += strlen(glsl_precision_hdr);
+ #ifdef HAVE_FFP_SHADER_SUPPORT
+ 	size += strlen(glsl_ffp_hdr);
+ #endif
+ #ifndef SKIP_ERROR_HANDLING
+-	if (glsl_sema_mode == VGL_MODE_GLOBAL)
++	if (GLSL_MODE() == VGL_MODE_GLOBAL)
+ 		glsl_current_ref_idx++;
+ #endif
+ 	if (s->type == GL_VERTEX_SHADER)
+@@ -1432,7 +1470,7 @@
+ 			strcat(s->source, "varying in float4 gl_Color : COLOR;\n");
+ 	}
+ 	strcat(s->source, glsl_hdr);
+-	if (glsl_precision_low && (!glsl_precision_fs_only || s->type == GL_FRAGMENT_SHADER))
++	if (GLSL_LOW() && (!GLSL_FS_ONLY() || s->type == GL_FRAGMENT_SHADER))
+ 		strcat(s->source, glsl_precision_hdr);
+ 	
+ #ifdef HAVE_FFP_SHADER_SUPPORT
+@@ -1448,7 +1486,7 @@
+ 	strcat(s->source, out);
+ 	glsl_preprocessor_clean();
+ 
+-	switch (glsl_sema_mode) {
++	switch (GLSL_MODE()) {
+ 		case VGL_MODE_SHADER_PAIR:
+ 			glsl_translate_with_shader_pair(text, s->type, hasFrontFacing);
+ 			break;
+@@ -1461,7 +1499,7 @@
+ 	}
+ 	
+ 	// Replacing all marked varying with actual bindings if custom bindings are used
+-	if (glsl_custom_bindings_num > 0 || glsl_sema_mode == VGL_MODE_GLOBAL) {
++	if (glsl_custom_bindings_num > 0 || GLSL_MODE() == VGL_MODE_GLOBAL) {
+ 		// Texcoords
+ 		char *str = strstr(s->source, "\v");
+ 		while (str) {
+@@ -1476,7 +1514,7 @@
+ 			start++;
+ 			int idx = -1;
+ 			*end = 0;
+-			if (glsl_sema_mode == VGL_MODE_GLOBAL) {
++			if (GLSL_MODE() == VGL_MODE_GLOBAL) {
+ 				for (int j = 0; j < MAX_CG_TEXCOORD_ID; j++) {
+ 					idx = j;
+ 					for (int i = 0; i < glsl_custom_bindings_num; i++) {
+@@ -1526,7 +1564,7 @@
+ 			start++;
+ 			int idx = -1;
+ 			*end = 0;
+-			if (glsl_sema_mode == VGL_MODE_GLOBAL) {
++			if (GLSL_MODE() == VGL_MODE_GLOBAL) {
+ 				for (int j = 0; j < MAX_CG_COLOR_ID; j++) {
+ 					idx = j;
+ 					for (int i = 0; i < glsl_custom_bindings_num; i++) {
+@@ -1629,7 +1667,7 @@
+ #endif
+ 
+ 	vgl_fast_memcpy(&s->semantics, &glsl_bindings_map, sizeof(binds_map));
+-	if (glsl_sema_mode == VGL_MODE_SHADER_PAIR) {
++	if (GLSL_MODE() == VGL_MODE_SHADER_PAIR) {
+ 		glsl_is_first_shader = !glsl_is_first_shader;
+ 		if (glsl_is_first_shader) {
+ 			vgl_memset(glsl_bindings_map.texcoord_used, GL_FALSE, sizeof(GLboolean) * MAX_CG_TEXCOORD_ID);
+@@ -1638,9 +1676,11 @@
+ 	}
+ 	s->size = strlen(s->source);
+ 	s->is_glsl = GL_FALSE;
++	vgl_compiler_unlock();
+ }
+ 
+ void glsl_translator_set_process(shader *vs, shader *fs) {
++	vgl_compiler_lock();
+ 	if (vs->prog || fs->prog) {
+ 		glsl_is_first_shader = GL_FALSE;
+ 		if (vs->prog) {
+@@ -1661,4 +1701,5 @@
+ 	if (!fs->prog) {
+ 		glsl_translator_process(fs);
+ 	}
++	vgl_compiler_unlock();
+ }
+diff -ruN a/source/utils/glsl_utils.h b/source/utils/glsl_utils.h
+--- a/source/utils/glsl_utils.h	2026-11-07 10:53:21.099051779 -0500
++++ b/source/utils/glsl_utils.h	2026-11-07 10:54:35.597292357 -0500
+@@ -41,6 +41,21 @@
+ extern GLboolean glsl_precision_low;
+ extern GLboolean glsl_precision_fs_only; // low precision applies to fragment shaders only (vglUseLowPrecisionFragmentOnly)
+ extern GLenum glsl_sema_mode;
++
++/* Patch 0020: see glsl_utils.c. The translator reads its mode and precision through these. */
++typedef struct {
++	GLboolean active; /* set by the worker (vglCompileShaderPairToCache) only while it holds the compiler lock */
++	GLenum mode;
++	GLboolean low;
++	GLboolean fs_only;
++} glsl_override_t;
++extern glsl_override_t glsl_override;
++#define GLSL_MODE() (glsl_override.active ? glsl_override.mode : glsl_sema_mode)
++#define GLSL_LOW() (glsl_override.active ? glsl_override.low : glsl_precision_low)
++#define GLSL_FS_ONLY() (glsl_override.active ? glsl_override.fs_only : glsl_precision_fs_only)
++int vgl_compiler_enabled(void);
++void vgl_compiler_lock(void);
++void vgl_compiler_unlock(void);
+ extern GLenum prev_shader_type;
+ 
+ void glsl_translate_with_shader_pair(char *text, GLenum type, GLboolean hasFrontFacing);
+diff -ruN a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h	2026-11-07 10:53:21.098643335 -0500
++++ b/source/vitaGL.h	2026-11-07 10:54:35.576737234 -0500
+@@ -1334,6 +1334,16 @@
+ // Like vglUseLowPrecision, but only fragment shaders are translated with low precision (vertex shaders keep float).
+ void vglUseLowPrecisionFragmentOnly(GLboolean val);
+ 
++// Asynchronous shader compilation (patch 0020, needs HAVE_SHADER_CACHE). vglEnableAsyncCompiler (once, on the GL thread, before any
++// worker exists) makes the translator and the runtime compiler take a recursive lock, so that a worker thread may call
++// vglCompileShaderPairToCache while the GL thread runs; it returns 0 or a negative error and does nothing a second time. Never called:
++// no lock exists and vitaGL behaves as before. vglCompileShaderPairToCache(vs, fs, fsLowPrecision, &compiled) translates the GLSL pair
++// (texts as glShaderSource joins them), compiles what the shader cache (vglSetShaderCachePath) lacks and writes it there, creating no GL
++// object and touching no GXM state, so any thread but the GL thread's may call it. 0: both entries are in the cache; else see
++// custom_shaders.c (bit 0x100: a failure; -1: cannot run).
++int vglEnableAsyncCompiler(void);
++int vglCompileShaderPairToCache(const char *vs_src, const char *fs_src, GLboolean fs_low_precision, int *compiled);
++
+ // Allows to swap between triple and double buffering. Default value: GL_TRUE.
+ void vglUseTripleBuffering(GLboolean usage);
+ 

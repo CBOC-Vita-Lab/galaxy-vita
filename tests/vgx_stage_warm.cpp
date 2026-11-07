@@ -122,7 +122,58 @@ static size_t FileSize(const char* path) {
     return n > 0 ? static_cast<size_t>(n) : 0;
 }
 
-int main() {
+#ifndef __VGX_VITA__
+// GXV_STAGEWARM_COMPILE_MS (desktop build: GXV_SIM_COMPILE_MS/SLEEP make each shader compile cost real time). A fresh process, 60 programs
+// of a stage nobody has compiled; quiet frames (the loading screen). "off": 30 ms a frame as before; "on": the slices run past it
+// while the extra budget lasts, then the rest is logged and goes on in the usual slices.
+static int BudgetMain(bool on) {
+    setenv("GXV_SIM_COMPILE_MS", "5", 1);
+    setenv("GXV_SIM_COMPILE_SLEEP", "1", 1);
+    setenv("GXV_STAGEWARM_COMPILE_MS", on ? "150" : "0", 1);
+    setenv("GXV_STAGEWARM_FILE", "/tmp/vgx_stage_warm_budget.bin", 1);
+    std::remove("/tmp/vgx_stage_warm_budget.bin");
+    Require(Init(32, 32), "back end initialised against the GL stub");
+    RegisterAll();
+    for (unsigned i = 0; i < 60; ++i) StageAdd(0x6, StageRec{g_vsrc[0].keyHash, g_fsrc[i].keyHash, 0});
+    uint64_t frame = 1;
+    quiet = 1; scene = 0; loading = 0x6;
+    g_serial += 10;
+    Execute(Frame(frame++, 0, 0));
+    Require(g_stageTarget == 0x6, "stage queued");
+    const size_t afterFirst = 60 - g_stageQueue.size();
+    std::printf("  first quiet frame: %u of 60 programs, extra %.0f ms\n", static_cast<unsigned>(afterFirst), g_stageCompileMs);
+    if (!on) {
+        Require(afterFirst <= 8 && g_stageCompileMs == 0, "COMPILE_MS=0: one 30 ms slice, as before");
+        for (int i = 0; i < 20 && !g_stageQueue.empty(); ++i) { g_serial += 3; Execute(Frame(frame++, 0, 0)); }
+        Require(g_stageQueue.empty() && g_stageCompileMs == 0, "COMPILE_MS=0: the queue drains in the usual slices");
+    } else {
+        Require(afterFirst >= 15 && g_stageCompileMs > 0, "COMPILE_MS=150: the first slice ran past 30 ms");
+        for (int i = 0; i < 40 && !g_stageQueue.empty(); ++i) { g_serial += 3; Execute(Frame(frame++, 0, 0)); }
+        Require(g_stageQueue.empty(), "the queue drains");
+        Require(g_stageCompileMs >= 100.0 && g_stageCompileMs <= 150.0 + 30.0, "extra time stays within the budget (one entry's overshoot)");
+        bool logged = false;
+        for (const auto& l : lines) if (l.find("compile budget of 150 ms used up") != std::string::npos) logged = true;
+        Require(logged, "what was left is logged");
+        // a new load starts with a new budget
+        for (unsigned i = 0; i < 4; ++i) StageAdd(0x7, StageRec{g_vsrc[1].keyHash, g_fsrc[i].keyHash, 0});
+        loading = 0x7; g_serial += 3;
+        Execute(Frame(frame++, 0, 0));
+        Require(g_stageTarget == 0x7 && g_stageCompileMs < 150.0, "the budget is per load");
+        // in play nothing is spent beyond the live slice
+        g_stageCompileMs = 0;
+    }
+    std::printf("PASS stage warm-up compile budget (%s)\n", on ? "150 ms" : "off");
+    std::remove("/tmp/vgx_stage_warm_budget.bin");
+    return 0;
+}
+#endif
+
+int main(int argc, char** argv) {
+#ifndef __VGX_VITA__
+    if (argc > 1) return BudgetMain(std::strcmp(argv[1], "budget-on") == 0);
+#else
+    (void)argc; (void)argv;
+#endif
     const char* path = "/tmp/vgx_stage_warm_test.bin";
     std::remove(path);
     setenv("GXV_STAGEWARM_FILE", path, 1);
@@ -237,6 +288,73 @@ int main() {
         g_serial += 3;
         Execute(Frame(frame++, 0, 0));
         Require(g_stageQueue.empty() && g_stats.programLinks == links0 + 24, "the quiet frame's slice made the warm draws, no further links");
+    }
+    // The package's list (GXV_STAGEWARM_PKG_FILE, read-only) is merged with the card's: the card's records stay, new ones are added and
+    // written to the card's file at the next flush (the union), a list of another format or switched off (GXV_STAGEWARM_PKG=0) adds nothing.
+    {
+        const char* pkg = "/tmp/vgx_stage_warm_pkg.bin";
+        const auto Write = [&](const char* file, const char* magic, const std::vector<StageFileRec>& recs, const char* tail) {
+            FILE* f = std::fopen(file, "wb");
+            std::fwrite(magic, 1, 8, f);
+            for (const StageFileRec& r : recs) std::fwrite(&r, sizeof r, 1, f);
+            if (tail) std::fwrite(tail, 1, std::strlen(tail), f);
+            std::fclose(f);
+        };
+        const auto Reload = [&] {
+            g_stageSets.clear();
+            g_stageRecs = 0;
+            g_stageLoaded = false;
+            g_stageFileRecs = 0;
+            StageLoad();
+        };
+        // the card's file as it is now: its records are persisted; remember them
+        Reload();
+        const size_t cardRecs = g_stageRecs, cardBytes = FileSize(path);
+        Require(cardBytes == 8 + 24 * cardRecs, "card file reads back whole");
+        const size_t aRecs = g_stageSets[0xA].recs.size();
+        const StageRec aFirst = g_stageSets[0xA].recs[0];
+        // package: one record the card has (stage A's first), three new (stage E), one more for stage A; 5 bytes of a cut record
+        const std::vector<StageFileRec> list = {
+            {0xA, aFirst.lb, aFirst.vs, aFirst.fs}, {0xE, 0, g_vsrc[0].keyHash, g_fsrc[0].keyHash}, {0xE, 0, g_vsrc[0].keyHash, g_fsrc[1].keyHash},
+            {0xE, 0, g_vsrc[0].keyHash, g_fsrc[2].keyHash}, {0xA, 7, g_vsrc[0].keyHash, g_fsrc[3].keyHash}};
+        Write(pkg, "VGXSTW01", list, "abcde");
+        setenv("GXV_STAGEWARM_PKG", "0", 1);
+        setenv("GXV_STAGEWARM_PKG_FILE", pkg, 1);
+        Reload();
+        Require(g_stageRecs == cardRecs && !g_stageSets.count(0xE), "GXV_STAGEWARM_PKG=0: the package's list is not read");
+        setenv("GXV_STAGEWARM_PKG", "1", 1);
+        Reload();
+        Require(g_stageRecs == cardRecs + 4, "package merged: 4 new records, the card's duplicate not added twice, the cut tail ignored");
+        Require(g_stageSets[0xE].recs.size() == 3 && g_stageSets[0xA].recs.size() == aRecs + 1, "new records in their stages");
+        Require(g_stageSets[0xA].recs[0].fs == aFirst.fs && g_stageSets[0xA].persisted == aRecs && g_stageSets[0xE].persisted == 0,
+                "the card's records come first and stay persisted; the package's are not");
+        Require(FileSize(path) == cardBytes, "reading the package writes nothing yet");
+        StageFlush();
+        Require(FileSize(path) == cardBytes + 24 * 4, "the next flush appends the union to the card's file");
+        // the card now holds the union: a start without the package reads the same sets
+        unsetenv("GXV_STAGEWARM_PKG_FILE");
+        Reload();
+        Require(g_stageRecs == cardRecs + 4 && g_stageSets[0xE].recs.size() == 3, "the card's file keeps what the package gave");
+        // a list of another format (or an older magic) is ignored, the card's is untouched
+        Write(pkg, "VGXSTW00", list, nullptr);
+        setenv("GXV_STAGEWARM_PKG_FILE", pkg, 1);
+        Reload();
+        Require(g_stageRecs == cardRecs + 4, "package list with another magic ignored");
+        setenv("GXV_STAGEWARM_PKG_FILE", "/tmp/vgx_stage_warm_missing.bin", 1);
+        Reload();
+        Require(g_stageRecs == cardRecs + 4, "missing package list ignored");
+        unsetenv("GXV_STAGEWARM_PKG_FILE");
+        std::remove(pkg);
+        // and the card's file is started anew: the union is written whole, the package's records included
+        setenv("GXV_STAGEWARM_PKG_FILE", "/tmp/vgx_stage_warm_pkg2.bin", 1);
+        Write("/tmp/vgx_stage_warm_pkg2.bin", "VGXSTW01", list, nullptr);
+        std::remove(path);
+        Reload();
+        Require(g_stageRecs == 5 && FileSize(path) == 8, "no card file: only the package's records");
+        StageFlush();
+        Require(FileSize(path) == 8 + 24 * 5, "a new card file gets the package's records at the next flush");
+        unsetenv("GXV_STAGEWARM_PKG_FILE");
+        std::remove("/tmp/vgx_stage_warm_pkg2.bin");
     }
     // GXV_STUTTER_LOG: a long frame with its costs accounted gets a line.
     g_stFrame.demandProgs = 5; g_stFrame.demandMs = 60; g_stFrame.texUploads = 2; g_stFrame.texBytes = 4096; g_stFrame.texMs = 3;

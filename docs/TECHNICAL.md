@@ -127,6 +127,15 @@ not console timings.
   (`tools/test_vgx_efbswap2_gl.sh`).
 - Reduced-size additive effects (`GXV_FXHALF`) and half-size blur passes (`GXV_PASSHALF`) are in
   the source but **off** by default.
+- **Asynchronous shaders** (`GXV_ASYNC_SHADERS`, default **on**; `0` = the blocking behaviour of before, exactly). A draw whose program is not
+  linked and whose shaders are in neither the card's cache nor the package's seed does not compile on the render thread: the pair goes to one worker
+  thread (`platform/vgx/src/vgx_async_shaders.h`; the fourth core when proven, else cores 1-2 at the lowest priority: `GXV_CORE3_SHADERS`) and the draw is
+  skipped, as a draw of a program that failed to link always was, until the worker has written vitaGL's cache files (`vglCompileShaderPairToCache`,
+  `tools/vitagl/patches/0020`; no GL object, no GXM call off the render thread). The program then links with a file read. Never skipped: the characters'
+  draws (the HD pack's list), the HUD and every draw without depth test, draws into textures, opaque cached geometry (the map). A skipped draw goes on to
+  the blocking path after `GXV_ASYNC_SHADERS_MAXWAIT_MS` (15,000). `GXV_ASYNC_SMALL_VERTS=<n>` lets opaque cached draws of at most n vertices wait too.
+  The basic log gets `async shaders: on, worker ...` once and an `async-shaders-5s:` line when the worker or a skipped draw had work in the window.
+  Host tests: `tools/test_vgx_async_shaders.sh`.
 - Half precision (fp16) fragment shaders (`GXV_FS_HALF`, **off** by default). `1`: only the shaders
   `FsHalfAnalyse` proves to differ from the float shader by at most one 8-bit level (a forward error
   analysis of the TEV stages: unit-range inputs, a half rounding after every operation; no indirect
@@ -193,6 +202,10 @@ not console timings.
   - The warm-up list (`shadercache/vgx_shaderlist.bin`, the programs linked behind the title) stays at the console's
     844 programs: listing all of the sweep's 1,012 would come close to vitaGL's 1,024-program table. The rest are
     linked when first drawn, from the cache.
+  - The per-galaxy list (`shadercache/vgx_stagewarm.bin`, same format as the card's `ux0:data/smg/shadercache/vgx_stagewarm.bin`)
+    is read from the package too, only when the package holds the seed folder of this build's key; the card's records
+    win, the others are added and written to the card's file at the next quiet moment (`GXV_STAGEWARM_PKG`, default 1).
+    While a galaxy loads, its programs may take up to `GXV_STAGEWARM_COMPILE_MS` (default 1500) ms beyond the usual slices.
 - The vitaGL in use (upstream HEAD) keeps its cache in `v3`; the port's folder, the package's
   compiled-shader seed and the shader RAM pack follow it (`GXV_VGL_CACHE_DIR`).
 - **Caches stay valid across updates:** an older cache layout is moved in place, in whole folders, before the graphics library starts.

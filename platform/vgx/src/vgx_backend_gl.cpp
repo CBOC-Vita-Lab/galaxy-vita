@@ -58,6 +58,7 @@
 #include "vgx_sanitize.h"
 #include "vgx_coldtrace.h"
 #include "vgx_autoq.h"
+#include "vgx_async_shaders.h"
 #include "vgx_copyvar.h"
 #include "vgx_resource_audit.h"
 #ifdef __vita__
@@ -132,6 +133,12 @@ extern "C" int vgxvita_uploadSyncMode(void) __attribute__((weak));
 extern "C" void vgxvita_xferFence(void) __attribute__((weak));
 extern "C" void vgxvita_xferStats(uint64_t* waits, uint64_t* us) __attribute__((weak));
 extern "C" void vglReserveTextureLevels(GLsizei width, GLsizei height, GLint levels) __attribute__((weak));
+// GXV_ASYNC_SHADERS (vgx_async_shaders.h; vgx_host_galaxy_vita.cpp): the cache probe, the compile of a pair into the cache (vitaGL patch 0020), the
+// worker thread's start and its priority boost. Weak: a host or a vitaGL without them leaves every shader on the blocking path.
+extern "C" int vgxvita_asyncShaderInCache_v1(const char* joined, int fragment) __attribute__((weak));
+extern "C" int vgxvita_asyncShaderCompile_v1(const char* vs, const char* fs, int fsHalf, int* compiled) __attribute__((weak));
+extern "C" int vgxvita_asyncShaderStart_v1(void (*fn)(void*), void* arg, char* where, size_t whereSize) __attribute__((weak));
+extern "C" void vgxvita_asyncShaderBoost_v1(int on) __attribute__((weak));
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // The first few times something of the gpupass section happens: one line in the console's log (the back end's stderr does not reach it).
 #define GPUPASS_NOTE(n, ...) do { static int gp_cnt_ = 0; if (gp_cnt_ < (n)) { ++gp_cnt_; port_log("[vgx] " __VA_ARGS__); } } while (0)
@@ -2061,7 +2068,104 @@ Program& UnavailableProgram() {
     return p;
 }
 
-Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false) {
+// ---- asynchronous shaders (GXV_ASYNC_SHADERS, default 1; 0 = the blocking behaviour of before, nothing below runs)
+// A draw whose program is not linked yet and whose shaders are not in vitaGL's compiled-shader cache hands the pair to a worker thread
+// (vgx_async_shaders.h) and is skipped, as a draw of a program that failed to link always was, until the worker has written the cache files;
+// the ordinary path below then links it with a file read. What must not wait never does (AsyncMustBlock). The announcements (CMD_PROGRAM,
+// CMD_VARIANT) are never draws, so they never block: the first draw that needs the program decides. The warm-ups (optional) are behind
+// loading screens and keep the old path.
+asyncsh::Engine* g_async = nullptr;
+bool g_asyncTried = false, g_asyncWaited = false; // (g_asyncWaited: the last GetProgram said Wait; Draw reads it to count its skip)
+#ifdef __VGX_VITA__
+bool AsyncInCacheHook(void*, const asyncsh::Job& j) {
+    return vgxvita_asyncShaderInCache_v1(j.vs.c_str(), 0) && vgxvita_asyncShaderInCache_v1(j.fs.c_str(), 1);
+}
+int AsyncCompileHook(void*, const asyncsh::Job& j, int* shaders) {
+    int n = 0;
+    const int rc = vgxvita_asyncShaderCompile_v1(j.vs.c_str(), j.fs.c_str(), j.fsHalf ? 1 : 0, &n);
+    if (shaders) *shaders = n;
+    return rc;
+}
+double AsyncNowHook(void*) { return NowMs(); }
+void AsyncBoostHook(void*, bool on) { vgxvita_asyncShaderBoost_v1(on ? 1 : 0); }
+void AsyncWorkerMain(void* arg) { static_cast<asyncsh::Engine*>(arg)->WorkerLoop(); }
+#endif
+// The engine, made at the first miss of a draw's program (on the render thread, so vitaGL's lock is created on the thread that owns GL, before
+// the worker exists); null when the switch is off or the host cannot do it. Asked once.
+asyncsh::Engine* AsyncEngine() {
+    if (g_asyncTried) return g_async;
+    g_asyncTried = true;
+#ifdef __VGX_VITA__
+    if (EnvInt("GXV_ASYNC_SHADERS", 1) == 0) return nullptr;
+    if (!vgxvita_asyncShaderInCache_v1 || !vgxvita_asyncShaderCompile_v1 || !vgxvita_asyncShaderStart_v1) {
+        port_log_summary("async shaders: off (this build has no host support)");
+        return nullptr;
+    }
+    asyncsh::Host host;
+    host.inCache = &AsyncInCacheHook;
+    host.compile = &AsyncCompileHook;
+    host.nowMs = &AsyncNowHook;
+    if (vgxvita_asyncShaderBoost_v1) host.boost = &AsyncBoostHook;
+    const long maxWait = EnvInt("GXV_ASYNC_SHADERS_MAXWAIT_MS", 15000);
+    auto* engine = new asyncsh::Engine(host, static_cast<double>(maxWait < 0 ? 0 : maxWait)); // (never freed: the worker runs for the life of the process)
+    char where[128] = "";
+    if (!vgxvita_asyncShaderStart_v1(&AsyncWorkerMain, engine, where, sizeof where)) {
+        port_log_summary("async shaders: off (%s)", where[0] ? where : "the worker thread or vitaGL's compiler lock could not be made");
+        delete engine; // (no thread was made, nothing refers to it)
+        return nullptr;
+    }
+    g_async = engine;
+    port_log_summary("async shaders: on, worker %s, a skipped draw waits at most %ld ms (GXV_ASYNC_SHADERS=0 turns it off)", where, maxWait);
+#endif
+    return g_async;
+}
+inline bool AsyncPossible() { return g_async || !g_asyncTried; }
+// Draws that must never be skipped for want of a program: the player and the main characters (the HD pack's list, the notion GXV_CHARAA_AUTO
+// uses for "Mario's own draws"), the HUD and every 2D or screen-space draw (no depth test: layouts, fades, blits, post effects), a draw that
+// covers the viewport, anything drawn into a texture (shadow maps, blur chains, copies read later), and opaque cached geometry (a static
+// buffer without blending: the map's shapes, GXV_STATICCULL's static runs, and the actors drawn the same way: the back end cannot tell a
+// tile from a coin, so GXV_ASYNC_SMALL_VERTS=<n> lets opaque cached draws of at most n vertices wait). What can wait a few frames: blended
+// 3D (effects, particles, glass, shadows) and CPU-transformed opaque draws.
+bool AsyncMustBlock(const DrawRec& r) {
+    static const long smallVerts = EnvInt("GXV_ASYNC_SMALL_VERTS", 0);
+    if (S.fbo != g_efbFbo) return true;
+    if (!r.rs.depthTest || r.cover) return true;
+    if (vgx::IsCharaTexture)
+        for (int m = 0; m < 8; ++m)
+            if ((r.texMask & (1u << m)) && vgx::IsCharaTexture(r.tex[m].texId)) return true;
+    if (!r.rs.blend && r.vbuf) return !(smallVerts > 0 && static_cast<long>(r.vtxCount) <= smallVerts);
+    return false;
+}
+// The shader texts as Compile() hands them to glShaderSource (vitaGL's cache key is the hash of exactly this).
+asyncsh::Job AsyncJob(uint16_t vsId, uint16_t fsId) {
+    asyncsh::Job j;
+    const bool half = FsHalf();
+    j.vs = std::string("#version 100\n") + g_vsSrc[vsId]->text;
+    j.fs = std::string("#version 100\n") + (half ? kFsHalfMarker : "") + g_fsSrc[fsId]->text;
+    j.fsHalf = half;
+    return j;
+}
+// The worker's priority follows the render thread's while the render thread compiles (or waits for the worker's compile) itself.
+struct AsyncBoostScope {
+    asyncsh::Engine* e; bool on;
+    AsyncBoostScope(asyncsh::Engine* engine) : e(engine), on(engine && engine->WorkerBusy()) { if (on) e->Boost(true); }
+    ~AsyncBoostScope() { if (on) e->Boost(false); }
+};
+// The 5 s line (called from StutterFrameEnd's window): shaders compiled in the background, draws skipped, the longest wait.
+void AsyncSummary() {
+    if (!g_async) return;
+    const asyncsh::Stats a = g_async->TakeWindow();
+    if (!a.Any()) return;
+    port_log_summary("async-shaders-5s: compiled %llu shaders in the background (%llu programs, %llu failed; %.0f ms of compile, longest %.0f ms), draws skipped %llu, "
+                     "longest wait %.0f ms, queue %u; blocking path taken %llu (must not wait) + %llu (waited too long), %llu waited for the worker's own compile; "
+                     "%llu programs found in the cache (probes %.1f ms)",
+                     static_cast<unsigned long long>(a.compiledShaders), static_cast<unsigned long long>(a.compiledPairs), static_cast<unsigned long long>(a.failed),
+                     a.compileMs, a.longestCompileMs, static_cast<unsigned long long>(a.skippedDraws), a.longestWaitMs, a.queueDepth,
+                     static_cast<unsigned long long>(a.forcedBlocking), static_cast<unsigned long long>(a.forcedByAge), static_cast<unsigned long long>(a.raced),
+                     static_cast<unsigned long long>(a.cacheHits), a.probeMs);
+}
+
+Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false, const DrawRec* draw = nullptr) {
     const uint32_t key = (static_cast<uint32_t>(vsId) << 16) | fsId;
     auto& fr = g_programFront[((vsId * 7u + fsId) * 2654435761u) >> 22];
     if (fr.p && fr.key == key && (fr.p->ok || !GlRetry())) {
@@ -2083,6 +2187,16 @@ Program& GetProgram(uint16_t vsId, uint16_t fsId, bool optional = false) {
         failures = old.failures;
     }
     if (GlAllocBackoff()) return UnavailableProgram();
+    // (GXV_ASYNC_SHADERS) shaders not in the cache are compiled by the worker; a draw that may wait is skipped meanwhile, one that must not
+    // (draw != null and AsyncMustBlock) goes on below as before, and so does anything once the pair is Ready. The announcements pass no draw.
+    asyncsh::Engine* const asyncEngine = (!optional && AsyncPossible()) ? AsyncEngine() : nullptr;
+    if (asyncEngine && vsId < g_vsSrc.size() && fsId < g_fsSrc.size() && g_vsSrc[vsId] && g_fsSrc[fsId]) {
+        if (asyncEngine->Ask(key, draw && AsyncMustBlock(*draw), [&] { return AsyncJob(vsId, fsId); }) == asyncsh::Verdict::Wait) {
+            g_asyncWaited = true;
+            return UnavailableProgram();
+        }
+    }
+    const AsyncBoostScope asyncBoost(asyncEngine);
 #if VGX_COLDTRACE
     coldtrace::Scope trace(coldtrace::g_recorder,coldtrace::Key{g_progFrame,CMD_PROGRAM,vsId,fsId,0,0},coldtrace::Origin::DirectProgram);
 #endif
@@ -2848,6 +2962,13 @@ void RunWarm() {
 // delete (see StageWarmIdle). Its optional links may use the program slots down to GXV_STAGEWARM_RESERVE (default 48) free; in a quiet moment it makes
 // room by deleting programs that are not the stage's and were not drawn in the last two frames (up to GXV_STAGEWARM_EVICT, default
 // 48, at a time). The housekeeping evictions spare the stage's programs, a draw's emergency reclaim takes them last.
+// (GXV_STAGEWARM_COMPILE_MS, default 1500; 0 = off) While a stage loads (the screen not live) its queue may run past the usual slice
+// (GXV_STAGEWARM_MS), up to GXV_STAGEWARM_COMPILE_SLICE_MS (default 100) a frame, until this much time beyond the slices has gone into
+// that load's queue; what is left then is logged and goes on in the usual slices. In frames only: no GPU scene between frames.
+long StageCompileMs() {
+    static const long ms = std::max(0L, EnvInt("GXV_STAGEWARM_COMPILE_MS", 1500));
+    return ms;
+}
 struct StageRec { uint64_t vs = 0, fs = 0; uint32_t lb = 0; }; // shader key hashes; layout mask << 13 | blend key
 struct StageFileRec { uint32_t stage, lb; uint64_t vs, fs; };  // 24 bytes, after an 8-byte magic
 static_assert(sizeof(StageFileRec) == 24, "stage warm-up file record");
@@ -2865,6 +2986,8 @@ double g_stageQueueMs = 0;           // spent on the current queue so far
 size_t g_stageIdleCursor = 0;        // (GXV_STAGEWARM_IDLE) queue entries from the front whose programs the between-frames path has tried
 bool g_stageIdleBlocked = false;     // (GXV_STAGEWARM_IDLE) it met the slot reserve: the rest waits for the frames' slices
 unsigned g_stageQueueLinks = 0, g_stageQueued = 0;
+double g_stageCompileMs = 0;          // (GXV_STAGEWARM_COMPILE_MS) time beyond the usual slice spent on the queue of this load so far
+bool g_stageCompileLogged = false;    // the line "budget used up, N left" was written for this queue
 size_t g_stageRecs = 0;               // in memory, all stages
 constexpr size_t kStageMaxRecs = 2048, kStageMemMax = 32768, kStageFileMax = 65536; // per stage; in memory (768 KiB); in the file
 constexpr char kStageMagic[8] = {'V', 'G', 'X', 'S', 'T', 'W', '0', '1'};
@@ -2915,6 +3038,30 @@ void StageLog(const char* fmt, ...) {
     port_log_summary("%s", text);
 #endif
 }
+// (GXV_STAGEWARM_PKG, default 1) The list that came with the package (GXV_STAGEWARM_PKG_FILE, set by the host only when the package's
+// shader generator key is this build's), read-only. Its records are added after the card's: a record the card has is kept as it is
+// (the card wins), the others are new to the card's file and beyond the sets' persisted marks, so the next flush appends them (the
+// card's file then holds the union). A file of another format or cut short is ignored from the damaged record on, nothing else.
+bool StagePkgOn() { return EnvInt("GXV_STAGEWARM_PKG", 1) != 0; }
+void StageLoadPackaged() {
+    const char* path = std::getenv("GXV_STAGEWARM_PKG_FILE");
+    if (!path || !*path || !StagePkgOn()) return;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return;
+    char magic[8];
+    unsigned read = 0, added = 0;
+    if (std::fread(magic, 1, sizeof magic, f) == sizeof magic && std::memcmp(magic, kStageMagic, sizeof magic) == 0) {
+        StageFileRec r;
+        while (std::fread(&r, 1, sizeof r, f) == sizeof r) {
+            ++read;
+            if (StageAdd(r.stage, StageRec{r.vs, r.fs, r.lb})) ++added;
+        }
+        StageLog("stage warm-up: %u draw variants read from the package's %s, %u of them new to the card's list", read, path, added);
+    } else {
+        StageLog("stage warm-up: the package's %s is not a stage list of this format, ignored", path);
+    }
+    std::fclose(f);
+}
 void StageLoad() {
     g_stageLoaded = true;
     const char* path = StageFile();
@@ -2945,13 +3092,13 @@ void StageLoad() {
             g_stageFileRecs = kStageFileMax; // (no file: recording stays in memory only)
         }
     }
+    // What the card's file holds is persisted (or, for a file started anew, nothing is: the next flush writes it whole).
+    for (auto& kv : g_stageSets) kv.second.persisted = rewrite ? 0 : kv.second.recs.size();
     size_t recs = 0;
-    for (auto& kv : g_stageSets) {
-        kv.second.persisted = rewrite ? 0 : kv.second.recs.size();
-        recs += kv.second.recs.size();
-    }
+    for (auto& kv : g_stageSets) recs += kv.second.recs.size();
     StageLog("stage warm-up: %u stages, %u draw variants read from %s%s", static_cast<unsigned>(g_stageSets.size()), static_cast<unsigned>(recs), path,
              rewrite ? " (file started anew)" : "");
+    StageLoadPackaged();
 }
 // Appends what was recorded since the last flush (quiet moments only: a few KiB to the memory card).
 void StageFlush() {
@@ -2983,6 +3130,8 @@ void StageBuild(uint32_t target) {
     g_stageQueued = 0;
     g_stageIdleCursor = 0;
     g_stageIdleBlocked = false;
+    g_stageCompileMs = 0;
+    g_stageCompileLogged = false;
     g_stageLeft.store(0, std::memory_order_relaxed);
     const auto it = g_stageSets.find(target);
     if (!target || it == g_stageSets.end() || it->second.recs.empty()) return;
@@ -3007,6 +3156,12 @@ void StageBuild(uint32_t target) {
     g_stageLeft.store(g_stageQueued, std::memory_order_relaxed);
     StageLog("stage warm-up: stage %08x: %u draw variants of %u programs queued (%u with shaders this run does not know)", target, g_stageQueued,
              static_cast<unsigned>(g_stageProgs.size()), unknown);
+    if (StageCompileMs() > 0) {
+        unsigned fresh = 0;
+        for (const uint32_t k : g_stageProgs) { const auto p = g_programs.find(k); if (p == g_programs.end() || !p->second.ok) ++fresh; }
+        StageLog("stage warm-up: stage %08x: %u of its programs are not linked yet (compiled here if the card's cache and the package's seed lack them), up to %ld ms beyond the slices",
+                 target, fresh, StageCompileMs());
+    }
 }
 // Room for the stage's programs (quiet moments only): programs that are not the stage's, not drawn in the last two frames.
 bool StageEvict() {
@@ -3021,9 +3176,12 @@ bool RunStageWarm(bool idle) {
     static const double quietMs = static_cast<double>(EnvInt("GXV_STAGEWARM_MS", 30));
     static const double liveMs = static_cast<double>(EnvInt("GXV_STAGEWARM_LIVE_MS", 0));
     static const unsigned reserve = static_cast<unsigned>(std::max(8L, EnvInt("GXV_STAGEWARM_RESERVE", 48)));
-    const double budgetMs = g_screenLive ? liveMs : quietMs;
+    double budgetMs = g_screenLive ? liveMs : quietMs;
     if (budgetMs <= 0.0) return true;
     if (GlAllocBackoff() || g_warmAllocFailSerial == g_serial) return true;
+    static const double sliceMax = static_cast<double>(std::max(1L, EnvInt("GXV_STAGEWARM_COMPILE_SLICE_MS", 100)));
+    const double compileLeft = static_cast<double>(StageCompileMs()) - g_stageCompileMs;
+    if (!g_screenLive && compileLeft > 0.0 && sliceMax > budgetMs) budgetMs += std::min(compileLeft, sliceMax - budgetMs);
     const uint32_t capacityKey = g_warmCapacityKey;
     g_optionalReserve = reserve;
     const double t0 = NowMs();
@@ -3060,7 +3218,15 @@ bool RunStageWarm(bool idle) {
     g_stFrame.stageLinks += links;
     g_stageQueueMs += took;
     g_stageQueueLinks += links;
+    if (!g_screenLive && StageCompileMs() > 0 && took > quietMs) g_stageCompileMs += took - quietMs;
     g_stageLeft.store(static_cast<unsigned>(g_stageQueue.size()), std::memory_order_relaxed);
+    if (!g_stageQueue.empty() && !g_stageCompileLogged && StageCompileMs() > 0 && g_stageCompileMs >= static_cast<double>(StageCompileMs())) {
+        g_stageCompileLogged = true;
+        unsigned fresh = 0;
+        for (const VariantCmd& q : g_stageQueue) { const auto p = g_programs.find((static_cast<uint32_t>(q.vsId) << 16) | q.fsId); if (p == g_programs.end() || !p->second.ok) ++fresh; }
+        StageLog("stage warm-up: stage %08x: compile budget of %ld ms used up, %u draw variants left (%u of them without a linked program)", g_stageTarget,
+                 StageCompileMs(), static_cast<unsigned>(g_stageQueue.size()), fresh);
+    }
     if (g_stageQueue.empty())
         StageLog("stage warm-up: stage %08x ready: %u draw variants, %u links, %.0f ms in all (the last slice %s)", g_stageTarget, g_stageQueued,
                  g_stageQueueLinks, g_stageQueueMs, idle ? "between frames" : (g_screenLive ? "in play" : "in a quiet frame"));
@@ -3162,6 +3328,7 @@ void StutterFrameEnd(uint64_t frame, double ms) {
                              -1, "off");
 #endif
     }
+    AsyncSummary(); // (GXV_ASYNC_SHADERS: its own line, when the worker or a skipped draw had anything to do in the window)
     g_stPlay = StutterCosts{};
     g_stQuiet = StutterCosts{};
     windowT0 = now;
@@ -3358,8 +3525,10 @@ void Draw(const CmdBuf& buf, const DrawRec& r) {
 #endif
     if (g_px.noop && PxNoEffect(r.rs)) { ++g_pxN.noop; return; } // (GXV_PX_NOOP: it would change nothing)
     if (kBackendDiagnostics && g_dprofOn) g_dprofT = DNow();
-    Program& p = GetProgram(r.vsId, r.fsId);
+    g_asyncWaited = false;
+    Program& p = GetProgram(r.vsId, r.fsId, false, &r);
     DP(0);
+    if (g_asyncWaited && !p.ok) g_async->NoteSkipped(); // (GXV_ASYNC_SHADERS: this draw waits for the worker's compile)
     if (!p.ok || r.idxCount == 0) {
 #if defined(GXV_DRAW_REJECT_COUNTERS) && GXV_DRAW_REJECT_COUNTERS
         if(!p.ok) { DrawRejectNote(RejectProgram,buf,r); DrawRejectProgramState(r,p); }
