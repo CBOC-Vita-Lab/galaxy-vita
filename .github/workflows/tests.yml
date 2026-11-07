@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Python packages the picture tests use
+        run: python3 -m pip install numpy pillow
       - name: Release files, build driver, cooker layout and download checker
         run: python3 -m unittest discover -s tests -v
       - name: Download checker on the repository itself
