@@ -2,6 +2,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths: ["cboc-release.json", "Galaxy-Vita.vpk", ".github/workflows/release.yml"]
 permissions:
   contents: write
 jobs:
@@ -9,21 +11,34 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Which version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # (a tag names its version; on main the version in cboc-release.json is published once, as tag vX.Y)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"
+          else tag="v$(python3 -c "import json;print(json.load(open('cboc-release.json'))['version'])")"; fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          if gh release view "$tag" >/dev/null 2>&1; then echo "SKIP=1" >> "$GITHUB_ENV"; echo "$tag is already published"; fi
       - name: Check the package against its release record
+        if: env.SKIP != '1'
         run: |
           want=$(python3 -c "import json;print(json.load(open('cboc-release.json'))['package']['sha256'])")
           have=$(sha256sum Galaxy-Vita.vpk | cut -d' ' -f1)
           test "$want" = "$have"
       - name: Release notes
+        if: env.SKIP != '1'
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           if [ -f "docs/RELEASE-NOTES-$v.md" ]; then cp "docs/RELEASE-NOTES-$v.md" notes.md
           else awk '/^# Version /{n++} n==1' CHANGELOG.md | tail -n +2 > notes.md; fi
       - name: Install ZIP
+        if: env.SKIP != '1'
         run: git archive --format=zip --prefix=Galaxy-Vita/ -o Galaxy-Vita-install.zip HEAD
       - name: Publish
+        if: env.SKIP != '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Super Mario Galaxy ${GITHUB_REF_NAME#v}" --notes-file notes.md --latest \
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Super Mario Galaxy ${TAG#v}" --notes-file notes.md --latest \
             Galaxy-Vita.vpk Galaxy-Vita-install.zip cboc-release.json SHA256SUMS
