@@ -1,15 +1,15 @@
 # Version 2.1 — November 7, 2026
 
-The smooth-play update. No more pauses while the game prepares new graphics.
+The smooth-play update. Far fewer pauses while the game prepares new graphics.
 
 ### Smoother play
-- **No more shader pauses.** When the game meets an effect it hasn't drawn before, it now prepares it in the background on a spare CPU core while you keep playing. At worst a new sparkle or effect appears a moment late; Mario, the HUD and the level itself never do.
-- **Many more graphics ready out of the box.** The package now carries ready-made shaders from every mission of every galaxy, not just the first, so most players will never see a new one prepared at all.
-- **Galaxies warm up while they load.** Each galaxy prepares the graphics it's known to need during its loading screen, adding at most a second or so, so the first steps in a new galaxy are as smooth as the rest.
+- **Many more graphics ready out of the box.** The download now carries ready-made shaders gathered from every mission of every galaxy, not just the first, so the short pause when something new appears is gone almost everywhere.
+- **Galaxies warm up while they load.** Each galaxy prepares the graphics it's known to need during its loading screen, adding at most a second or so, so your first steps in a galaxy are as smooth as the rest.
+- **The list of what each galaxy needs now ships with the game,** so even a fresh install gets that warm-up on its very first visit.
 
 ### Under the hood
-- The shader compiler can now run on a second core, the list of each galaxy's graphics ships with the game, and the package no longer carries a stray macOS file.
-- Background preparation can be switched off with `GXV_ASYNC_SHADERS=0` in `env.txt` if you ever want 2.0's behaviour back.
+- An optional background shader compiler is included for testing (`GXV_ASYNC_SHADERS=1` in `env.txt`). It's off by default while it's being tuned.
+- The package no longer carries a stray macOS file.
 
 **Updating?** Install the new VPK over the old one. Your saves and settings stay.
 

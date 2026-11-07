@@ -2096,7 +2096,7 @@ asyncsh::Engine* AsyncEngine() {
     if (g_asyncTried) return g_async;
     g_asyncTried = true;
 #ifdef __VGX_VITA__
-    if (EnvInt("GXV_ASYNC_SHADERS", 1) == 0) return nullptr;
+    if (EnvInt("GXV_ASYNC_SHADERS", 0) == 0) return nullptr;  // (off by default in 2.1: the r101 console A/B showed cached links waiting behind the worker's compile lock)
     if (!vgxvita_asyncShaderInCache_v1 || !vgxvita_asyncShaderCompile_v1 || !vgxvita_asyncShaderStart_v1) {
         port_log_summary("async shaders: off (this build has no host support)");
         return nullptr;

@@ -15,7 +15,7 @@ You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
 ## New In Version 2.1
 
-No more pauses while the game prepares new graphics: anything new is prepared in the background on a spare core while you play, and the download now carries ready-made graphics for every mission of every galaxy.
+Far fewer pauses: the download now carries ready-made graphics from every mission of every galaxy, and each galaxy prepares what it needs while it loads.
 
 ## New In Version 2.0
 

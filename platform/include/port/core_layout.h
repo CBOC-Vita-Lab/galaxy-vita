@@ -74,7 +74,7 @@ template <class Get> Switches ReadSwitches(Get get) {
     s.core3Split = split == 1 || (split < 0 && all == 1);           // (unset: off; GXV_CORE3=1 or GXV_CORE3_SPLIT=1)
     const int shaders = PartSwitch(get("GXV_CORE3_SHADERS"), 1);
     const char* async = get("GXV_ASYNC_SHADERS");                   // (0: there is no worker, so no part for the core and no reason to probe for it)
-    s.core3Shaders = shaders != 0 && !(async && async[0] == '0');   // (unset: ON, the worker is delay-tolerant; GXV_CORE3=0 returned above)
+    s.core3Shaders = shaders != 0 && async && async[0] == '1';       // (only with GXV_ASYNC_SHADERS=1, off by default in 2.1; GXV_CORE3=0 returned above)
     return s;
 }
 

@@ -189,11 +189,14 @@ int main() {
         gEnv.clear();
         Switches s = ReadSwitches(Get);
         Require(!s.core3Io && s.core3Audio == 2 && !s.core3Split, "nothing set: IO off in code (entry.cpp sets it), audio output only, no split");
+        Require(!s.core3Shaders, "nothing set: no shader compile worker (GXV_ASYNC_SHADERS is off by default since 2.1)");
+        gEnv["GXV_ASYNC_SHADERS"] = "1";
+        s = ReadSwitches(Get);
         Require(s.core3Shaders && Core3Uses(s, Core3Part::ShaderWorker, true) && !Core3Uses(s, Core3Part::ShaderWorker, false),
-                "nothing set: the shader compile worker asks for a proven core (delay-tolerant work, default on)");
+                "GXV_ASYNC_SHADERS=1: the shader compile worker asks for a proven core (delay-tolerant work)");
         gEnv["GXV_CORE3_SHADERS"] = "0";
         Require(!ReadSwitches(Get).core3Shaders, "GXV_CORE3_SHADERS=0: the shader worker stays on cores 1-2");
-        gEnv.erase("GXV_CORE3_SHADERS");
+        gEnv.erase("GXV_CORE3_SHADERS"); gEnv.erase("GXV_ASYNC_SHADERS");
         gEnv["GXV_ASYNC_SHADERS"] = "0";
         Require(!ReadSwitches(Get).core3Shaders, "GXV_ASYNC_SHADERS=0: no worker, no part for the fourth core");
         gEnv.erase("GXV_ASYNC_SHADERS");
@@ -217,7 +220,10 @@ int main() {
         gEnv["GXV_CORE3_AUDIO"] = "0";
         gEnv["GXV_CORE3_IO"] = "0";
         s = ReadSwitches(Get);
-        Require(s.core3Shaders && Core3Wanted(s), "GXV_CORE3=1 with every other part at 0: the shader worker (default on) still wants the core");
+        Require(!s.core3Shaders && !Core3Wanted(s), "GXV_CORE3=1 with every other part at 0 and no GXV_ASYNC_SHADERS: no probe");
+        gEnv["GXV_ASYNC_SHADERS"] = "1";
+        s = ReadSwitches(Get);
+        Require(s.core3Shaders && Core3Wanted(s), "GXV_CORE3=1 with every other part at 0: the shader worker (GXV_ASYNC_SHADERS=1) still wants the core");
         gEnv["GXV_CORE3_SHADERS"] = "0";
         s = ReadSwitches(Get);
         Require(!Core3Wanted(s), "GXV_CORE3=1 with every part at 0: no probe");

@@ -1,6 +1,6 @@
 // GXV_ASYNC_SHADERS in the back end (vgx_backend_gl.cpp GetProgram / Draw / AsyncMustBlock) on the GL stub, built as the console builds it
 // (__VGX_VITA__), with a fake host: a cache probe, a "compiler" that sleeps 60 ms on another thread, a worker thread made from std::thread.
-//   vgx_async_shaders_backend on    GXV_ASYNC_SHADERS unset (default 1)
+//   vgx_async_shaders_backend on    GXV_ASYNC_SHADERS=1 (off by default since 2.1)
 //   vgx_async_shaders_backend off   GXV_ASYNC_SHADERS=0: the old behaviour, none of the host's functions is ever called
 // "on" checks: a draw whose program is not in the cache is skipped and the frame does not wait for the compile (every frame is quick); the
 // draws that must not be skipped (no depth test, i.e. the HUD and 2D; the opaque cached geometry; a draw into a texture) link at once; a
@@ -171,7 +171,7 @@ static bool Linked(unsigned vs, unsigned fs) {
 int main(int argc, char** argv) {
     Require(argc == 2, "usage: vgx_async_shaders_backend on|off");
     const bool on = std::strcmp(argv[1], "on") == 0;
-    if (on) unsetenv("GXV_ASYNC_SHADERS"); else setenv("GXV_ASYNC_SHADERS", "0", 1);
+    if (on) setenv("GXV_ASYNC_SHADERS", "1", 1); else unsetenv("GXV_ASYNC_SHADERS");  // (off by default since 2.1)
     setenv("GXV_STAGEWARM", "0", 1);
     setenv("GXV_MAXPROGRAMS", "1000", 1);
     fake::mainThread = std::this_thread::get_id();
