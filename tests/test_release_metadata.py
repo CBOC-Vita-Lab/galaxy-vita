@@ -32,7 +32,7 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertEqual(self.release["releaseId"], self.manifest["releaseId"])
         self.assertEqual(self.release["version"], self.manifest["version"])
         self.assertEqual(self.manifest["releaseId"], "galaxy-v" + self.manifest["version"])
-        self.assertRegex(self.manifest["version"], r"^\d+\.\d+$")
+        self.assertRegex(self.manifest["version"], r"^\d+\.\d+(\.\d+)?$")
         self.assertEqual(self.manifest["titleId"], "SMGV00001")
         self.assertEqual(self.release["titleId"], "SMGV00001")
         self.assertEqual(self.manifest["package"]["path"], "Galaxy-Vita.vpk")

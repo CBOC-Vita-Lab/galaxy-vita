@@ -1,5 +1,9 @@
 # Source Record
 
+## Version 2.1.1 (`galaxy-v2.1.1`)
+
+Version 2.1 with the same eboot (r102, SHA-256 `60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563`) and APP_VER 02.11. The package drops the 115 vertex shaders that only the Vita3K farm had compiled: where the console and the emulator compiled the same vertex shader, 3 of 29 differed in the program header's vertex output mask (`vertex_outputs1`, bytes 176-177 of the GXP) with identical code, so emulator-only vertex shaders can't be trusted (fragment shaders: 38 of 38 identical; kept). Every vertex shader in the package is now one the console compiled. Missing ones are compiled on the console at the stage warm-up or the first draw.
+
 ## Version 2.1 (`galaxy-v2.1`)
 
 Version 2.0 plus the changes below. The eboot is the console-tested build r102 (SHA-256 `60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563`), built as 2.0 with vitaGL patch 0020 added (`tools/vitagl/patches/0020-async-shader-compile.patch`; the shader cache key stays `b4d4c2a9`, its output is byte-identical).
