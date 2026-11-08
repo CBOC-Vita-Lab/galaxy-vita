@@ -19864,7 +19864,7 @@
     },
     {
       "path": "tests/test_player_settings_assets.py",
-      "sha256": "752ac61139ca2bcf4fd8ee99103857fee7329d4241c7301db07ab35b052b8411"
+      "sha256": "f0dd016747be2db4896da6072f9100c7d95623f2a00c0bf483e66fba068e5731"
     },
     {
       "path": "tests/test_release_metadata.py",
