@@ -73,7 +73,9 @@ class PackagePictures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             subprocess.run([sys.executable, '-I', str(ROOT / 'tools/handheld/make_livearea.py'), temporary], check=True, capture_output=True)
             for name, (relative, _) in self.SHIPPED.items():
-                self.assertEqual((pathlib.Path(temporary) / name).read_bytes(), (ROOT / relative).read_bytes(), name)
+                from PIL import Image  # (decoded pixels and palette: PNG compression differs between zlib builds)
+                made, shipped = Image.open(pathlib.Path(temporary) / name), Image.open(ROOT / relative)
+                self.assertEqual((made.size, made.getpalette(), made.tobytes()), (shipped.size, shipped.getpalette(), shipped.tobytes()), name)
 
     def test_reference_script_still_documents_the_device_algorithm(self):
         text = (ROOT / 'tools/handheld/make_livearea_title.py').read_text()
