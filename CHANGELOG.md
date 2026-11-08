@@ -1,3 +1,23 @@
+# Version 2.2 — November 7, 2026
+
+The smooth-play update, part two. Fewer hitches everywhere, quicker menus and a new look.
+
+### Smoother play
+- **Galaxies start ready.** Each galaxy finishes preparing its graphics during the loading screen (a few seconds longer the first time at most), so the first steps in a galaxy no longer stutter. On a 3-galaxy test, graphics prepared mid-play went from 25 to 0.
+- **No more hitch when the picture size changes.** The next size is prepared ahead of time, so a change takes about a millisecond instead of a visible skip.
+- **Menus prepare their graphics at start-up**, so the pause menu and star select open smoothly.
+- **Performance mode reacts faster.** When a scene gets heavy it steps down within a fraction of a second instead of several seconds. Good Egg at the widest camera now holds 60 FPS.
+- **Every packaged shader is compiled on a real Vita.**
+
+### New look
+- **New original artwork** for the bubble and LiveArea: a starry night sky over a glowing ocean.
+- **The Settings button on the LiveArea** has the size the Vita expects. If you still don't see it after updating, use VitaShell's Refresh LiveArea (Triangle on its home page) or delete the game and install fresh (your saves stay).
+
+### Fixed
+- A guard against a crash if Bee Mario's model isn't loaded yet when you grab the Bee Mushroom.
+
+**Updating?** Install the new VPK over the old one. Your saves and settings stay.
+
 # Version 2.1.1 — November 7, 2026
 
 A quick fix for 2.1.

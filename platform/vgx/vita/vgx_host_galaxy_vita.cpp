@@ -99,6 +99,8 @@ extern "C" int port_vgx_gate_wait_take(uint64_t* n, uint64_t* totalUs, uint64_t*
 extern "C" uint32_t vglGetMaskSkips(void) __attribute__((weak)); // vitaGL built with MASK_SKIP: full-target mask quads left out so far
 extern "C" void vglSetMaskKeep(GLboolean on) __attribute__((weak));    // vitaGL with patches/0018 built with MASK_KEEP (GXV_VGL_MASKKEEP)
 extern "C" uint32_t vglGetMaskKeeps(void) __attribute__((weak));      // (the same: full-target mask quads left out by it so far)
+extern "C" void vglSetMaskKeepDisplay(GLboolean on) __attribute__((weak)); // (patches/0022: MASK_KEEP for the display's own scene, GXV_VGL_MASKKEEP_DISPLAY)
+extern "C" GLboolean vglColorLoadSkip(GLboolean arm) __attribute__((weak)); // vitaGL with patches/0021 (GXV_COLOR_LOADSKIP)
 extern "C" GLboolean vglColorLoadFrom(GLuint tex) __attribute__((weak)); // vitaGL with patches/0019 built with COLOR_LOAD_FROM (GXV_VGL_LOADFROM)
 extern "C" uint32_t vglGetColorLoadsFrom(void) __attribute__((weak));   // (the same: scenes that loaded their colour from another buffer)
 #include "vgx_core3_probe_vita.h"
@@ -1793,6 +1795,15 @@ bool StartGl(char* error, size_t errorSize) {
         if (maskKeep && vglSetMaskKeep) {
             vglSetMaskKeep(GL_TRUE);
             port_log("[vgx-vita] GXV_VGL_MASKKEEP=1: unloaded framebuffer-object scenes start with their scissor mask set (no full-target mask quad)");
+            // GXV_VGL_MASKKEEP_DISPLAY=1 (default 1, with GXV_VGL_MASKKEEP=1; vitaGL patches/0022): the same for the present's own scene (the
+            // blit of the finished picture: PresentDisplayCopy hints depth load = false, scissor test off), which otherwise draws the
+            // full-target mask quad (960x544, depth/stencil only) before the picture. Exact under the same condition as MASKKEEP.
+            long maskKeepDisplay = 1;
+            EnvLong("GXV_VGL_MASKKEEP_DISPLAY", maskKeepDisplay, 0, 1);
+            if (maskKeepDisplay && vglSetMaskKeepDisplay) {
+                vglSetMaskKeepDisplay(GL_TRUE);
+                port_log("[vgx-vita] GXV_VGL_MASKKEEP_DISPLAY=1: the display's scene starts with its scissor mask set (no full-target mask quad)");
+            }
         } else if (maskKeep) {
             port_log("[vgx-vita] GXV_VGL_MASKKEEP=1 ignored: this vitaGL has no vglSetMaskKeep (patches/0018, MASK_KEEP)");
         }
@@ -1810,6 +1821,19 @@ bool StartGl(char* error, size_t errorSize) {
             port_log("[vgx-vita] GXV_VGL_LOADFROM=1: a swapped EFB colour buffer is loaded by the next EFB scene (no drawing-back quad)");
         } else if (loadFrom) {
             port_log("[vgx-vita] GXV_VGL_LOADFROM=1 ignored: this vitaGL has no vglColorLoadFrom (patches/0019, COLOR_LOAD_FROM)");
+        }
+    }
+    // GXV_COLOR_LOADSKIP=<bits> (default 0, console A/B; vitaGL tools/vitagl/patches/0021): a scene that begins with a clear of all its
+    // colour loads its colour tiles from a tiny texture instead of 2.1 MB / 1.2 MB of its own old content (vgx_backend_gl.cpp
+    // ColorSkipMode: 1 = the EFB's scenes, 2 = pass / effect targets, 4 = the display's scene, this file's PresentDisplayCopy, 8 = copy scenes).
+    {
+        long skip = 0;
+        EnvLong("GXV_COLOR_LOADSKIP", skip, 0, 15);
+        if (skip && vglColorLoadSkip) {
+            vgx::backend::SetColorSkipHook([](bool arm) { return vglColorLoadSkip(arm ? GL_TRUE : GL_FALSE) == GL_TRUE; });
+            port_log("[vgx-vita] GXV_COLOR_LOADSKIP=%ld: scenes that begin with a full clear load a tiny colour texture (bits 1 EFB, 2 passes, 4 display, 8 copy scenes)", skip);
+        } else if (skip) {
+            port_log("[vgx-vita] GXV_COLOR_LOADSKIP=%ld ignored: this vitaGL has no vglColorLoadSkip (patches/0021, COLOR_LOAD_FROM)", skip);
         }
     }
     vglSetupShaderPatcher(static_cast<unsigned>(patcherMib) * 1024u * 1024u, static_cast<unsigned>((patcherMib + 1) / 2) * 1024u * 1024u,
@@ -2255,6 +2279,11 @@ bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
     if (g_scissorOn) { glDisable(GL_SCISSOR_TEST); ParkScissor(); }
     glBindFramebuffer(GL_READ_FRAMEBUFFER, efb);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    // GXV_COLOR_LOADSKIP bit 4 (vitaGL patches/0021): the display's scene draws opaque quads over the whole screen (the sharpen /
+    // edge pass or the blit, scissor off, no blending), so what its colour tiles hold at the start is never seen: they are filled
+    // from a tiny texture. Only for the picture on the whole screen (GXV_VITA_WIDE=1): side bars would be left unwritten.
+    static const bool colorSkip = [] { long v = 0; EnvLong("GXV_COLOR_LOADSKIP", v, 0, 7); return (v & 4) != 0 && vglColorLoadSkip != nullptr; }();
+    const bool colorSkipArmed = colorSkip && dx0 == 0 && dx1 == kScreenW && vglColorLoadSkip(GL_TRUE) == GL_TRUE;
     if (vgxvita_maskGuardOn) vgxvita_maskGuard(); // (the display's scene starts with a mask update too)
     // GXV_DEPTH_SKIP=2 (a vitaGL with DEPTH_HINT): the display's scene is a blit; it neither tests nor keeps depth.
     static const bool depthSkip = [] { long v = 2; EnvLong("GXV_DEPTH_SKIP", v, 0, 2); return v >= 2 && vglSetNextSceneDepthModes != nullptr; }();
@@ -2273,6 +2302,7 @@ bool PresentDisplayCopy(unsigned efb, int x, int y, int w, int h) {
         // in this same scene (nothing is drawn in a frame without them, nor on a multisampled EFB).
         vgx::backend::PresentCharaAA(0, x, y, w, h, dx0, 0, dx1 - dx0, kScreenH, sharpened ? sharpen : 0.0f, true);
     }
+    if (colorSkipArmed) vglColorLoadSkip(GL_FALSE); // (taken back: only the scene the draws above began may use it)
     const uint64_t swapStart = WaitLogOn() ? NowUs() : 0;
     NoteSwap(g_presentStamp);  // (GXV_PRESENT_SYNC: the display callback holds the picture to its turn's slot)
     g_presentStamp = 0;        // (a second display copy in the same job is shown when ready)

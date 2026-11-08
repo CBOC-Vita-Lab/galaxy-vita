@@ -1,0 +1,58 @@
+diff -ruN a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -729,8 +729,29 @@
+ 	return ds;
+ }
+ #define VGL_MASK_KEEP(ds) vgl_mask_keep(ds)
++// MASK_KEEP for the display's scene (Galaxy port, patch 0021): the present's scene (a blit of the finished picture, scissor test off, depth
++// hint load = GL_FALSE) draws the same full-target "mask set everywhere" quad at its start as a framebuffer-object scene does. Its begin
++// call cannot be wrapped like the framebuffer object's (build-vitagl.sh's DEPTH_HINT step matches its text), so this runs before
++// apply_depth_hint, at the top of the display branch, and takes the hint's decision itself (depth_hint_valid, depth_hint_fb == NULL for the
++// display, depth_hint_load): exactly the condition apply_depth_hint turns into vgl_mask_skip_next. Off until vglSetMaskKeepDisplay(GL_TRUE)
++// (and vglSetMaskKeep(GL_TRUE)); while off, or when the scene is not that kind, the background mask is left alone as before.
++GLboolean vgl_mask_keep_display_on = GL_FALSE;
++void vglSetMaskKeepDisplay(GLboolean on) { vgl_mask_keep_display_on = on ? GL_TRUE : GL_FALSE; }
++static void vgl_mask_keep_display(void) {
++	vgl_mask_keep_ds = NULL;
++	if (depth_hint_valid && depth_hint_fb == NULL && !depth_hint_load) {
++		const GLboolean keep = vgl_mask_keep_on && vgl_mask_keep_display_on && !scissor_test_state;
++		if (keep || vgl_mask_keep_display_on) {
++			vglDepthStencilSurfaceSetBackgroundMask(&gxm_depth_stencil_surface, keep);
++			if (keep)
++				vgl_mask_keep_ds = &gxm_depth_stencil_surface;
++		}
++	}
++}
++#define VGL_MASK_KEEP_DISPLAY() vgl_mask_keep_display()
+ #else
+ #define VGL_MASK_KEEP(ds) (ds)
++#define VGL_MASK_KEEP_DISPLAY() ((void)0)
+ #endif
+ 
+ #ifdef COLOR_LOAD_FROM
+@@ -829,6 +850,7 @@
+ 		// Starting drawing scene
+ 		is_rendering_display = !active_write_fb;
+ 		if (is_rendering_display) { // Default framebuffer is used
++			VGL_MASK_KEEP_DISPLAY();
+ 			if (system_app_mode) {
+ 				sceSharedFbBegin(shared_fb, &shared_fb_info);
+ 				shared_fb_info.vsync = vsync_interval;
+diff -ruN a/source/tests.c b/source/tests.c
+--- a/source/tests.c
++++ b/source/tests.c
+@@ -266,10 +266,11 @@
+ 		extern uint32_t vgl_mask_keeps;
+ 		SceGxmDepthStencilSurface *kept = vgl_mask_keep_ds;
+ 		vgl_mask_keep_ds = NULL; // (one use: a later update in the scene draws as before)
+-		if (kept && vgl_mask_skip_next && !scissor_test_state && !is_rendering_display && in_use_framebuffer && in_use_framebuffer->depthbuffer_ptr == kept) {
++		const GLboolean kept_here = is_rendering_display ? (kept == &gxm_depth_stencil_surface) : (in_use_framebuffer && in_use_framebuffer->depthbuffer_ptr == kept);
++		if (kept && vgl_mask_skip_next && !scissor_test_state && kept_here) {
+ 			vgl_mask_skip_next = GL_FALSE;
+ 			vgl_mask_keeps++;
+-			const uint32_t active_w = in_use_framebuffer->width, active_h = in_use_framebuffer->height;
++			const uint32_t active_w = is_rendering_display ? DISPLAY_WIDTH : in_use_framebuffer->width, active_h = is_rendering_display ? DISPLAY_HEIGHT : in_use_framebuffer->height;
+ 			region.x = region.gl_x < 0 ? 0 : region.gl_x;
+ 			region.w = region.gl_w;
+ 			region.h = region.gl_h;

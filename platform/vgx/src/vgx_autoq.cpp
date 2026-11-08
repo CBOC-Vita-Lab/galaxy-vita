@@ -232,6 +232,7 @@ const char* WhyText(Why w) {
     case Why::HoldEdgeBack: return "edge smoothing on again lost pictures to the GPU: off, and the next try blocked";
     case Why::CadenceUp: return "on the steady 30 (60 out of reach at any size) the GPU has room at 33.3 ms: one size up, on trial";
     case Why::CadenceBack: return "the size tried on the steady 30 lost pictures to the GPU: back, and that size blocked";
+    case Why::FastDown: return "pictures are late for the GPU in a sustained burst (Performance): one size down at once";
     default: return "-";
     }
 }
@@ -252,6 +253,10 @@ Controller::Controller(const Config& c) : cfg_(c) {
     if (!cfg_.overload) cfg_.overloadFx = false;
     if (cfg_.targetFps != 30) cfg_.hold30 = false; // (Quality mode's rule: the 30 target only)
     if (cfg_.targetFps != 60) cfg_.cadenceUp = false; // (Performance mode's steady 30 only)
+    if (cfg_.targetFps != 60) cfg_.fast60 = false;    // (Performance mode's fast step down only: Quality (30) and Locked 30 never run it)
+    cfg_.fast60Pics = std::clamp(cfg_.fast60Pics, 4, static_cast<int>(kFastRing));
+    cfg_.fast60Late = std::clamp(cfg_.fast60Late, 1, cfg_.fast60Pics);
+    cfg_.fast60ReachFps = std::clamp(cfg_.fast60ReachFps, 31.0, 60.0);
     if (cfg_.targetFps != 60 || !cfg_.edgeStep) cfg_.edgeCheck = false; // (Performance's edge step only; Hold30's edge rule is its own)
     cfg_.cadenceUpFrac = std::clamp(cfg_.cadenceUpFrac, 0.5, 1.0);
     cfg_.cadenceReachFps = std::clamp(cfg_.cadenceReachFps, 31.0, 60.0);
@@ -291,6 +296,7 @@ void Controller::ResetHolds() {
     missRun_ = calmRun_ = 0;
     missGpuSum_ = 0;
     missGpuN_ = 0;
+    fastN_ = 0; // (Config::fast60: the pictures before a change, a stall or a quiet moment are not those of the next size)
 }
 
 void Controller::Block(int rung, uint64_t now) {
@@ -729,6 +735,10 @@ bool Controller::Add(const FrameTimes& f) {
             // (Config::cadenceUp: a picture on the steady 30 that the census, judging it against 33.3 ms, blames on the GPU, or with the
             // GPU's own time unknown and nothing else measured that made it late: the size may have cost it)
             picCadLateGpu_ = cfg_.cadenceUp && f.cadence30 && (cause == 0 || (cause == 5 && gpuByElimination));
+            // (Config::fast60: the picture goes into the ring of the last ones, with its GPU time and its largest other stage)
+            if (Fast60())
+                FastNote(f, interval, picLateGpu_, f.timers ? f.gpuBusyUs : fenceBusy,
+                         std::max({gameUs, backendUs, FrontStage() ? uint64_t(lastFrontUs_) : uint64_t(0)}));
         }
         if (!gameKnown || !gameTurns || !backendKnown || !gpuKnown) {
             hintKnown_ = false;
@@ -970,6 +980,11 @@ bool Controller::Add(const FrameTimes& f) {
         return false;
     }
     if (f.presentUs < settleUntil_) return false;                                // a change is settling
+    // (Config::fast60, Performance: a sustained burst of pictures late for the GPU steps down now, not after the windows' holds; the
+    // movie, the quiet moment, the stall and the settling are all behind us here, and the steady 30's pictures never enter the ring)
+    if (Fast60()) {
+        if (const int r = FastStep(f.presentUs)) return r == 1;
+    }
     // (Config::overload: the GPU's own busy time a picture, known exactly with its timers)
     const bool gpuFrame = cfg_.overload && Target() && f.timers && f.busyKnown;
     if (gpuFrame) {
@@ -1046,6 +1061,104 @@ bool Controller::Add(const FrameTimes& f) {
     const bool changed = Evaluate(f.presentUs, mayChange);
     ResetWindow();
     return changed;
+}
+
+// Config::fast60: a picture into the ring of the last ones. Not counted (and the ring starts again): a quiet moment, a movie, a stall,
+// a picture on the steady 30 (the pacing's deliberate 30 is not a miss of 60). Not counted (the ring goes on): the settling after a change.
+void Controller::FastNote(const FrameTimes& f, uint64_t interval, bool lateGpu, uint64_t gpuUs, uint64_t otherUs) {
+    if (f.quiet || f.movie || f.cadence30 || static_cast<double>(interval) > cfg_.gapResetMs * 1000.0) { fastN_ = 0; return; }
+    if (f.presentUs < settleUntil_) return;
+    FastPic& p = fastRing_[fastHead_];
+    p.intervalUs = static_cast<uint32_t>(std::min<uint64_t>(interval, 0xFFFFFFFFu));
+    p.gpuUs = static_cast<uint32_t>(std::min<uint64_t>(gpuUs, 0xFFFFFFFFu));
+    p.otherUs = static_cast<uint32_t>(std::min<uint64_t>(otherUs, 0xFFFFFFFFu));
+    p.lateGpu = lateGpu;
+    fastHead_ = (fastHead_ + 1) % kFastRing;
+    if (fastN_ < kFastRing) ++fastN_;
+}
+
+// Config::fast60: a sustained burst (fast60Late of the last fast60Pics pictures late for the GPU, within fast60SpanSec) takes ONE step
+// down, in the order of the other rules: anisotropic filtering, the present's edge smoothing (at today's rung), then a rung. A picture late
+// for the CPU stages is not marked late for the GPU (picLateGpu_), so it never counts. Returns 0: nothing, 1: the rung changed, 2: a step or
+// anisotropic filtering changed (the rung did not).
+int Controller::FastStep(uint64_t now) {
+    const unsigned k = static_cast<unsigned>(cfg_.fast60Pics);
+    if (fastN_ < k) return 0;
+    // (the means are those of the pictures late for the GPU: at the start of a burst the ring still holds pictures from before it)
+    unsigned late = 0;
+    double spanUs = 0, gpuUs = 0, otherUs = 0, lateIntervalUs = 0;
+    for (unsigned i = 0; i < k; ++i) {
+        const FastPic& p = fastRing_[(fastHead_ + kFastRing - 1 - i) % kFastRing];
+        spanUs += p.intervalUs;
+        if (!p.lateGpu) continue;
+        ++late;
+        lateIntervalUs += p.intervalUs;
+        gpuUs += p.gpuUs;
+        otherUs += p.otherUs;
+    }
+    if (late < static_cast<unsigned>(cfg_.fast60Late) || spanUs > cfg_.fast60SpanSec * 1e6) return 0;
+    const uint64_t gap = static_cast<uint64_t>(cfg_.fast60GapSec * 1e6);
+    if ((changes_ && now < last_.atUs + gap) || (fxEver_ && now < lastFxAt_ + gap) || (anisoAt_ != 0 && now < anisoAt_ + gap)) return 0;
+    if (pendingUndo_ >= 0) return 0; // (a series that bought nothing is being undone)
+    const double gpuMs = gpuUs / late / 1000.0, otherMs = otherUs / late / 1000.0, intervalMs = lateIntervalUs / late / 1000.0;
+    winLoad_ = gpuMs / cfg_.budgetMs;
+    winIntervalMs_ = intervalMs;
+    if (aniso_) {
+        // (what means least goes first, as in the other rules: off, and on again blocked as after an overload)
+        anisoBlockLen_ = anisoBlockLen_ > 0 ? std::min(anisoBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.blockSec;
+        anisoBlockedUntil_ = now + static_cast<uint64_t>(anisoBlockLen_ * 1e6);
+        lastBlockAt_ = now;
+        SetAniso(false, Why::AnisoOff, now);
+        ++fastSteps_;
+        return 2;
+    }
+    if (rung_ == FxRung() && cfg_.edgeStep && !HoldEdgeRule() && !(steps_ & 4) && !trial_ && now >= onBlockedUntil_[2]) {
+        // (the present's edge smoothing off: no new render target, no freeze; judged by its own GPU-timed trial as in Evaluate)
+        fxBefore_ = gpuMs;
+        fxBoundKept_ = 0;
+        fxOffBlockLen_ = lastFxOffAt_ != 0 && now - lastFxOffAt_ < static_cast<uint64_t>(cfg_.fxRepeatSec * 1e6) && fxOffBlockLen_ > 0
+            ? std::min(fxOffBlockLen_ * 2.0, cfg_.maxBlockSec) : cfg_.fxOffBlockSec;
+        fxOffBlockedUntil_ = now + static_cast<uint64_t>(fxOffBlockLen_ * 1e6);
+        SetSteps(steps_ | 4u, Why::FxOn, now);
+        trial_ = 4u;
+        fxCheckT_ = fxCheckSum_ = 0;
+        fxCheckFrames_ = 0;
+        ++fastSteps_;
+        return 2;
+    }
+    if (rung_ <= cfg_.minRung) return 0; // (the floor rung: the steady 30 is the way out, as before)
+    // Not when even the floor rung cannot hold ~fast60ReachFps: its GPU time predicted by the pixels (the most a smaller size could save),
+    // or another stage, is over 1000 / fast60ReachFps ms.
+    const double floorGpuMs = gpuMs * Cost(cfg_.minRung) / Cost(rung_);
+    if (std::max(floorGpuMs, otherMs) > 1000.0 / cfg_.fast60ReachFps) return 0;
+    const int from = rung_;
+    if (from > kToday) {
+        // (above today's size: as an overload there, the rung left blocked (blockSec, doubling): no climb into a size just too slow)
+        Block(from, now);
+        checking_ = false;
+        ++fastSteps_;
+        SetRung(from - 1, Why::FastDown, now);
+        return 1;
+    }
+    // At or below today's size it is a step of the existing series of steps below, judged as the others (the GPU's time after belowCheckSec,
+    // the pictures, the scene's remembered floor, the blocks of a series that bought nothing): not when those rules say it would not gain.
+    if (now < belowBlockedUntil_ || (sceneFloor_ != kNoRung && rung_ <= sceneFloor_ && now < sceneFloorUntil_)) return 0;
+    if (std::max({floorGpuMs, otherMs, cfg_.budgetMs}) >= intervalMs * (1.0 - cfg_.pathRateFrac)) return 0;
+    if (pathFrom_ == kNoRung) { pathFrom_ = from; pathInterval_ = intervalMs; }
+    const bool series = checking_; // (a step while the last was still being judged: the judged start stays, the clock starts again)
+    const int checkFrom = series ? checkFrom_ : from;
+    const double before = series ? checkBefore_ : gpuMs;
+    Block(from, now); // (the hysteresis: the size just left is too slow; no climb back into it for blockSec, doubling)
+    ++fastSteps_;
+    SetRung(from - 1, Why::FastDown, now);
+    checking_ = true;
+    checkFrom_ = checkFrom;
+    checkBefore_ = before;
+    checkMissing_ = true;
+    checkSpan_ = 0;
+    checkT_ = 0;
+    checkFrames_ = 0;
+    return 1;
 }
 
 // Config::hold30: a decision window's pictures go into the hold window; one that has lasted holdWindowSec is judged: a miss (more than

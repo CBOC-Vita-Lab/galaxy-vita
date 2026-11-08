@@ -11,7 +11,7 @@ extern "C" int64_t port_host_time_ns(void) __attribute__((weak));
 extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));
 extern "C" void port_log_summary(const char*, ...) __attribute__((weak, format(printf, 1, 2)));
 
-namespace vgx { void DlCacheBranchCounts(uint64_t out[7]) __attribute__((weak)); void StateListFastCounters(uint64_t out[3]) __attribute__((weak));
+namespace vgx { void DlCacheBranchCounts(uint64_t out[7]) __attribute__((weak)); void DlOtherWhyCounts(uint64_t out[8]) __attribute__((weak)); void StateListFastCounters(uint64_t out[3]) __attribute__((weak));
                 void DrawReplayCounters5(uint64_t out[5]) __attribute__((weak));
                 namespace split { void KeyIdCounters(uint64_t out[4]) __attribute__((weak)); }
                 void FeCutCounters(uint64_t out[4]) __attribute__((weak)); void FxMergeCounters(uint64_t out[6]) __attribute__((weak)); }
@@ -926,6 +926,19 @@ inline void Report() {
                          (dl[0]-prevDl[0])/(double)pics, (dl[1]-prevDl[1])/(double)pics, (dl[2]-prevDl[2])/(double)pics, (dl[3]-prevDl[3])/(double)pics,
                          (dl[4]-prevDl[4])/(double)pics, (dl[5]-prevDl[5])/(double)pics, (dl[6]-prevDl[6])/(double)pics);
         for (int i = 0; i < 7; ++i) prevDl[i] = dl[i];
+        if (&DlOtherWhyCounts) {
+            // (the calls that went the "list-other" way, by cause: a list outside guest RAM; a bypassed list that StateListCall replayed
+            // as a material list / that was decoded by ProcessStream; lists put into the bypass map by repeated rewrites / by a new
+            // variant every picture; a list the cache refused (state inside) replayed as a material list / decoded; builds)
+            static uint64_t prevOw[8] = {};
+            uint64_t ow[8];
+            DlOtherWhyCounts(ow);
+            port_log_summary("workload: list-other why per picture: not-guest %.1f, bypassed->state-replay %.1f, bypassed->decode %.1f, bypass-set(rewritten) %.1f, "
+                             "bypass-set(variant streak) %.1f, uncacheable->state-replay %.1f, uncacheable->decode %.1f, builds %.1f",
+                             (ow[0]-prevOw[0])/(double)pics, (ow[1]-prevOw[1])/(double)pics, (ow[2]-prevOw[2])/(double)pics, (ow[3]-prevOw[3])/(double)pics,
+                             (ow[4]-prevOw[4])/(double)pics, (ow[5]-prevOw[5])/(double)pics, (ow[6]-prevOw[6])/(double)pics, (ow[7]-prevOw[7])/(double)pics);
+            for (int i = 0; i < 8; ++i) prevOw[i] = ow[i];
+        }
         // (GXV_SLFAST, vgx_state.cpp StateListFastHit: material lists replayed without the geometry cache's detour; "via-table" and
         // "same-bytes" are the ones that went through it before, as "bypassed" calls)
         static uint64_t prevSl[3] = {};

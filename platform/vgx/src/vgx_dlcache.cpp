@@ -33,6 +33,7 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <algorithm>
 #include <atomic>
 #include <unordered_map>
 
@@ -238,6 +239,9 @@ uint64_t SetBypass(Bypass& b, uint64_t frame) {
     return b.until;
 }
 PtrMap<Bypass> g_bypass; // lists not worth caching for now (state inside, volatile)
+// (GXV_FE_SPLIT: why a call of CallListBody went the "list-other" way, counted per picture in the "list-other why" line of vgx_workload.h)
+enum OtherWhy : unsigned { OwNotGuest, OwBypassStateReplay, OwBypassStream, OwRehashBypassSet, OwStreakBypassSet, OwUncacheableState, OwUncacheableStream, OwBuild, OwCount };
+uint64_t g_otherWhy[OwCount] = {};
 
 int g_mode = -1; // 0 off, 1 on, 2 verify
 bool g_static = true;   // GXV_STATICBUF=0: never promote (decoded vertices are copied into the arena every time)
@@ -246,6 +250,7 @@ bool g_keepCopy = false; // GXV_HASH=2: keep the bytes of promoted entries for h
 struct Counters {
     uint64_t hits = 0, builds = 0, rehashOk = 0, rehashChanged = 0, bypassed = 0, uncacheable = 0, staleNoNotify = 0, evicted = 0;
     uint64_t hitVerts = 0, builtVerts = 0, liveBytes = 0, staticBytes = 0, promoted = 0, staticBufs = 0;
+    uint64_t weldLists = 0, weldIn = 0, weldOut = 0; // (GXV_DLWELD) promoted lists welded, their vertices before / after
 } g_ctr;
 
 // ---- learned copies (GXV_RIGIDMERGE_DLLEARN)
@@ -312,6 +317,52 @@ void ReleaseBuffer(Entry& e) {
     e.bufId = 0;
     e.bufBytes = 0;
 }
+// GXV_DLWELD (default 1; 0: every vertex of every primitive is its own vertex of the static buffer, as before). The game's models are
+// hundreds of short triangle strips and fans (three to eight vertices, see Run), and the same mesh vertex (the same indices into the
+// position / normal / colour / texture arrays, so the same decoded bytes) comes up again in every strip that touches it: the decoded
+// list holds it two to six times, and the vertex shader runs for every copy. Promote writes each distinct vertex of a run once and
+// points the run's indices at it. Exact: the vertices are byte for byte the ones the unwelded buffer holds (same layout mask, same
+// stride, same bytes, NaN patterns included), so every index reads the same attribute values and the vertex shader gives the same
+// outputs for it; the primitives, their order and winding are the same, so the same triangles reach the rasteriser in the same order.
+// A run's indices stay inside its own block of the buffer (vtxFirst .. vtxFirst + vtxCount, now the number of distinct vertices) and
+// the runs are cut where they were (the unwelded counts), so records, merging and bounds are as before. With absolute indices the
+// block's vertices are numbered from the buffer's start (all strides equal), with relative ones (the Vita build: a byte offset per
+// draw, GXV_ABSIDX_DEFAULT=0) from the run's own byte offset. Not for GXV_HASH=2 (reference hashes of the buffer's bytes).
+bool WeldOn() {
+    static const bool on = EnvInt("GXV_DLWELD", 0) != 0;
+    return on;
+}
+// The distinct vertices of one run: an open-addressing table of slots (+1) in the new buffer, emptied by a stamp per run.
+struct Welder {
+    std::vector<uint32_t> stamp, slot;
+    uint32_t mask = 0, cur = 0;
+    void Init(uint32_t maxVerts) {
+        uint32_t cap = 256;
+        while (cap < maxVerts * 2u) cap <<= 1;
+        if (stamp.size() < cap) { stamp.assign(cap, 0); slot.assign(cap, 0); cur = 0; }
+        mask = static_cast<uint32_t>(stamp.size()) - 1u; // (a larger table from an earlier list is fine: same hash, fewer collisions)
+    }
+    void NewRun() {
+        if (++cur == 0) { std::fill(stamp.begin(), stamp.end(), 0u); cur = 1; }
+    }
+    // The slot (index among the run's distinct vertices, from 0) of the vertex `v` of `stride` bytes; the run's block starts `block`
+    // bytes into `out`; the vertex is appended there if it is new.
+    uint32_t Find(std::vector<uint8_t>& out, size_t block, const uint8_t* v, uint32_t stride) {
+        uint32_t h = static_cast<uint32_t>(XXH3_64bits(v, stride)) & mask;
+        for (;;) {
+            if (stamp[h] != cur) {
+                const uint32_t n = static_cast<uint32_t>((out.size() - block) / stride);
+                out.insert(out.end(), v, v + stride);
+                stamp[h] = cur;
+                slot[h] = n;
+                return n;
+            }
+            if (std::memcmp(out.data() + block + static_cast<size_t>(slot[h]) * stride, v, stride) == 0) return slot[h];
+            h = (h + 1u) & mask;
+        }
+    }
+};
+
 // Moves the entry's geometry into a static buffer of the back end.
 void Promote(Entry& e) {
     split::Settle(e.ticket); // (GXV_SPLIT_COPY: the vertices may move to the back end below)
@@ -336,6 +387,17 @@ void Promote(Entry& e) {
     BufUpload up;
     up.bufId = e.bufId = AllocBufId(&e);
     e.runs.clear();
+    const bool weld = !g_keepCopy && WeldOn();
+    static Welder welder;
+    static std::vector<uint16_t> slotOf;
+    if (weld) {
+        welder.Init(e.totalVerts);
+        up.vtx.reserve(e.verts.size());
+    }
+    uint64_t weldedVerts = 0; // (welding: the distinct vertices written, over all runs)
+    uint32_t runRaw = 0; // (welding: the run's vertices before welding; the runs are cut by these, as without it)
+    size_t block = 0;    // (welding: where the run's block of distinct vertices starts in the new buffer, bytes)
+    uint32_t base = 0;   // (welding: the number its first vertex has: absolute indices count from the buffer's start, relative ones from the block)
     for (Seg& sg : e.segs) {
         const uint32_t segStride = sg.stride;
         const uint8_t kind = (sg.prim == 0xA8 || sg.prim == 0xB0) ? PRIM_LINES : (sg.prim == 0xB8 ? PRIM_POINTS : PRIM_TRIANGLES);
@@ -343,35 +405,71 @@ void Promote(Entry& e) {
         // Continue the current run, or start one: at a change of layout or primitive kind, and
         // where a run's vertices would no longer fit 16-bit indices counted from its start.
         Run* r = e.runs.empty() ? nullptr : &e.runs.back();
-        if (!r || r->primKind != kind || r->layoutMask != sg.layoutMask || r->vtxCount + sg.count > 0xFFFF ||
-            sg.offset != r->vtxByteOffset + r->vtxCount * segStride) {
+        const bool cut = weld ? (!r || r->primKind != kind || r->layoutMask != sg.layoutMask || runRaw + sg.count > 0xFFFF)
+                              : (!r || r->primKind != kind || r->layoutMask != sg.layoutMask || r->vtxCount + sg.count > 0xFFFF ||
+                                 sg.offset != r->vtxByteOffset + r->vtxCount * segStride);
+        if (cut) {
             e.runs.emplace_back();
             r = &e.runs.back();
             r->primKind = kind;
             r->layoutMask = sg.layoutMask;
-            r->vtxByteOffset = sg.offset;
-            r->vtxFirst = abs ? sg.offset / stride : 0;
             r->idxOffset = static_cast<uint32_t>(up.idx.size());
+            if (weld) {
+                block = up.vtx.size(); // (the run's block of distinct vertices starts here)
+                base = abs ? static_cast<uint32_t>(block / stride) : 0u;
+                r->vtxByteOffset = static_cast<uint32_t>(block);
+                r->vtxFirst = base;
+                runRaw = 0;
+                welder.NewRun();
+            } else {
+                r->vtxByteOffset = sg.offset;
+                r->vtxFirst = abs ? sg.offset / stride : 0;
+            }
         }
         sg.idxOffset = static_cast<uint32_t>(up.idx.size());
-        // Indices count from the buffer's start (absolute) or from the run's first vertex.
-        sg.vtxFirst = abs ? sg.offset / stride : (sg.offset - r->vtxByteOffset) / segStride;
         up.idx.resize(up.idx.size() + n);
-        PrimIndices(sg.prim, sg.count, sg.vtxFirst, up.idx.data() + sg.idxOffset);
-        r->vtxCount += sg.count;
+        if (weld) {
+            // Indices relative to the primitive's first vertex, then through the slot of each of its vertices.
+            sg.vtxFirst = base;
+            uint16_t* const ix = up.idx.data() + sg.idxOffset;
+            PrimIndices(sg.prim, sg.count, 0, ix);
+            slotOf.resize(sg.count);
+            const uint8_t* v = e.verts.data() + sg.offset;
+            for (uint32_t i = 0; i < sg.count; ++i, v += segStride) slotOf[i] = static_cast<uint16_t>(base + welder.Find(up.vtx, block, v, segStride));
+            for (uint32_t i = 0; i < n; ++i) ix[i] = slotOf[ix[i]];
+            runRaw += sg.count;
+            weldedVerts += (up.vtx.size() - block) / segStride - r->vtxCount;
+            r->vtxCount = static_cast<uint32_t>((up.vtx.size() - block) / segStride);
+        } else {
+            // Indices count from the buffer's start (absolute) or from the run's first vertex.
+            sg.vtxFirst = abs ? sg.offset / stride : (sg.offset - r->vtxByteOffset) / segStride;
+            PrimIndices(sg.prim, sg.count, sg.vtxFirst, up.idx.data() + sg.idxOffset);
+            r->vtxCount += sg.count;
+        }
         r->idxCount += n;
         ++r->prims;
         if (sg.posMtxMax > r->posMtxMax) r->posMtxMax = sg.posMtxMax;
     }
-    e.bufBytes = static_cast<uint32_t>(e.verts.size() + up.idx.size() * 2);
+    if (weld) {
+        g_ctr.weldIn += e.totalVerts;
+        g_ctr.weldOut += weldedVerts;
+        ++g_ctr.weldLists;
+        if (up.vtx.size() * 4 < up.vtx.capacity() * 3) up.vtx.shrink_to_fit();
+        if ((g_ctr.weldLists & 255u) == 1u)
+            VGX_LOG("dl weld: %llu lists, vertices %llu -> %llu (%.1f%%)\n", (unsigned long long)g_ctr.weldLists, (unsigned long long)g_ctr.weldIn,
+                    (unsigned long long)g_ctr.weldOut, 100.0 * (double)g_ctr.weldOut / (double)(g_ctr.weldIn ? g_ctr.weldIn : 1));
+    }
+    e.bufBytes = static_cast<uint32_t>((weld ? up.vtx.size() : e.verts.size()) + up.idx.size() * 2);
     g_ctr.liveBytes -= e.verts.capacity();
     if (g_keepCopy) {
         up.vtx = e.verts;
         e.idx = up.idx;
         g_ctr.liveBytes += e.verts.capacity();
     } else if (e.copyable) {
-        up.vtx = e.verts; // (GXV_RIGIDMERGE_DLLEARN: the entry keeps its vertices too, for the copies into the arena)
+        if (!weld) up.vtx = e.verts; // (GXV_RIGIDMERGE_DLLEARN: the entry keeps its vertices too, for the copies into the arena; welded: the buffer has its own)
         g_ctr.liveBytes += e.verts.capacity();
+    } else if (weld) {
+        e.verts = std::vector<uint8_t>(); // (the welded buffer is up.vtx; this entry is not copied from)
     } else {
         up.vtx = std::move(e.verts);
         e.verts = std::vector<uint8_t>();
@@ -743,6 +841,8 @@ void DlCacheBranchCounts(uint64_t out[7]) {
     out[0] = g_ctr.hits; out[1] = g_ctr.rehashOk; out[2] = g_ctr.rehashChanged; out[3] = g_ctr.bypassed;
     out[4] = g_ctr.builds; out[5] = g_ctr.uncacheable; out[6] = g_ctr.promoted;
 }
+// (GXV_FE_SPLIT: the "list-other why" counters)
+void DlOtherWhyCounts(uint64_t out[8]) { for (unsigned i = 0; i < OwCount; ++i) out[i] = g_otherWhy[i]; }
 uint64_t DlCacheStaticBytes() { return g_ctr.staticBytes; }
 
 void DlCacheReport(FILE* f) {
@@ -755,6 +855,9 @@ void DlCacheReport(FILE* f) {
                  (unsigned long long)g_ctr.bypassed, (unsigned long long)g_ctr.uncacheable, (unsigned long long)g_ctr.evicted,
                  (unsigned long long)g_ctr.staleNoNotify, g_ctr.liveBytes / 1048576.0, (unsigned long long)g_ctr.promoted,
                  (unsigned long long)g_ctr.staticBufs, g_ctr.staticBytes / 1048576.0);
+    if (g_ctr.weldLists)
+        std::fprintf(f, "GXV_DLWELD: %llu promoted lists welded, vertices %llu -> %llu (%.1f%%)\n", (unsigned long long)g_ctr.weldLists,
+                     (unsigned long long)g_ctr.weldIn, (unsigned long long)g_ctr.weldOut, 100.0 * (double)g_ctr.weldOut / (double)(g_ctr.weldIn ? g_ctr.weldIn : 1));
     if (g_learnMax)
         std::fprintf(f,
                      "learned copies (up to %u vertices): %llu copies (%.1f MB), %llu joined, %llu did not; %llu static uses, %llu of them could have joined; "
@@ -1012,6 +1115,7 @@ static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope
     }
     SyncVertexArrays();
     if (!IsGuestRam(list, nbytes)) {
+        ++g_otherWhy[OwNotGuest];
         ProcessStream(list, nbytes);
         return;
     }
@@ -1024,7 +1128,8 @@ static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope
             if (frame < b->until) {
                 ++g_ctr.bypassed;
                 ++stats::Cur().dlBypass;
-                if (!StateListCall(list, nbytes)) ProcessStream(list, nbytes);  // (material lists: pre-parsed, vgx_state.cpp)
+                if (!StateListCall(list, nbytes)) { ++g_otherWhy[OwBypassStream]; ProcessStream(list, nbytes); }  // (material lists: pre-parsed, vgx_state.cpp)
+                else ++g_otherWhy[OwBypassStateReplay];
                 return;
             }
             // expired: try caching again (the entry stays, it remembers the back-off level)
@@ -1089,6 +1194,7 @@ static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope
             // Rewritten every time it is drawn (dynamic geometry): hashing and
             // storing it is wasted work. Decode directly for the next two seconds.
             SetBypass(g_bypass[list], frame);
+            ++g_otherWhy[OwRehashBypassSet];
             Unlink(li, e);
             if (!li.head) { g_map.Erase(list); MapFrontClear(); }
             ProcessStream(list, nbytes);
@@ -1108,6 +1214,7 @@ static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope
             li.lastNewVariant = frame;
             if (li.streak >= 4) {
                 SetBypass(g_bypass[list], frame);
+                ++g_otherWhy[OwStreakBypassSet];
                 FreeAll(li);
                 g_map.Erase(list);
                 MapFrontClear();
@@ -1160,10 +1267,12 @@ static void CallListBody(const uint8_t* list, uint32_t nbytes, workload::FeScope
         g_bypass[list].until = frame + 600;
         Unlink(li, e);
         if (!li.head) { g_map.Erase(list); MapFrontClear(); }
-        if (!StateListCall(list, nbytes)) ProcessStream(list, nbytes);
+        if (!StateListCall(list, nbytes)) { ++g_otherWhy[OwUncacheableStream]; ProcessStream(list, nbytes); }
+        else ++g_otherWhy[OwUncacheableState];
         return;
     }
     e->lastUse = age;
+    ++g_otherWhy[OwBuild];
     ++g_ctr.builds;
     ++stats::Cur().dlBuild;
     g_ctr.builtVerts += e->totalVerts;
