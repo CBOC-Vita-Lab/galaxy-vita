@@ -13,7 +13,6 @@
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/MapUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
-#include <revolution/os.h>
 #include <revolution/types.h>
 
 void MarioActor::setPlayerMode(u16 playerMode, bool myBool) {
@@ -92,12 +91,8 @@ void MarioActor::setPlayerMode(u16 playerMode, bool myBool) {
             MR::getGameSceneLayoutHolder()->changeLifeMeterModeGround();
         }
 
-        if (_9E4) {
-            _9E4->kill();
-        }
-        if (_9E8) {
-            _9E8->kill();
-        }
+        _9E4->kill();
+        _9E8->kill();
         break;
 
     case 3:
@@ -246,12 +241,6 @@ void MarioActor::setPlayerMode(u16 playerMode, bool myBool) {
         break;
 
     case 4:
-        if (!_9E4 || !_9E8) {
-            // port: BeeMario/BeeMarioWing archives were not loaded (initBeeMario returned early);
-            // fall back to Normal rather than dereferencing null. Do not change life meter.
-            OSReport("beecrash: bee model missing (_9E4=%p _9E8=%p), staying Normal\n", _9E4, _9E8);
-            break;
-        }
         MR::getGameSceneLayoutHolder()->changeLifeMeterModeBee();
 
         rushDropThrowMemoSensor();

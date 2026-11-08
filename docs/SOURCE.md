@@ -1,5 +1,9 @@
 # Source Record
 
+## Version 2.2.1 (`galaxy-v2.2.1`)
+
+A rollback of the game code to 2.1.1 (eboot r102, SHA-256 `60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563`, vitaGL reader vp20) after players reported a crash (C2-12828-1) on entering the Comet Observatory with 2.2 (r108). The package is 2.1.1's (console-compiled vertex shaders plus 2.1's fragment set) with 2.2's art, Settings tile and template content-rev 3, APP_VER 02.21. The r108 changes stay on the work branch until the crash is found.
+
 ## Version 2.2 (`galaxy-v2.2`)
 
 The eboot is the console-tested build r108 (SHA-256 `4324e96c69d6791289ebdbf077fb1dbf5ed8715f8386317f9c0580fb2022e3d7`), vitaGL archive `libvitaGL-reader-vp21` (vp20 plus gxm.o/tests.o rebuilt with patches 0021 color-load-skip and 0022 mask-keep-display; both are inert unless their switches are set, except `GXV_VGL_MASKKEEP_DISPLAY`, default 1). APP_VER 02.20.

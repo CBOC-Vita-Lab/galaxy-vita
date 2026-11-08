@@ -30,7 +30,6 @@ extern "C" void port_debug_dump_threads(void);
 // (platform/src/port/perf.cpp) the stage being loaded, for the renderer's stage warm-up (GXV_STAGEWARM)
 extern "C" void port_scene_load_begin(const char* stage);
 extern "C" void port_scene_load_end(void);
-extern "C" int port_stage_warm_hold(void) __attribute__((weak));
 #endif
 
 namespace {
@@ -230,14 +229,8 @@ bool GameSystemSceneController::isStopSound() const {
 }
 
 bool GameSystemSceneController::isReadyToStartScene() const {
-    const bool ready = isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene)) &&
-                       !mScenarioSelectScene->isScenarioSelecting();
-#if defined(__vita__)
-    // (GXV_STAGEWARM_HOLD_MS, platform/vgx/src/vgx_backend_gl.cpp) the closed screen opens only after this: the renderer asks to wait
-    // while the stage's program queue is not finished (capped), so the first frames of play link nothing
-    if (ready && port_stage_warm_hold && port_stage_warm_hold()) return false;
-#endif
-    return ready;
+    return isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene)) &&
+           !mScenarioSelectScene->isScenarioSelecting();
 }
 
 bool GameSystemSceneController::isFirstUpdateSceneNerveNormal() const {

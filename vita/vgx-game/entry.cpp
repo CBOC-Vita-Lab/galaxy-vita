@@ -525,10 +525,6 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // on time: a smaller size only after sustained misses blamed on the GPU, a climb trial back after 20 s of calm (vgx_autoq.h
     // Config::hold30; Locked 30 and Performance unchanged). GXV_AUTOQ_HOLD30=0 in env.txt: the GPU-busy rules as before.
     setenv("GXV_AUTOQ_HOLD30", "1", 0);
-    // autoq (7 Nov): Performance mode only (target 60; the controller forces it off for Quality and Locked 30): a sustained burst of pictures
-    // late for the GPU (8 of the last 12, every other stage fitting) steps down one size within ~0.3 s and again while they stay late, instead of
-    // after 4+ s and a quiet moment (r100: Good Egg zoom 2.0 held 720x404 at 48.6 fps, Honeyhive 41.8). GXV_AUTOQ_FAST60=0: the old pace.
-    setenv("GXV_AUTOQ_FAST60", "1", 0);
     // gpu960 (6 Nov): GPU cuts at 960x544 for Quality's full size. GXV_EDGE_AA_HUDCUT: the edge pass leaves out the HUD rectangles it
     // redraws anyway (byte-identical). GXV_VGL_MASKKEEP: vitaGL (patches/0018, MASK_KEEP) skips the full-target scissor-mask quad of
     // scenes that do not load depth. GXV_EFBSWAP2: the shadow-alpha and indirect screen captures without an EFB scene split (exact;

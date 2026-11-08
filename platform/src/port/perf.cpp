@@ -705,14 +705,6 @@ extern "C" void port_scene_load_begin(const char* stage) {
 }
 extern "C" void port_scene_load_end(void) { sLoadingActive.store(0, std::memory_order_release); }
 extern "C" uint32_t port_scene_loading_key(void) { return sLoadingKey.load(std::memory_order_relaxed); }
-// (GXV_STAGEWARM_MENU) the star select / galaxy map (ScenarioSelectScene::draw) marks each drawn turn; the renderer records its programs
-// under the menu list while the mark is recent (a few frames: the back end runs a little behind the game thread).
-static std::atomic<int64_t> sMenuLayerNs{0};
-extern "C" void port_menu_layer_mark(void) { sMenuLayerNs.store(port_host_time_ns(), std::memory_order_relaxed); }
-extern "C" int port_menu_layer_recent(void) {
-    const int64_t at = sMenuLayerNs.load(std::memory_order_relaxed);
-    return at != 0 && port_host_time_ns() - at < 150000000 ? 1 : 0;
-}
 extern "C" int port_scene_loading_active(void) { return sLoadingActive.load(std::memory_order_acquire); }
 // The raw flag (GXV_DL_LAZY, decomp/src/Game/LiveActor/ModelManager.cpp): materials of a turn without a picture are computed at
 // the next turn that draws. GXV_DL_LAZY=0 turns it off (read once; default 1).

@@ -183,25 +183,6 @@
 //     the cadence (more than holdMissFrac of the trial's) or a GPU-limited window against 33.3 ms go back at once to the rung it came from
 //     and block the rung tried (blockSec, doubling; Why::CadenceBack). Steps down on the cadence are as before (DownBudgetMs); anisotropic
 //     filtering is not touched by it.
-// Performance mode: fast60 (Config::fast60, GXV_AUTOQ_FAST60=1|0, default on in the back end and entry.cpp; target 60 only, Config::fast60 is
-// forced off for any other target, so Quality and Locked 30 never run it). The console (r100): Good Egg zoom 2.0 held 720x404 at 48.6 a
-// second, Honeyhive 41.8, Beach Bowl dropped to a steady 30, because a step below today's size waits for a quiet moment or 4-8 s of a
-// GPU-limited stretch and then for a GPU-timed trial, and a spike took seconds to answer. With it, per picture (after the existing
-// rejections: a movie, a quiet moment, a stall over gapResetMs, the settling after a change, a picture on the steady 30 are not looked at):
-//   - a picture is "late for the GPU" as in the floor census (the budget + 3 %, the GPU the largest stage by causeShare and every other
-//     measured stage within the budget + 3 %); a picture late for the game's CPU, the renderer or the front end never counts;
-//   - fast60Late (8) of the last fast60Pics (12) pictures late for the GPU, those 12 within fast60SpanSec, and fast60GapSec since the
-//     last change: one step down (about 0.2-0.4 s after the spike began). In this order: anisotropic filtering off (as the other rules),
-//     the present's edge smoothing off (Config::edgeStep, with its GPU-timed trial, at today's rung), then ONE RUNG down. Above today's
-//     rung the rung left is blocked as after an overload (blockSec, doubling to maxBlockSec: the hysteresis, no climb into a size that was
-//     just too slow); at or below today's it joins the existing series of steps below (pathFrom_, checking_): the series is judged after
-//     belowCheckSec by the GPU's time (any real saving, missGainFrac, because the floor is missed) and by the pictures (pathRateFrac), and
-//     is undone as a whole, blocked and remembered with the scene when it buys nothing. The rung left is blocked for climbs as well.
-//   - it goes on one rung at a time while the pictures stay late for the GPU (each step needs 12 fresh pictures after the change), down to
-//     the floor rung, even when the predicted gain of a single step is small (the GPU's fixed per-scene cost makes each step a few percent);
-//   - not when even the floor rung cannot hold ~fast60ReachFps: the floor rung's predicted GPU time (falling with the pixels) or the other
-//     stages over 18.2 ms, or the existing "cannot gain" test: that is the steady 30's case, left to it (GXV_STEADY30) as before;
-//   - the way back is the existing one (room at 16.7 ms for recoverHoldSec with the rung's block run out); nothing here steps up.
 // The pacing hint (port_autoq_picture_work_us) stays a 30 Hz feasibility cost in both targets (two turns): the 20/30 pacing of
 // GXV_PACE reads it against 30 Hz limits. The bounded slip (GXV_SLIP) is a 30-floor tool: it engages only when a pair of turns
 // does not fit two retraces (a game slower than 30 at full speed), where 60 is out of reach anyway, and it only paces turns, so
@@ -464,14 +445,6 @@ struct Config {
     bool cadenceUp = false;
     double cadenceUpFrac = 0.90;    // the predicted GPU time and the other stages within this share of 33.3 ms
     double cadenceReachFps = port::pace::kSteady30AboveFps; // 60 out of reach: the floor rung's GPU or the other stages miss this rate
-    // GXV_AUTOQ_FAST60=1|0 (target 60 only; off here, on in the back end): Performance mode steps down within about half a second of
-    // sustained pictures late for the GPU, one size at a time, and keeps going while they stay late (see "Performance mode: fast60").
-    bool fast60 = false;
-    int fast60Pics = 12;            // the last this many pictures are looked at ...
-    int fast60Late = 8;             // ... and this many of them late for the GPU (every other stage fitted) is a sustained miss
-    double fast60SpanSec = 1.0;     // ... when they took at most this long (a stall is not a burst)
-    double fast60GapSec = 0.75;     // changes at least this far apart (settleSec, then fast60Pics fresh pictures, are needed anyway)
-    double fast60ReachFps = 55.0;   // no step when even the floor rung's predicted GPU time, or another stage, is over 1000 / this ms
     // GXV_AUTOQ_EDGECHECK=1|0 (target 60 with edgeStep only; off here, on in the back end): the edge step's GPU-timed trial is judged over
     // edgeCheckSec instead of checkSec and kept when the GPU fell by the smaller of half its assumed saving (1 - 1 / edgeRatio) and
     // edgeBetterFrac, instead of betterFrac (5 %): its ~12 % saving read as 5 % in a 2 s trial through the camera's noise (Good Egg,
@@ -527,7 +500,7 @@ struct FrameTimes {
 };
 
 enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain, AnisoOn, AnisoOff, Wipe, FreeDown, Severe,
-                           HoldMiss, HoldClimb, HoldBack, HoldEdgeOff, HoldEdgeOn, HoldEdgeBack, CadenceUp, CadenceBack, FastDown };
+                           HoldMiss, HoldClimb, HoldBack, HoldEdgeOff, HoldEdgeOn, HoldEdgeBack, CadenceUp, CadenceBack };
 const char* WhyText(Why w);
 
 struct Change {
@@ -754,18 +727,6 @@ private:
     bool HoldEdgeRule() const { return Hold30() && cfg_.edgeStep; }
     void SetHoldEdge(bool off, Why why, uint64_t now);
     unsigned quietUps_ = 0;
-    // Performance mode, Config::fast60: the last pictures (ring), the step and its state
-    bool Fast60() const { return cfg_.fast60 && cfg_.targetFps == 60; }
-    struct FastPic { uint32_t intervalUs = 0, gpuUs = 0, otherUs = 0; bool lateGpu = false; };
-    static constexpr unsigned kFastRing = 32;
-    FastPic fastRing_[kFastRing];
-    unsigned fastN_ = 0, fastHead_ = 0;            // pictures in the ring (since the last change, quiet moment, stall ...), next slot
-    unsigned fastSteps_ = 0;
-    void FastNote(const FrameTimes& f, uint64_t interval, bool lateGpu, uint64_t gpuUs, uint64_t otherUs);
-    int FastStep(uint64_t now);                     // 0: nothing, 1: the rung changed, 2: a step or anisotropic filtering changed
-public:
-    unsigned FastSteps() const { return fastSteps_; }
-private:
     // floor protection by degrees (Config::fxStep)
     unsigned steps_ = 0;                    // bit 0 half-size effects and blur, bit 1 cheaper background
     Change lastFx_;
