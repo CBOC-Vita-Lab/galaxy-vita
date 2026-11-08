@@ -644,19 +644,6 @@ inline void FrameEnd(unsigned scenes, unsigned copyQuads) {
 } // namespace beprof
 #define BEPROF_MARK(b) do { if (beprof::g_frame) beprof::Mark(beprof::b); } while (0)
 
-// ---- GXV_BE_PLD (default 0; read in Init): look-ahead cache hints for the draws of a command buffer (see bepldx::Ahead before ExecuteFrame)
-// A data-cache hint (PLD on ARM) never faults and never changes a value; it only moves the time a load takes. 0 off, 1 on.
-// GXV_BE_PLD_LINES=<n> (default 3, 1..4): the most lines hinted of each uniform block.
-namespace bepld {
-bool g_on = false;
-uint32_t g_lines = 3;
-void Configure() {
-    g_on = EnvInt("GXV_BE_PLD", 0) != 0;
-    g_lines = static_cast<uint32_t>(std::clamp<long>(EnvInt("GXV_BE_PLD_LINES", 3), 1, 4));
-    if (g_on) autoq::Log("[be-pld] on: the next three draws' records, uniform blocks (%u lines at most), texture slots and programs are hinted to the cache as a draw is executed", g_lines);
-}
-} // namespace bepld
-
 // ---- GXV_GPU_SCENES (the player build too; default 0): where the GPU's time goes, scene by scene, on the console
 // The GPU clock of automatic quality (vitaGL's GPU timers) gives one number a picture: from each scene's sceGxmEndScene to its fragment
 // completion. A tile-based GPU does a scene in two phases: the vertex phase (vertex shaders, clipping, binning into the tiles: "TA")
@@ -6362,11 +6349,6 @@ void AutoQualityInit() {
         // only where 60 is out of reach at any size: the reach is the steady 30's own release (GXV_STEADY30_ABOVE, 45 a second, read and
         // bounded as port/perf.cpp does, so the two agree). 0: the old decisions.
         cfg.cadenceUp = targetFps == 60 && EnvInt("GXV_AUTOQ_CADENCE_UP", 1) != 0;
-        {
-            // (GXV_STEADY30_GPUSCALE, percent, default 100: see Config::cadenceGpuScale)
-            const long pct = EnvInt("GXV_STEADY30_GPUSCALE", 100);
-            cfg.cadenceGpuScale = pct < 0 ? 0.0 : pct > 100 ? 1.0 : static_cast<double>(pct) / 100.0;
-        }
         if (cfg.cadenceUp) {
             const long below = std::clamp<long>(EnvInt("GXV_STEADY30_BELOW", static_cast<long>(port::pace::kSteady30BelowFps)), 20, 58);
             const long above = std::clamp<long>(EnvInt("GXV_STEADY30_ABOVE", static_cast<long>(port::pace::kSteady30AboveFps)), 31, 60);
@@ -6532,7 +6514,7 @@ void FloorReport() {
         const size_t used = std::strlen(steps);
         std::snprintf(steps + used, sizeof steps - used, "; anisotropic filtering %s", g_autoq->AnisoOn() ? "on" : "off");
     }
-    char extra[512] = "";
+    char extra[256] = "";
     if (w.stalls || w.quiet)
         std::snprintf(extra, sizeof extra, "; not counted: %u stalls (%.2f s), %u pause/fade pictures", w.stalls, static_cast<double>(w.stallUs) / 1e6, w.quiet);
     if (w.cadence) {
@@ -6557,13 +6539,6 @@ void FloorReport() {
     if (w.late == 0) {
         autoq::LogSummary("floor: %.1f s, %u pictures, none under %d; rung %d (%s)%s%s", window, w.pictures, g_autoq->Cfg().targetFps, g_rung, rungText, steps, extra);
         return;
-    }
-    if (w.otherMulti != 0 || w.otherGameSpan != 0) {
-        // (GXV_FLOOR_SPAN: of "none of these", the pictures that spanned several game turns, and those whose game thread CPU over all
-        // their turns filled 85 % of the interval or more, with the mean share of those; the rest are waits and pacing proper)
-        const size_t used = std::strlen(extra);
-        std::snprintf(extra + used, sizeof extra - used, "; of the none: %u spanned 2+ game turns, %u filled by the game thread's own turns (%.0f %% of their interval)",
-                      w.otherMulti, w.otherGameSpan, w.otherSpanUs ? 100.0 * static_cast<double>(w.otherGameSpanUs) / static_cast<double>(w.otherSpanUs) : 0.0);
     }
     autoq::LogSummary("floor: %.1f s, %u pictures, %u late (over %.1f ms) = %.2f s below %d, worst %.0f ms; late by GPU %u, game CPU %u, renderer CPU %u, "
                       "front end CPU %u, none of these (waits, pacing) %u, not measured %u; rung %d (%s)%s%s",
@@ -8125,7 +8100,6 @@ bool Init(int renderWidth, int renderHeight) {
     g_quadClear = EnvInt("GXV_QUADCLEAR", 1) != 0;
     g_noCache = EnvInt("GXV_GLCACHE", 1) == 0;
     beprof::Configure(); // (GXV_BE_PROF)
-    bepld::Configure(); // (GXV_BE_PLD)
     gpuscenes::g_mode = static_cast<int>(std::clamp<long>(EnvInt("GXV_GPU_SCENES", 0), 0, 2));
     gpuscenes::g_on = gpuscenes::g_mode != 0;
     g_px.noop = EnvInt("GXV_PX_NOOP", 0) != 0;
@@ -10364,57 +10338,6 @@ void OverdrawPlan(const CmdBuf& buf, bool diag) {
     o.covered += nCovered; o.blended += nBlended; o.noEffect += nNoEffect; o.px += px; ++o.frames;
 }
 
-// GXV_BE_PLD: what the draws a few commands ahead will read, hinted to the cache while the current draw is executed. The back end
-// reads, per draw, its record (about six lines, written by the finishing thread on another core), up to six uniform blocks of the
-// frame's uniform arena (also written there), the texture slots and the program (the front slot, then the Program, one dependent load
-// after another). Each of those loads went to memory one after the other. Three stages, so that no hint waits for a load that has not
-// arrived: the command three ahead has its record hinted (an address that needs no load); the one two ahead, whose record the last step
-// hinted, has its uniform blocks, its textures' slots and its program's front slot hinted; the one ahead has its Program hinted, from the
-// front slot hinted a step before. Nothing is read that the draw itself would not read, nothing is written, and a hint of an address
-// that is wrong or out of range does nothing: the values the draw sees, and so the picture, are the same.
-namespace bepldx {
-inline void P(const void* p) { __builtin_prefetch(p, 0, 3); }
-inline void Lines(const void* p, uint32_t bytes, uint32_t maxLines) {
-    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
-    uint32_t n = static_cast<uint32_t>(((a & 31u) + bytes + 31u) >> 5);
-    if (n > maxLines) n = maxLines;
-    const uint8_t* q = reinterpret_cast<const uint8_t*>(a & ~static_cast<uintptr_t>(31));
-    for (uint32_t i = 0; i < n; ++i) P(q + i * 32u);
-}
-inline uint32_t FrontSlot(const DrawRec& d) { return ((d.vsId * 7u + d.fsId) * 2654435761u) >> 22; }
-void Ahead(const CmdBuf& buf, size_t ci) {
-    const size_t n = buf.cmds.size(), nd = buf.draws.size();
-    if (ci + 3 < n) {
-        const Cmd& c = buf.cmds[ci + 3];
-        if (c.type == CMD_DRAW && c.arg < nd) { Lines(&buf.draws[c.arg], sizeof(DrawRec), 6); }
-    }
-    if (ci + 2 < n) {
-        const Cmd& c = buf.cmds[ci + 2];
-        if (c.type == CMD_DRAW && c.arg < nd) {
-            const DrawRec& d = buf.draws[c.arg];
-            const float* const u = buf.uni.data();
-            const size_t un = buf.uni.size();
-            for (int b = 0; b < UB_COUNT; ++b) {
-                const size_t o = d.ublock[b];
-                if (o != kNoBlock && o < un) Lines(u + o, kUbSize[b] * 4u, bepld::g_lines);
-            }
-            const uint32_t tn = static_cast<uint32_t>(g_tex.size());
-            for (int m = 0; m < 8; ++m)
-                if ((d.texMask & (1u << m)) && d.tex[m].texId < tn) P(&g_tex[d.tex[m].texId]);
-            P(&g_programFront[FrontSlot(d)]);
-        }
-    }
-    if (ci + 1 < n) {
-        const Cmd& c = buf.cmds[ci + 1];
-        if (c.type == CMD_DRAW && c.arg < nd) {
-            const DrawRec& d = buf.draws[c.arg];
-            const ProgramFront& fr = g_programFront[FrontSlot(d)];
-            if (fr.p && fr.key == ((static_cast<uint32_t>(d.vsId) << 16) | d.fsId)) Lines(fr.p, sizeof(Program), 8);
-        }
-    }
-}
-} // namespace bepldx
-
 static void ExecuteFrame(const CmdBuf& buf) {
 #if VGX_COLDTRACE
     coldtrace::SpanScope executeTrace(coldtrace::g_recorder,coldtrace::SpanKind::Execute,buf.frame);
@@ -10577,7 +10500,6 @@ static void ExecuteFrame(const CmdBuf& buf) {
             }
             if (c.type == CMD_DRAW || c.type == CMD_PASS_BEGIN || c.type == CMD_COPY_TEX) continue;
         }
-        if (bepld::g_on && c.type == CMD_DRAW) bepldx::Ahead(buf, commandIndex); // (GXV_BE_PLD)
         const double t0 = prof ? Now() : 0.0;
         const uint32_t swUnits = g_sw.total ? (c.type == CMD_SHADER ? 10u : (c.type == CMD_PROGRAM ? 2u : (c.type == CMD_VARIANT ? 1u : 0u))) : 0u;
         const double swT0 = swUnits ? NowMs() : 0.0;
@@ -10972,7 +10894,7 @@ static void ExecuteFrame(const CmdBuf& buf) {
                                  "%.2f whose samplers see no conversion), %.2f made without a copy scene (%.2f of them with a conversion: GXV_EFBSWAP2=%d), "
                                  "converted later %u; scenes %.2f a picture; left ordinary: %.2f for an earlier reader (GXV_EFBSWAP2_PREDICT), %u held "
                                  "(GXV_EFBSWAP2_HOLD)", pics, made / n, whole / n, wRgb / n, wA / n, wOk / n, sw / n, part / n,
-                                 static_cast<int>(EnvInt("GXV_EFBSWAP2", 1) != 0), conv, scenes / n, wPred / n, holds);
+                                 static_cast<int>(EnvInt("GXV_EFBSWAP2", 0) != 0), conv, scenes / n, wPred / n, holds);
             pics = sw = part = conv = scenes = made = whole = wRgb = wA = wOk = wPred = holds = 0;
         }
     }

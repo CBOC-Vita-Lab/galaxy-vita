@@ -13,6 +13,10 @@ aim Star Bits, touch the screen where you used to point the Wii Remote, and tilt
 
 You'll need your own copy of the game (Wii, USA, `RMGE01`).
 
+## New In Version 2.2
+
+Galaxies start ready to go, picture-size changes no longer hitch, menus open smoothly, Performance mode reacts faster, and the bubble and LiveArea have new original artwork.
+
 ## New In Version 2.1
 
 Far fewer pauses: the download now carries ready-made graphics from every mission of every galaxy, and each galaxy prepares what it needs while it loads.

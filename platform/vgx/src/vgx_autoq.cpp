@@ -603,8 +603,7 @@ FloorWindow Controller::TakeFloor() {
 // CPU, the renderer's CPU, the front end's CPU (when it is measured). None that did, with the first three measured: something
 // unmeasured (a wait, the pacing). A picture on Performance mode's steady 30 (cadence) is late only against 33.3 ms.
 int Controller::FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
-                           uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown, uint64_t front, bool cadence,
-                           uint64_t gameSpanUs, uint32_t spanTurns) {
+                           uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown, uint64_t front, bool cadence) {
     FloorWindow& w = floor_;
     if (quiet) { ++w.quiet; return -1; }
     if (static_cast<double>(interval) > cfg_.gapResetMs * 1000.0) { ++w.stalls; w.stallUs += interval; return -1; }
@@ -631,23 +630,7 @@ int Controller::FloorCount(uint64_t interval, bool quiet, bool measured, bool gp
     else if (cause == 1) ++w.game;
     else if (cause == 2) ++w.renderer;
     else if (cause == 3) ++w.front;
-    else if (measured) {
-        ++w.other;
-        // GXV_FLOOR_SPAN (default 1; census only): what "none of these" was. At the 60 target the game stage is ONE turn's CPU against
-        // causeShare of the budget, but a picture the skip rule stretched over 2-3 turns (and every picture on the steady 30) has an
-        // interval of several turns: the game thread's CPU over all of them is the true stage. r107/r108 Honeyhive with the profilers
-        // (cpuhh10.log): 104 pictures of 47.6 ms, 2.8 turns each at 15.5 ms of game CPU a turn = 91 % of the interval, "none of these" 48.
-        static const bool span = [] { const char* e = std::getenv("GXV_FLOOR_SPAN"); return !e || e[0] != '0'; }();
-        if (span && spanTurns != 0 && gameSpanUs != 0) {
-            if (spanTurns >= 2) ++w.otherMulti;
-            if (static_cast<double>(gameSpanUs) >= 0.85 * static_cast<double>(interval)) {
-                ++w.otherGameSpan;
-                w.otherGameSpanUs += gameSpanUs;
-                w.otherSpanUs += interval;
-            }
-        }
-        return 4;
-    }
+    else if (measured) { ++w.other; return 4; }
     else { ++w.unknown; return 5; }
     return cause;
 }
@@ -736,8 +719,7 @@ bool Controller::Add(const FrameTimes& f) {
             const bool gameOk = gameKnown && gameTurns != 0;
             const uint64_t gameUs = gameOk ? uint64_t(gameRun) * PictureTurns() / gameTurns : 0, backendUs = backendKnown ? f.backendRunUs - prevRun : 0;
             const int cause = FloorCount(interval, f.quiet, gameOk && backendKnown && gpuKnown, gpuKnown, gameOk, backendKnown,
-                                         f.timers ? f.gpuBusyUs : fenceBusy, gameUs, backendUs, lastFrontUs_ != 0, lastFrontUs_, f.cadence30,
-                                         gameOk ? uint64_t(gameRun) : 0, gameOk ? gameTurns : 0);
+                                         f.timers ? f.gpuBusyUs : fenceBusy, gameUs, backendUs, lastFrontUs_ != 0, lastFrontUs_, f.cadence30);
             // (Config::hold30: a picture late against the budget + 3 % is late for the GPU only when the census blames the GPU AND every
             // other measured stage fitted the budget + 3 %: then a smaller picture could have brought it on time. Late for the game's CPU
             // (or with the game over the budget as well: the GPU timer counts waits under the fixed cap) it says nothing about the size.)
@@ -1565,10 +1547,8 @@ bool Controller::Evaluate(uint64_t now, bool mayChange) {
         // at 27 game turns a second, then 30 at 720x404 for the rest of the run, where r98 ran ~54 at 608-720). The release is judged with
         // the GPU at the smallest size the controller may still take, its time falling with the pixels: leaving the cadence hands the scene
         // back to the 16.7 ms rules, which take the sizes down again if they must.)
-        const bool pipeScaled = cfg_.cadenceUp && CadenceWindow() && rung_ > cfg_.minRung && !floorKnown;
-        const double pipeGpuMs = !pipeScaled ? gpuMs
-                                 : cfg_.cadenceGpuScale >= 1.0 ? gpuMs * Cost(cfg_.minRung) / Cost(rung_)
-                                                                : gpuMs * (1.0 - cfg_.cadenceGpuScale * (1.0 - Cost(cfg_.minRung) / Cost(rung_)));
+        const double pipeGpuMs = cfg_.cadenceUp && CadenceWindow() && rung_ > cfg_.minRung && !floorKnown
+                                     ? gpuMs * Cost(cfg_.minRung) / Cost(rung_) : gpuMs;
         const double pipeMs = std::max({pipeGpuMs, backendMs, frontMs});
         const bool lowerable = NextStep(now) != 0 || trial_ != 0 || checking_ || pendingBelow_ ||
             (rung_ > cfg_.minRung && now >= belowBlockedUntil_ && !floorKnown && !cannotGain);

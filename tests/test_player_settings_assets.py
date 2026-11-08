@@ -32,7 +32,7 @@ class PlayerSettingsAssets(unittest.TestCase):
         png = (ROOT / 'vita/vgx-game/sce_sys/livearea/contents/settings.png').read_bytes()
         self.assertFalse((module.ROOT / 'vita/vgx-game/sce_sys/livearea/contents/settings.png').exists())
         self.assertEqual(png[:8], b'\x89PNG\r\n\x1a\n')
-        self.assertEqual(struct.unpack('>IIBBBBB', png[16:29]), (280, 64, 8, 3, 0, 0, 0))
+        self.assertEqual(struct.unpack('>IIBBBBB', png[16:29]), (280, 124, 8, 3, 0, 0, 0))
         pixels = module.rgba_png(ROOT / 'tools/handheld/assets/settings_vita.png')
         self.assertEqual(len(pixels), 300*129*4)
         self.assertGreater(len(set(zip(pixels[0::4], pixels[1::4], pixels[2::4], pixels[3::4]))), 256)
@@ -51,7 +51,7 @@ class PackagePictures(unittest.TestCase):
     SHIPPED = {'icon0.png': ('vita/vgx-game/sce_sys/icon0.png', (128, 128)), 'pic0.png': ('vita/vgx-game/sce_sys/pic0.png', (960, 544)),
                'livearea/contents/bg.png': ('vita/vgx-game/sce_sys/livearea/contents/bg.png', (840, 500)),
                'livearea/contents/startup.png': ('vita/vgx-game/sce_sys/livearea/contents/startup.png', (280, 158)),
-               'livearea/contents/settings.png': ('vita/vgx-game/sce_sys/livearea/contents/settings.png', (280, 64))}
+               'livearea/contents/settings.png': ('vita/vgx-game/sce_sys/livearea/contents/settings.png', (280, 124))}
 
     def test_pictures_are_8bit_palette_pngs_of_the_right_size(self):
         for name, (relative, size) in self.SHIPPED.items():

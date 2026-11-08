@@ -1848,19 +1848,6 @@ bool StartGl(char* error, size_t errorSize) {
     EnvLong("GXV_VITA_PARAM_KIB", paramKib, 0, 65536);
     EnvLong("GXV_VITA_VDM_KIB", vdmKib, 0, 65536);
     if (tripleBuffering) vglUseTripleBuffering(GL_TRUE);
-    // GXV_VITA_DISPLAY_BUFFERS=<2-4> (default 0 = vitaGL's three): more display buffers for GXV_PRESENT_SYNC=2. The display callback holds a
-    // finished picture until its slot (the latency L = 3-6 vblanks after its turn began), and while it holds, the buffer is neither shown
-    // nor free: with three buffers (displayQueueMaxPendingCount 2) the third picture's sceGxmDisplayQueueAddEntry blocks the render thread
-    // and its first scene waits on the buffer's sync object, so the hold, not the work, can set the picture's "ready after" (Good Egg r107:
-    // 4 vblanks natural against the lowest latency 5, a 16 ms wait in the callback for 262 of 274 pictures). A fourth buffer costs 2 MiB of
-    // CDRAM and takes a quarter off each frame's slice of vitaGL's circular pool (the pool is divided by the buffer count): on the console
-    // watch the "present:" line (ready after, waits) and the back end's wall against its CPU in "workload: backend-execute".
-    long displayBuffers = 0;
-    EnvLong("GXV_VITA_DISPLAY_BUFFERS", displayBuffers, 0, 4);
-    if (displayBuffers >= 2) {
-        vglSetDisplayBufferCount(static_cast<int>(displayBuffers));
-        GXV_BASIC_LOG("[vgx-vita] GXV_VITA_DISPLAY_BUFFERS=%ld: %ld display buffers", displayBuffers, displayBuffers);
-    }
     if (paramKib) {
         vglSetParamBufferSize(static_cast<uint32_t>(paramKib) * 1024u);
         GXV_BASIC_LOG("[vgx-vita] GXV_VITA_PARAM_KIB=%ld: sceGxm parameter buffer %ld KiB (vitaGL's default 16384)", paramKib, paramKib);

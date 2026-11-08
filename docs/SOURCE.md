@@ -1,5 +1,15 @@
 # Source Record
 
+## Version 2.2 (`galaxy-v2.2`)
+
+The eboot is the console-tested build r108 (SHA-256 `4324e96c69d6791289ebdbf077fb1dbf5ed8715f8386317f9c0580fb2022e3d7`), vitaGL archive `libvitaGL-reader-vp21` (vp20 plus gxm.o/tests.o rebuilt with patches 0021 color-load-skip and 0022 mask-keep-display; both are inert unless their switches are set, except `GXV_VGL_MASKKEEP_DISPLAY`, default 1). APP_VER 02.20.
+- **Stage warm-up finished before play:** the closed screen is held until the stage's queue is done (`GXV_STAGEWARM_HOLD_MS`, default 5000). Queue order: shared programs, then the stage's own, then the menu (`GXV_STAGEWARM_HOT`). A "menu" pseudo-stage list (`GXV_STAGEWARM_MENU`). Shared programs of other stages (`GXV_STAGEWARM_COMMON`), a scaled budget (`_SCALE`), programs recorded from play (`_PROGREC`), diagnostics (`_DIAG`).
+- **Picture-size changes:** the next rungs are prebuilt (`GXV_RUNG_PREBUILD`), and render textures rewritten every picture are not resampled (`GXV_RUNG_SKIPRS`). Console: 120-180 ms per change before, about 1 ms after.
+- **Performance mode:** fast step-down on sustained GPU-late pictures (`GXV_AUTOQ_FAST60`, target 60 only).
+- **Off by default (diagnostics or untested):** `GXV_DLWELD`, `GXV_OVERDRAW`, `GXV_COLOR_LOADSKIP`, `GXV_EFBSWAP2` (console A/B showed about 3 ms less GPU a picture; to be turned on in a later release after more testing), `GXV_VGL_LOADFROM` (gave a black screen with EFBSWAP2; never turn it on), scene dump and copy census.
+- **Bee Mario morph:** guards a model that isn't loaded (logs "beecrash: bee model missing").
+- **Package:** only console-compiled shaders. 2.1.1's emulator-only fragment shaders are dropped (a later audit found them byte-identical where comparable; the one real difference between compiles is the `v_fog` slot, which is chosen at compile time and fixed in a later shader generation). The console card's shaders and its stage warm-up list, including the menu list, are added. Original LiveArea art; settings.png is 280x124 (8-bit palette; the a1 frame does not show a 280x64 tile); template content-rev 3.
+
 ## Version 2.1.1 (`galaxy-v2.1.1`)
 
 Version 2.1 with the same eboot (r102, SHA-256 `60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563`) and APP_VER 02.11. The package drops the 115 vertex shaders that only the Vita3K farm had compiled: where the console and the emulator compiled the same vertex shader, 3 of 29 differed in the program header's vertex output mask (`vertex_outputs1`, bytes 176-177 of the GXP) with identical code, so emulator-only vertex shaders can't be trusted (fragment shaders: 38 of 38 identical; kept). Every vertex shader in the package is now one the console compiled. Missing ones are compiled on the console at the stage warm-up or the first draw.

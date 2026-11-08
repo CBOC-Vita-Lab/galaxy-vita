@@ -101,7 +101,7 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 # the game makes the loading-screen, Settings and bubble pictures from the player's own title screen on the first start
 # (title_art_runtime.cpp, docs/ASSETS.md).
 set(sys "${CMAKE_CURRENT_SOURCE_DIR}/sce_sys")
-vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 02.11 NAME "Super Mario Galaxy"
+vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 02.20 NAME "Super Mario Galaxy"
     FILE "${sys}/icon0.png" sce_sys/icon0.png
     FILE "${sys}/pic0.png" sce_sys/pic0.png
     FILE "${sys}/livearea/contents/bg.png" sce_sys/livearea/contents/bg.png
