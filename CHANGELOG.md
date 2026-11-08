@@ -1,3 +1,13 @@
+# Version 2.2.1 — November 7, 2026
+
+A quick fix for 2.2.
+
+### Fixed
+- **2.2 could crash on entering the Comet Observatory.** 2.2.1 goes back to the proven game code of 2.1.1 while the cause is found; the smoother loading and picture-size changes of 2.2 will return in a later update once they're fixed.
+- Keeps 2.2's new artwork and the larger Settings tile.
+
+**Updating?** Install the new VPK over the old one. Your saves and settings stay.
+
 # Version 2.2 — November 7, 2026
 
 The smooth-play update, part two. Fewer hitches everywhere, quicker menus and a new look.

@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v2.2",
+  "release": "galaxy-v2.2.1",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -13796,7 +13796,7 @@
     },
     {
       "path": "decomp/src/Game/Player/MarioActorMorph.cpp",
-      "sha256": "94833c54f1df10982d6f5a334cab8f37bec4d4632b50bf7a4abfd03bd8962f05"
+      "sha256": "e7d7afdbc340e6281ca159d09248ecfb422061331e26262e437fc84aefe6d35e"
     },
     {
       "path": "decomp/src/Game/Player/MarioActorOffensiveMsg.cpp",
@@ -14324,7 +14324,7 @@
     },
     {
       "path": "decomp/src/Game/Scene/ScenarioSelectScene.cpp",
-      "sha256": "7ad70d2481d5c7399798f7562c5810d5af8d6de6c9bb59788ae17115ce5b8b35"
+      "sha256": "830fdde040c2f92a1856c58b0b7012c8aaaae2f27e902ca0d2edf4e0016e56d9"
     },
     {
       "path": "decomp/src/Game/Scene/Scene.cpp",
@@ -15148,7 +15148,7 @@
     },
     {
       "path": "decomp/src/Game/System/GameSystemSceneController.cpp",
-      "sha256": "df11d3e6b34d92615f95944e1733435d7a899a7c49d09dc8107a2bb3dd48b2ac"
+      "sha256": "50f0c6e769792ab240243e274d37375fdda88c83abea364ff3befad8435168c4"
     },
     {
       "path": "decomp/src/Game/System/GameSystemStationedArchiveLoader.cpp",
@@ -18996,7 +18996,7 @@
     },
     {
       "path": "platform/src/port/perf.cpp",
-      "sha256": "f5257e0be42061eaef55cfa08ce30ce82370118a6ae61d0f1e68d81f4bac6e10"
+      "sha256": "badffa970f617418196bbc69381f58628db8a6c532039a696cb38a5939bda419"
     },
     {
       "path": "platform/src/port/phase_cpu.h",
@@ -19140,15 +19140,15 @@
     },
     {
       "path": "platform/vgx/src/vgx_autoq.cpp",
-      "sha256": "d9cda43139cd98aaa443b1f2c1a8a767de5c6d0bb36827315759e984c65f25b5"
+      "sha256": "78b921108e1a4f2aff2de4f44ba38f65b18b0dadfccd8be2e755499e496e94ce"
     },
     {
       "path": "platform/vgx/src/vgx_autoq.h",
-      "sha256": "dc54648376a136bad8294a172ea4a2f0f969cfd2fff4c954b514d61b0626fb7c"
+      "sha256": "60694310b8b364ef7256075ebf6c01510d2cf8e224450893036778f4e787a5be"
     },
     {
       "path": "platform/vgx/src/vgx_backend_gl.cpp",
-      "sha256": "cccb52369f05f550bb0a28747872f6f35378350104e2e4c32d7a5c7163d984e2"
+      "sha256": "d70fb35fe75180fc179de99d81257e3e4af16ddafb7f2a1ec084496406f61b42"
     },
     {
       "path": "platform/vgx/src/vgx_backend_null.cpp",
@@ -19160,7 +19160,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_cmd.h",
-      "sha256": "3f9e2f5764712ef2bf916f74c12297e2a985be6542aafa76740e946619604950"
+      "sha256": "a6bf20587f923fe9e6f5c98544bcdbc3399130962a178f0afcaf4afe42e3ead2"
     },
     {
       "path": "platform/vgx/src/vgx_coldtrace.h",
@@ -19188,7 +19188,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_dlcache.cpp",
-      "sha256": "1fececd01a7c1392705ce8db0028d86b43bc2b03472f00dd842eafafbde61508"
+      "sha256": "caab374ac7374dc3918f592a86aba3edf73c4b3eff8e7defe02620801cabd093"
     },
     {
       "path": "platform/vgx/src/vgx_draw.cpp",
@@ -19292,7 +19292,7 @@
     },
     {
       "path": "platform/vgx/src/vgx_workload.h",
-      "sha256": "7bedbd70af61e5514608634fdd5f8550d710f8853808be7ca64766402598b3b5"
+      "sha256": "441fb472a8210eba1526b14dcfeb3bad7e000e378f66f3bca5e5a644c479c356"
     },
     {
       "path": "platform/vgx/third_party/LICENSE",
@@ -19340,7 +19340,7 @@
     },
     {
       "path": "platform/vgx/vita/vgx_host_galaxy_vita.cpp",
-      "sha256": "bf40ae81bae7ce1f881d95c5158706835db72eafb49c10fce09782603742364f"
+      "sha256": "7980466c1333dff96e925900e9ffb9c88beadc8b16378581c650b25a079a685d"
     },
     {
       "path": "platform/vgx/vita/vgx_host_vita.cpp",
@@ -19975,10 +19975,6 @@
       "sha256": "faec1b5c14d3f2d47ed914f494d9c7bcf4afb29fadbf61eb235131c3223f8531"
     },
     {
-      "path": "tests/vgx_autoq_fast60.cpp",
-      "sha256": "56e87d7b8c6d2c82705cb30a590c14a31049c758d67a11c758ff67250fc7c424"
-    },
-    {
       "path": "tests/vgx_autoq_fxstep.cpp",
       "sha256": "614e717520da4791321602263ab43e2851722921338097c472b6868db2f0fe47"
     },
@@ -20012,7 +20008,7 @@
     },
     {
       "path": "tests/vgx_backend_quiet.cpp",
-      "sha256": "3c0b36f18cf77a50d88ee7b07926c566ead3f17a0eaa247753c628f46800f209"
+      "sha256": "499c0ad66802de0605acc8701cf69501350556c068fac865d6d256b938c18878"
     },
     {
       "path": "tests/vgx_backend_quiet.py",
@@ -21499,10 +21495,6 @@
       "sha256": "1b4bb60e3e0337ce089b0b83e1e26b60914c475533c2a679ec35c0fd7aa0b16a"
     },
     {
-      "path": "tools/test_vgx_autoq_fast60.sh",
-      "sha256": "4e9000fb7facd734d38c279382820880522a1b1f6062734aefa4d5d3ee75629e"
-    },
-    {
       "path": "tools/test_vgx_autoq_fxstep.sh",
       "sha256": "9d9f296510727575fc7313c66862e7130b275adeb709184dc51fbfbd745726e0"
     },
@@ -22167,14 +22159,6 @@
       "sha256": "7c9378e71d995a8b2110ae32519e42d2e98d899c292f3c8a00adb8c6de3114eb"
     },
     {
-      "path": "tools/vitagl/patches/0021-color-load-skip.patch",
-      "sha256": "8153d3610631f22dd3d665dbd43f6808b41daba88ae6d8a009e0a38ed3d3e8f4"
-    },
-    {
-      "path": "tools/vitagl/patches/0022-mask-keep-display.patch",
-      "sha256": "2d1548c41cf16206d938d6f4b8fdf881a722bfe6a8170c1de7237b105f3dc8b6"
-    },
-    {
       "path": "vita/CMakeLists.txt",
       "sha256": "02a8af1e1a3f0d8fe9f1587041175f7b0fccdbad67ac0311ecc75925249033e5"
     },
@@ -22380,7 +22364,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "86f6e8ad066dd9083b814d9a4030077284ad1663579a301825e4505b8c8d5fed"
+      "sha256": "7df49a6a9049750cfc4ee7757ccde886913dcc1f42e2c488916459fcab37b70a"
     },
     {
       "path": "vita/vgx-game/coldtrace_export.cpp",
@@ -22392,7 +22376,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "21de5f25d41dfe202a94073c403147e3108caa8da81b63828256f2daf6dd077d"
+      "sha256": "c6036ba440bc23c7c7230ffe07feda44f5953ac9a5c127a690f907770d63e643"
     },
     {
       "path": "vita/vgx-game/fd_guard.cpp",

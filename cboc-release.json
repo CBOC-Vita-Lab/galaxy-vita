@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "releaseId": "galaxy-v2.2",
+  "releaseId": "galaxy-v2.2.1",
   "titleId": "SMGV00001",
   "displayName": "Super Mario Galaxy",
-  "version": "2.2",
+  "version": "2.2.1",
   "minInstallerVersion": "1.1",
   "visibility": "public",
   "releaseState": "ready",
   "recipeId": "galaxy",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "e202e5c3a6bc27f7b7df3b8f2a3abf0527ba1d156600307eb6fd524cc4fcf4c9",
-    "runtimeSha256": "4324e96c69d6791289ebdbf077fb1dbf5ed8715f8386317f9c0580fb2022e3d7"
+    "sha256": "e0b579a4f10ed09d897bbf1a68d2d55a2e864f70788022a32187cc3dc1055bff",
+    "runtimeSha256": "60709476d67411e0ee4423d9dac938982923e5bb2b896c67c01a092ce94cf563"
   },
   "requiredInputs": [
     {
