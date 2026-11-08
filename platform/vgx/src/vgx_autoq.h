@@ -464,6 +464,12 @@ struct Config {
     bool cadenceUp = false;
     double cadenceUpFrac = 0.90;    // the predicted GPU time and the other stages within this share of 33.3 ms
     double cadenceReachFps = port::pace::kSteady30AboveFps; // 60 out of reach: the floor rung's GPU or the other stages miss this rate
+    // GXV_STEADY30_GPUSCALE=<percent> (default 100 = as before): the share of the GPU's busy time that is taken to fall with the pixels when the
+    // steady 30's release estimate (port_autoq_stages) is made with the GPU at the smallest size the controller may take. 100 scales all of
+    // it (busy x Cost(min) / Cost(now)). The console says much of the picture's GPU time is fixed per picture, not per pixel (Honeyhive
+    // r107, 720x404 -> 664x376: 25.3/22.3/21.4 ms -> 23.4/22.5 ms against the 14 % the pixels predict), so the estimate released the
+    // cadence for 54 pictures a second at a GPU of 22 ms and the pictures then came at 37-45 with the GPU late (p107hh10 18:36:11-18:36:23).
+    double cadenceGpuScale = 1.0;
     // GXV_AUTOQ_FAST60=1|0 (target 60 only; off here, on in the back end): Performance mode steps down within about half a second of
     // sustained pictures late for the GPU, one size at a time, and keeps going while they stay late (see "Performance mode: fast60").
     bool fast60 = false;
@@ -550,6 +556,12 @@ struct FloorWindow {
     uint32_t stalls = 0;                   // intervals over gapResetMs (a load, a shader build): not in `late`
     uint64_t stallUs = 0;
     uint32_t quiet = 0;                    // pictures of quiet moments (pause menu, fades): not counted
+    // (GXV_FLOOR_SPAN, census only, no decision reads these) The late pictures counted in `other` ("none of these"), told apart: the
+    // pictures that spanned two or more game turns (the skip rule left turns out, so the picture interval is several turns long and
+    // the one-turn game stage cannot reach its share of the budget), and of those or any, the ones whose game thread CPU over ALL the
+    // turns since the last picture was gameShare (0.85) of the interval or more: the game thread itself was the limit.
+    uint32_t otherMulti = 0, otherGameSpan = 0;
+    uint64_t otherGameSpanUs = 0, otherSpanUs = 0; // ... the CPU and the interval of those, for the log's mean share
 };
 
 class Controller {
@@ -713,8 +725,11 @@ private:
     unsigned Mem() const { return steps_ | (aniso_ ? kAnisoMem : 0u); } // what a scene remembers beside its rung (bit 3: anisotropic filtering)
     int FxRung() const { return cfg_.minRung > kToday ? cfg_.minRung : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
     // (returns the late picture's stage: 0 GPU, 1 game, 2 renderer, 3 front end, 4 none of these, 5 not measured; -1 on time or not counted)
+    // (gameSpanUs / spanTurns: the game thread's CPU over every turn since the last picture and their number, 0 when not known; they only
+    // feed FloorWindow::otherMulti / otherGameSpan, GXV_FLOOR_SPAN, and never change the returned stage)
     int FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
-                   uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown = false, uint64_t front = 0, bool cadence = false);
+                   uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown = false, uint64_t front = 0, bool cadence = false,
+                   uint64_t gameSpanUs = 0, uint32_t spanTurns = 0);
 public:
     unsigned QuietUps() const { return quietUps_; }
     // Quality mode judged by the pictures (Config::hold30): the last closed hold window (diagnostics, tests): its pictures, those late,

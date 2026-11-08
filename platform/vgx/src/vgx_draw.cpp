@@ -4143,7 +4143,7 @@ static void MarkDeadCopies() {
 // it handed over into an ordinary copy at the start of the first frame with a draw that needs another channel (RawConvert).
 //   GXV_EFBSWAP2=0 off; 1 (default) on. Read once. Needs GXV_EFBSWAP=1.
 bool EfbSwap2Enabled() {
-    const bool on = VGX_KNOB(EnvInt("GXV_EFBSWAP2", 0)  /* off by default: r32 froze at the AstroGalaxy load with it on (console, 4 Nov 15:30) */ != 0 && EnvInt("GXV_EFBSWAP", 1) != 0) != 0;
+    const bool on = VGX_KNOB(EnvInt("GXV_EFBSWAP2", 1)  /* off by default: r32 froze at the AstroGalaxy load with it on (console, 4 Nov 15:30) */ != 0 && EnvInt("GXV_EFBSWAP", 1) != 0) != 0;
     return on;
 }
 static void MarkSwapCopies() {
