@@ -182,6 +182,7 @@ public:
 
     void initDrawAndModel();
     void initBeeMario();
+    void initBeeTextureSwap();
     void initTeresaMario();
     void initHopperMario();
     void initIceMario();

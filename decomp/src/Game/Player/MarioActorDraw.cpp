@@ -146,6 +146,10 @@ void MarioActor::initDrawAndModel() {
 }
 
 void MarioActor::initBeeMario() {
+    if (_9E4 != nullptr || _9E8 != nullptr) {
+        return;
+    }
+
     J3DModelX* model;
     const char* modelName;
     const char* archiveName;
@@ -190,6 +194,10 @@ void MarioActor::initBeeMario() {
 
     _9F0 = 0;
     _3D2 |= 0x10;
+
+    if (_B64 != nullptr && _B6C != nullptr) {
+        initBeeTextureSwap();
+    }
 }
 
 void MarioActor::initHopperMario() {
@@ -360,6 +368,14 @@ void MarioActor::initBoneMario() {
 }
 
 void MarioActor::changeDisplayMode(u8 mode) {
+#ifdef TARGET_PC
+    // A deferred refresh belongs to the model selected when it was requested.
+    // During a morph the maker switches models, so that refresh must not apply
+    // the previous model's material flags to the newly selected model.
+    if (mModelManager->mDisplayListMaker->mModel != mModels[mode]) {
+        mModelManager->mStaleDL = false;
+    }
+#endif
     mCurrModel = mode;
     mMarioAnim->mXanimePlayer->setModel(mModels[mCurrModel]);
     mMarioAnim->mXanimePlayerUpper->setModel(mModels[mCurrModel]);
@@ -546,6 +562,34 @@ bool MarioActor::isAllHidden() const {
     return hidden;
 }
 
+void MarioActor::initBeeTextureSwap() {
+    if (_9E4 == nullptr || _B64 == nullptr || _B6C == nullptr) {
+        return;
+    }
+
+    J3DModelData* beeData = MR::getJ3DModelData(_9E4);
+    const u32 textureNum = beeData->mMaterialTable.mTexture->getNum();
+
+    u16 texNo = 0;
+    for (u16 i = 0; i < textureNum; i++) {
+        J3DModelData* modelData = MR::getJ3DModelData(_9E4);
+        const char* texName = modelData->mMaterialTable.mTextureName->getName(i);
+        if (strcmp(texName, "mario_eyeLid.0") == 0) {
+            texNo = i;
+            break;
+        }
+    }
+
+    for (u32 i = 0; i < textureNum; i++) {
+        _B64[i] = MR::getResTIMG(_9E4, i);
+    }
+
+    createTextureDL(&_B6C[4], 0, texNo);
+    createTextureDL(&_B6C[5], 0, texNo + 1);
+    createTextureDL(&_B6C[6], 0, texNo + 2);
+    createTextureDL(&_B6C[7], 0, texNo + 3);
+}
+
 void MarioActor::swapTextureInit() {
     J3DModelData* actorData = MR::getJ3DModelData(this);
     const u32 textureCount = actorData->mMaterialTable.mTexture->getNum();
@@ -575,28 +619,7 @@ void MarioActor::swapTextureInit() {
     createTextureDL(&_B6C[2], 0, texNo + 2);
     createTextureDL(&_B6C[3], 0, texNo + 3);
 
-    if (_9E4 != nullptr) {
-        J3DModelData* beeData = MR::getJ3DModelData(_9E4);
-        const u32 textureNum = beeData->mMaterialTable.mTexture->getNum();
-
-        for (u16 i = 0; i < textureNum; i++) {
-            J3DModelData* modelData = MR::getJ3DModelData(_9E4);
-            const char* texName = modelData->mMaterialTable.mTextureName->getName(i);
-            if (strcmp(texName, "mario_eyeLid.0") == 0) {
-                texNo = i;
-                break;
-            }
-        }
-
-        for (u32 i = 0; i < textureNum; i++) {
-            _B64[i] = MR::getResTIMG(_9E4, i);
-        }
-
-        createTextureDL(&_B6C[4], 0, texNo);
-        createTextureDL(&_B6C[5], 0, texNo + 1);
-        createTextureDL(&_B6C[6], 0, texNo + 2);
-        createTextureDL(&_B6C[7], 0, texNo + 3);
-    }
+    initBeeTextureSwap();
 
     if (_A00 != nullptr) {
         J3DModelData* hopperData = MR::getJ3DModelData(_A00);
