@@ -16,6 +16,13 @@
 #include <revolution/types.h>
 
 void MarioActor::setPlayerMode(u16 playerMode, bool myBool) {
+    if (playerMode == PlayerMode_Bee && (_9E4 == nullptr || _9E8 == nullptr)) {
+        initBeeMario();
+        if (_9E4 == nullptr || _9E8 == nullptr) {
+            return;
+        }
+    }
+
     if (mPlayerMode == playerMode) {
         if (playerMode == 1) {
             _3DC = mConst->getTable()->mMetalHoldTime;

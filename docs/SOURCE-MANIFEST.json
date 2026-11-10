@@ -4676,7 +4676,7 @@
     },
     {
       "path": "decomp/include/Game/Player/MarioActor.hpp",
-      "sha256": "2b43daf9391ac9a1c8480ada0a17988557c1b2d9bd15a00748164cf25d78c73b"
+      "sha256": "b7bc0b84aca183fe79976e5acee579bfcf66c21319a85bdefe34d7343dbaccfc"
     },
     {
       "path": "decomp/include/Game/Player/MarioAnimator.hpp",
@@ -13768,7 +13768,7 @@
     },
     {
       "path": "decomp/src/Game/Player/MarioActorDraw.cpp",
-      "sha256": "ef855046cb8d947f8a80b13751e791f630162013767abd0a5b7ffdbf56121937"
+      "sha256": "bc8536da338b8e878bc436736494e989669105890197692af9e5a81c276e2aea"
     },
     {
       "path": "decomp/src/Game/Player/MarioActorEye.cpp",
@@ -13796,7 +13796,7 @@
     },
     {
       "path": "decomp/src/Game/Player/MarioActorMorph.cpp",
-      "sha256": "e7d7afdbc340e6281ca159d09248ecfb422061331e26262e437fc84aefe6d35e"
+      "sha256": "b4c83efd13f236f1848c84d790e9e6c743fd02d42c54f551cd6e5f0a89c187c8"
     },
     {
       "path": "decomp/src/Game/Player/MarioActorOffensiveMsg.cpp",
@@ -19860,7 +19860,7 @@
     },
     {
       "path": "tests/test_player_audit.py",
-      "sha256": "383fe87ad30d6729b5f424395c20a64b9e297bc89328d6c26c07da7b3a6e1788"
+      "sha256": "3f26c9f4a5ed0e514f4e282fc057488b9ec84be6104735842fcdc74b50d2550a"
     },
     {
       "path": "tests/test_player_settings_assets.py",
