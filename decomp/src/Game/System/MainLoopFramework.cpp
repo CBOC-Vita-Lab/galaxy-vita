@@ -558,7 +558,13 @@ namespace {
 // for the front end first, so it never overwrites what the last picture still reads. Counted for the log.
 static int sFlushScope = 0;
 static unsigned sOutsideWaits = 0;
-extern "C" void port_gx_flush_scope(int on) { sFlushScope = on; }
+struct OSThread;
+extern "C" OSThread* OSGetCurrentThread(void);
+static OSThread* sGameThread = nullptr;
+extern "C" void port_gx_flush_scope(int on) {
+    sFlushScope = on;
+    sGameThread = OSGetCurrentThread();
+}
 extern "C" int port_gx_in_flush_scope(void) { return sFlushScope; }
 extern "C" int port_gx_drawdone_defer_mode(void);
 extern "C" int port_gx_drawdone_pending(void);
@@ -567,6 +573,9 @@ extern "C" void port_gx_view_write_from(void* from);
 extern "C" void port_gx_view_write(void) { port_gx_view_write_from(__builtin_return_address(0)); }
 extern "C" void port_gx_view_write_from(void* from) {
     if (sFlushScope || port_gx_drawdone_defer_mode() < 3 || !port_gx_drawdone_pending()) {
+        return;
+    }
+    if (sGameThread != nullptr && OSGetCurrentThread() != sGameThread) {
         return;
     }
     ++sOutsideWaits;
