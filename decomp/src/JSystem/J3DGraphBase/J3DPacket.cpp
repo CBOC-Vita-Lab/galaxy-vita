@@ -150,6 +150,18 @@ extern "C" void port_j3d_picture_begin(void) {
     sJ3DPortLogBase = c;
 }
 
+void J3DDisplayListObj::regrowForDiff(u32 size) {
+    const u32 newMax = ALIGN_NEXT(size, 0x20);
+    void* a = new (0x20) char[newMax];
+    void* b = new (0x20) char[newMax];
+    memset(a, 0, newMax);
+    memset(b, 0, newMax);
+    mpDisplayList[0] = a;
+    mpDisplayList[1] = b;
+    mMaxSize = newMax;
+    mSize = 0;
+}
+
 void J3DDisplayListObj::beginDiffDL() {
     if (!J3DPortDiffKeepOn() || mMaxSize > sizeof(sDiffScratch) || mpDisplayList[0] == nullptr) {
         sDiffScratchOn = false;
@@ -173,6 +185,9 @@ u32 J3DDisplayListObj::endDiffDL() {
     OSRestoreInterrupts(sInterruptFlag);
     const u32 size = GDGetGDLObjOffset(&sGDLObj);
     GDSetCurrent(NULL);
+    if (size > mMaxSize) {
+        regrowForDiff(size);
+    }
     if (size == mSize && memcmp(mpDisplayList[0], sDiffScratch, size) == 0) {
         // The bytes the current buffer holds: it stays the one called, unwritten (what endDL would have stored, in the other buffer,
         // is these same bytes).

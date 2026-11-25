@@ -15,10 +15,11 @@ void DisplayListMaker_FORCE_MATCH_INLINE(J3DTexture* pTexture, const ResTIMG& rT
 
 DisplayListMaker::DisplayListMaker(J3DModel* pModel, const ResourceHolder* pResHolder) : mModel(pModel), mFogCtrl(), mResHolder(pResHolder) {
     u16 materialNum = mModel->getModelData()->getMaterialNum();
-    mPrgFlag = new u32[materialNum];
-    mCurFlag = new u32[materialNum];
-    MR::zeroMemory(mPrgFlag, materialNum * sizeof(u32));
-    MR::zeroMemory(mCurFlag, materialNum * sizeof(u32));
+    const u32 arrayNum = materialNum + 16;
+    mPrgFlag = new u32[arrayNum];
+    mCurFlag = new u32[arrayNum];
+    MR::zeroMemory(mPrgFlag, arrayNum * sizeof(u32));
+    MR::zeroMemory(mCurFlag, arrayNum * sizeof(u32));
     mMaterialCtrl.init(materialNum * 4);
 }
 

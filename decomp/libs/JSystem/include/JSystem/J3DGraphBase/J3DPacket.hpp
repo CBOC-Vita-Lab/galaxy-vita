@@ -99,6 +99,7 @@ public:
     // only when its bytes differ from the current one's.
     void beginDiffDL();
     u32 endDiffDL();
+    void regrowForDiff(u32 size);
 #endif
 
     u8* getDisplayList(int idx) {
