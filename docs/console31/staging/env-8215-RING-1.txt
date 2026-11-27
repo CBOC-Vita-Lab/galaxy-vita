@@ -1,0 +1,14 @@
+# 8215 RING-1: mid-pass split RING-1: sceGxm rings: GXV_VITA_VDM_KIB=1024 GXV_VITA_FRAGMENT_KIB=1024 GXV_VITA_USSE_KIB=1024 (sh3vita's sizes; USSE at our clamp); Observatory 90 s then Beach Bowl 90 s, Performance, scripted route
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=5400
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_RING_CENSUS=1
+GXV_BE_SPLIT=2
+GXV_GPU_SCENES=1
+GXV_VITA_VDM_KIB=1024
+GXV_VITA_FRAGMENT_KIB=1024
+GXV_VITA_USSE_KIB=1024

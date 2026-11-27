@@ -44,6 +44,20 @@ inline const char* getEntryAddress(const JMapData* pData, s32 dataOffset, int en
     return reinterpret_cast< const char* >(pData) + dataOffset + entryIndex * pData->mEntrySize;
 }
 
+template <typename T>
+inline T readJMapScalar(const char* address) {
+    // Shipped tables can put a four-byte field at offset two inside a row.
+    T value;
+    std::memcpy(&value, address, sizeof(value));
+    return value;
+}
+
+template <typename T>
+inline bool canSearchJMapField(const JMapItem&, T) { return true; }
+inline bool canSearchJMapField(const JMapItem& field, const char* search) {
+    return search && (field.mType == JMAP_VALUE_TYPE_STRING || field.mType == JMAP_VALUE_TYPE_STRING_PTR);
+}
+
 class JMapInfo {
 public:
     JMapInfo();
@@ -76,13 +90,13 @@ public:
     bool getValueFast(int entryIndex, int itemIndex, f32* pValueOut) const {
         const JMapItem* pItem = &mData->mItems[itemIndex];
         const char* pValue = getEntryAddress(mData, mData->mDataOffset, entryIndex) + pItem->mOffsData;
-        *pValueOut = *reinterpret_cast< const f32* >(pValue);
+        *pValueOut = readJMapScalar<f32>(pValue);
         return true;
     }
     bool getValueFast(int entryIndex, int itemIndex, bool* pValueOut) const {
         const JMapItem* pItem = &mData->mItems[itemIndex];
         const char* pValue = getEntryAddress(mData, mData->mDataOffset, entryIndex) + pItem->mOffsData;
-        *pValueOut = (*reinterpret_cast< const u32* >(pValue) & pItem->mMask) != 0;
+        *pValueOut = (readJMapScalar<u32>(pValue) & pItem->mMask) != 0;
         return true;
     }
 
@@ -142,16 +156,17 @@ public:
 
 template < typename T >
 JMapInfoIter JMapInfo::findElement(const char* pKey, T searchValue, int startIndex) const {
-    int entryIndex = startIndex;
-    T value;
-
-    while (entryIndex < getNumEntries()) {
-        getValue< T >(entryIndex, pKey, &value);
+    const int rows = getNumEntries();
+    if (startIndex < 0 || startIndex >= rows) return end();
+    const s32 column = searchItemInfo(pKey);
+    if (column < 0 || !canSearchJMapField(mData->mItems[column], searchValue)) return end();
+    for (int entryIndex = startIndex; entryIndex < rows; ++entryIndex) {
+        T value;
+        // The field type and mask are shared by every row. A type mismatch cannot match later.
+        if (!getValueFast(entryIndex, column, &value)) return end();
         if (compareValues< T >(value, searchValue)) {
             return JMapInfoIter(this, entryIndex);
         }
-
-        entryIndex++;
     }
 
     return end();

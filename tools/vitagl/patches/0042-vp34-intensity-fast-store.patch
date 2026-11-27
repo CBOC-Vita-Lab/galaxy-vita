@@ -1,0 +1,13 @@
+Patch 0042 (vp34, ported from Strikers 0053): glTexImage2D(GL_INTENSITY, GL_RED, GL_UNSIGNED_BYTE) takes the fast store
+(GL_INTENSITY is U8_RRRR, one byte per texel like U8_R, eliminating per-texel callbacks).
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -608,7 +608,7 @@
+ 	case GL_ALPHA:
+ 		switch (type) {
+ 		case GL_UNSIGNED_BYTE:
+-			if (internalFormat == GL_RED || internalFormat == GL_ALPHA)
++			if (internalFormat == GL_RED || internalFormat == GL_ALPHA || internalFormat == GL_INTENSITY) // patch 0042: GL_INTENSITY is U8_RRRR, 1 byte/texel
+ 				fast_store = GL_TRUE;
+ 			else
+ 				read_cb = read_r8;

@@ -14,6 +14,9 @@
 #include "Game/Util/RailUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/TalkUtil.hpp"
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 namespace {
     static const s32 sFlyLectureWaitStep = 120;
@@ -135,6 +138,9 @@ void HoneyBee::init(const JMapInfoIter& rIter) {
     MR::initFur(this);
     MR::initFur(mLodCtrl->_10);
     MR::initFur(mLodCtrl->_14);
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 6);  // (GXV_ALOD, actorlod23: family 6, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void HoneyBee::calcAndSetBaseMtx() {

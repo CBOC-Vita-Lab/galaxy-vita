@@ -3,13 +3,13 @@
 #
 #   tools/pgo/run_route.sh <instrumented-game> <cooked-data-dir> <route.txt> <run-dir> <game-seconds>
 #
-# Environment: QEMU_ARM (default qemu-arm), SYSROOT (default /usr/arm-linux-gnueabihf), EXTRA_ENV="A=1 B=2" for more
+# Environment: QEMU_ARM (default qemu-arm, else qemu-arm-static: Ubuntu's qemu-user-static), SYSROOT (default /usr/arm-linux-gnueabihf), EXTRA_ENV="A=1 B=2" for more
 # game switches, TIMEOUT (seconds, default 14400).  The cooked game data is read in place and never copied.
 # The game runs on its virtual clock, so the profile does not depend on how fast qemu is.  <run-dir> must not exist.
 set -uo pipefail
 [ $# -eq 5 ] || { sed -n '2,9p' "$0"; exit 2; }
 game=$1; cooked=$2; route=$3; run=$4; secs=$5
-Q=${QEMU_ARM:-qemu-arm}; SYSROOT=${SYSROOT:-/usr/arm-linux-gnueabihf}
+Q=${QEMU_ARM:-$(command -v qemu-arm || command -v qemu-arm-static || echo qemu-arm)}; SYSROOT=${SYSROOT:-/usr/arm-linux-gnueabihf}
 [ -x "$game" ] && [ -f "$cooked/sys/fst.bin" ] && [ -f "$route" ] || { echo "missing game, cooked data or route"; exit 2; }
 mkdir "$run" || { echo "run dir exists"; exit 2; }
 mkdir "$run/saves"
@@ -19,9 +19,10 @@ inputline=$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$ro
 env_args=(PETARI_VCLOCK=1 PETARI_GAME_CLOCK=1 PETARI_QEMU_MARK=1 PETARI_NATIVE_ADDRESSES=1 PETARI_SHOT_MS=999999999
   SDL_AUDIODRIVER=dummy PETARI_THP_WORKERS=2 PETARI_VCLOCK_FE=1 PETARI_INPUT="$inputline"
   LLVM_PROFILE_FILE="$run/route.profraw")
-env_args+=("${script_env[@]}")
 # shellcheck disable=SC2206
 env_args+=(${EXTRA_ENV:-})
+# the route's own "#!env" lines last, so that they win over EXTRA_ENV (opening.txt's PETARI_FRAMESKIP=0 against the console's 5)
+env_args+=("${script_env[@]}")
 start=$(date +%s)
 nice -n 10 timeout --kill-after=20 "${TIMEOUT:-14400}" env "${env_args[@]}" "$Q" -cpu cortex-a9 -L "$SYSROOT" \
   "$game" "$cooked" "$run" "$secs" > "$run/console.log" 2>&1

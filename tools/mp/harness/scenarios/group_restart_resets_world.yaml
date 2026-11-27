@@ -1,0 +1,35 @@
+# hostreload, case (b): Falls =
+# Bubbles (default). The guest defeats 3 enemies at 5 s, then both fall (host 40 s, guest 42 s, nobody pops): everyone is caught, the host sends
+# RESTART and the group restarts from the checkpoint together, like a single-player restart: enemies are alive again on EVERY console. The carry is
+# dropped everywhere ("world reload carry dropped"), never applied, and the host's state after the reload is kill=0 (objmap sent kill=0).
+name: group_restart_resets_world
+description: "everyone caught -> group restart: no carry applied, kill=0 on both, the 3 defeats are not kept"
+seconds: 360
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_KILL, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 8000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_DIE: "40:0:abyss"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_KILL: "5:3", SMG_MP_TEST_DIE: "42:1:abyss"}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'distinct host /\[mp\] world reg n=\d+ crc=([0-9a-f]+) / == 1'   # the same placement gives the same registry CRC after the reload
+  - 'distinct guest /\[mp\] world reg n=\d+ crc=([0-9a-f]+) / == 1'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] world test kill: killed=3 serial=\d+/'
+  - 'count host /\[mp\] world kill key=\S+ src=remote/ >= 3'
+  - 'expect * /\[mp\] bubble restart reload/ within 20s after * /\[mp\] bubble restart start/'
+  - 'expect host /\[mp\] world reload carry dropped \(group restart\)/'
+  - 'expect guest /\[mp\] world reload carry dropped \((restart message|group restart)\)/'
+  - 'expect guest /\[mp\] world reload carry dropped \(restart message\)/'   # the guest's RESTART handler drops first
+  - 'expect host /\[mp\] world objmap sent kill=0 purple=\d+ chip=\d+ chunks=\d+ to=1/ after host /\[mp\] bubble restart reload/'
+  - 'count host /\[mp\] world kill key=\S+ src=remote/ <= 3'   # nothing is applied again after the restart
+  - 'absent * /\[mp\] world reload carry applied/'
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

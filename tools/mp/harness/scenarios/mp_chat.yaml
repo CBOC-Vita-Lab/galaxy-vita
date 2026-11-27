@@ -1,0 +1,36 @@
+# MP3 chat: messages between players on the mp_star pair's footing (host takes both to Good Egg 1, the guest is Luigi). In the
+# second scene (flow serial 1: the autopilot starts in play, so Good Egg is the first scene) the guest sends a phrase from the Messages page's path, then one with the quick ring (Select held,
+# right), then a typed message (a room on the local link: typing allowed); the host answers with a phrase; then the host mutes the
+# guest and the guest's next typed message is hidden on the host (its phrase still toasts). Screenshots every 2 s: the balloons
+# over the puppets (TalkBalloonStretch). SMG_MP_TEST_CHAT is desktop-only.
+name: mp_chat
+description: phrases (page and ring), a typed message, the host's answer, mute; balloons and toasts on the other console
+seconds: 230
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_CHAT]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_CHAT: "16@1:5,30@1:mute:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_CHAT: "10@1:7,20@1:ring1,25@1:text:Meet me by the big tree,34@1:text:Can you see this?,37@1:6"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect guest /\[mp\] chat test: 7/ within 120s after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order guest /\[mp\] ui: chat sent id=7 / before host /\[mp\] ui: chat shown from=1 kind=phrase id=7$/ within 5s'
+  - 'order guest /\[mp\] ui: chat ring open/ before guest /\[mp\] ui: chat ring pick dir=1 phrase=3/ within 2s'
+  - 'order guest /\[mp\] ui: chat sent id=3 / before host /\[mp\] ui: chat shown from=1 kind=phrase id=3$/ within 5s'
+  - 'order guest /\[mp\] ui: chat sent id=text chars=23 / before host /\[mp\] ui: chat shown from=1 kind=text chars=23/ within 5s'
+  - 'order host /\[mp\] ui: chat sent id=5 / before guest /\[mp\] ui: chat shown from=0 kind=phrase id=5$/ within 5s'
+  - 'expect host /\[mp\] ui: chat mute slot=1 on=1/'
+  - 'order guest /\[mp\] ui: chat sent id=text chars=17 / before host /\[mp\] ui: chat hidden from=1 kind=text \(muted\)/ within 5s'
+  - 'order guest /\[mp\] ui: chat sent id=6 / before host /\[mp\] ui: chat shown from=1 kind=phrase id=6 \(muted: no balloon\)/ within 5s'
+  - 'expect * /\[mp\] ui: toast ".*: (Here.s a star!|Let.s go!|Meet me by the big tree|Help!)"/'
+  - 'absent * /\[mp\] (chat drop |ui: chat dropped|ui: chat NOT sent|ui: chat not sent|ui: chat balloons off)/'
+  - 'shots * >= 20'

@@ -1,0 +1,60 @@
+# QA-FUNC 5/15. Star Race TIE: both consoles finish with the SAME frame count. Unit-tested only (flow_test.cpp "tie shares the place",
+# series_test.cpp "a tie for first has no sole winner: the streak ends"); never seen in a game. A tie cannot be made on purpose from the star
+# timers (the frame count starts at each console's own countdown end), so the hook SMG_MP_TEST_RACE_FRAMES=<n> (MpRace.cpp onStarGet) makes the
+# real finish carry exactly n frames, and the "race results" line (MpRace.cpp applyResults) now ends with places=<card place numbers in list order>.
+# Expected: places=1,1 on both consoles, the card shows a shared first place, race 2 (Race Again, host's TEST_CHOICE 1) has no head start for anybody;
+# the host's second card is left with the hook's default (Leave Race), which ends the run.
+# Hooks (desktop build only): SMG_MP_TEST_RACE_FRAMES, SMG_MP_TEST_STAR, SMG_MP_TEST_CHOICE. SKIPs until the binary has SMG_MP_TEST_RACE_FRAMES.
+name: qa_race_tie
+description: "Star Race, both finish with equal frames: the results card shares first place, the next race has no head start for anybody"
+seconds: 420
+requires: {strings: [SMG_MP_TEST_RACE_FRAMES]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    may_end_early: true   # ends by its HARNESS_END mark (the early-exit preflight would call the run INVALID)
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_STAR: 25, SMG_MP_TEST_RACE_FRAMES: 1800, SMG_MP_TEST_CHOICE: "1:8",
+          HARNESS_END: '\[mp\] race test choice 3|20'}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15, SMG_MP_TEST_RACE_FRAMES: 1800}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit * == 0'
+  - 'expect host /\[mp\] flow session start role=host slot=0 mode=2/'
+  - 'expect host /\[mp\] race finish slot=0 frames=1800 star=\d+/'
+  - 'expect host /\[mp\] race finish slot=1 frames=1800$/'
+  - 'expect guest /\[mp\] race finish slot=1 frames=1800/'
+  - 'same host,guest /\[mp\] race results serial=\d+ n=2 first=\d frames=(\d+)/ first'
+  - 'expect host /\[mp\] race results serial=\d+ n=2 first=\d frames=1800 places=1,1/'
+  - 'expect guest /\[mp\] race results serial=\d+ n=2 first=\d frames=1800 places=1,1/'
+  - 'expect host /\[mp\] ui: results shown count=2 series=1 choice=0/'
+  - 'expect guest /\[mp\] ui: results shown count=2 series=1 choice=0/'
+  - 'absent * /\[mp\] race results .*places=(1,2|2,1)/'
+  - 'expect guest /\[mp\] race test frames 1800/'
+  - 'expect host /\[mp\] race test frames 1800/'
+  - 'absent * /\[mp\] race results .*places=(\d,0|0,\d)/'
+  - 'expect host /\[mp\] race test choice 1/'
+  - 'count host /\[mp\] race armed serial=\d+ galaxy=EggStarGalaxy/ >= 2'
+  - 'absent guest /\[mp\] race head start [1-9]\d* turns/'
+  - 'absent host /\[mp\] race head start [1-9]\d* turns/'
+  - 'absent * /\[mp\] (race hold timeout|race drop|star delivered .*path=record)/'
+  - 'absent * /\[mp\] (rejected by host|hello rejected|bad message from slot|events lost|queue overflow)/'
+  # racefix: the synchronized start. READY before the host's note of it, one GO with every present racer ready, one countdown per console and
+  # race, no countdown before GO, both countdowns close together, and no message the core refuses
+  - 'order guest /\[mp\] race ready sent serial=(\d+)/ before host /\[mp\] race ready from slot=1 serial=$1/ within 2s tol 300ms each'
+  - 'expect host /\[mp\] race go sent serial=\d+ ready=3 present=3 waited=\d+ ms/'
+  - 'count host /\[mp\] race go sent serial=\d+/ == 2'
+  - 'count host /\[mp\] race countdown serial=\d+/ == 2'
+  - 'count guest /\[mp\] race countdown serial=\d+/ == 2'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before host /\[mp\] race countdown serial=$1/ within 1s each'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s tol 300ms each'
+  - 'order host /\[mp\] race countdown serial=(\d+)/ near guest /\[mp\] race countdown serial=$1/ within 1s each'
+  - 'absent * /\[mp\] bad message from slot/'

@@ -1,0 +1,83 @@
+# Symbols the final Vita ELF (vita-vgx-game/galaxy_native) must DEFINE strongly and globally (nm T, or D/B/R for data; a local t does not count). Read by tools/check_weak_links.py
+# --must-define, which tools/vgx_build/build.py's link stage runs after every link (a release build fails when one is missing or only weak).
+# Most of these are referenced only WEAKLY by the rest of the port (host tests link without them): a weak reference never pulls an archive
+# member into the link, so without vita/vgx-game/CMakeLists.txt's -Wl,--require-defined the feature is silently absent on the console.
+# One name per line, `# why` after it. Mangled C++ names are allowed.
+
+# --- native Settings (linkfix31: integ-3.1's first Vita build had no "Triangle: Settings" hint and no live setters) ---
+port_settings_native_available   # settings_live.cpp: the pause panel's hint and Triangle (perf.cpp port_settings_hint_visible)
+port_less_motion_enabled         # settings_live.cpp: Less Motion row (settings_native.cpp NativeLiveOps)
+port_less_motion_set             # settings_live.cpp
+port_tilt_stick_enabled          # settings_live.cpp: Tilt row
+port_tilt_stick_set              # settings_live.cpp
+port_tilt_level                  # settings_live.cpp: Tilt Strength row
+port_tilt_level_set              # settings_live.cpp
+port_settings_hint_visible       # perf.cpp: the pause panel asks it
+port_settings_native_request     # MpUiSystem.cpp: Triangle / the old LiveArea tile open the native Settings (settings_runtime.cpp calls it weakly)
+_ZN4port8settings18NativeHostPlatformEv   # settings_runtime.cpp: the Vita host; settings_native.cpp has a weak null default that must lose
+_ZN4port8settings13NativeHostGetEv        # settings_native.cpp
+
+# --- multiplayer (MP3 vitalink; the list of build31.sh / build-3.0-vita.sh MP_MUST_DEFINE) ---
+np_vita_radio_dialog_render      # net/: ad hoc radio dialog
+np_vita_radio_dialog_active      # net/
+np_vita_radio_dialog_prepare     # net/
+np_vita_radio_rx_late_take_max   # net/
+np_vita_radio_ring_take_peak     # net/
+np_vita_ime_dialog_render        # net/: the on-screen keyboard
+np_vita_ime_dialog_active        # net/
+sceNetCtlInetGetState            # SceNetCtl stub: Wi-Fi state
+sceNetCtlInetGetInfo             # SceNetCtl stub
+sceNetCtlInetRegisterCallback    # SceNetCtl stub (mp_core_vita.cpp references it weakly; required in CMakeLists.txt)
+sceNetCtlInetUnregisterCallback  # SceNetCtl stub
+sceNetCtlCheckCallback           # SceNetCtl stub
+sceNetGetStatisticsInfo          # SceNet stub: free network memory
+mp_diag_report_begin             # mp_diag.cpp: beta diagnostics (Problem Report)
+mp_diag_check_begin              # mp_netcheck.cpp: Check Connection
+mp_port_boot                     # mp_boot.cpp: the multiplayer boot hook
+mp_ui_net_info                   # mp_ui_flow.cpp: the menu data store
+mp_conntest_start                # mp_conntest_sys.cpp: connection test
+mp_aids_boot                     # mp_hwaids.cpp
+mp_update_take_notice            # mp_update.cpp: update notice
+
+# --- renderer / runtime ---
+vgx2_b_thread_main               # vgx_twocore_b.cpp: the front end's second instance (GXV_FE_TWOCORE), weakly referenced
+vgx2_b_picture_state             # vgx_twocore_b*.cpp
+vgx2_b_state_objs                # vgx_twocore_b*.cpp
+pthread_cancel                   # libstdc++'s "threads are linked" test: without it std::mutex does nothing
+port_vgx_shader_bucket_open_guard_v1   # coldtrace_wrap.cpp / the shader cache guard
+vgxvita_prepareShaderCacheWrite_v1     # vitaGL shader cache write
+vgl_shader_cache_path                  # vitaGL shader cache path (data)
+
+# --- integ-3.1 hooks (fixnow31): weak references added since 34ee2865, each with a definition in the tree ---
+port_nand_progress               # platform/src/nand/nand.cpp: "Save and Start Again" progress (settings_runtime.cpp, weak)
+port_nand_failures               # nand.cpp: its failure count
+port_card_write_finished         # platform/src/os/os_alarm.cpp: card-write queue progress (settings_runtime.cpp, weak)
+port_card_write_failures         # os_alarm.cpp: card-write queue failures
+port_nand_all_atomic             # nand.cpp: the relaunch-is-safe test; null = the 30 s stall path
+vgxvita_asyncWorkerTid           # vgx_host_galaxy_vita.cpp (data): asyncsh31's alloc wrappers read it (alloc_wrap.cpp, weak)
+vgxvita_workerAllocStats_v1      # vita/vgx-game/alloc_wrap.cpp: the "worker alloc:" census line
+port_pose_blendfix_turn_begin    # decomp/src/Game/LiveActor/LiveActor.cpp: blendfix31's per-turn hook (perf.cpp, weak)
+port_bowl_pose_turn_begin        # LiveActor.cpp: bowl31's per-turn hook (perf.cpp, weak)
+port_pose_ondraw_turn_begin      # LiveActor.cpp: ondraw31's per-turn hook (perf.cpp, weak): GXV_POSE_ONDRAW's phase and "pose-ondraw:" line
+port_ptcl_pre_mode               # perf.cpp: perf32 GXV_PTCL_PRE (JPAResource.cpp references it weakly)
+vgx_tex_decode_counts            # platform/vgx/src/vgx_texcache.cpp: texup31 census (vgx_backend_gl.cpp, weak)
+vgxvita_swizzleLeftPending       # vgx_host_galaxy_vita.cpp: texup31 lazy fence (weak)
+vgxvita_texupCensusLine          # vgx_host_galaxy_vita.cpp: texup31 phase line (weak)
+
+# --- gxdedup31: GXV_GX_DEDUP's gate (platform/src/gx/gx_dedup.inc, in gx_fifo.cpp); port/gx_dedup.h declares them weak so host tests link without it ---
+__PortGXDedupBP                  # gx_dedup.inc: the BP write gate (GXRegs.h GX_WRITE_RA_REG, J3DFifo.hpp J3DFifoLoadBPCmd)
+__PortGXDedupCP                  # gx_dedup.inc: the CP write gate (GX_WRITE_CP_STRM_REG, J3DFifoLoadCPCmd, J3DLoadCPCmd)
+__PortGXDedupXF                  # gx_dedup.inc: the one-word XF register gate (GX_WRITE_XF_REG)
+__PortGXDedupXF2                 # gx_dedup.inc: J3DShapeMtxIdx::load's two matrix-index words
+__PortGXDedupBumpAt              # gx_dedup.inc: the invalidations (list calls, markers, pictures, GXInit, FIFO rebinds)
+__PortGXDedupOn                  # gx_dedup.inc (data): the switch byte; every other unit has a weak zero that must lose
+__PortGXDedupOnBP                # gx_dedup.inc (data): the BP writes go through the gate (GXV_GX_DEDUP_CLASSES)
+__PortGXDedupOnCX                # gx_dedup.inc (data): the CP / XF writes go through the gate
+__PortGXDedupKeep                # gx_dedup.inc (data): what a caller vouches for at a list call
+
+# --- keepawake33: OLED-safe VitaOS ~15 s auto-suspend guard during boot & shader compiles ---
+port_vgx_shader_compiling        # platform/vgx/src/vgx_backend_gl.cpp: 1 while sync Compile/Link or async worker compile is active
+port_vgx_shader_compile_seq      # platform/vgx/src/vgx_backend_gl.cpp: monotonic sequence bumped on ShaderCompileGuard enter/exit (boot StallWatch)
+port_vgx_vita_boot_loading       # platform/vgx/vita/vgx_host_galaxy_vita.cpp: 1 while boot splash is actively loading (kDirect/kGl, !failed, !stalled)
+port_settings_native_open        # decomp/src/Game/MP/MpUiSystem.cpp: 1 while native in-game Settings UI is open
+port_dvd_cached_fst_copy         # platform/src/dvd/dvd.cpp: cached sys/fst.bin copy for mp_boot StageDataHash (weak ref)

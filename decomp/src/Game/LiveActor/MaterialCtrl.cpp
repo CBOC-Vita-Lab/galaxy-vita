@@ -1,9 +1,15 @@
 #include "Game/LiveActor/MaterialCtrl.hpp"
+#ifdef TARGET_PC
+#include <string.h>
+#endif
 #include "Game/System/ResourceHolder.hpp"
 #include "Game/Util.hpp"
 #include <JSystem/J3DGraphBase/J3DMaterial.hpp>
 #include <JSystem/J3DGraphBase/J3DTexture.hpp>
 #include <cstring>
+#ifdef TARGET_PC
+#include <JSystem/J3DGraphBase/J3DPortNative.hpp>
+#endif
 
 #ifndef GXV_PROJMAP_RUN_REUSE
 #define GXV_PROJMAP_RUN_REUSE 0
@@ -77,6 +83,23 @@ FogCtrl::FogCtrl(J3DModelData* pModelData, bool useAllMaterials) : MaterialCtrl(
 }
 
 void FogCtrl::update() {
+#ifdef TARGET_PC
+    // (GXV_J3DNATIVE: the fog serial moves only when the fog values change (update runs every turn); the lists it reaches are made
+    // again through diff and bump themselves when their bytes change)
+    if (J3DPortNativeMode() != 0) {
+        J3DPortCensusAdd(J3DPortCen_FogCalls);
+        bool changed = false;
+        for (s32 i = 0; i < mNumMaterials && !changed; i++) {
+            changed = memcmp(static_cast< J3DFogInfo* >(mMaterials[i]->mPEBlock->getFog()), &mFogInfo, sizeof(J3DFogInfo)) != 0;
+        }
+        if (changed) {
+            J3DPortCensusAdd(J3DPortCen_FogReal);
+            J3DPortVerBump(J3DPortVer_Fog);
+        }
+    } else {
+        J3DPortVerBump(J3DPortVer_Fog);
+    }
+#endif
     for (s32 i = 0; i < mNumMaterials; i++) {
         mMaterials[i]->mPEBlock->getFog()->setFogInfo(mFogInfo);
     }

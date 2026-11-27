@@ -8,6 +8,10 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SequenceUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpGame.hpp"  // MP3: hold after the star until the session moves on
+#include "Game/MP/MpSpectate.hpp"  // MP3 spectate: no "You got a Star!" over the watched view
+#endif
 
 namespace {
     static const s32 sClearDemoStopFrame = 10;
@@ -90,6 +94,13 @@ void GameStageClearSequence::exePowerStarGetDemo() {
     bool isWipeActive = MR::isWipeActive();
 
     if (MR::isGreaterStep(this, ::sClearDemoWipeStepPowerStar) && !isWipeActive) {
+#ifdef TARGET_PC
+        // MP3: behind the closed wipe until the session moves on (guests: the host's MOVE; Star Race: the results)
+        if (mp_active() && MpFlow::holdAfterClear()) {
+            if (MpSpectate::watching() && mEffectLayout && !MR::isDead(mEffectLayout)) mEffectLayout->kill();
+            return;
+        }
+#endif
         MR::requestChangeStageAfterStageClear();
         kill();
     }
@@ -125,6 +136,12 @@ void GameStageClearSequence::exeGrandStarGetDemo() {
         bool isWipeActive = MR::isSystemWipeActive();
 
         if (MR::isGreaterStep(this, ::sClearDemoWipeStepKoopaVs3) && !isWipeActive) {
+#ifdef TARGET_PC
+            // MP3: behind the closed wipe until the session moves on (guests: the host's MOVE; Star Race: the results)
+            if (mp_active() && MpFlow::holdAfterClear()) {
+                return;
+            }
+#endif
             MR::requestChangeStageAfterStageClear();
             kill();
         }
@@ -136,6 +153,12 @@ void GameStageClearSequence::exeGrandStarGetDemo() {
         bool isWipeActive = MR::isWipeActive();
 
         if (MR::isGreaterStep(this, ::sClearDemoWipeStepGrandStar) && !isWipeActive) {
+#ifdef TARGET_PC
+            // MP3: behind the closed wipe until the session moves on (guests: the host's MOVE; Star Race: the results)
+            if (mp_active() && MpFlow::holdAfterClear()) {
+                return;
+            }
+#endif
             MR::requestChangeStageAfterStageClear();
             kill();
         }

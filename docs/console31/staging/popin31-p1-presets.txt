@@ -1,0 +1,4 @@
+# popin31 P1: the base class without the budget's drawn cuts and without cpulod (sizes, fx and clip_skipempty as shipped)
+@class base start=6 floor=6 ceil=6 size=fixed fx=down clip_skipempty=1
+AstroGalaxy class=base
+AstroDome class=base

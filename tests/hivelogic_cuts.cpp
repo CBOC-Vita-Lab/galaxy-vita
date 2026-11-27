@@ -13,9 +13,16 @@
 #include <cstring>
 #include <new>
 #include <vector>
+#include <ctime>
+#include <cstdint>
 
-static int gSensorKnob = 0, gAreaKnob = 1;
+static int gSensorKnob = 0, gAreaKnob = 1, gBpKnob = 0, gPfKnob = 0;
 extern "C" int port_hl_sensor_on(void) { return gSensorKnob; }
+// update23: GXV_SENSOR_BP (port/sensor_bp.h) and GXV_UPD_PREFETCH, and what the "sensor-bp:" line needs
+extern "C" int port_sensor_bp_on(void) { return gBpKnob; }
+extern "C" int port_upd_prefetch_on(void) { return gPfKnob; }
+extern "C" int64_t port_host_time_ns(void) { return 0; }
+extern "C" void port_log_summary(const char*, ...) {}
 extern "C" int port_hl_areacube_on(void) { return gAreaKnob; }
 // the verify hooks (perf.cpp on the console): counted here
 static long gVArea = 0, gVAreaMis = 0, gVAreaStale = 0, gVSensTurns = 0, gVSensCompared = 0, gVSensMis = 0;
@@ -30,6 +37,7 @@ extern "C" void port_hl_verify_sensor(unsigned compared, unsigned mismatched, co
 }
 static long gClipCalls = 0, gClipFlipAt = -1;  // (detector check: one host's clipping flips at that isClipped call)
 extern "C" void port_logic_count(int, unsigned) {}
+extern "C" uint32_t port_area_geo_gen = 1;  // (logic23: GXV_AREA_GRID's generation, bumped by AreaFormCube::updateBoxParam)
 static unsigned char gClip[4096];
 static char gHostBase[4096];
 namespace MR {
@@ -304,6 +312,190 @@ static int AreaFollowStaleTest() {
     return followWrong == 0 && staleSeen == staleRuns ? 0 : 1;
 }
 
+
+// ---- update23: GXV_SENSOR_BP ----------------------------------------------------------------------------------------------------
+// The broad phase against the original loops (knob 0) and the copies' plain loops (HL 1, BP 0), on scenes made to hurt it: pairs
+// placed at exactly r1 + r2 apart along an axis or a random direction, +- a few ulps (the hit test's boundary), exact ties, large
+// coordinates with small radii, zero radii, one huge radius, many sensors in one spot, and now and then a NaN / infinite / out-of-range
+// value (the turn must fall back to the plain loops). Every sensor's hit list (entries AND order) must equal the original's.
+// PORT_SENSOR_BP_NEG (a margin too narrow) must make it fail.
+static HitSensor* NewSensor(std::vector<HitSensor*>& all, int hosts) {
+    HitSensor* s = static_cast<HitSensor*>(::operator new(sizeof(HitSensor)));
+    std::memset(s, 0, sizeof(HitSensor));
+    s->mType = (rnd() % 6 == 0) ? ATYPE_EYE : rnd() % 0x90;
+    s->mGroupSize = (rnd() % 5 == 0) ? 1 + rnd() % 3 : 8 + rnd() % 24;  // (small caps: the order decides what is kept)
+    s->mSensors = new HitSensor*[s->mGroupSize + 1];
+    s->mValidByHost = rnd() % 10 != 0;
+    s->mValidBySystem = rnd() % 12 != 0;
+    s->mHost = reinterpret_cast<LiveActor*>(gHostBase + rnd() % hosts);
+    s->mSensorCount = rnd() % 3;
+    all.push_back(s);
+    return s;
+}
+static void Lists(const std::vector<HitSensor*>& all, std::vector<std::vector<HitSensor*> >& out) {
+    out.clear();
+    for (HitSensor* s : all) out.push_back(std::vector<HitSensor*>(s->mSensors, s->mSensors + s->mSensorCount));
+}
+static int SensorBpTest() {
+    const int kMax[6] = {0x10, 0x80, 0x200, 0x800, 0x400, 0x400};
+    alignas(16) static unsigned char raw[sizeof(SensorHitChecker)];
+    SensorHitChecker* chk = reinterpret_cast<SensorHitChecker*>(raw);
+    SensorGroup* groups[6];
+    for (int g = 0; g < 6; g++) groups[g] = new SensorGroup(kMax[g], "t");
+    chk->mPlayerGroup = groups[0]; chk->mRideGroup = groups[1]; chk->mEyeGroup = groups[2];
+    chk->mSimpleGroup = groups[3]; chk->mMapObjGroup = groups[4]; chk->mCharacterGroup = groups[5];
+    long entries = 0, differ = 0, boundary = 0, special = 0;
+    const int kScen = 6000;
+    for (int scen = 0; scen < kScen; scen++) {
+        std::vector<HitSensor*> all;
+        const int hosts = 2 + rnd() % 120;
+        for (int h = 0; h < hosts; h++) gClip[h] = (rnd() % 5) == 0;
+        const int kind = scen % 6;
+        const float spread = kind == 0 ? 30.0f : kind == 1 ? 600.0f : kind == 2 ? 8000.0f : kind == 3 ? 250000.0f : kind == 4 ? 3000.0f : 1.0e6f;
+        for (int g = 0; g < 6; g++) {
+            int n = (g == 0) ? 1 + rnd() % 4 : (scen % 7 == 0 ? rnd() % 260 : rnd() % 70);
+            if (n > kMax[g]) n = kMax[g];
+            groups[g]->mSensorCount = n;
+            for (int i = 0; i < n; i++) {
+                HitSensor* s = NewSensor(all, hosts);
+                const int mode = rnd() % 16;
+                const float rmax = kind == 3 || kind == 5 ? 400.0f : spread * 0.3f;
+                s->mRadius = (rnd() % 9 == 0) ? 0.0f : frand(0.0f, rmax);
+                if (mode < 3) {  // a coarse grid: exact ties, touching spheres
+                    s->mPosition.set((float)(rnd() % 7) * 50.0f, (float)(rnd() % 7) * 50.0f, (float)(rnd() % 3) * 50.0f);
+                    s->mRadius = 25.0f * (float)(rnd() % 3);
+                } else {
+                    s->mPosition.set(frand(-spread, spread), frand(-spread, spread), frand(-spread, spread));
+                }
+                if (mode >= 9 && all.size() > 1) {  // at the boundary of an earlier sensor, +- a few ulps
+                    const HitSensor* o = all[rnd() % (all.size() - 1)];
+                    float d = (o->mRadius + s->mRadius);
+                    const int ulps = (int)(rnd() % 9) - 4;
+                    for (int k = 0; k < (ulps < 0 ? -ulps : ulps); k++) d = nextafterf(d, ulps < 0 ? 0.0f : INFINITY);
+                    if (mode < 13) {  // along one axis
+                        const int ax = rnd() % 3;
+                        const float sg = (rnd() & 1) ? 1.0f : -1.0f;
+                        s->mPosition = o->mPosition;
+                        if (ax == 0) s->mPosition.x = o->mPosition.x + sg * d;
+                        if (ax == 1) s->mPosition.y = o->mPosition.y + sg * d;
+                        if (ax == 2) s->mPosition.z = o->mPosition.z + sg * d;
+                    } else {  // a random direction
+                        float dx = frand(-1, 1), dy = frand(-1, 1), dz = frand(-1, 1);
+                        const float l = sqrtf(dx * dx + dy * dy + dz * dz) + 1e-6f;
+                        s->mPosition.set(o->mPosition.x + d * dx / l, o->mPosition.y + d * dy / l, o->mPosition.z + d * dz / l);
+                    }
+                    ++boundary;
+                }
+                if (mode == 8 && rnd() % 3 == 0) s->mRadius = frand(5000.0f, 2.0e5f);  // one huge sensor
+                if (rnd() % 400 == 0) {  // a value the broad phase must refuse (the turn runs the plain loops)
+                    const float sp[5] = {NAN, INFINITY, -INFINITY, 3.0e9f, -1.0f};
+                    const int w = rnd() % 5;
+                    if (w == 4) s->mRadius = -frand(0.0f, 50.0f); else if (rnd() & 1) s->mPosition.y = sp[w]; else s->mRadius = sp[w] == -INFINITY ? INFINITY : sp[w];
+                    ++special;
+                }
+                groups[g]->mSensors[i] = s;
+            }
+        }
+        std::vector<std::vector<HitSensor*> > ref, hl, bp;
+        gSensorKnob = 0; gBpKnob = 0; gPfKnob = 0;
+        chk->SensorHitChecker::movement();
+        Lists(all, ref);
+        gSensorKnob = 1; gBpKnob = 0; gPfKnob = scen & 1;
+        chk->SensorHitChecker::movement();
+        Lists(all, hl);
+        gSensorKnob = 1; gBpKnob = 1; gPfKnob = (scen >> 1) & 1;
+        chk->SensorHitChecker::movement();
+        Lists(all, bp);
+        for (auto& v : ref) entries += (long)v.size();
+        if (ref != hl || ref != bp) ++differ;
+        for (HitSensor* s : all) { delete[] s->mSensors; ::operator delete(s); }
+    }
+    gBpKnob = 0;
+    std::printf("sensor-bp: %d scenarios, %ld hit-list entries, %ld boundary placements, %ld refused values, %ld scenarios differ\n", kScen,
+                entries, boundary, special, differ);
+    return differ == 0 ? 0 : 1;  // (built with PORT_SENSOR_BP_NEG, the negative control: must FAIL here)
+}
+// GXV_SENSOR_BP=2 (verify): the lists are the original loops', no mismatch reported.
+static int SensorBpVerifyTest() {
+    const int kMax[6] = {0x10, 0x80, 0x200, 0x800, 0x400, 0x400};
+    alignas(16) static unsigned char raw[sizeof(SensorHitChecker)];
+    SensorHitChecker* chk = reinterpret_cast<SensorHitChecker*>(raw);
+    SensorGroup* groups[6];
+    for (int g = 0; g < 6; g++) groups[g] = new SensorGroup(kMax[g], "t");
+    chk->mPlayerGroup = groups[0]; chk->mRideGroup = groups[1]; chk->mEyeGroup = groups[2];
+    chk->mSimpleGroup = groups[3]; chk->mMapObjGroup = groups[4]; chk->mCharacterGroup = groups[5];
+    long differ = 0;
+    const long turnsBefore = gVSensTurns, misBefore = gVSensMis;
+    for (int scen = 0; scen < 800; scen++) {
+        std::vector<HitSensor*> all;
+        const int hosts = 2 + rnd() % 60;
+        for (int h = 0; h < hosts; h++) gClip[h] = (rnd() % 5) == 0;
+        for (int g = 0; g < 6; g++) {
+            int n = (g == 0) ? 1 + rnd() % 3 : rnd() % 60;
+            groups[g]->mSensorCount = n;
+            for (int i = 0; i < n; i++) {
+                HitSensor* s = NewSensor(all, hosts);
+                s->mPosition.set(frand(-900, 900), frand(-900, 900), frand(-900, 900));
+                s->mRadius = frand(0.0f, 200.0f);
+                groups[g]->mSensors[i] = s;
+            }
+        }
+        std::vector<std::vector<HitSensor*> > ref, ver;
+        gSensorKnob = 0; gBpKnob = 0;
+        chk->SensorHitChecker::movement();
+        Lists(all, ref);
+        gSensorKnob = 1; gBpKnob = 2;
+        chk->SensorHitChecker::movement();
+        Lists(all, ver);
+        if (ref != ver) ++differ;
+        for (HitSensor* s : all) { delete[] s->mSensors; ::operator delete(s); }
+    }
+    gBpKnob = 0; gSensorKnob = 0;
+    const long turns = gVSensTurns - turnsBefore, mis = gVSensMis - misBefore;
+    std::printf("sensor-bp verify mode: 800 scenarios, %ld turns compared, %ld mismatches reported, %ld differ\n", turns, mis, differ);
+    return differ == 0 && mis == 0 && turns == 800 ? 0 : 1;  // (PORT_SENSOR_BP_NEG: mismatches reported, FAIL)
+}
+// Host timing of movement() on a Honeyhive-like scene (informative only: the host's caches and FPU are not the console's).
+static void SensorBpTiming() {
+    const int kMax[6] = {0x10, 0x80, 0x200, 0x800, 0x400, 0x400};
+    alignas(16) static unsigned char raw[sizeof(SensorHitChecker)];
+    SensorHitChecker* chk = reinterpret_cast<SensorHitChecker*>(raw);
+    SensorGroup* groups[6];
+    for (int g = 0; g < 6; g++) groups[g] = new SensorGroup(kMax[g], "t");
+    chk->mPlayerGroup = groups[0]; chk->mRideGroup = groups[1]; chk->mEyeGroup = groups[2];
+    chk->mSimpleGroup = groups[3]; chk->mMapObjGroup = groups[4]; chk->mCharacterGroup = groups[5];
+    // a scene: player 3, ride 2, eye 12, simple 60 (coins / star bits in rings), map obj 20, character 30 (bees, enemies) over a
+    // ~6000-unit region, radii 30-150 (eyes 600-1000), all hosts unclipped: ~1500 pairs in the loops, as the r107 log's count
+    const int sizes[6] = {3, 2, 12, 60, 20, 30};
+    std::vector<HitSensor*> all;
+    for (int h = 0; h < 120; h++) gClip[h] = 0;
+    for (int g = 0; g < 6; g++) {
+        groups[g]->mSensorCount = sizes[g];
+        for (int i = 0; i < sizes[g]; i++) {
+            HitSensor* s = NewSensor(all, 120);
+            s->mValidByHost = s->mValidBySystem = true;
+            s->mType = g == 2 ? ATYPE_EYE : 1;
+            s->mPosition.set(frand(-3000, 3000), frand(-3000, 3000), frand(-1500, 1500));
+            s->mRadius = g == 2 ? frand(600, 1000) : frand(30, 150);
+            groups[g]->mSensors[i] = s;
+        }
+    }
+    double ns[2];
+    for (int bpOn = 0; bpOn < 2; bpOn++) {
+        gSensorKnob = 1; gBpKnob = bpOn;
+        const int reps = 20000;
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        for (int r = 0; r < reps; r++) chk->SensorHitChecker::movement();
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        ns[bpOn] = ((b.tv_sec - a.tv_sec) * 1e9 + (b.tv_nsec - a.tv_nsec)) / reps;
+    }
+    gBpKnob = 0; gSensorKnob = 0;
+    std::printf("sensor-bp timing (host, informative): movement() %.2f us with the copies' plain loops, %.2f us with the broad phase (x%.2f)\n",
+                ns[0] / 1000.0, ns[1] / 1000.0, ns[0] / (ns[1] > 0 ? ns[1] : 1));
+    for (HitSensor* s : all) { delete[] s->mSensors; ::operator delete(s); }
+}
+
 int main() {
     int bad = 0;
     bad |= SensorTest(false);
@@ -311,6 +503,9 @@ int main() {
     bad |= AreaTest();
     bad |= SensorVerifyTest();
     bad |= AreaFollowStaleTest();
+    bad |= SensorBpTest();
+    bad |= SensorBpVerifyTest();
+    SensorBpTiming();
     std::printf(bad ? "FAIL\n" : "PASS\n");
     return bad;
 }

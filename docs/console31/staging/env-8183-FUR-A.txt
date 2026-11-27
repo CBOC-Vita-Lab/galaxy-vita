@@ -1,0 +1,8 @@
+# 8183 FUR-A: fur A: the default (GXV_PB_FUR_SURFACE on) with GXV_POPIN_LOG=1 GXV_FURCENSUS=1; Honeyhive: climb the Queen from the ground to her head and back (2 min), then orbit her at 2000-3000 units; note GPU ms and the governor level (the owner plays or watches)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+GXV_POPIN_LOG=1
+GXV_FURCENSUS=1

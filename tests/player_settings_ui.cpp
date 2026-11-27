@@ -17,72 +17,48 @@ static void Tap(UiState& s,uint32_t key) {Input(s,key);Input(s);}
 static void Arm(UiState& s) {Input(s);}
 int main() {
     auto session=Session();UiState s;Begin(s,session);
-    Input(s,Accept,controls::Cross);assert(!s.armed&&s.working.fpsLimit==0);Input(s);
-    // Preset row: Right goes Best picture -> Balanced -> Performance -> Best picture, Left back; each sets only its covered rows.
-    assert(s.row==RowPreset&&PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Right);assert(PresetOf(s.working)==Preset::Balanced&&!s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Auto&&s.working.sharpness==Sharpness::Auto&&s.working.depthOfField&&session.active.aboveNative);
-    Tap(s,Right);assert(PresetOf(s.working)==Preset::Performance&&!s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Off&&s.working.sharpness==Sharpness::Off&&!s.working.depthOfField);
-    Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture&&s.working.aboveNative&&s.working.depthOfField&&!Dirty(s));
-    Tap(s,Left);assert(PresetOf(s.working)==Preset::Performance);Tap(s,Left);assert(PresetOf(s.working)==Preset::Balanced);Tap(s,Left);assert(PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Accept);assert(PresetOf(s.working)==Preset::Balanced);Tap(s,Left);   // Cross steps forward like Right
-    // The rows a preset leaves alone survive it: picture rate, HD textures, core plan, reduced motion, language.
-    s.working.hdTextures=false;s.working.coreHelp=false;s.working.reducedMotion=true;s.working.language="French";Tap(s,Right);Tap(s,Right);
-    assert(!s.working.hdTextures&&!s.working.coreHelp&&s.working.reducedMotion&&s.working.language=="French");s.working.hdTextures=true;s.working.coreHelp=true;s.working.reducedMotion=false;s.working.language="";
-    Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Down);assert(s.row==RowRate);
-    // Picture mode: Quality (default) -> Performance -> Locked 30 -> Quality. Performance reads as the Performance preset only with the
-    // preset's own rows; Quality and Locked 30 are not in a preset. Performance leaves Sharper and Anti-aliasing as they are (sizes above the
-    // standard one with room at 60 follow Sharper; multisampling is never used in it, which the Anti-aliasing row says).
-    assert(!s.working.performance60&&s.working.fpsLimit==0);
-    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.label)=="Picture mode"&&std::string(rv.value).find("Quality")==0);}
-    Tap(s,Right);assert(s.working.performance60&&s.working.fpsLimit==0&&s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Auto&&session.active.fpsLimit==0&&!session.active.performance60&&PresetOf(s.working)==Preset::Custom);
-    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value).find("Performance")==0&&std::string(rv.help1).find("60")!=std::string::npos);
-     DisplayRowView(s,RowAntiAliasing,rv);assert(std::string(rv.help1).find("no multisampling in Performance")!=std::string::npos);}
-    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==30);
-    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value)=="Locked 30");}
-    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==0&&PresetOf(s.working)==Preset::BestPicture);
-    Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Left);assert(s.working.performance60&&s.working.fpsLimit==0);Tap(s,Left);assert(!s.working.performance60&&s.working.fpsLimit==0);
-    Tap(s,Left);assert(s.working.fpsLimit==30&&PresetOf(s.working)==Preset::BestPicture);   // Locked 30 itself is not in a preset
-    // The Performance preset selects Performance mode (and leaves Locked 30); the others go back to Quality, keeping a Locked 30.
-    s.row=RowPreset;Tap(s,Left);assert(PresetOf(s.working)==Preset::Performance&&s.working.performance60&&s.working.fpsLimit==0);
-    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value).find("Performance")!=std::string::npos);DisplayRowView(s,RowSharper,rv);assert(std::string(rv.value)=="Off");}
-    Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture&&!s.working.performance60&&s.working.fpsLimit==0);
-    s.working.fpsLimit=30;Tap(s,Right);assert(PresetOf(s.working)==Preset::Balanced&&s.working.fpsLimit==30);Tap(s,Left);assert(PresetOf(s.working)==Preset::BestPicture&&s.working.fpsLimit==30);
-    s.working.fpsLimit=0;
-    // Every Display row has its words in every picture mode.
-    for(int mode=0;mode<3;++mode) {
-        s.working.fpsLimit=mode==2?30:0;s.working.performance60=mode==1;
-        for(unsigned row=0;row<kDisplayRows;++row) {RowView rv;DisplayRowView(s,row,rv);assert(rv.label[0]&&rv.value[0]&&rv.help1[0]);}
+    Input(s,Accept,controls::Cross);assert(!s.armed&&s.working.fpsLimit==0&&s.working.performance60);Input(s);
+    // modes26: the Display page opens on the Picture mode row (the first of kDisplayRows = 13 shown rows); Preset, Dynamic resolution, Sharper, Mario, Anti-aliasing and Effects are
+    // no longer rows of the page (their enum values are at kDisplayRows and after, never reached by Up / Down).
+    assert(kDisplayRows==13&&RowRate==0&&RowPreset>=kDisplayRows&&RowDynamic>=kDisplayRows&&RowSharper>=kDisplayRows&&RowMario>=kDisplayRows&&RowAntiAliasing>=kDisplayRows&&RowEffects>=kDisplayRows);
+    assert(s.row==RowRate&&Mode30(s.working)==false&&s.working.performance60&&s.working.fpsLimit==0);
+    // Picture mode: Performance (60, the default) <-> Quality (30); either arrow or Cross toggles; the names and the two descriptions are the owner's.
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.label)=="Picture mode"&&std::string(rv.value)=="Performance (60)");
+     assert(std::string(rv.help1)=="60 fps. The smoothest play. Some far detail and effects are lighter."&&std::string(rv.help2).find("960x544")==0);}
+    Tap(s,Right);assert(!s.working.performance60&&s.working.fpsLimit==30&&Mode30(s.working)&&session.active.fpsLimit==0&&session.active.performance60);
+    {RowView rv;DisplayRowView(s,RowRate,rv);assert(std::string(rv.value)=="Quality (30)"&&std::string(rv.help1)=="30 fps, smooth, with the highest quality. Always.");}
+    Tap(s,Right);assert(s.working.performance60&&s.working.fpsLimit==0);
+    Tap(s,Left);assert(s.working.fpsLimit==30);Tap(s,Accept);assert(s.working.performance60&&s.working.fpsLimit==0);
+    // The hidden rows keep their saved values and nothing on the page changes them.
+    s.working.aboveNative=false;s.working.antiAliasing=AntiAliasing::Off;s.working.effects=EffectsQuality::Full;s.working.prioritizeMario=false;s.working.autoQuality=AutoQuality::Disabled;
+    for(unsigned i=0;i<kDisplayRows+3;++i){Tap(s,Down);}
+    s.row=RowRate;Tap(s,Right);Tap(s,Right);assert(!s.working.aboveNative&&s.working.antiAliasing==AntiAliasing::Off&&s.working.effects==EffectsQuality::Full&&!s.working.prioritizeMario&&s.working.autoQuality==AutoQuality::Disabled);
+    s.working.aboveNative=true;s.working.antiAliasing=AntiAliasing::Auto;s.working.effects=EffectsQuality::Adaptive;s.working.prioritizeMario=true;s.working.autoQuality=AutoQuality::Default;
+    // Every Display row has its words in both picture modes (and the hidden rows still have theirs).
+    for(int mode=0;mode<2;++mode) {
+        s.working.fpsLimit=mode==1?30:0;s.working.performance60=mode==0;
+        for(unsigned row=0;row<kDisplayRows+6;++row) {RowView rv;DisplayRowView(s,row,rv);assert(rv.label[0]&&rv.value[0]&&rv.help1[0]);}
     }
-    s.working.fpsLimit=0;s.working.performance60=false;s.row=RowRate;
-    // Editing any covered row reads Custom; putting it back reads the preset again.
-    struct Covered {unsigned row;const char* what;};
-    for(const Covered c:{Covered{RowDynamic,"dynamic"},Covered{RowSharper,"sharper"},Covered{RowMario,"mario"},Covered{RowAntiAliasing,"aa"},Covered{RowSharpness,"sharpness"},Covered{RowEffects,"effects"},Covered{RowDepthOfField,"dof"}}) {
-        s.row=c.row;Tap(s,Right);assert(PresetOf(s.working)==(c.row==RowSharper?Preset::Balanced:Preset::Custom));   // Sharper off alone is exactly Balanced
-        if(c.row==RowSharpness){assert(s.working.sharpness==Sharpness::Off);Tap(s,Right);assert(s.working.sharpness==Sharpness::Strong&&PresetOf(s.working)==Preset::Custom);}
-        Tap(s,c.row==RowSharpness?Right:Left);assert(PresetOf(s.working)==Preset::BestPicture);
-    }
-    s.row=RowSharpness;Tap(s,Left);assert(s.working.sharpness==Sharpness::Strong);Tap(s,Right);assert(s.working.sharpness==Sharpness::Auto);
-    // From Custom, Right starts the list at Best picture and Left at Performance.
-    s.row=RowMario;Tap(s,Right);assert(PresetOf(s.working)==Preset::Custom);s.row=RowPreset;Tap(s,Right);assert(PresetOf(s.working)==Preset::BestPicture&&s.working.prioritizeMario);
-    s.row=RowMario;Tap(s,Right);s.row=RowPreset;Tap(s,Left);assert(PresetOf(s.working)==Preset::Performance);Tap(s,Left);Tap(s,Left);assert(PresetOf(s.working)==Preset::BestPicture);
-    // Dynamic resolution Off is Custom and its On is the default choice, not a forced one.
-    s.row=RowDynamic;Tap(s,Right);assert(s.working.autoQuality==AutoQuality::Disabled&&PresetOf(s.working)==Preset::Custom);Tap(s,Right);assert(s.working.autoQuality==AutoQuality::Default&&PresetOf(s.working)==Preset::BestPicture);
-    {auto on=s.working;on.autoQuality=AutoQuality::Enabled;assert(PresetOf(on)==Preset::BestPicture);}   // a saved "on" reads as the preset too
+    s.working.fpsLimit=0;s.working.performance60=true;s.row=RowRate;
+    // Sharpness is a shown row (Auto, Off, Strong).
+    s.row=RowSharpness;Tap(s,Right);assert(s.working.sharpness==Sharpness::Off);Tap(s,Right);assert(s.working.sharpness==Sharpness::Strong);Tap(s,Right);assert(s.working.sharpness==Sharpness::Auto);
+    Tap(s,Left);assert(s.working.sharpness==Sharpness::Strong);Tap(s,Right);
+    s.row=RowDepthOfField;Tap(s,Right);assert(!s.working.depthOfField);Tap(s,Left);assert(s.working.depthOfField);
     // The remaining rows toggle.
     s.row=RowHdTextures;Tap(s,Right);assert(!s.working.hdTextures);Tap(s,Left);assert(s.working.hdTextures);
     s.row=RowCorePlan;Tap(s,Accept);assert(!s.working.coreHelp);Tap(s,Accept);assert(s.working.coreHelp);
-    s.row=RowRenderer;Tap(s,Right);assert(!s.working.gxmDirect&&PresetOf(s.working)==Preset::BestPicture);Tap(s,Left);assert(s.working.gxmDirect);   // speed rows are not in a preset
+    s.row=RowRenderer;Tap(s,Right);assert(!s.working.gxmDirect&&true);Tap(s,Left);assert(s.working.gxmDirect);   // speed rows are not in a preset
     s.row=RowOverlap;assert(s.working.logicOverlap&&s.working.overlapMax);Tap(s,Right);assert(s.working.logicOverlap&&!s.working.overlapMax);Tap(s,Right);assert(!s.working.logicOverlap);Tap(s,Right);assert(s.working.logicOverlap&&s.working.overlapMax);
     s.row=RowMaterials;Tap(s,Accept);assert(!s.working.lazyMaterials);Tap(s,Accept);assert(s.working.lazyMaterials);
     s.row=RowFarAnimation;Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Full);Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Aggressive);Tap(s,Right);assert(s.working.farAnimation==FarAnimation::Reduced);Tap(s,Left);assert(s.working.farAnimation==FarAnimation::Aggressive);Tap(s,Right);
-    s.row=RowSpeed;Tap(s,Accept);assert(!s.working.fullSpeed&&PresetOf(s.working)==Preset::BestPicture);Tap(s,Accept);assert(s.working.fullSpeed);
+    s.row=RowSpeed;Tap(s,Accept);assert(!s.working.fullSpeed);Tap(s,Accept);assert(s.working.fullSpeed);
     s.row=RowLanguage;Tap(s,Right);assert(s.working.language=="English");Tap(s,Left);assert(s.working.language.empty());Tap(s,Right);
     s.row=RowMotion;Tap(s,Accept);assert(s.working.reducedMotion);
+    s.row=RowSafeSaves;assert(!s.working.safeSaves);Tap(s,Accept);assert(s.working.safeSaves);Tap(s,Accept);assert(!s.working.safeSaves);
     // Up and Down walk every row (settings, then the three commands) and wrap; the commands also move with Left and Right.
     s.row=0;Tap(s,Up);assert(s.row==kDisplayRows+2);Tap(s,Down);assert(s.row==0);for(unsigned i=0;i<kDisplayRows;++i)Tap(s,Down);assert(s.row==kDisplayRows);
     Tap(s,Right);assert(s.row==kDisplayRows+1);Tap(s,Right);assert(s.row==kDisplayRows+2);Tap(s,Right);assert(s.row==kDisplayRows);Tap(s,Left);assert(s.row==kDisplayRows+2);Tap(s,Left);Tap(s,Left);assert(s.row==kDisplayRows);
-    Tap(s,Down);assert(s.row==kDisplayRows+1);Tap(s,Up);Tap(s,Up);assert(s.row==RowMotion+1);Tap(s,Up);assert(s.row==RowMotion);
+    Tap(s,Down);assert(s.row==kDisplayRows+1);Tap(s,Up);Tap(s,Up);assert(s.row==RowLanguage);Tap(s,Up);assert(s.row==RowSafeSaves);Tap(s,Up);assert(s.row==RowMotion);
     Tap(s,Back);assert(s.modal==Modal::Discard&&s.modalChoice==2);Tap(s,Left);Tap(s,Left);Tap(s,Accept);assert(!s.done&&s.modal==Modal::None);Tap(s,Back);Tap(s,Left);Tap(s,Accept);assert(s.done&&!s.result.saved);
     session=Session(OpenMode::Running);Begin(s,session);Arm(s);s.row=kDisplayRows+1;Input(s,Accept);assert(s.modal==Modal::Restart&&s.modalChoice==0);Input(s,Accept);assert(!s.saveRequested);Input(s);Tap(s,Accept);assert(s.modal==Modal::None&&!s.saveRequested);
     Tap(s,Accept);Tap(s,Right);Tap(s,Accept);assert(s.saveRequested&&s.pendingIntent==ExitIntent::Restart);
@@ -104,7 +80,9 @@ int main() {
     s.row=0;Tap(s,Right);assert(s.working.profile==controls::ProfileId::PlayStation);
     s.row=3;Tap(s,Right);assert(s.bindingSlot==1);Tap(s,Reset);Tap(s,Accept);assert(s.working.profiles[1].bindings[2].buttons[1].empty());
     Tap(s,Reset);Tap(s,Down);Tap(s,Accept);assert(s.modal==Modal::Conflict);Arm(s);Tap(s,Right);Tap(s,Accept);assert(s.modal==Modal::None&&s.message=="Every required action needs a binding"&&s.working.profiles[1].bindings[0].buttons[0]=="cross");
-    session=Session();session.features={false,false};session.document.config.fpsLimit=30;Begin(s,session);Arm(s);s.row=RowRate;Tap(s,Right);assert(s.working.fpsLimit==30&&!s.message.empty());Tap(s,NextPage);s.row=1;Tap(s,Accept);assert(s.modal==Modal::None);
+    session=Session();session.features={false,false};session.document.config.fpsLimit=30;session.document.config.performance60=false;Begin(s,session);Arm(s);s.row=RowRate;Tap(s,Right);assert(s.working.fpsLimit==0&&s.working.performance60);   // (a build without the fixed cap can leave Quality but not enter it)
+    session.features={false,false};session.document.config.fpsLimit=0;session.document.config.performance60=true;Begin(s,session);Arm(s);s.row=RowRate;Tap(s,Right);assert(s.working.fpsLimit==0&&s.working.performance60&&Mode30(s.working)==false);   // (no change: Quality unavailable)
+    session=Session();session.features={false,false};session.document.config.fpsLimit=30;session.document.config.performance60=false;Begin(s,session);Arm(s);Tap(s,NextPage);s.row=1;Tap(s,Accept);assert(s.modal==Modal::None);
     session=Session();session.languages.names.clear();session.document.config.language="French";Begin(s,session);Arm(s);s.row=RowLanguage;Tap(s,Right);assert(s.working.language=="French"&&!s.message.empty());
     session=Session();session.detectedProfile=controls::ProfileId::PlayStation;session.controller=controls::NominalCaps(session.detectedProfile);session.controller.availableButtons&=~controls::L2;session.document.config.profile=session.detectedProfile;
     Begin(s,session);Arm(s);Tap(s,NextPage);s.row=1;Tap(s,Reset);for(unsigned i=0;i<6;++i)Tap(s,Down);Tap(s,Accept);
@@ -281,7 +259,7 @@ int main() {
         auto vs=Session();UiState v;Begin(v,vs);
         for(unsigned row=0;row<kDisplayRows;++row) {RowView rv;DisplayRowView(v,row,rv);assert(rv.label[0]&&rv.value[0]&&rv.help1[0]);}
         RowView hd;DisplayRowView(v,RowHdTextures,hd);assert(std::string(hd.value)=="On");vs.hdtexPack=false;DisplayRowView(v,RowHdTextures,hd);assert(std::string(hd.value).find("not installed")!=std::string::npos&&std::string(hd.help2).find("not in")!=std::string::npos);vs.hdtexPack=true;
-        RowView preset;DisplayRowView(v,RowPreset,preset);assert(std::string(preset.value)=="Best picture");v.working.sharpness=Sharpness::Strong;DisplayRowView(v,RowPreset,preset);assert(std::string(preset.value)=="Custom");
+        RowView preset;DisplayRowView(v,RowPreset,preset);assert(std::string(preset.value)=="Best picture");
         for(unsigned row=0;row<=vs.controls->actionCount+kControlExtras;++row) {RowView rv;ControlsRowView(v,row,rv);assert(rv.label[0]&&rv.help1[0]&&rv.help2[0]&&(rv.value[0]||(row>0&&row<=vs.controls->actionCount)));}   // (an action's buttons are drawn from its binding)
         std::vector<uint32_t> frame(960*544);
         for(auto page:{Page::Display,Page::Controls})for(unsigned profile=0;profile<2;++profile)for(unsigned row=0;row<RowCount(v);++row) {

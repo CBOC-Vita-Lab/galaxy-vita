@@ -240,6 +240,11 @@ void J3DModelX::drawIn(J3DMaterial* material, bool fog, MtxPtr base, J3DModel* m
         }
     }
 
+#ifdef TARGET_PC
+    if (mPortZAlwaysOn && mPortZAlways) {
+        GXCallDisplayList(mPortZAlways, mPortZAlwaysSize);  // (reflfur25: after the flag lists, before the dynamic one)
+    }
+#endif
     if (_1B8) {
         _1B4 = _1B8;
         _1B8 = nullptr;
@@ -473,6 +478,21 @@ J3DModelX::J3DModelX(J3DModelData* data, u32 flags, u32 bufferFlags) : J3DModel(
 
     GDSetBlendModeEtc(GX_BM_BLEND, GX_BL_INVDSTALPHA, GX_BL_DSTALPHA, GX_LO_CLEAR, GX_TRUE, GX_FALSE, GX_FALSE);
     storeDisplayList(&obj, 15);
+
+#ifdef TARGET_PC
+    {
+        // (reflfur25, GXV_MIRROR25 = 2) one more list, kept apart from the sixteen: the depth test that lets the additive reflection pass punch the
+        // floor's depth itself (the game's depth-only pass does that with ZMode ALWAYS + write; this is the same state in the colour pass)
+        GDSetZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
+        GDPadCurr32();
+        const u32 zSize = (GDGetGDLObjOffset(&obj) + 31) & ~31;
+        mPortZAlways = new (32) u8[zSize];
+        MR::copyMemory(mPortZAlways, obj.start, zSize);
+        DCStoreRange(mPortZAlways, zSize);
+        mPortZAlwaysSize = GDGetGDLObjOffset(&obj);
+        GDInitGDLObj(&obj, obj.start, obj.length);
+    }
+#endif
 
     _1E0 = -1;
     _1DC = 0x32323232;

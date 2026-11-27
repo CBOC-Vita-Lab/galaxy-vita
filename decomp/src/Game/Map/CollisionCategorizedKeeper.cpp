@@ -9,6 +9,9 @@
 #ifdef TARGET_PC
 extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
 #include "port/shadow_memo_hooks.h"  // (shadowmemo2: zone lists and zone spheres report their changes)
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF, logic23: the queries timed as "collision"; parts looked at / searched counted)
+#define PORT_COLL_PROF() PORT_LOGIC_SYS(PORT_LS_COLL)
+#define PORT_COLL_COUNT(id, n) PORT_LOGIC_COUNT((id), static_cast< unsigned >(n))
 #define PORT_SHADOWMEMO_RESHAPE()          \
     do {                                   \
         if (port_shadowmemo_armed) {       \
@@ -19,6 +22,8 @@ extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging bu
 #define PORT_SHADOWMEMO_RESHAPE() \
     do {                          \
     } while (0)
+#define PORT_COLL_PROF() ((void)0)
+#define PORT_COLL_COUNT(id, n) ((void)0)
 #endif
 
 CollisionCategorizedKeeper::CollisionCategorizedKeeper(s32 category)
@@ -79,6 +84,7 @@ void CollisionCategorizedKeeper::removeFromGlobal(CollisionParts* pParts) {
 
 s32 CollisionCategorizedKeeper::checkStrikePoint(const TVec3f& rPosition, HitInfo* pHitInfo) {
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
     _10 = 0;
 
     for (CollisionZone** pZone = mZones.begin(); pZone != mZones.end(); pZone++) {
@@ -97,6 +103,8 @@ s32 CollisionCategorizedKeeper::checkStrikePoint(const TVec3f& rPosition, HitInf
         }
 
         int count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -130,6 +138,8 @@ s32 CollisionCategorizedKeeper::checkStrikePoint(const TVec3f& rPosition, HitInf
                 continue;
             }
 
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
+
             if (pParts->checkStrikePoint(pHitInfo, rPosition)) {
                 _10 = 1;
                 return 1;
@@ -143,6 +153,7 @@ s32 CollisionCategorizedKeeper::checkStrikePoint(const TVec3f& rPosition, HitInf
 s32 CollisionCategorizedKeeper::checkStrikeBall(const TVec3f& rPosition, f32 ballRadius, bool moving, const CollisionPartsFilterBase* pPartsFilter,
                                                 const TriangleFilterBase* pTriangleFilter) {
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
 #ifdef TARGET_PC
     port_logic_count(6, 1);
 #endif
@@ -165,6 +176,8 @@ s32 CollisionCategorizedKeeper::checkStrikeBall(const TVec3f& rPosition, f32 bal
         }
 
         s32 count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -202,6 +215,8 @@ s32 CollisionCategorizedKeeper::checkStrikeBall(const TVec3f& rPosition, f32 bal
                 continue;
             }
 
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
+
             hitCount += pParts->checkStrikeBall(&mHitInfoArray[hitCount], 32 - hitCount, rPosition, ballRadius, moving, pTriangleFilter);
 
             if (hitCount >= 32) {
@@ -219,6 +234,7 @@ s32 CollisionCategorizedKeeper::checkStrikeBallWithThickness(const TVec3f& rPosi
                                                              const CollisionPartsFilterBase* pPartsFilter,
                                                              const TriangleFilterBase* pTriangleFilter) {
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
     _10 = 0;
     s32 hitCount = 0;
 
@@ -238,6 +254,8 @@ s32 CollisionCategorizedKeeper::checkStrikeBallWithThickness(const TVec3f& rPosi
         }
 
         s32 count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -298,6 +316,7 @@ s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec
                                                 const CollisionPartsFilterBase* pPartsFilter, const TriangleFilterBase* pTriangleFilter) {
 #endif
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
 
     if (maxHits == 0) {
         maxHits = 32;
@@ -344,6 +363,8 @@ s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec
         }
 
         s32 count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -369,8 +390,10 @@ s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec
             }
 
 #ifdef TARGET_PC
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
             hitCount += pParts->checkStrikeLine(&mHitInfoArray[hitCount], maxHits - hitCount, rStart, rDirection, pTriangleFilter, nearestOnly);
 #else
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
             hitCount += pParts->checkStrikeLine(&mHitInfoArray[hitCount], maxHits - hitCount, rStart, rDirection, pTriangleFilter);
 #endif
 
@@ -387,6 +410,7 @@ s32 CollisionCategorizedKeeper::checkStrikeLine(const TVec3f& rStart, const TVec
 
 u32 CollisionCategorizedKeeper::createAreaPolygonList(Triangle* pTriangles, u32 maxTriangles, const TVec3f& rStart, const TVec3f& rEnd) {
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
     u32 triangleCount = 0;
     TVec3f min;
     TVec3f max;
@@ -421,6 +445,8 @@ u32 CollisionCategorizedKeeper::createAreaPolygonList(Triangle* pTriangles, u32 
         }
 
         s32 count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -436,6 +462,8 @@ u32 CollisionCategorizedKeeper::createAreaPolygonList(Triangle* pTriangles, u32 
             if (!isSphereOverlappingWithBox(min, max, position, radius)) {
                 continue;
             }
+
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
 
             triangleCount += pParts->createAreaPolygonList(pTriangles + triangleCount, maxTriangles - triangleCount, rStart, rEnd);
 
@@ -450,6 +478,7 @@ u32 CollisionCategorizedKeeper::createAreaPolygonList(Triangle* pTriangles, u32 
 
 u32 CollisionCategorizedKeeper::createAreaPolygonListArray(Triangle* pTriangles, u32 maxTriangles, TVec3f* pVertices, u32 vertexCount) {
     MR::getCollisionDirector();
+    PORT_COLL_PROF();
     u32 triangleCount = 0;
     TVec3f min;
     TVec3f max;
@@ -461,6 +490,8 @@ u32 CollisionCategorizedKeeper::createAreaPolygonListArray(Triangle* pTriangles,
         }
 
         s32 count = (*pZone)->mParts.size();
+
+        PORT_COLL_COUNT(PORT_LC_COLL_PARTS, count);
         CollisionParts* pParts;
 
         for (int i = 0; i < count; i++) {
@@ -476,6 +507,8 @@ u32 CollisionCategorizedKeeper::createAreaPolygonListArray(Triangle* pTriangles,
             if (!isSphereOverlappingWithBox(min, max, position, radius)) {
                 continue;
             }
+
+            PORT_COLL_COUNT(PORT_LC_COLL_SEARCH, 1);
 
             triangleCount += pParts->createAreaPolygonListArray(pTriangles + triangleCount, maxTriangles - triangleCount, pVertices, vertexCount);
 

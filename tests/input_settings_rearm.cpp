@@ -15,6 +15,30 @@ int port_input_real_a(); int port_title_confirm(); int port_input_take_pause_req
 void port_input_use_tilt(float);
 }
 void test_tilt_consumers();
+// issue 36: the game must always end up knowing that the pad and its Nunchuk are there, whatever order it registered its callbacks in.
+static int gConnects, gDisconnects, gExtensions;
+static bool gSubPad;   // what WPad::mIsSubPadConnected would hold
+static void onConnect(s32, s32 reason) { if (reason == WPAD_ERR_NONE) ++gConnects; else { ++gDisconnects; gSubPad = false; } }
+static void onExtension(s32, s32 result) { ++gExtensions; gSubPad = result == WPAD_DEV_FREESTYLE; }
+static void test_pad_callbacks() {
+    KPADStatus k{};
+    PortPadState p{}; p.connected = 1;
+    port_input_set(2, &p);
+    for (int i = 0; i < 3; ++i) KPADRead(2, &k, 1);        // connected before the game registered anything: nothing is lost
+    assert(gConnects == 0 && gExtensions == 0);
+    WPADSetConnectCallback(2, onConnect); WPADSetExtensionCallback(2, onExtension);
+    KPADRead(2, &k, 1);
+    assert(gConnects == 1 && gExtensions == 1 && gSubPad);
+    for (int i = 0; i < 29; ++i) KPADRead(2, &k, 1);
+    assert(gConnects == 1);                               // (no second connect)
+    gSubPad = false;                                      // the game lost its "Nunchuk present" some other way
+    for (int i = 0; i < 31; ++i) KPADRead(2, &k, 1);
+    assert(gSubPad && gExtensions >= 2);                  // it heals within about half a second
+    p.connected = 0; port_input_set(2, &p); KPADRead(2, &k, 1);
+    assert(gDisconnects == 1 && !gSubPad);
+    p.connected = 1; port_input_set(2, &p); KPADRead(2, &k, 1);
+    assert(gConnects == 2 && gSubPad);                    // a reconnect reports the stick again at once
+}
 int main() {
     PortPadState p{}; p.connected = 1;
     p.buttons = 0x810; p.touched = 1; p.stickX = 1; p.pointerValid = 1;
@@ -41,5 +65,6 @@ int main() {
         // WPadAcceleration::update negates acc.x; a right stick yields rightward steering.
         assert((-k.acc.x) * sign > 0);
     }
+    test_pad_callbacks();
     test_tilt_consumers();
 }

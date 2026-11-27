@@ -9,6 +9,7 @@
 // higher percentage never steers less than a lower one.
 #pragma once
 
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 
@@ -63,16 +64,34 @@ inline void Scale(float& x, float& y, float& z, int percent) {
     y = -std::cos(scaled);
 }
 
-// GXV_TILT_GAIN, read once. The Settings menu sets it at start-up (platform/src/settings/settings_launch.cpp); env.txt wins.
+// settingsnative: the two values are atomic cells the native Settings menu can change while the game runs (SetPercent / SetUseStick, relaxed
+// stores). -1 = not read yet: the first read takes the start-up switch (a racing SetPercent wins over it).
+inline std::atomic<int>& PercentCell() { static std::atomic<int> c{-1}; return c; }
+inline std::atomic<int>& UseStickCell() { static std::atomic<int> c{-1}; return c; }
+inline void SetPercent(int percent) {
+    PercentCell().store(percent < kMinPercent ? kMinPercent : percent > kMaxPercent ? kMaxPercent : percent, std::memory_order_relaxed);
+}
+inline void SetUseStick(bool on) { UseStickCell().store(on ? 1 : 0, std::memory_order_relaxed); }
+
+// GXV_TILT_GAIN, read once (until SetPercent). The Settings menu sets it at start-up (platform/src/settings/settings_launch.cpp); env.txt wins.
 inline int Percent() {
-    static const int percent = ParsePercent(std::getenv("GXV_TILT_GAIN"));
-    return percent;
+    int v = PercentCell().load(std::memory_order_relaxed);
+    if (v >= 0) return v;
+    int expected = -1;
+    PercentCell().compare_exchange_strong(expected, ParsePercent(std::getenv("GXV_TILT_GAIN")), std::memory_order_relaxed);
+    return PercentCell().load(std::memory_order_relaxed);
 }
 
-// GXV_TILT_STICK=1, read once: tilt comes from the left stick even where the console has a motion sensor.
+// GXV_TILT_STICK=1, read once (until SetUseStick): tilt comes from the left stick even where the console has a motion sensor.
 inline bool UseStick() {
-    static const bool on = [] { const char* e = std::getenv("GXV_TILT_STICK"); return e && std::atoi(e) != 0; }();
-    return on;
+    int v = UseStickCell().load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* e = std::getenv("GXV_TILT_STICK");
+        int expected = -1;
+        UseStickCell().compare_exchange_strong(expected, e && std::atoi(e) != 0 ? 1 : 0, std::memory_order_relaxed);
+        v = UseStickCell().load(std::memory_order_relaxed);
+    }
+    return v != 0;
 }
 
 }  // namespace tilt

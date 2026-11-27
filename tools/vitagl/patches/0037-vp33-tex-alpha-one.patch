@@ -1,0 +1,57 @@
+Patch 0037 (swz24; inert until the host calls vglSetTexAlphaOne). Written against the vp29..vp32 tree (gxm.c / vitaGL.h with 0030-0036); checked with
+`patch -p1 --dry-run` on those two files only; not built, not run (no Vita build in this task).
+vglSetTexAlphaOne(name, on) switches one texture's descriptor between SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR and SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR
+(same memory layout, the sampled alpha is 1). Host: GXV_EFBSWAP2_A1. Needs the vitaGL rebuild (and the shader re-harvest) before it can run.
+diff -ruN a/src/gxm.c b/src/gxm.c
+--- a/src/gxm.c
++++ b/src/gxm.c
+@@ -2029,6 +2029,37 @@
+ 	return name > 0 && name < TEXTURES_NUM && vgl_dd_sync_for(&texture_slots[name]) != NULL;
+ }
+ 
++// (patch 0037, GXV_EFBSWAP2_A1) vglSetTexAlphaOne(name, on): the texture's sampler format U8U8U8U8_ABGR <-> X8U8U8U8_1BGR (the same memory, the
++// alpha a sampler returns forced to 1). Only the texture descriptor's format field changes: no data, no allocation, no render target. The host
++// uses it on an EFB colour buffer that now stands for an RGB565 copy (alpha 1) and sets it back before the buffer is drawn into again (a
++// colour surface is made from the descriptor's format: X8U8U8U8_1BGR is not one of get_color_from_texture's). Returns GL_TRUE when the
++// texture has the format asked for afterwards, GL_FALSE (nothing changed) for another texture format, a name that is not a valid texture or
++// a refusal of sceGxmTextureSetFormat. Inert unless the host calls it. vglGetTexAlphaOnes(): successful changes to the alpha-1 format.
++static uint32_t vgl_a1_sets = 0, vgl_a1_refused = 0;
++uint32_t vglGetTexAlphaOnes(uint32_t *refused) {
++	if (refused)
++		*refused = vgl_a1_refused;
++	return vgl_a1_sets;
++}
++GLboolean vglSetTexAlphaOne(GLuint name, GLboolean on) {
++	if (name == 0 || name >= TEXTURES_NUM || texture_slots[name].status != TEX_VALID) {
++		vgl_a1_refused++;
++		return GL_FALSE;
++	}
++	texture *t = &texture_slots[name];
++	const SceGxmTextureFormat have = sceGxmTextureGetFormat(&t->gxm_tex);
++	const SceGxmTextureFormat from = on ? SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR : SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR;
++	const SceGxmTextureFormat to = on ? SCE_GXM_TEXTURE_FORMAT_X8U8U8U8_1BGR : SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR;
++	if (have == to)
++		return GL_TRUE;
++	if (have != from || sceGxmTextureSetFormat(&t->gxm_tex, to) != 0) {
++		vgl_a1_refused++;
++		return GL_FALSE;
++	}
++	vgl_a1_sets++;
++	return GL_TRUE;
++}
++
+ // Arms the next vglSwapBuffers to queue display texture `name` instead of vitaGL's own back buffer. Returns 1 when armed. 0 (counted as a
+ // refusal, swap behaves as before) when `name` is not one. The host must have drawn the picture into that texture (its scenes began with
+ // its sync object) and must not begin another scene on it before a different buffer has been flipped (the display holds it until then).
+diff -ruN a/src/vitaGL.h b/src/vitaGL.h
+--- a/src/vitaGL.h
++++ b/src/vitaGL.h
+@@ -1284,6 +1284,8 @@
+ // directly. FBOs over it begin their scenes with its own sync object. Inert unless vglMakeDisplayTexture is called.
+ int vglMakeDisplayTexture(GLuint name);
+ int vglIsDisplayTexture(GLuint name);
++GLboolean vglSetTexAlphaOne(GLuint name, GLboolean on); // patch 0037: sampler format U8U8U8U8_ABGR <-> X8U8U8U8_1BGR (alpha reads 1), descriptor only
++uint32_t vglGetTexAlphaOnes(uint32_t *refused); // patch 0037: successful changes (refusals in *refused)
+ int vglSetNextFlip(GLuint name);
+ uint32_t vglGetDirectFlips(void);
+ uint32_t vglGetDirectRefusals(void);

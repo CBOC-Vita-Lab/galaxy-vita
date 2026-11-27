@@ -1,0 +1,20 @@
+# feature<TAB>suites (names in allsuites summary.tsv, comma)<TAB>scenarios (comma)   -- the only hand-kept part of EVIDENCE.md; everything else is read from run results
+Session start, join, room scan, version check	core,flow,service	mp_join,mp_join_addr,mp_version,mp_entry_join,mp_entry_cycle
+Network core: exactly-once events, loss, silence, jitter	core,payload,net,netsmooth	mp_loss20,mp_silence2,mp_silence6,mp_netsmooth_clean,mp_netsmooth_bad
+Galaxy move, scene barrier, late join	flow	mp_move,mp_latejoin_water,mp_guest_play_late,mp_bubble_latejoin
+Star delivery, one credit, host saves to its co-op copy	flow,savecheck	mp_star,mp_star_both,mp_celebrate
+Team Star Bits, Co-Star hold, tally card	costar	mp_costar
+Co-op (emote, pointer, bounce, super jump)	coop	mp_coop
+Bubbles	bubble	mp_bubble_a,mp_bubble_caught,mp_bubble_touch,mp_bubble_infinite,mp_bubble_out,mp_bubble_race,mp_bubble_migrate,mp_bubble_migrate_fast
+Race	flow	mp_race
+Spectating	spectate	mp_spectate_bubble,mp_spectate_out,mp_spectate_race
+Puppets, characters, forms, drop-in	dropin,puppet_pose_test,puppet_toad_test,puppet_form_test,head3d_motion,formation	mp_puppet,mp_puppet_forms,mp_dropin_char
+World mirroring (switches)	world	mp_switch
+Host migration and lost peers	core	mp_migrate3,mp_migrate3_loaded,mp_migrate3_star,mp_migrate3_switch,mp_lost_peer
+Recovery files, save safety (single-player save untouched)	savecheck	mp_recover,mp_recover_offer
+Chat, away, names, languages	chat,away,l10n,rules	mp_chat,mp_names,mp_samename
+Menus and Vita controls	ui,vitabtn,tags	mp_entry_join,touches_shots
+Online service, TLS, NAT port mapping, connection test	service,service_server,tls_chain,json,natpmp,upnp,conntest	mp_conntest
+Quality governor, LOD, thread layout	perf,lod,nocap	mp_governor
+Four consoles at once	-	mp_four,mp_bots4
+Single-player baseline (nothing changes with multiplayer off)	-	a_boot_observatory,b_goodegg_walk,c_two_observatory

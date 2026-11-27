@@ -1,0 +1,32 @@
+# Bubbles, an abyss fall: the guest is killed the abyss way (SMG_MP_TEST_DIE "25:1:abyss", forceKill 0 = the game-over abyss
+# nerve): the bubble appears by the nearest teammate (far=1, as in NSMB), not down in the void; a life is lost; the host's touch
+# pops it (SMG_MP_TEST_BUBBLE_NEAR) and the guest lands beside the host.
+name: mp_bubble_abyss
+description: abyss fall -> bubble appears by the host (far=1), popped by the host's touch
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE, SMG_MP_TEST_BUBBLE_NEAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25:1:abyss", SMG_MP_TEST_BUBBLE_NEAR: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect guest /\[mp\] bubble test die: \d+ ms after each scene start, slot 1, abyss/'
+  - 'expect guest /\[mp\] bubble test die: slot 1 serial=1 abyss lives=\d+/'
+  - 'expect guest /\[mp\] bubble on slot=1 lives=(\d+)->\d+ out=0 far=1 target=0 serial=1/ within 3s after guest /\[mp\] bubble test die: slot 1/'
+  - 'absent guest /\[mp\] bubble on slot=1 lives=(\d+)->\1 /'
+  - 'expect host /\[mp\] bubble remote on slot=1/'
+  - 'expect guest /\[mp\] bubble off slot=1 by=0 land=0 why=touch lives=\d+/ within 20s after guest /\[mp\] bubble on slot=1/'
+  - 'absent * /\[mp\] bubble restart/'
+  - 'absent guest /\[mp\] flow (dead slot|own move type=5)/'
+  - 'absent * /\[mp\] bubble drop/'
+  - 'exit * == 0'

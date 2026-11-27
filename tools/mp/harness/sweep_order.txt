@@ -1,0 +1,24 @@
+# The qa-func audit's "sweep order" (21 runs), one scenario per line (name of a file in scenarios/ without .yaml); '#' starts a comment.
+# 1 the train's scenario, 2-8 the new scenarios that need no new hook, 9-15 one existing scenario of each family the audit lists
+# (takeover, rejoin, race, save, dropin, bubble, join_addr), 17-20 the scenarios that need the new hooks, 21 one emu_* (link events with a quoted `on`).
+mp_smoke
+qa_four_star_full
+qa_host_power_continue
+qa_suspend_20s
+qa_typed_hidden_one
+qa_save_relaunch_continue
+qa_sp_untouched_whole_session
+qa_guest_wifi_12s
+mp_migrate3
+mp_recover
+mp_race
+mp_race_unequal
+sv_recovery
+mp_dropin_char
+mp_bubble_a
+mp_join_addr
+qa_race_tie
+qa_race_rematch_leave
+qa_remove_no_return
+qa_wrong_code
+emu_wifi_blip

@@ -1,0 +1,21 @@
+# integ (13 Nov): pictures of the DEFAULT NAME: two consoles through the menus to the gathering screen, no name typed, the console user name (SMG_LINK_NAME,
+# what the Vita's system name is on the desktop) is a made-up real name: the heads must read "Mario" and "Luigi", never the console names.
+name: pics_names
+description: pictures - the gathering screen with two heads and no typed names (the character's names)
+seconds: 130
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    may_end_early: true
+    input: "@entry_host"
+    env: {SMG_MP_NAME: "", SMG_LINK_NAME: "Jonathan Realname", SMG_MP_LOOK: 0, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    may_end_early: true
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: "", SMG_LINK_NAME: "Maria Realname", SMG_MP_LOOK: 1,
+          HARNESS_START_ON: 'host|\[mp\] hosting session|0'}
+rules:
+  - 'nocrash *'
+  - 'expect host /\[mp\] slot 1 joined name=Luigi /'
+  - 'absent * /Realname/'

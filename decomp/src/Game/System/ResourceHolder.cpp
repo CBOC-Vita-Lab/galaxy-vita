@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "port/stream_census.h"  // (GXV_STREAM_CENSUS: model names)
+#endif
 #include "Game/System/ResourceHolder.hpp"
 #include "Game/Animation/MaterialAnmBuffer.hpp"
 #include "Game/Util/MemoryUtil.hpp"
@@ -10,6 +13,11 @@
 #include <cstdio>
 #include <cstring>
 #include <revolution.h>
+#ifdef __vita__
+#include "port/diagnostics.h"
+#include "port/title_cloud.h"
+#include <cstdlib>
+#endif
 
 namespace {
     static const ArchiveName sModelExt[] = {".bdl", ".bmd", nullptr};
@@ -219,12 +227,26 @@ ResFileInfo* ResourceHolder::createAndRegisterObject(const char* pName, void* pD
 
     if (strstr(pName, ".bdl") != nullptr) {
         OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
+#ifdef __vita__
+        if (MR::strcasecmp(pName, "CometNearOrbitSky.bdl") == 0) {
+            const char* enabled = std::getenv("GXV_TITLE_CLOUD");
+            if (!enabled || std::strcmp(enabled, "0") != 0) {
+                const s32 n = mArchive->getResSize(pData);
+                const bool applied = n > 0 && port::titlecloud::BaseCloud(pData, static_cast<size_t>(n));
+                port_log_summary("C183: title Cloud01k %s (%d BDL bytes)",
+                                 applied ? "base-level linear sampler" : "authored sampler: unmatched model", n);
+            }
+        }
+#endif
         J3DModelData* modelData = J3DModelLoaderDataBase::loadBinaryDisplayList(pData, J3DMLF_Material_UseIndirect | J3DMLF_UseUniqueMaterials);
         OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
         MR::initEnvelopeAndEnvMapOrProjMapModelData(modelData);
         if (MR::isUseFur(modelData) || MR::strcasecmp(pName, "MarioShadow.bdl") == 0) {
             MR::downFracVtx(modelData);
         }
+#ifdef TARGET_PC
+        port_stream_census_model_note(modelData, pName);  // (GXV_STREAM_CENSUS: the model's name in the census lines)
+#endif
         return mModelResTable->add(pName, modelData, true);
     }
 
@@ -232,6 +254,9 @@ ResFileInfo* ResourceHolder::createAndRegisterObject(const char* pName, void* pD
         J3DModelData* modelData =
             J3DModelLoaderDataBase::load(pData, J3DMLF_Material_PE_Full | J3DMLF_Material_UseIndirect | J3DMLF_UseUniqueMaterials | J3DMLF_21);
         modelData->newSharedDisplayList(0);
+#ifdef TARGET_PC
+        port_stream_census_model_note(modelData, pName);  // (GXV_STREAM_CENSUS)
+#endif
         return mModelResTable->add(pName, modelData, true);
     }
 

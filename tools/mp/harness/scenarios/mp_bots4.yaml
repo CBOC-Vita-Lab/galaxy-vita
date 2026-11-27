@@ -1,0 +1,29 @@
+# PREPARED. 4 players: host + guest games and two mp_bot clients (core's tools/mp/mp_bot.cpp, built by core's
+# tests/mp/build.sh: MP_TEST_OUT=/tmp/harness_core_tests tests/mp/build.sh build). Port/bcast/vip from SMG_MP_UDP_* (run_pair).
+name: mp_bots4
+description: 4-player Play Together with two bots, roster of 4, puppets for 3 remotes, no bad messages
+seconds: 240
+requires: {strings: [SMG_MP_AUTO_MODE], files: [/tmp/harness_core_tests/mp_bot]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+bots:
+  - name: bot1
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot1 --look 2 --duration 200 --radius 300 --speed 20 --data-hash aa3ddccb --scan-for 150"
+  - name: bot2
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot2 --look 3 --duration 200 --radius 0 --data-hash aa3ddccb --scan-for 150"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard host,guest'
+  - 'expect host /\[mp\] slot \d joined name=\S+ rejoin=0 .*players=4/ within 200s'
+  - 'expect host /\[mp\] session started/ within 10s after host /players=4/'
+  - 'count host /\[mp\] puppet slot=[123] appear model=\w+ self=0/ >= 3'
+  - 'count guest /\[mp\] puppet slot=[0-3] appear model=\w+ self=0/ >= 3'
+  - 'absent * /\[mp\] (bad message from slot|events lost|queue overflow|kicked slot)/'
+  - 'exit bot1,bot2 == 0'

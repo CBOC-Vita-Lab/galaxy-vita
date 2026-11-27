@@ -1,0 +1,24 @@
+# checks83 (14 Nov): the edge head, again, with a longer walk and a rule that says it appeared. pics_edge's guest walked 6 s sideways
+# and no run has judged it; a Mario on a small planet may still be inside the host's picture after 6 s. Here the guest runs 30 s one way
+# and 30 s back, and the host's log must show "puppet edge head" (MpNameTag.cpp). The host does not move, so its picture is the one that shows it.
+name: pics_edge2
+description: pictures - the host sees the guest's edge head (the guest runs 30 s sideways, then back)
+shot_size: 960x544
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 1500, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+  - name: guest
+    input: "@pics_edge2_guest"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL/'
+  - 'expect host /\[mp\] flow barrier release serial=1/'
+  - 'expect guest /\[mp\] flow barrier release serial=1/'
+  - 'expect host /\[mp\] puppet edge head slot=1 at=\S+ behind=[01]/'

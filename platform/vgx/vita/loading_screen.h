@@ -58,6 +58,7 @@ constexpr const char* kBackgroundPath = "ux0:data/smg/art/title.rgba";
 inline bool ReadBackground() {
     FILE* file = fopen(kBackgroundPath, "rb");
     if (!file) return false;
+    setvbuf(file, nullptr, _IONBF, 0);
     bool valid = fseek(file, 0, SEEK_END) == 0 && ftell(file) == static_cast<long>(kBackgroundBytes) &&
                  fseek(file, 0, SEEK_SET) == 0;
     if (valid) valid = fread(g_bg, 1, kBackgroundBytes, file) == kBackgroundBytes && fgetc(file) == EOF && !ferror(file);

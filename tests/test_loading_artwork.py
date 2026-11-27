@@ -20,7 +20,8 @@ class LoadingArtworkTests(unittest.TestCase):
         self.assertNotIn("smg_loading_picture", source)
         listed = set(re.findall(r'FILE "\$\{sys\}/([^"]+)"', source))
         self.assertEqual(listed, {"icon0.png", "pic0.png", "livearea/contents/bg.png", "livearea/contents/startup.png",
-                                  "livearea/contents/settings.png", "livearea/contents/template.xml"})
+                                  "livearea/contents/template.xml"})
+        self.assertNotIn("settings.png", source.replace("settings.png stays in the tree but is not packaged", ""))
         self.assertIn("title_art_runtime.cpp", source)
 
     def test_both_readers_use_the_players_capture_path(self):

@@ -11,9 +11,10 @@ extern "C" int64_t port_host_time_ns(void) __attribute__((weak));
 extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));
 extern "C" void port_log_summary(const char*, ...) __attribute__((weak, format(printf, 1, 2)));
 
-namespace vgx { void DlCacheBranchCounts(uint64_t out[7]) __attribute__((weak)); void StateListFastCounters(uint64_t out[3]) __attribute__((weak));
-                void DrawReplayCounters5(uint64_t out[5]) __attribute__((weak));
-                namespace split { void KeyIdCounters(uint64_t out[4]) __attribute__((weak)); }
+namespace vgx { void DlCacheBranchCounts(uint64_t out[7]) __attribute__((weak)); void DlOtherWhyCounts(uint64_t out[8]) __attribute__((weak)); void StateListFastCounters(uint64_t out[3]) __attribute__((weak));
+                void DrawReplayCounters5(uint64_t out[5]) __attribute__((weak)); void RetainedCounters(uint64_t out[7]) __attribute__((weak)); void DirectJ3DCounters(uint64_t out[12]) __attribute__((weak));
+                namespace split { void KeyIdCounters(uint64_t out[4]) __attribute__((weak)); void WakeCounters(uint64_t out[4]) __attribute__((weak)); }
+                void StreamDetailCounters(uint64_t out[13]) __attribute__((weak)); void StateFastCounters(uint64_t out[4]) __attribute__((weak));
                 void FeCutCounters(uint64_t out[4]) __attribute__((weak)); void FxMergeCounters(uint64_t out[6]) __attribute__((weak)); }
 namespace vgx::workload {
 struct PreserveErrno {
@@ -761,9 +762,12 @@ inline void Picture(uint32_t draws, uint32_t copies, uint32_t displays, uint32_t
 // ProcessTimeWide, ~2.6 us on the console), and with =1 the ~4,000 scopes of a lit Comet Observatory picture add more than they
 // measure (the front end's own CPU rises by half); =2 adds about a sixteenth of that, so the shares and the absolute times are those
 // of the real picture. The counts in brackets are exact either way.
+// (top-state-run, fedl25: a run of top-level BP / CP / XF / matrix-index commands in the player's command stream, one scope per run, from its first
+// command to the first command that is not one: the writes themselves, repeats and changes, without the list calls and draws between runs;
+// state cmds a picture in the "fe stream detail" line divide it into a time per command)
 // (fx-merge: the port-private particle commands of GXV_FXMERGE, vgx_state.cpp FxMergeRun, whole; their draws are in "draw" as well)
-enum FeSlot : unsigned { FeStream, FeDraw, FeDecode, FeEmit, FeList, FeStatic, FeTiny, FeMatHit, FeGeomHit, FeOther, FeResolve, FeSend, FeFxMerge, FeSlotCount };
-inline constexpr const char* FeNames[] = {"stream", "draw", "decode", "emit", "list", "static-draw", "list-tiny", "list-material-hit", "list-geometry-hit", "list-other", "resolve-state", "finish-or-send", "fx-merge"};
+enum FeSlot : unsigned { FeStream, FeDraw, FeDecode, FeEmit, FeList, FeStatic, FeTiny, FeMatHit, FeGeomHit, FeOther, FeResolve, FeSend, FeFxMerge, FeJ3n, FeTopState, FeCull, FeNote, FeSoft, FeSmall, FeFold, FeBook, FeSlotCount };
+inline constexpr const char* FeNames[] = {"stream", "draw", "decode", "emit", "list", "static-draw", "list-tiny", "list-material-hit", "list-geometry-hit", "list-other", "resolve-state", "finish-or-send", "fx-merge", "j3n-skip", "top-state-run", "emit-cull", "emit-note", "emit-soft-xform", "emit-small-bounds", "emit-fold-bake", "emit-book"};
 // (one knob, the probe's switch and its hooks folded in: every FeScope reads it, some 6,500 a picture of the lit Comet Observatory)
 inline int FeSplitMode() {
     return static_cast<int>(VGX_KNOB([] {
@@ -800,6 +804,9 @@ inline uint32_t FePrevNTimed[FeSlotCount];
 struct FeScope {
     int slot = -1; bool timed = false; int64_t t = 0;
     explicit __attribute__((always_inline)) FeScope(unsigned s) { if (__builtin_expect(FeSplitMode() != 0, 0)) Open(s); }
+    // (fixnow31: `on` is FeSplitOn() read ONCE by the caller (EmitDraw, EmitStaticDraw: ~15 scopes a draw). With the breakdown off a scope is then a test of
+    // a register, not a load of the knob word and a compare: emitsplit31's six new scopes cost about eight knob checks a dynamic draw otherwise.)
+    __attribute__((always_inline)) FeScope(bool on, unsigned s) { if (__builtin_expect(on, 0)) Open(s); }
     __attribute__((always_inline)) ~FeScope() { if (__builtin_expect(slot >= 0, 0)) Close(); }
     __attribute__((noinline)) void Open(unsigned s) {
         slot = static_cast<int>(s);
@@ -877,6 +884,41 @@ inline void Report() {
                              (rp[2]-prevRp[2])/(double)pics, (rp[3]-prevRp[3])/(double)pics);
         for (int i = 0; i < 5; ++i) prevRp[i] = rp[i];
     }
+    if (&RetainedCounters) {
+        // (GXV_RETAINED, vgx_dlcache.cpp "retained shapes": J3D shape calls that came with a handle; of them hits of the handle's record,
+        // calls with no record for the handle, records that failed a test (both went the normal way), records made; =2: hits checked
+        // against the normal path, mismatching)
+        static uint64_t prevRt[7] = {};
+        uint64_t rt[7];
+        RetainedCounters(rt);
+        const uint32_t pics = p.pictures - old.pictures ? p.pictures - old.pictures : 1;
+        if (rt[0] != prevRt[0])
+            port_log_summary("workload: retained per picture: %.1f shape calls, %.1f hits, %.1f without a record, %.1f failed a test, %.1f recorded; "
+                             "verify (GXV_RETAINED=2): %llu checked, %llu mismatching",
+                             (rt[0]-prevRt[0])/(double)pics, (rt[1]-prevRt[1])/(double)pics, (rt[2]-prevRt[2])/(double)pics,
+                             (rt[3]-prevRt[3])/(double)pics, (rt[4]-prevRt[4])/(double)pics, (unsigned long long)rt[5], (unsigned long long)rt[6]);
+        for (int i = 0; i < 7; ++i) prevRt[i] = rt[i];
+    }
+    if (&DirectJ3DCounters) {
+        // (GXV_DIRECT_J3D, vgx_direct.h: retained shape calls emitted with their key template; of their runs, those that took the template's
+        // shader ids, those resolved the normal way; key copies left undone, made later (something read the keys); templates made;
+        // =2: templated runs compared with the normal resolution, mismatching)
+        static uint64_t prevDj[12] = {};
+        uint64_t dj[12] = {};
+        DirectJ3DCounters(dj);
+        const uint32_t pics = p.pictures - old.pictures ? p.pictures - old.pictures : 1;
+        if (dj[0] != prevDj[0])
+            port_log_summary("workload: direct J3D per picture: %.1f shape calls, %.1f runs templated, %.1f resolved the normal way, %.1f key copies deferred, "
+                             "%.1f made later, %.1f templates made; verify (GXV_DIRECT_J3D=2): %llu checked, %llu mismatching",
+                             (dj[0]-prevDj[0])/(double)pics, (dj[1]-prevDj[1])/(double)pics, (dj[2]-prevDj[2])/(double)pics, (dj[3]-prevDj[3])/(double)pics,
+                             (dj[4]-prevDj[4])/(double)pics, (dj[5]-prevDj[5])/(double)pics, (unsigned long long)dj[6], (unsigned long long)dj[7]);
+        // (fe27: the retained shape calls DjEmit did not arm, per picture, by the first reason: the entry is not a static buffer (a list of at most GXV_SOFTXFORM
+        // vertices stays in the arena and goes through EmitDraw), learned copies, no runs, the mode / diagnostics refuse)
+        if (dj[8] + dj[9] + dj[10] + dj[11] != prevDj[8] + prevDj[9] + prevDj[10] + prevDj[11])
+            port_log_summary("workload: direct J3D not armed per picture (fe27): %.1f arena lists (no static buffer), %.1f learned copies, %.1f no runs, %.1f switch off or diagnostics",
+                             (dj[8]-prevDj[8])/(double)pics, (dj[9]-prevDj[9])/(double)pics, (dj[10]-prevDj[10])/(double)pics, (dj[11]-prevDj[11])/(double)pics);
+        for (int i = 0; i < 12; ++i) prevDj[i] = dj[i];
+    }
     if (&split::KeyIdCounters && &FeCutCounters) {
         // (GXV_FECUT_*, see REPORT of the fecut change: shader keys sent to the finishing thread whole / by id (GXV_FECUT_KEYID); material
         // lists replayed from the entry's first cache line, and their deltas applied in the compact layout (GXV_FECUT_SLHOT))
@@ -891,6 +933,18 @@ inline void Report() {
                              (k[0]-prevK[0])/(double)pics, (k[1]-prevK[1])/(double)pics, (k[2]-prevK[2])/(double)pics, (k[3]-prevK[3])/(double)pics,
                              (c[0]-prevC[0])/(double)pics, (c[1]-prevC[1])/(double)pics);
         for (int i = 0; i < 4; ++i) { prevK[i] = k[i]; prevC[i] = c[i]; }
+    }
+    if (&split::WakeCounters) {
+        // (vgx_fesplit.cpp Wake: the player's wake-ups of the finishing thread. "signalled" = the thread was asleep: the player took the mutex
+        // and signalled the condition variable (kernel calls); ms is the player's time in those, measured with GXV_SPLIT_WAKESTAT=1.)
+        static uint64_t prevW[4] = {};
+        uint64_t w[4];
+        split::WakeCounters(w);
+        const uint32_t pics = p.pictures - old.pictures ? p.pictures - old.pictures : 1;
+        if (w[0] != prevW[0])
+            port_log_summary("workload: split wake-ups per picture: %.1f calls, %.1f signalled (%.3f ms of the player's time), the finishing thread slept %.1f times",
+                             (w[0]-prevW[0])/(double)pics, (w[1]-prevW[1])/(double)pics, (w[2]-prevW[2])/1e6/pics, (w[3]-prevW[3])/(double)pics);
+        for (int i = 0; i < 4; ++i) prevW[i] = w[i];
     }
     if (&FxMergeCounters) {
         // (GXV_FXMERGE, vgx_state.cpp FxMergeRun: the particle commands the game gathered, the display-list calls in them, how many of
@@ -908,17 +962,62 @@ inline void Report() {
     }
     if (FeSplitOn()) {
         const uint32_t pics = p.pictures - old.pictures ? p.pictures - old.pictures : 1;
-        char line[900]; int at = 0;
+        char line[1500], lineC[1500]; int at = 0, atC = 0;
+        // (every timed scope's time includes the clock read that closes the interval it measures: ~1 us or more on the console, and some
+        // 8,000 scopes a picture. The cost of one read is measured here, once, and taken off every call of every slot for the "corrected"
+        // line: what the code between a scope's two reads takes. A parent still holds the reads of the nested scopes that happened to be
+        // timed with it (1 in 16 of them). With GXV_FE_SPLIT=1 every scope is timed and the figures are not scaled.)
+        static double tcUs = -1.0;
+        if (tcUs < 0.0) {
+            tcUs = 1.0;
+            if (port_host_time_ns) {
+                const int64_t a = port_host_time_ns();
+                for (int i = 0; i < 400; ++i) (void)port_host_time_ns();
+                const int64_t b = port_host_time_ns();
+                tcUs = (b - a) / 401.0 / 1000.0 + 0.15; // (+ the scope's own bookkeeping: Open and Close are calls with atomic adds)
+            }
+        }
         for (unsigned i = 0; i < FeSlotCount; ++i) {
             const uint64_t ns = FeNs[i].load(std::memory_order_relaxed); const uint32_t n = FeN[i].load(std::memory_order_relaxed);
             const uint32_t nt = FeNTimed[i].load(std::memory_order_relaxed);
             // (GXV_FE_SPLIT=2: the timed scopes' time, scaled by all scopes / timed scopes of the slot in this window)
             const double scale = nt - FePrevNTimed[i] ? static_cast<double>(n - FePrevN[i]) / static_cast<double>(nt - FePrevNTimed[i]) : 0.0;
             at += snprintf(line + at, sizeof line - at, " %s=%.2fms(%u)", FeNames[i], (ns - FePrevNs[i]) * scale / 1e6 / pics, (n - FePrevN[i]) / pics);
+            {
+                const double ms = (ns - FePrevNs[i]) * scale / 1e6 / pics, calls = (n - FePrevN[i]) / (double)pics;
+                const double corr = ms - calls * tcUs / 1000.0;
+                atC += snprintf(lineC + atC, sizeof lineC - atC, " %s=%.2fms", FeNames[i], corr > 0.0 ? corr : 0.0);
+            }
             FePrevNs[i] = ns; FePrevN[i] = n; FePrevNTimed[i] = nt;
         }
         port_log_summary("workload: fe-split per picture (wall, front-end thread; calls per picture in brackets%s):%s",
                          FeSplitMode() == 2 ? "; about 1 scope in 16 timed, scaled" : "", line);
+        port_log_summary("workload: fe-split corrected (one timed scope costs %.2f us, taken off every call; nested slots overlap, they are not additive):%s", tcUs, lineC);
+        if (&StreamDetailCounters) {
+            // (vgx_state.cpp StreamDetail: what ProcessStream parsed. top = the game's command streams, list = display lists, tiny ones and bypassed
+            // ones included. state = BP/CP/XF/array commands the loop went through (a run of no-op BP writes counts one each). flush = the zero strips
+            // DrawStreamPlan drops. bypass = lists a ProcessStream parse was made of because the cache gave them up (list-other).)
+            static uint64_t prevSd[13] = {};
+            uint64_t sd[13];
+            StreamDetailCounters(sd);
+            auto d = [&](int i) { return (sd[i] - prevSd[i]) / static_cast<double>(pics); };
+            port_log_summary("workload: fe stream detail per picture: top %.1f streams %.1f KB %.0f state cmds %.0f draws %.0f verts; "
+                             "lists %.0f parsed %.1f KB %.0f state cmds %.0f draws %.0f verts; flush strips dropped %.0f; "
+                             "bypass-parsed lists %.1f %.1f KB",
+                             d(0), d(1) / 1024.0, d(2), d(3), d(4), d(5), d(6) / 1024.0, d(7), d(8), d(9), d(10), d(11), d(12) / 1024.0);
+            for (int i = 0; i < 13; ++i) prevSd[i] = sd[i];
+        }
+        if (&StateFastCounters) {
+            // (GXV_FE_STATEFAST, vgx_state.cpp StateRun: the top-level state commands the tight loop took, per picture; checked / mismatching are the verify mode's, totals)
+            static uint64_t prevSf[4] = {};
+            uint64_t sf[4];
+            StateFastCounters(sf);
+            if (sf[3] != 0 || prevSf[3] != 0)
+                port_log_summary("workload: statefast per picture: %.0f state cmds taken in %.1f runs; verify (GXV_FE_STATEFAST=2): %llu repeats checked, %llu mismatching",
+                                 (sf[2] - prevSf[2]) / static_cast<double>(pics), (sf[3] - prevSf[3]) / static_cast<double>(pics), static_cast<unsigned long long>(sf[0]),
+                                 static_cast<unsigned long long>(sf[1]));
+            for (int i = 0; i < 4; ++i) prevSf[i] = sf[i];
+        }
         static uint64_t prevDl[7] = {};
         uint64_t dl[7];
         if (&DlCacheBranchCounts) DlCacheBranchCounts(dl); else for (auto& v : dl) v = 0;
@@ -926,6 +1025,19 @@ inline void Report() {
                          (dl[0]-prevDl[0])/(double)pics, (dl[1]-prevDl[1])/(double)pics, (dl[2]-prevDl[2])/(double)pics, (dl[3]-prevDl[3])/(double)pics,
                          (dl[4]-prevDl[4])/(double)pics, (dl[5]-prevDl[5])/(double)pics, (dl[6]-prevDl[6])/(double)pics);
         for (int i = 0; i < 7; ++i) prevDl[i] = dl[i];
+        if (&DlOtherWhyCounts) {
+            // (the calls that went the "list-other" way, by cause: a list outside guest RAM; a bypassed list that StateListCall replayed
+            // as a material list / that was decoded by ProcessStream; lists put into the bypass map by repeated rewrites / by a new
+            // variant every picture; a list the cache refused (state inside) replayed as a material list / decoded; builds)
+            static uint64_t prevOw[8] = {};
+            uint64_t ow[8];
+            DlOtherWhyCounts(ow);
+            port_log_summary("workload: list-other why per picture: not-guest %.1f, bypassed->state-replay %.1f, bypassed->decode %.1f, bypass-set(rewritten) %.1f, "
+                             "bypass-set(variant streak) %.1f, uncacheable->state-replay %.1f, uncacheable->decode %.1f, builds %.1f",
+                             (ow[0]-prevOw[0])/(double)pics, (ow[1]-prevOw[1])/(double)pics, (ow[2]-prevOw[2])/(double)pics, (ow[3]-prevOw[3])/(double)pics,
+                             (ow[4]-prevOw[4])/(double)pics, (ow[5]-prevOw[5])/(double)pics, (ow[6]-prevOw[6])/(double)pics, (ow[7]-prevOw[7])/(double)pics);
+            for (int i = 0; i < 8; ++i) prevOw[i] = ow[i];
+        }
         // (GXV_SLFAST, vgx_state.cpp StateListFastHit: material lists replayed without the geometry cache's detour; "via-table" and
         // "same-bytes" are the ones that went through it before, as "bypassed" calls)
         static uint64_t prevSl[3] = {};

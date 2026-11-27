@@ -1,8 +1,12 @@
+#ifdef TARGET_PC
+#include "Game/MP/MpSelfPuppet.hpp"
+#endif
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/Map/HitInfo.hpp"
 #include "Game/Player/J3DModelX.hpp"
 #include "Game/Player/JetTurtleShadow.hpp"
 #include "Game/Player/Mario.hpp"
+#include "Game/Player/MarioAccess.hpp"
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Player/MarioConst.hpp"
 #include "Game/Player/MarioShadow.hpp"
@@ -31,6 +35,130 @@ void MarioActorShadow_FORCE_MATCH_SDATA2() {
     (void)4503599627370496.0;
     (void)4503601774854144.0;
 }
+
+#ifdef TARGET_PC
+#include <cstdlib>
+#include <cstdio>
+#include "port/stage_knob.h"
+#include "port/mirror25.h"
+#include "Game/LiveActor/ClippingJudge.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"
+extern "C" void port_gx_marker(unsigned int kind);
+extern "C" void port_log_summary(const char* fmt, ...);
+// ---- GXV_SILH_GATE (shadow25): does Mario's silhouette show in this picture? The renderer (vgx_draw.cpp SilhGatePass) leaves the silhouette fill's whole-EFB alpha
+// capture and its full-screen quad out of a picture with no shadow volume when this says "cannot show". The silhouette is drawn (drawSilhouette, DrawType_0x28) only
+// where Mario is BEHIND what the lists before it drew: the map (planets, map objects: the draw buffers drawn before DrawType_0x28; enemies, NPCs and effects come after
+// and neither hide nor are darkened by it). 1: it cannot show: not drawn this picture (exact), or rays from the camera to his body (centre, head, both sides) hit no map
+// collision for GXV_SILH_HOLD (default 8) pictures running; 2: it may (a hit, a demo, the camera close to him, the hold still running). Misses: a map object WITHOUT collision
+// in front of him (decorative foliage, a model-only bridge), a ray that slips between collision polygons; the renderer's own check cannot see those either.
+namespace {
+bool sSilhDrawn = false;
+u32 sSilhClear = 0, sSilhSeenGen = 0xFFFFFFFFu;
+int sSilhOn = 0, sSilhRays = 4, sSilhHold = 8;
+u32 sSilhAsked = 0, sSilhExact = 0, sSilhRayClear = 0, sSilhHit = 0;
+const char* SilhEnv(const char* name, char* buf, size_t size) {
+    long v;
+    if (port::stageknob::Overridden(name, &v)) { snprintf(buf, size, "%ld", v); return buf; }
+    return getenv(name);
+}
+}  // namespace
+
+// ---- GXV_MIRROR25 (reflfur25; platform/include/port/mirror25.h has the whole story): is the mirrored model entirely outside the picture's frustum?
+// The sphere is centred on the reflection's origin (the base matrix's translation) with the generous bound of mirror25::Radius; it is judged by
+// the clipping judge's PICTURE frustum (the zoomed one while the handheld zoom is in force). The camera within NearGuard() + radius of the origin is
+// never judged (the judge's near plane is 500 units out).
+bool MarioActor::portReflectionOutside(const TVec3f& rOrigin, bool* pNear) {
+    *pNear = false;
+    if (!MR::isExistSceneObj(SceneObj_CameraContext)) {
+        *pNear = true;  // (no camera known: nothing is judged)
+        return false;
+    }
+    const f32 r = port::mirror25::Radius(getCarrySensor() != nullptr);
+    const TVec3f cam = MR::getCamPos();
+    const f32 dx = rOrigin.x - cam.x, dy = rOrigin.y - cam.y, dz = rOrigin.z - cam.z;
+    const f32 guard = port::mirror25::NearGuard() + r;
+    if (dx * dx + dy * dy + dz * dz <= guard * guard) {
+        *pNear = true;
+        return false;
+    }
+    return MR::getClippingJudge()->isJudgedToClipPictureFrustum(rOrigin, r);
+}
+namespace {
+port::mirror25::Census sMirCensus;
+}
+int MarioActor::portSilhouetteHint() {
+    if (sSilhSeenGen != port::stageknob::Gen()) {
+        sSilhSeenGen = port::stageknob::Gen();
+        char sb[16];
+        const char* e = SilhEnv("GXV_SILH_GATE", sb, sizeof sb);
+        sSilhOn = e && *e ? atoi(e) : 0;
+        const char* r = getenv("GXV_SILH_RAYS");
+        sSilhRays = r && *r ? atoi(r) : 4;
+        if (sSilhRays < 1) sSilhRays = 1;
+        if (sSilhRays > 5) sSilhRays = 5;
+        const char* h = getenv("GXV_SILH_HOLD");
+        sSilhHold = h && *h ? atoi(h) : 8;
+        sSilhClear = 0;
+    }
+    if (!sSilhOn) {
+        sSilhDrawn = false;
+        return 0;
+    }
+    const bool drawn = sSilhDrawn;
+    sSilhDrawn = false;
+    ++sSilhAsked;
+    int hint = 2;
+    if (!drawn) {
+        hint = 1;  // (nothing was drawn: no alpha from the silhouette, exact)
+        ++sSilhExact;
+        sSilhClear = 0;
+    } else if (MR::isDemoActive() || mMario->isStatusActive(MarioStatus_Bury)) {
+        sSilhClear = 0;
+    } else {
+        const TVec3f& up0 = getGravityVector();
+        TVec3f up(-up0.x, -up0.y, -up0.z);
+        TVec3f toMario(mPosition - mCamPos);
+        const f32 dist2 = toMario.x * toMario.x + toMario.y * toMario.y + toMario.z * toMario.z;
+        bool hit = dist2 < 400.0f * 400.0f;  // (the camera close to him: it may be inside something)
+        TVec3f side;
+        side.cross(mCamDirZ, up);
+        if (MR::isNearZero(side)) side.set< f32 >(1.0f, 0.0f, 0.0f);
+        MR::normalizeOrZero(&side);
+        TVec3f pts[5];
+        pts[0] = mPosition + up * 60.0f;
+        pts[1] = mPosition + up * 140.0f;
+        pts[2] = pts[0] + side * 70.0f;
+        pts[3] = pts[0] - side * 70.0f;
+        pts[4] = mPosition + up * 20.0f;
+        for (int i = 0; i < sSilhRays && !hit; ++i) {
+            const TVec3f seg(pts[i] - mCamPos);
+            hit = MR::isExistMapCollision(mCamPos, seg);
+        }
+        if (hit) {
+            sSilhClear = 0;
+            ++sSilhHit;
+        } else {
+            ++sSilhClear;
+            if (sSilhClear >= static_cast< u32 >(sSilhHold)) {
+                hint = 1;
+                ++sSilhRayClear;
+            }
+        }
+    }
+    if (sSilhAsked >= 3600) {
+        port_log_summary("silhgate (game): %u pictures: hint cannot-show %u (not drawn %u, rays clear %u), rays hit %u", sSilhAsked, sSilhExact + sSilhRayClear, sSilhExact, sSilhRayClear, sSilhHit);
+        sSilhAsked = sSilhExact = sSilhRayClear = sSilhHit = 0;
+    }
+    return hint;
+}
+extern "C" int port_silhouette_hint(void) {
+    MarioActor* p = MarioAccess::getPlayerActor();
+    if (p == nullptr) {
+        return 0;
+    }
+    return p->portSilhouetteHint();
+}
+#endif
 
 void MarioActor::initShadow() {
     _A08 = 1;
@@ -198,6 +326,37 @@ void MarioActor::calcViewReflectionModel() {
         _9A0->calcType0(_E0C.toMtxPtr());
     }
 
+#ifdef TARGET_PC
+    // GXV_MIRROR25 (reflfur25): the reflection of a picture whose mirrored model is outside the frustum is neither calculated nor drawn. The census
+    // (GXV_MIRROR25_CENSUS=1, also with the level 0) counts the same decision without acting on it.
+    mPortReflSkip = 0;
+    {
+        const int mirLevel = port::mirror25::Level();
+        if (mirLevel >= 1 || port::mirror25::CensusOn()) {
+            port::mirror25::Input in;
+            in.hidden = isAllHidden();
+            in.fading = (_A08 >= 6 && _A24 < 2) || (_A08 == 3 && _A25 < 2) || !(_A08 & 2);
+            in.outside = false;
+            in.cameraNear = false;
+            if (!in.hidden && !in.fading) {
+                in.outside = portReflectionOutside(position, &in.cameraNear);
+            }
+            const port::mirror25::Reason why = port::mirror25::Decide(in);
+            ++sMirCensus.reason[why];
+            ++sMirCensus.mode[_A08 & 7];
+            if (why == port::mirror25::kDrawn && _A08 == 2 && mirLevel >= 2) {
+                ++sMirCensus.single;
+            }
+            if (mirLevel >= 1 && port::mirror25::Skips(why)) {
+                mPortReflSkip = 1;
+            }
+        }
+    }
+    if (mPortReflSkip) {
+        MR::loadViewMtx();  // (as the end of this function: the view matrix, unchanged)
+        return;
+    }
+#endif
     PSMTXConcat(_BC8.mMtx, offset.toMtxPtr(), offset.toMtxPtr());
     PSMTXConcat(matrix.toMtxPtr(), offset.toMtxPtr(), matrix.toMtxPtr());
     PSMTXConcat(j3dSys.mViewMtx, matrix.toMtxPtr(), j3dSys.mViewMtx);
@@ -363,6 +522,16 @@ void MarioActor::drawShadow() const {
 }
 
 void MarioActor::decideShadowMode() {
+#ifdef TARGET_PC
+    if (port::mirror25::Level() >= 1 || port::mirror25::CensusOn()) {
+        if (port::mirror25::Tick(sMirCensus)) {  // (once a picture: 300 pictures a line)
+            char line[480];
+            port::mirror25::Format(line, sizeof line, sMirCensus, port::mirror25::Level());
+            port_log_summary("%s", line);
+            sMirCensus = port::mirror25::Census();
+        }
+    }
+#endif
     if (getMovementStates()._2 && !mMario->isNotReflectGlassGround() && !mMario->isStatusActive(MarioStatus_FpView) &&
         (mMario->_962 == 14 || mMario->_962 == 33)) {
         _A08 = 2;
@@ -542,6 +711,17 @@ void MarioActor::calcViewFootPrint() {
     }
 }
 
+#ifdef TARGET_PC
+// MP3: self puppet (MpPuppets): the silhouette behind walls would show the MarioActor's shape. (merge of 3.0 on c181: the test is in front of drawSilhouette, which is registered
+// as the draw functor through this wrapper, so drawSilhouette has c181's control flow and its PGO profile.)
+void MarioActor::drawSilhouetteMp() const {
+    if (MpSelfPuppet::hideLocalBody()) {
+        return;
+    }
+    drawSilhouette();
+}
+#endif
+
 void MarioActor::drawSilhouette() const {
     bool hidden = _482 || _483 || _481;
     if (hidden) {
@@ -582,6 +762,9 @@ void MarioActor::drawSilhouette() const {
         return;
     }
 
+#ifdef TARGET_PC
+    sSilhDrawn = true;
+#endif
     J3DModelX* pModel = getSimpleModel();
     pModel->setDrawView(1);
     pModel->mFlags.clear();

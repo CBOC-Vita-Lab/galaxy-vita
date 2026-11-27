@@ -1,0 +1,54 @@
+# Star Race series in Good Egg 1 (race agent): race 1 (guest first), the results card with the series column and the host's three choices,
+# the host chooses Race Again (SMG_MP_TEST_CHOICE: 1 = Race Again for the 1st race, then 3 = Leave Race), race 2 starts with the winner's
+# head start (guest, 3 s) shown on the countdown, second results with the series at 2 points + 2 points, then the host leaves.
+# Autopilot start, like mp_race / qa_race_tie / qa_race_rematch_leave (@file2_observatory: both consoles walk the Single Player file select to file 2 and are in play;
+# the host's autopilot then copies file 2 into a co-op file and starts the Star Race). The host moves to Good Egg 1 (PETARI_STAGE) and the race starts.
+# 14 Nov: this scenario used to walk the Multiplayer menu (inputs/entry_host_race.txt). Since uxfix #6 a Star Race never asks "Which File?" (MpMenuGather.cpp
+# requestStart: mMode == MP_MODE_RACE), so the menu path starts on a NEW co-op file: the opening storybook plays in the castle garden, PETARI_STAGE (it needs 120
+# frames of play, GameScene.cpp) never fires, and the run sat on the storybook for 900 s (final run ff8fe7d1, mp_race_series-183609). The menu path itself is mp_smoke's.
+name: mp_race_series
+description: "Star Race series, results card with choices, Race Again, head start on the countdown, series column"
+seconds: 900
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, SMG_MP_TEST_CHOICE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    may_end_early: true   # ends by its HARNESS_END mark (the early-exit preflight would call the run INVALID)
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_STAR: 25, SMG_MP_TEST_CHOICE: "1,3:8",
+          HARNESS_END: '\[mp\] race over serial=\d+|20'}
+  - name: guest
+    may_end_early: true   # ends by its HARNESS_END mark (the early-exit preflight would call the run INVALID)
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15,
+          HARNESS_END: '\[mp\] race over serial=\d+|20'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] race results serial=(\d+) n=2 first=1/'
+  - 'expect host /\[mp\] ui: results shown count=2 series=1 choice=0/'
+  - 'expect guest /\[mp\] ui: results shown count=2 series=1 choice=0/'
+  - 'expect host /\[mp\] race test choice 1/'
+  - 'expect guest /\[mp\] race host choice 1 serial=\d+/ within 3s after host /\[mp\] race test choice 1/'
+  - 'expect host /\[mp\] race host starts the next race from the star wipe serial=\d+ scen=1/ within 5s after host /\[mp\] race test choice 1/'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/ within 5s after host /\[mp\] race host starts the next race/'
+  - 'expect guest /\[mp\] race armed serial=\d+ galaxy=EggStarGalaxy/'
+  - 'expect guest /\[mp\] race head start 180 turns slot=1/'
+  - 'expect guest /\[mp\] flow run command \(behind the star wipe\) type=0 serial=\d+/'
+  - 'expect host /\[mp\] race results serial=\d+ n=2 first=1/ after host /\[mp\] race test choice 1/'
+  - 'expect host /\[mp\] race test choice 3/'
+  - 'absent * /\[mp\] (race hold timeout|race drop)/'
+  # racefix: the synchronized start. READY before the host's note of it, one GO with every present racer ready, one countdown per console and
+  # race, no countdown before GO, both countdowns close together, and no message the core refuses
+  - 'order guest /\[mp\] race ready sent serial=(\d+)/ before host /\[mp\] race ready from slot=1 serial=$1/ within 2s tol 300ms each'
+  - 'expect host /\[mp\] race go sent serial=\d+ ready=3 present=3 waited=\d+ ms/'
+  - 'count host /\[mp\] race go sent serial=\d+/ == 2'
+  - 'count host /\[mp\] race countdown serial=\d+/ == 2'
+  - 'count guest /\[mp\] race countdown serial=\d+/ == 2'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before host /\[mp\] race countdown serial=$1/ within 1s each'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s tol 300ms each'
+  - 'order host /\[mp\] race countdown serial=(\d+)/ near guest /\[mp\] race countdown serial=$1/ within 1s each'
+  - 'absent * /\[mp\] bad message from slot/'

@@ -1,4 +1,9 @@
 #include "Game/Map/FileSelector.hpp"
+#include "Game/MP/MpFlow.hpp"
+#include "Game/MP/MpHead3D.hpp"  // MP3 heads3d: the character select's 3D heads
+#include "Game/MP/MpUi.hpp"
+#include "Game/Screen/LayoutCoreUtil.hpp"  // MP3: the Multiplayer label
+#include <nw4r/lyt/textBox.h>
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Map/FileSelectCameraController.hpp"
 #include "Game/Map/FileSelectEffect.hpp"
@@ -6,6 +11,9 @@
 #include "Game/Map/FileSelectItem.hpp"
 #include "Game/Map/FileSelectItemDelegator.hpp"
 #include "Game/Map/FileSelectSky.hpp"
+#include "Game/MP/MpEntry.hpp"  // MP3 entry: Single Player / Multiplayer between the title and the files
+#include "Game/MP/MpSaveGame.hpp"  // MP3 savefix: the file select's guard (its files must be the save image's)
+#include "Game/Util/SequenceUtil.hpp"
 #include "Game/NPC/MiiFacePartsHolder.hpp"
 #include "Game/Scene/SceneFunction.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
@@ -56,6 +64,17 @@ namespace {
     // static _ sCreatorOffset = _;
     static const f32 sItemThetaOffset[USER_FILE_NUM] ATTRIBUTE_ALIGN(4) = {10.0f, -10.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     static const s32 sIndexOrder[USER_FILE_NUM] = {1, 2, 4, 6, 5, 3};
+    // MP3: the 2P button opened the Multiplayer menu (MpUi) / the session's user file to load
+    static bool sMpMenuOpen = false;
+    static s32 sMpLaunchFile = 0;
+    static const s32 sBackToEntryWipeFrames = 30;   // menuback32: the heads' Back: the game's fade, out and in
+    static bool sMpHoldSelect = false;   // MP3 fix3: our window opened over the file list: back to it afterwards
+    static s32 sMpLoadedFile = 1;        // MP3 entry: the multiplayer launch's file (its name when no file was pointed)
+    // MP3 savefix (review finding 1): the save image generation the files were cached from; input held while the save layer
+    // says the files are not the image's (switch back pending, image unverified) or the image changed (then the scene is rebuilt)
+    static unsigned sMpImageGen = 0;
+    static bool sMpGuardHeld = false;
+    static bool sMpRebuildAsked = false;
 };  // namespace
 
 namespace {
@@ -85,6 +104,7 @@ namespace NrvFileSelector {
     NEW_NERVE(FileSelectorNrvRFLWaitEnd, FileSelector, RFLWaitEnd);
     NEW_NERVE(FileSelectorNrvFileSelectStart, FileSelector, FileSelectStart);
     NEW_NERVE(FileSelectorNrvFileSelect, FileSelector, FileSelect);
+    NEW_NERVE(FileSelectorNrvBackToEntry, FileSelector, BackToEntry);   // menuback32
     NEW_NERVE(FileSelectorNrvFileConfirmStart, FileSelector, FileConfirmStart);
     NEW_NERVE(FileSelectorNrvFileConfirmMiiDeleteWarningStart, FileSelector, FileConfirmMiiDeleteWarningStart);
     NEW_NERVE(FileSelectorNrvFileConfirmMiiDeleteWarning, FileSelector, FileConfirmMiiDeleteWarning);
@@ -138,15 +158,28 @@ FileSelector::FileSelector(const char* pName)
       mBgmState(), mSelectEffect() {
 }
 
+#ifdef TARGET_PC
+void portPostGuidanceKeep(LayoutActor* pActor);   // (Game/Screen/StarPointerDirector.cpp)
+#endif
+
 void FileSelector::init(const JMapInfoIter& rIter) {
+    // MP3: back at the file select: no menu of ours is pending, and the save root is the single-player one again
+    sMpMenuOpen = false;
+    sMpLaunchFile = 0;
+    sMpHoldSelect = false;
+    MpUi::onFileSelect();
+    MpEntry::createForFileSelect();   // MP3 entry: the entry screen's layouts (no-op with SMG_MP_MENU=0)
     MR::connectToScene(this, MR::MovementType_Environment, MR::CalcAnimType_None, MR::DrawBufferType_None, MR::DrawType_None);
     initHitSensor(1);
     MR::addHitSensorPriorBinder(this, "body", 8, 500.0f, TVec3f(0.0f, 0.0f, 0.0f));
     initUserFileArray();
+    sMpImageGen = MpSaveGame::fileSelectOpened();   // MP3 savefix: the files just cached come from this image
+    sMpGuardHeld = sMpRebuildAsked = false;
     MR::invalidateClipping(this);
     createCameraController();
     createSky();
     createFileItems();
+    MpHead3D::createForFileSelect();  // MP3 heads3d: the Multiplayer menu's character heads (scene heap; no-op with SMG_MP_MENU=0)
     createOperationButton();
     createBackButton();
     createBrosButton();
@@ -219,6 +252,39 @@ void FileSelector::notifyItem(FileSelectItem* pItem, s32 msg) {
 
 void FileSelector::control() {
     _C0 = nullptr;
+#ifdef TARGET_PC
+    portPostGuidanceKeep(mBackButton);   // pillz32: alive this frame, so the pointer director draws the pill after the guidance band
+#endif
+    // MP3 savefix: no file select action on files that are not the save image's (single player: a few bool tests, always usable)
+    const int mpGuard = MpSaveGame::fileSelectGuard(sMpImageGen);
+    if (mpGuard != MpSaveGame::FS_USABLE) {
+        if (isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelect)) || isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileConfirm))) {
+            invalidateSelectAll();
+            sMpGuardHeld = true;
+        }
+        // flow (door run, 12 Nov): never while the Multiplayer menu is up: a gathering's room switch (Invite from Far Away with a
+        // friend in) ends and restarts the session under the open menu, and the title scene this asks for took the entry screen's
+        // wait for the menu with it: the START that followed launched nothing and both consoles landed on the title. When the menu
+        // closes, a launch keeps the guard usable (mp_active) and anything else gets this rebuild then.
+        if (mpGuard == MpSaveGame::FS_REBUILD && !sMpRebuildAsked && !MpUi::isMenuOpen()) {
+            sMpRebuildAsked = true;
+            MR::requestChangeSceneTitle();   // MpSaveGame.hpp: after a root switch the file select is rebuilt
+        }
+    } else if (sMpGuardHeld) {
+        sMpGuardHeld = false;
+        if (isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelect))) validateSelectAll();
+    }
+    // MP3 fix2: a save root switch back to single-player that failed at init (busy save sequence) is retried here; a bool
+    // test when nothing is pending. fix3: its warning opens only while a file is being chosen (or a file's buttons are up), and
+    // the file select then waits in the Multiplayer menu's nerve (files and buttons hidden from input) until the window is
+    // gone: the A press that closes it never also picks a file
+    if (MpUi::fileSelectTick(isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelect)) ||
+                             isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileConfirm)))) {
+        sMpHoldSelect = isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelect));
+        sMpMenuOpen = true;
+        invalidateSelectAll();
+        setNerve(GET_NERVE(FileSelector, FileSelectorNrvManualStart));
+    }
 
     for (int i = 0; i < mItems->getObjNum(); i++) {
         LiveActor* pActor = mItems->getActor(i);
@@ -305,6 +371,15 @@ void FileSelector::createFileItems() {
 void FileSelector::createOperationButton() {
     mOperationButton = new FileSelectButton("FileSelectButton");
     mOperationButton->initWithoutIter();
+    // MP3 entry: Multiplayer is chosen on the entry screen now: the round 2P button goes (hidden, and its pointing box has no
+    // size, so it can neither be seen nor pointed). SMG_MP_MENU=0: the game's 2P manual button as before.
+    if (MpUi::featureEnabled()) {
+        MR::hidePane(mOperationButton, "P2Button");
+        if (nw4r::lyt::Pane* pPane = MR::getPane(mOperationButton, "BoxP2")) {
+            pPane->mSize.width = 0.0f;
+            pPane->mSize.height = 0.0f;
+        }
+    }
     mOperationButton->setCallbackFunctor(MR::Functor(this, &FileSelector::callbackStart), MR::Functor(this, &FileSelector::callbackCopy),
                                          MR::Functor(this, &FileSelector::callbackMii), MR::Functor(this, &FileSelector::callbackDelete),
                                          MR::Functor(this, &FileSelector::callbackManual));
@@ -314,7 +389,14 @@ void FileSelector::createBackButton() {
     mBackButton = new BackButton("\x96\xdf\x82\xe9\x83\x7b\x83\x5e\x83\x93", false);
     mBackButton->initWithoutIter();
 
+#ifdef TARGET_PC
+    // pillz32: the "Please choose a file." band is the star pointer's guidance layout, drawn by GameSystem after the whole scene
+    // (after every scene draw list), so nothing in the scene could sit above it. The Back pill is drawn by the pointer director
+    // right after the band instead (portPostGuidanceKeep in control()), not in the scene's decoration list.
+    MR::connectToScene(mBackButton, MR::MovementType_Layout, MR::CalcAnimType_Layout, MR::DrawBufferType_None, MR::DrawType_None);
+#else
     MR::connectToScene(mBackButton, MR::MovementType_Layout, MR::CalcAnimType_Layout, MR::DrawBufferType_None, MR::DrawType_LayoutDecoration);
+#endif
 }
 
 void FileSelector::createBrosButton() {
@@ -527,6 +609,10 @@ void FileSelector::onSelect(FileSelectItem* pItem) {
     if (isNerve(GET_NERVE(FileSelector, FileSelectorNrvCopySelect))) {
         setNerve(GET_NERVE(FileSelector, FileSelectorNrvCopyConfirmStart));
     } else if (isNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelect))) {
+        if (!mBackButton->isHidden() && !mBackButton->_24) {   // menuback32: (the heads' Back prompt goes while the file's own buttons come)
+            mBackButton->disappear();
+        }
+
         if (pItem->isNew()) {
             setNerve(GET_NERVE(FileSelector, FileSelectorNrvCreateConfirmStart));
         } else {
@@ -941,7 +1027,8 @@ void FileSelector::exeWaitBind() {
 
 void FileSelector::exeTitle() {
     if (MR::isFirstStep(this)) {
-        mTitle->appear();
+        // MP3 entry: back from a multiplayer session started on the entry screen: that screen at once (no title)
+        if (!MpEntry::skipTitle()) mTitle->appear();
         MR::deactivateDefaultGameLayout();
         MR::startStarPointerModeTitle(this);
         MR::resetCameraMan();
@@ -951,6 +1038,22 @@ void FileSelector::exeTitle() {
 
     if (mTitle->isActive()) {
         return;
+    }
+
+    // MP3 entry: Single Player / Multiplayer before the heads (SMG_MP_MENU=0: STEP_SINGLE at once, as before)
+    s32 mpFile = 0;
+    switch (MpEntry::fileSelectStep(mManual, &mpFile)) {
+    case MpEntry::STEP_WAIT:
+        return;
+    case MpEntry::STEP_TITLE:
+        setNerve(GET_NERVE(FileSelector, FileSelectorNrvTitle));
+        return;
+    case MpEntry::STEP_LAUNCH:   // the Multiplayer menu's session: load its file the way "Play This File" does
+        sMpLaunchFile = mpFile;
+        setNerve(GET_NERVE(FileSelector, FileSelectorNrvDemoStartWait));
+        return;
+    default:
+        break;
     }
 
     if (::getMiiFacePartsHolder()->isInitEnd()) {
@@ -973,7 +1076,9 @@ void FileSelector::exeTitleEnd() {
         mMiiSelect->collectValidMiiIndex();
         invalidateSelectAll();
         MR::startStarPointerModeFileSelect(this);
-        MR::startStageBGM("MBGM_FILE_SELECT", false);
+        if (!MpEntry::bgmStarted()) {   // MP3 entry: (the entry screen started it already)
+            MR::startStageBGM("MBGM_FILE_SELECT", false);
+        }
     }
 
     if (mCameraController->isAtFarPoint()) {
@@ -1031,14 +1136,51 @@ void FileSelector::exeFileSelectStart() {
 
 void FileSelector::exeFileSelect() {
     if (MR::isFirstStep(this)) {
+        MpEntry::flushChoice();   // MP3 entry: a remembered Single Player choice is written to mp.cfg now that the file list is up (a bool test when nothing waits)
         validateSelectAll();
         appearAllIndex();
         MR::activeStarPointerGuidance();
+        // menuback32: the heads have a Back now (the entry screen is before them): the game's round Back button is the prompt
+        if (MpEntry::headsBackAllowed()) {
+            mBackButton->appear();
+        }
     } else {
         updateFileInfo();
     }
 
     MR::requestFileSelectGuidance();
+
+    // menuback32: B, or the round Back button (touch / pointer): back to the entry screen (checkSelectedBackButton: the cancel sound is the game's)
+    if (!MR::isFirstStep(this) && MpEntry::headsBackAllowed() && checkSelectedBackButton()) {
+        setNerve(GET_NERVE(FileSelector, FileSelectorNrvBackToEntry));
+    }
+}
+
+void FileSelector::exeBackToEntry() {
+    if (MR::isFirstStep(this)) {
+        // nothing is picked and nothing written: the heads go quiet and the game's fade closes over them
+        clearPointing();
+        invalidateSelectAll();
+        disappearAllIndex();
+        disappearAllLayout();
+        MR::deactiveStarPointerGuidance();
+        MR::closeWipeFade(::sBackToEntryWipeFrames);
+    }
+
+    if (!MR::isWipeBlank()) {
+        return;
+    }
+
+#ifdef TARGET_PC
+    // rev32 F1: nothing is picked now: the next session must not take the name and icon of a file pointed before this Back
+    _B4 = nullptr;
+    _B8 = nullptr;
+#endif
+    // under the closed wipe: the title's camera and the title nerve (its first step shows the entry screen, not the title text), and the wipe opens
+    mCameraController->goToTitle();
+    MpEntry::headsBack();
+    MR::openWipeFade(::sBackToEntryWipeFrames);
+    setNerve(GET_NERVE(FileSelector, FileSelectorNrvTitle));
 }
 
 void FileSelector::exeFileConfirmStart() {
@@ -1160,7 +1302,16 @@ void FileSelector::exeDemoStartWait() {
 
 void FileSelector::exeDemo() {
     if (MR::isFirstStep(this)) {
-        s32 id = _B4->_140;
+        MpSaveGame::fileSelectClosed();   // MP3 savefix: a game starts: the file select's cache no longer matters
+        s32 id = _B4 != nullptr ? _B4->_140 : 0;   // MP3 entry: (from the entry screen no file was pointed)
+        // MP3: a multiplayer session loads its own user file (the save module has switched the save root); entry: its cached copy
+        // here is re-read from the save image now (a co-op file, or the host's own file), so its character is the file's own
+        if (sMpLaunchFile > 0) {
+            id = sMpLaunchFile;
+            sMpLaunchFile = 0;
+            sMpLoadedFile = id;
+            GameSequenceFunction::restoreUserFile(&mUserFile[id - 1], id);
+        }
         bool isStartLoadSequence = !isUserFileLuigi(id);
 
         GameSequenceFunction::startGameDataLoadSequence(id, isStartLoadSequence);
@@ -1173,12 +1324,13 @@ void FileSelector::exeDemo() {
 
     wchar_t name[RFL_NAME_LEN + 1];
     FileSelectIconID iconId = FileSelectIconID();
+    const s32 nameId = _B4 != nullptr ? _B4->_140 : sMpLoadedFile;   // MP3 entry: the loaded file's name (no file was pointed)
 
-    getIconId(&iconId, _B4->_140);
+    getIconId(&iconId, nameId);
 
     if (iconId.isMii()) {
         FileSelectFunc::copyMiiName(reinterpret_cast< u16* >(name), iconId);
-    } else if (isUserFileLuigi(_B4->_140)) {
+    } else if (isUserFileLuigi(nameId)) {
         const wchar_t* pMessage = MR::getGameMessageDirect(::cLuigiNameMessageID);
 
         MR::copyString(name, pMessage, ARRAY_SIZE(name));
@@ -1189,6 +1341,9 @@ void FileSelector::exeDemo() {
     }
 
     GameSequenceFunction::reserveUserName(name);
+#ifdef TARGET_PC
+    if (mp_active() && !MpFlowHooks::fileSelectMayAsk()) return;   // touches: a guest waits for the host's move without asking every frame
+#endif
     MR::requestChangeStageInGameAfterLoadingGameData();
 }
 
@@ -1750,6 +1905,32 @@ void FileSelector::exeManualStart() {
 }
 
 void FileSelector::exeManual() {
+    // MP3: the Multiplayer menu is up: wait for it, then load the session's file, or open the 2P manual ("How to Play"), or go
+    // back to the file
+    if (sMpMenuOpen) {
+        if (MpUi::isMenuOpen()) {
+            return;
+        }
+        sMpMenuOpen = false;
+        s32 file = 0;
+        if (MpUi::takeLaunchRequest(&file)) {
+            sMpLaunchFile = file;
+            setNerve(GET_NERVE(FileSelector, FileSelectorNrvDemoStartWait));
+            return;
+        }
+        if (MpUi::takeManualRequest()) {
+            mManual->appear();
+            return;
+        }
+        if (sMpHoldSelect) {   // fix3: the warning came up over the file list: back to choosing a file (as the Back button does)
+            sMpHoldSelect = false;
+            clearPointing();
+            setNerve(GET_NERVE(FileSelector, FileSelectorNrvFileSelectStart));
+            return;
+        }
+        setNerve(GET_NERVE(FileSelector, FileSelectorNrvFileConfirm));
+        return;
+    }
     if (MR::isFirstStep(this)) {
         mManual->appear();
     }

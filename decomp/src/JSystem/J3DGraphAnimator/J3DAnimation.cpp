@@ -3,6 +3,9 @@
 #include "JSystem/J3DGraphAnimator/J3DModelData.hpp"
 #include "JSystem/J3DGraphBase/J3DStruct.hpp"
 #include "JSystem/JMath/JMath.hpp"
+#ifdef TARGET_PC
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF=2, logic23: BCK evaluations counted, and those repeating one already made this turn)
+#endif
 
 void J3DFrameCtrl::init(s16 endFrame) {
     mAttribute = EMode_LOOP;
@@ -670,6 +673,11 @@ f32 J3DGetKeyFrameInterpolation(f32 frame, J3DAnmKeyTableBase* pKeyTable, T* pDa
 }
 
 void J3DAnmTransformKey::calcTransform(f32 frame, u16 jointNo, J3DTransformInfo* pTransform) const {
+#ifdef TARGET_PC
+    if (__builtin_expect(port_logic_prof_flag >= 2, 0)) {
+        port_logic_prof_bck(this, frame, jointNo);
+    }
+#endif
     u16 idx = jointNo * 3;
     J3DAnmTransformKeyTable* entryX = &mAnmTable[idx];
     J3DAnmTransformKeyTable* entryY = &mAnmTable[idx + 1];

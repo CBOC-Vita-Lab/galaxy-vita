@@ -54,3 +54,15 @@ PowerUpIce
 PowerUpTeresa
 PowerUpHopper
 PowerUpInvincible
+
+# Review notes (hdtex24; numbers from `build_pack.py --report`):
+# - The 23 Oct pack has 4 textures that screensize.txt rates "never seen at 2x even in close-ups":
+#   the eyeball textures of Mario, Luigi, Peach and Rosalina (256x256, 341 KiB of GPU memory in
+#   all). They are also the eye textures the engine used to refuse; dropping them from a rebuild
+#   costs nothing visible (the eyes are tiny on screen). Add `--selection` with them excluded, or
+#   add "EyeBall" to EXCLUDE_NAMES in build_pack.py.
+# - Candidates to add only after `--list` shows their size and verdict on your copy (a texture
+#   that is 64x64 or smaller on a small object is already resolved at 960x544 and gains nothing):
+#   the HUD textures, and only with GXV_HUD_NATIVE=1 (otherwise the HUD is drawn at the original's
+#   size and a 2x image is never sampled); Yoshi, Hungry Luma and other NPCs seen in close-ups.
+# Every record added costs GPU memory about 3x the original's while its scene is alive.

@@ -1,0 +1,43 @@
+# QA-FUNC 9/15. FULL ROOM: host + 3 bots fill the 4 places, a fifth joiner (a real game, started when the host reports players=4) is refused with
+# "hello rejected reason=full" and the four members are not disturbed. Unit coverage: soak_long.cpp (5th console refused) only, and that suite is
+# not in allsuites.sh; no scenario. Whether the Join list lets a player press a full room, or hides it, decides what the fifth console logs: the
+# autopilot joins the first compatible room, so this scenario shows what the real list does (REPORT.md). Needs /tmp/harness_core_tests/mp_bot.
+name: qa_full_room
+description: "4 places taken (host + 3 bots); a fifth console is refused (reason=full); nobody is dropped; no 5th slot"
+seconds: 330
+requires: {files: [/tmp/harness_core_tests/mp_bot]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: fifth
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, SMG_MP_NAME: fifth, HARNESS_START_ON: 'host|\[mp\] slot \d joined name=bot\d .*players=4|0'}
+bots:
+  - name: bot1
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot1 --look 1 --duration 240 --radius 300 --speed 20 --data-hash aa3ddccb --scan-for 200"
+  - name: bot2
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot2 --look 2 --duration 240 --radius 200 --speed 30 --data-hash aa3ddccb --scan-for 200"
+  - name: bot3
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot3 --look 3 --duration 240 --radius 0 --data-hash aa3ddccb --scan-for 200"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot \d joined name=bot\d rejoin=0 .*players=4/ within 250s'
+  - 'expect host /\[mp\] session started/'
+  - 'expect host /\[mp\] hello rejected reason=full name=fifth/ within 120s after host /\[mp\] session started/'
+  - 'expect fifth /\[mp\] auto: joining /'
+  - 'expect fifth /\[mp\] rejected by host reason=2/'
+  - 'absent fifth /\[mp\] (joined slot=|flow barrier release|puppet slot=\d appear)/'
+  - 'absent host /\[mp\] slot \d joined name=fifth/'
+  - 'absent host /players=5/'
+  - 'count host /\[mp\] slot \d joined name=bot\d / == 3'
+  - 'absent host /\[mp\] slot \d left reason=/ before host /\[mp\] hello rejected reason=full/'
+  - 'count host /\[mp\] puppet slot=[123] appear model=\w+ self=0/ >= 3'
+  - 'absent host /\[mp\] (bad message from slot|events lost|queue overflow)/'
+  - 'exit bot1,bot2,bot3 == 0'

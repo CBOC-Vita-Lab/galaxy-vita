@@ -1,4 +1,5 @@
 #include "Game/Map/StageSwitch.hpp"
+#include "Game/MP/MpGame.hpp"  // MP3: switch bridge
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Util/JMapIdInfo.hpp"
 
@@ -178,6 +179,10 @@ SwitchIdInfo* StageSwitchFunction::createSwitchIdInfo(const char* pSwitchName, c
         pContainer->createAndAddZone(*pInfo);
     }
 
+    if (mp_active()) {  // MP3: shared world: local-only switch policy (switch areas in level mode, riding switches, ...)
+        MpWorldSync::classifySwitch(pInfo, pSwitchName, rIter);
+    }
+
     return pInfo;
 }
 
@@ -189,6 +194,9 @@ void StageSwitchFunction::onSwitchBySwitchIdInfo(const SwitchIdInfo& rSwitchId) 
 
     if (!pZoneSwitch->get(switchNo)) {
         pZoneSwitch->set(switchNo, true);
+        if (mp_active()) {  // MP3: shared world: report the on edge
+            MpWorldSync::onSwitchEdge(rSwitchId, true);
+        }
     }
 }
 
@@ -200,6 +208,9 @@ void StageSwitchFunction::offSwitchBySwitchIdInfo(const SwitchIdInfo& rSwitchId)
 
     if (pZoneSwitch->get(switchNo)) {
         pZoneSwitch->set(switchNo, false);
+        if (mp_active()) {  // MP3: shared world: report the off edge
+            MpWorldSync::onSwitchEdge(rSwitchId, false);
+        }
     }
 }
 

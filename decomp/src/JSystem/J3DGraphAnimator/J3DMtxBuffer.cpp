@@ -200,11 +200,20 @@ static bool J3DEnvelopeNeonOn() {
     }());
 }
 
-static void J3DCalcWeightEnvelopeNeon(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pOut, const u8* pScaleFlag, u8* pEnvScaleFlag) {
+static bool J3DEnvelopeReuseOn() {
+    return PORT_HOT_KNOB(bool, [] { const char* e = getenv("GXV_J3D_ENV_REUSE"); return !(e && *e == '0'); }());
+}
+
+template <bool Reuse>
+static void J3DEnvelopeLoop(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pOut, const u8* pScaleFlag, u8* pEnvScaleFlag) {
     const u16* pIdx = pTree->getWEvlpMixMtxIndex();
     const f32* pWeight = pTree->getWEvlpMixWeight();
     const int envNum = pTree->getWEvlpMtxNum();
     const float32x4_t zero = vdupq_n_f32(0.0f);
+    // A joint's animation * inverse-bind product is constant for this invocation, not for the next pose.
+    unsigned tags[16] = {};
+    struct Product { float32x4_t r0, r1, r2; };
+    Product products[16];
     for (int e = 0; e < envNum; e++) {
         u8 envScale = 1;
         float32x4_t acc0 = zero, acc1 = zero, acc2 = zero;
@@ -213,33 +222,53 @@ static void J3DCalcWeightEnvelopeNeon(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pO
         do {
             const u16 jointIdx = *pIdx++;
             const f32 w = *pWeight++;
-            const f32(*a)[4] = pAnmMtx[jointIdx];
-            const f32(*b)[4] = pTree->getInvJointMtx(jointIdx);
-            // C_MTXConcat(a, b) (platform/src/sdk/mtx.c, the NEON form), kept in registers.
-            const float32x4_t b0 = vld1q_f32(b[0]), b1 = vld1q_f32(b[1]), b2 = vld1q_f32(b[2]);
-            const float32x4_t a0 = vld1q_f32(a[0]), a1 = vld1q_f32(a[1]), a2 = vld1q_f32(a[2]);
-            float32x4_t r0 = vmulq_lane_f32(b0, vget_low_f32(a0), 0);
-            float32x4_t r1 = vmulq_lane_f32(b0, vget_low_f32(a1), 0);
-            float32x4_t r2 = vmulq_lane_f32(b0, vget_low_f32(a2), 0);
-            r0 = vmlaq_lane_f32(r0, b1, vget_low_f32(a0), 1);
-            r1 = vmlaq_lane_f32(r1, b1, vget_low_f32(a1), 1);
-            r2 = vmlaq_lane_f32(r2, b1, vget_low_f32(a2), 1);
-            r0 = vmlaq_lane_f32(r0, b2, vget_high_f32(a0), 0);
-            r1 = vmlaq_lane_f32(r1, b2, vget_high_f32(a1), 0);
-            r2 = vmlaq_lane_f32(r2, b2, vget_high_f32(a2), 0);
-            r0 = vsetq_lane_f32(vgetq_lane_f32(r0, 3) + vgetq_lane_f32(a0, 3), r0, 3);
-            r1 = vsetq_lane_f32(vgetq_lane_f32(r1, 3) + vgetq_lane_f32(a1, 3), r1, 3);
-            r2 = vsetq_lane_f32(vgetq_lane_f32(r2, 3) + vgetq_lane_f32(a2, 3), r2, 3);
+            const unsigned slot = jointIdx & 15;
+            const unsigned tag = unsigned(jointIdx) + 1;
+            Product p;
+            if (Reuse && tags[slot] == tag) {
+                p = products[slot];
+            } else {
+                const f32(*a)[4] = pAnmMtx[jointIdx];
+                const f32(*b)[4] = pTree->getInvJointMtx(jointIdx);
+                // C_MTXConcat(a, b) (platform/src/sdk/mtx.c, the NEON form), kept in registers.
+                const float32x4_t b0 = vld1q_f32(b[0]), b1 = vld1q_f32(b[1]), b2 = vld1q_f32(b[2]);
+                const float32x4_t a0 = vld1q_f32(a[0]), a1 = vld1q_f32(a[1]), a2 = vld1q_f32(a[2]);
+                float32x4_t r0 = vmulq_lane_f32(b0, vget_low_f32(a0), 0);
+                float32x4_t r1 = vmulq_lane_f32(b0, vget_low_f32(a1), 0);
+                float32x4_t r2 = vmulq_lane_f32(b0, vget_low_f32(a2), 0);
+                r0 = vmlaq_lane_f32(r0, b1, vget_low_f32(a0), 1);
+                r1 = vmlaq_lane_f32(r1, b1, vget_low_f32(a1), 1);
+                r2 = vmlaq_lane_f32(r2, b1, vget_low_f32(a2), 1);
+                r0 = vmlaq_lane_f32(r0, b2, vget_high_f32(a0), 0);
+                r1 = vmlaq_lane_f32(r1, b2, vget_high_f32(a1), 0);
+                r2 = vmlaq_lane_f32(r2, b2, vget_high_f32(a2), 0);
+                r0 = vsetq_lane_f32(vgetq_lane_f32(r0, 3) + vgetq_lane_f32(a0, 3), r0, 3);
+                r1 = vsetq_lane_f32(vgetq_lane_f32(r1, 3) + vgetq_lane_f32(a1, 3), r1, 3);
+                r2 = vsetq_lane_f32(vgetq_lane_f32(r2, 3) + vgetq_lane_f32(a2, 3), r2, 3);
+                p = {r0, r1, r2};
+                if (Reuse) {
+                    tags[slot] = tag;
+                    products[slot] = p;
+                }
+            }
             // acc[r][c] += prod[r][c] * w
-            acc0 = vmlaq_n_f32(acc0, r0, w);
-            acc1 = vmlaq_n_f32(acc1, r1, w);
-            acc2 = vmlaq_n_f32(acc2, r2, w);
+            acc0 = vmlaq_n_f32(acc0, p.r0, w);
+            acc1 = vmlaq_n_f32(acc1, p.r1, w);
+            acc2 = vmlaq_n_f32(acc2, p.r2, w);
             envScale &= pScaleFlag[jointIdx];
         } while (++k < envMixNum);
         vst1q_f32(pOut[e][0], acc0);
         vst1q_f32(pOut[e][1], acc1);
         vst1q_f32(pOut[e][2], acc2);
         pEnvScaleFlag[e] = envScale;
+    }
+}
+
+static void J3DCalcWeightEnvelopeNeon(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pOut, const u8* pScaleFlag, u8* pEnvScaleFlag) {
+    if (pTree->getWEvlpMtxNum() >= 4 && J3DEnvelopeReuseOn()) {
+        J3DEnvelopeLoop<true>(pTree, pAnmMtx, pOut, pScaleFlag, pEnvScaleFlag);
+    } else {
+        J3DEnvelopeLoop<false>(pTree, pAnmMtx, pOut, pScaleFlag, pEnvScaleFlag);
     }
 }
 #endif

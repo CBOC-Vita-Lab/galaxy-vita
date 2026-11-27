@@ -1,0 +1,31 @@
+# Pre-ship #7 (stale member cleared without a BYE): the guest is killed with SIGKILL 20 s after the session's first scene
+# barrier (no BYE); the host marks it gone within the liveness timeout (15 s lost), hides its puppet and goes on alone.
+# Pre-ship #7 proper: both consoles lose 20% of what they send (SMG_NET_DROP=20, vlink_udp.cpp's test injector); the session
+# must still come up and run, and the kill -9 must still be noticed in time.
+name: mp_lost_peer
+description: guest killed -9 (no BYE); host drops the slot within the timeout, hides the puppet, keeps running
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE, udp fault injection on]}
+env: {PETARI_GAME_CLOCK: 1, SMG_NET_DROP: 20}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, HARNESS_KILL: 'flow barrier release serial=1 |20|9'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit host == 0'
+  - 'expect guest /harness: kill signal=9/'
+  - 'expect host /\[mp\] slot 1 left reason=\S+ .*players=1/ within 25s after guest /harness: kill signal=9/'
+  - 'expect host /\[mp\] puppet slot=1 hide reason=/ within 25s after guest /harness: kill signal=9/'
+  - 'absent host /\[mp\] session ended reason=(?!none \(shutdown\))/'
+  - 'metric host fps >= 3'   # (the vgx renderer prints no 'gx: frame' lines; frametimes.json does the same job)
+  - 'expect * /\[vlink\] udp fault injection on: drop 20\.0%/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/'
+  - '?count * /\[mp\] (events lost|bad message)/ == 0'

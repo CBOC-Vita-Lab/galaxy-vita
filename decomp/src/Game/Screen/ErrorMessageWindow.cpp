@@ -13,6 +13,9 @@ namespace {
 };  // namespace
 
 ErrorMessageWindow::ErrorMessageWindow() : LayoutActor("\x83\x47\x83\x89\x81\x5b\x83\x81\x83\x62\x83\x5a\x81\x5b\x83\x57\x95\x5c\x8e\xa6", false), mMessageId(nullptr), mTexture(nullptr) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 void ErrorMessageWindow::init(const JMapInfoIter& rIter) {

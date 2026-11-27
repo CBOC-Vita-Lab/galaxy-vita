@@ -4,17 +4,19 @@
 # when 2 reports no mismatch, and when a ThreadSanitizer build of 1 and 2 reports no race.
 #   tools/test_vgx_fesplit.sh [frames] [seeds]      (host clang and gcc; out-of-tree build in $OUT, default /tmp/vgx_fesplit)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-300}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_fesplit}
+out=${OUT:-$MP_TMP/vgx_fesplit}
 mkdir -p "$out"
 cxx=${CXX:-clang++}
 srcs=(tests/vgx_fesplit_stress.cpp platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp
       platform/vgx/src/vgx_dlcache.cpp platform/vgx/src/vgx_guestmem.cpp platform/vgx/src/vgx_bpsync.cpp platform/vgx/src/vgx_shadergen.cpp
-      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp platform/vgx/src/vgx_backend_null.cpp)
+      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texcomp.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp platform/vgx/src/vgx_backend_null.cpp)
 cd "$root"
-common=(-std=c++17 -g -Iplatform/vgx/src -Iplatform/vgx/third_party -pthread)
+common=(-std=c++20 -g -Iplatform/include -Iplatform/vgx/src -Iplatform/vgx/third_party -pthread)
+if [ "$(uname -s)" = "Darwin" ]; then common+=(-Wl,-undefined,dynamic_lookup); fi
 $cxx "${common[@]}" -O2 "${srcs[@]}" -o "$out/stress"
 # (ThreadSanitizer: gcc's runtime; TSAN_CXX to choose another compiler)
 ${TSAN_CXX:-g++} "${common[@]}" -O1 -fsanitize=thread "${srcs[@]}" -o "$out/stress-tsan"

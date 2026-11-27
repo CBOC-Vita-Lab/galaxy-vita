@@ -142,6 +142,14 @@ int main(int argc, char** argv) {
             assert(std::fabs((cx - rx) - (fx - rx) * 0.25f) <= 1e-5f && std::fabs((cy - ry) - (fy - ry) * 0.25f) <= 1e-5f);
         }
     }
+    // settingsnative: the live setter beats the start-up switch, both ways, and ClearLive hands it back.
+    {
+        const bool atStart = Enabled();
+        SetLive(true);  assert(Enabled() && ShakeScale(1.0f) == kShakeScale);
+        SetLive(false); assert(!Enabled() && ShakeScale(1.0f) == 1.0f && Bits(BlurScale(3.0f)) == Bits(3.0f));
+        SetLive(true);  assert(Enabled() && BlurScale(4.0f) == 2.0f && CapFlashAlpha(1.0f, 6, 255, 255, 255) == kFlashAlphaCap);
+        ClearLive();    assert(Enabled() == atStart);
+    }
     std::puts("reduced_motion: switch, shake and blur scale, cap, identity and projection arithmetic passed");
     return 0;
 }

@@ -1,6 +1,8 @@
 #include "port/control_bindings.h"
+#include <atomic>
 #include <cassert>
 #include <string>
+#include <thread>
 using namespace port::controls;
 int main() {
     const auto& api = GetControlApi();
@@ -37,5 +39,47 @@ int main() {
         assert(api.validate(map, id, caps, error) == (id == ProfileId::PlayStation));
         // The Handheld defaults never change with the switch.
         if (id == ProfileId::Handheld) assert(api.defaults(id).bindings[1].buttons[0] == "circle");
+    }
+    // settingsnative: the staged swap. Nothing staged: nothing to commit. A staged mapping is invisible until the commit, a reference taken before
+    // it stays valid and unchanged after it (every mapping is immutable and never freed), and the commit counts.
+    {
+        const auto& api2 = GetControlApi();
+        assert(!CommitStagedMapping());
+        const CompiledMapping& before = ActiveMapping();
+        const uint64_t cross = Cross, circle = Circle;
+        assert(before.profile == ProfileId::Handheld && before.masks[static_cast<size_t>(Action::Jump)] == cross);
+        const uint32_t gen0 = MappingGeneration();
+        auto map = api2.defaults(ProfileId::Handheld);
+        std::string conflict, error;
+        assert(api2.bind(map, "jump", 0, "circle", true, NominalCaps(ProfileId::Handheld), conflict) == BindResult::Applied);
+        assert(StageActiveMapping(map, error));
+        assert(ActiveMapping().masks[static_cast<size_t>(Action::Jump)] == cross && MappingGeneration() == gen0);   // not yet
+        assert(CommitStagedMapping() && !CommitStagedMapping());                                                    // once
+        assert(ActiveMapping().masks[static_cast<size_t>(Action::Jump)] == circle && ActiveMapping().masks[static_cast<size_t>(Action::StarBits)] == cross);
+        assert(MappingGeneration() == gen0 + 1);
+        assert(before.masks[static_cast<size_t>(Action::Jump)] == cross && &before != &ActiveMapping());            // the old one is untouched
+        // Not valid for the controller in use (L2 on a handheld), or not complete: refused, nothing staged.
+        auto bad = api2.defaults(ProfileId::Handheld);
+        bad.bindings[0].buttons[0] = "l2";
+        assert(!StageActiveMapping(bad, error) && !error.empty() && !CommitStagedMapping());
+        bad = api2.defaults(ProfileId::Handheld); bad.bindings.pop_back();
+        assert(!StageActiveMapping(bad, error) && !CommitStagedMapping());
+        // A second stage before the commit replaces the first.
+        assert(StageActiveMapping(api2.defaults(ProfileId::Handheld), error));
+        assert(StageActiveMapping(map, error));
+        assert(CommitStagedMapping() && ActiveMapping().masks[static_cast<size_t>(Action::Jump)] == circle && !CommitStagedMapping());
+        // The profile does not change with a swap.
+        assert(ActiveMapping().profile == ProfileId::Handheld);
+        // A stager on another thread and the input thread committing and reading: every read is one whole mapping.
+        const auto defaults2 = api2.defaults(ProfileId::Handheld);
+        std::atomic<bool> stop{false};
+        std::thread stager([&] { std::string e; for (int i = 0; i < 400; ++i) StageActiveMapping(i & 1 ? map : defaults2, e); stop = true; });
+        while (!stop) {
+            CommitStagedMapping();
+            const CompiledMapping& m = ActiveMapping();
+            const uint64_t jump = m.masks[static_cast<size_t>(Action::Jump)], star = m.masks[static_cast<size_t>(Action::StarBits)];
+            assert((jump == cross && star == circle) || (jump == circle && star == cross));
+        }
+        stager.join();
     }
 }

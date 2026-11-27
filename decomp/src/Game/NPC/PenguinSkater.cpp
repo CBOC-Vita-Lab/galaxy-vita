@@ -1,4 +1,5 @@
 #include "Game/NPC/PenguinSkater.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/LiveActorGroup.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/NPC/NPCSupportRail.hpp"
@@ -54,6 +55,9 @@ namespace NrvPenguinSkater {
 
 PenguinSkater::PenguinSkater(const char* pName)
     : NPCActor(pName), mCameraInfo(0), mCurrentRail(nullptr), mSwitchRail(nullptr), mRail(nullptr), mNumRails(0) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
     // TODO: doubtful this is written like this, fix later.
     mMarioQuat.set< f32 >(0.0f, 0.0f, 0.0f, 1.0f);
     mMarioPos.z = 0.0f;

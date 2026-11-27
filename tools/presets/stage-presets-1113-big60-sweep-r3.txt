@@ -1,0 +1,10 @@
+# stage-presets-1113-big60-sweep-r3.txt: the six sweep stages each held at rung 3 (784x440), nothing else changed. HUD native on. For the size-sweep tours (env-big60-sweep-r3.txt).
+@class sw size=fixed fx=hold edge=off start=3 floor=3 ceil=3 hud_native=1 emergency=3
+HoneyBeeKingdomGalaxy class=sw
+HoneyBeeKingdomGalaxy:1 class=sw
+HoneyBeeKingdomGalaxy:2 class=sw
+HeavenlyBeachGalaxy class=sw
+IceVolcanoGalaxy class=sw
+CannonFleetGalaxy class=sw
+StarDustGalaxy class=sw
+EggStarGalaxy class=sw

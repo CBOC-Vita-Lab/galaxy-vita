@@ -1,4 +1,5 @@
 #include "Game/Player/MarioActor.hpp"
+#include "Game/MP/MpSelfPuppet.hpp"
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/Camera/CameraTargetArg.hpp"
 #include "Game/Enemy/KarikariDirector.hpp"
@@ -115,6 +116,11 @@ void MarioActor_DUMMY() {
 
 bool gIsLuigi;
 static f32 BASE_ROTATION = 0.0f;
+#ifdef TARGET_PC
+void portPlayerAssetsLog(MarioActor*, bool);  // (MarioActorMorph.cpp: luigi24, the start-of-stage "player-assets:" line)
+void portPlayerPowerupReset(MarioActor*);     // (MarioActorMorph.cpp: PETARI_POWERUP's turn count starts again with each actor)
+extern "C" void port_log_summary(const char* fmt, ...);
+#endif
 
 MarioActor::MarioActor(const char* pName) : LiveActor(pName), _1B0(0xFFFFFFFF) {
     initMember();
@@ -348,6 +354,10 @@ void MarioActor::init2(const TVec3f& rA, const TVec3f& rB, s32 initialAnimation)
     updateBaseScaleMtx();
     _A18 = mRotation;
     initDrawAndModel();
+#ifdef TARGET_PC
+    portPlayerAssetsLog(this, gIsLuigi);
+    portPlayerPowerupReset(this);
+#endif
 
     _C28 = new Mtx[MR::getJointNum(this)];
 
@@ -1837,7 +1847,24 @@ void MarioActor::calcAnimInMovement() {
 
         if (val == false) {
             TVec3f frontVec;
+#ifdef TARGET_PC
+            if (_4A4 == nullptr) {
+                // crash24 (10 Nov): _4A4 is the sensor of the power-up item Mario touched (MarioActorOffensiveMsg.cpp, tryGetItem: set after the item
+                // accepted ACTMES_ITEM_GET), and this is the FIRST transformation of that kind in the save (the "AtFirst" game-event flag is still
+                // off). A form taken without touching an item (the PETARI_POWERUP test hook; any future caller of setPlayerMode) leaves it nullptr
+                // and the line below read nullptr->mHost (data abort, address 0x24: dumps pw2/pw3, pw1 by the same path). The real game never gets
+                // here without the item, so nothing changes for a pickup. Without one, Mario faces as he already does and the camera zooms to him.
+                static u32 sNoItemSensor;
+                if (sNoItemSensor++ < 8) {
+                    port_log_summary("mario: first-time transformation (mode %u) without an item sensor: using Mario's own front vector", (unsigned)mPlayerMode);
+                }
+                frontVec = mMario->mFrontVec;
+            } else {
+                MR::calcFrontVec(&frontVec, _4A4->mHost);
+            }
+#else
             MR::calcFrontVec(&frontVec, _4A4->mHost);
+#endif
             mMario->setFrontVecKeepUp(frontVec);
 
             if (_336 == 0) {
@@ -1951,6 +1978,11 @@ void MarioActor::calcAnim() {
             if ((s32)val != (s32)mPlayerMode && _3D6 == 6) {
                 if (26 < _3D8) {
                     _9A4->appear();
+                    if (MpSelfPuppet::hideLocalBody()) {
+                        MR::hideModelAndOnCalcAnim(_9A4);
+                    } else {
+                        MR::showModel(_9A4);
+                    }
                 }
 
                 _483 = 1;

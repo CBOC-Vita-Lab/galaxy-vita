@@ -283,7 +283,7 @@ void SkeletalFishGuard::exeNumb() {
 
     MR::startDPDFreezeLevelSound(this);
 
-    if (!MR::isStarPointerPointing2POnPressButton(this, "\x8e\xe3", true, false)) {
+    if (!MR::isStarPointerPointing2POnPressButtonNoMp(this, "\x8e\xe3", true, false)) {
         setNerve(_CC);
     }
 }
@@ -601,7 +601,7 @@ bool SkeletalFishGuard::isLineOfSightClear() const {
 }
 
 bool SkeletalFishGuard::tryShiftNumb(const Nerve* pNerve) {
-    if (MR::isStarPointerPointing2POnPressButton(this, "\x8e\xe3", true, false)) {
+    if (MR::isStarPointerPointing2POnPressButtonNoMp(this, "\x8e\xe3", true, false)) {
         _CC = pNerve;
         setNerve(GET_NERVE_ANON(SkeletalFishGuardNrvNumb));
         return true;

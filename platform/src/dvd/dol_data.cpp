@@ -9,6 +9,7 @@
 
 #include <string>
 
+#include "port/bootio.h"
 #include "port/heap_routing.h"
 #include "port/port.h"
 
@@ -26,7 +27,7 @@ alignas(32) unsigned char GalaxyIDBCSV[kTableMax];
 
 static void load(const std::string& root, const char* name, unsigned char* dst, size_t capacity) {
     std::string path = root + "/sys/" + name;
-    FILE* f = fopen(path.c_str(), "rb");
+    FILE* f = bootio::FopenRetry(path.c_str(), "rb", "sys data");
     if (!f) {
         port_fatal("%s is missing: convert the game's files again with tools/cook/cook.py, which now also takes data from the "
                    "disc's sys/main.dol",

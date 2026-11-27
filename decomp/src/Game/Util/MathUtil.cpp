@@ -39,6 +39,27 @@ namespace {
     static f32* gAcosTable;
 };  // namespace
 
+#ifdef TARGET_PC
+// fp40 (A9 VFP): every float compare + branch is vcmp + vmrs APSR_nzcv, which stalls the Cortex-A9. isNearZero runs ~1e8 times in a
+// profile. For a tolerance that is not negative and not NaN, "|v| > t" is, bit for bit, an unsigned range test on the integer bits
+// (t >= +0, so |v|'s bits order like the value; a NaN's bits are above infinity and fail both original compares, as before).
+// A negative or NaN tolerance takes the original code.
+namespace {
+    inline u32 fp40Bits(f32 v) {
+        u32 u;
+        __builtin_memcpy(&u, &v, sizeof(u));
+        return u;
+    }
+    inline bool fp40TolOk(u32 tb) {
+        return tb <= 0x7F800000u;
+    }
+    // true when |v| > t (v not NaN), given 0 <= t <= inf as bits tb
+    inline bool fp40Exceeds(f32 v, u32 tb) {
+        return ((fp40Bits(v) & 0x7FFFFFFFu) - tb - 1u) < (0x7F800000u - tb);
+    }
+}  // namespace
+#endif
+
 namespace MR {
     void MathUtil_FORCE_MATCH_RODATA() {
         (void)0.98;
@@ -975,6 +996,15 @@ namespace MR {
     }
 
     bool isNearZero(f32 x, f32 tolerance) {
+#ifdef TARGET_PC
+        {
+            // |x| < t  <=>  integer bits of |x| < bits of t (t in [+0, inf]; NaN x has bits above inf: false, as before)
+            u32 tb = fp40Bits(tolerance);
+            if (fp40TolOk(tb)) {
+                return (fp40Bits(x) & 0x7FFFFFFFu) < tb;
+            }
+        }
+#endif
         if (x < 0.0f) {
             x = -x;
         }
@@ -987,6 +1017,14 @@ namespace MR {
     }
 
     bool isNearZero(const TVec3f& rVec, f32 tolerance) {
+#ifdef TARGET_PC
+        {
+            u32 tb = fp40Bits(tolerance);
+            if (fp40TolOk(tb)) {
+                return !(fp40Exceeds(rVec.x, tb) | fp40Exceeds(rVec.y, tb) | fp40Exceeds(rVec.z, tb));
+            }
+        }
+#endif
         if (rVec.x > tolerance) {
             return false;
         }
@@ -1015,6 +1053,14 @@ namespace MR {
     }
 
     bool isNearZero(const TVec2f& rVec, f32 tolerance) {
+#ifdef TARGET_PC
+        {
+            u32 tb = fp40Bits(tolerance);
+            if (fp40TolOk(tb)) {
+                return !(fp40Exceeds(rVec.x, tb) | fp40Exceeds(rVec.y, tb));
+            }
+        }
+#endif
         if (rVec.x > tolerance) {
             return false;
         }

@@ -79,6 +79,17 @@ static inline int portParseInputScript(const char* spec, PortInputEvent* out, in
     return n;
 }
 
+// route24 (vita/vgx-game/entry.cpp, PETARI_SCRIPT_ANCHOR=play / PETARI_SCRIPT_LOOP): the script's clock in game turns.
+// `turnPlusOne` is GameScene.cpp's port_script_scene_turn() (0: the script has not started in this scene, else turns since its
+// t = 0, plus one).  A turn is 1/60 s, in integer milliseconds like PETARI_GAME_CLOCK's frames: turn n is at n * 1000 / 60.
+static inline int portScriptTurnMs(unsigned long long turnPlusOne) {
+    return turnPlusOne ? (int)((turnPlusOne - 1) * 1000ull / 60ull) : 0;
+}
+// PETARI_SCRIPT_LOOP=<seconds>: the script starts again every loopMs.
+static inline int portScriptLoopMs(int ms, int loopMs) {
+    return loopMs > 0 && ms >= 0 ? ms % loopMs : ms;
+}
+
 // Applies the entries active at `ms` since boot to `pad`; returns nonzero if
 // any was.
 static inline int portApplyInputScript(const PortInputEvent* ev, int count, int ms, PortPadState* pad) {

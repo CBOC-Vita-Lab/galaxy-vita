@@ -14,6 +14,8 @@
 #include "revolution/gx/GXRegs.h"
 #include "revolution/mtx.h"
 #include "revolution/os.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 static GXFifoObj FifoObj ATTRIBUTE_ALIGN(32); // GXFifoObj is u8[128] (align 1) but is accessed as __GXFifoObj (strd): align it
 static GXData gxData;
@@ -198,8 +200,12 @@ void __GXInitRevisionBits(void) {
 }
 
 GXFifoObj* GXInit(void* base, u32 size) {
+    PORT_GXCAP_ABANDON(GXInit);
     static u32 shutdownFuncRegistered = 0;
     u32 i;
+#if defined(TARGET_PC)
+    __PortGXDedupBump(PORT_GXDD_BUMP_ALL, PORT_GXDD_CAUSE_INIT);  // (GXV_GX_DEDUP: everything is written again from here)
+#endif
 
     OSRegisterVersion(__GXVersion);
     gx->inDispList = FALSE;

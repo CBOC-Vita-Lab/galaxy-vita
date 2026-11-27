@@ -72,12 +72,18 @@ target_include_directories(vita_source_options INTERFACE
   "${DECOMP}/libs/nw4r/include"
   "${DECOMP}/libs/RVLFaceLib/include")
 target_compile_definitions(vita_source_options INTERFACE TARGET_PC=1 NDEBUG=1 VERSION=0)
+include("${GALAXY_ROOT}/cmake/MpBuildDefs.cmake")   # core2: NP_ONLINE_URL (default https://galaxy.psvita.dev), MP_BUILD_ID (default dev): the runtime
+target_compile_definitions(vita_source_options INTERFACE ${MP_BUILD_DEFS})   # stage's platform units take these flags from here
 # Keep upstream behavior flags, not Strikers' translated-code optimizations.
 # -fno-builtin-wcslen (from Producdevity's fork): newer Clang (22, not the 18 we build with) turns 16-bit string-length loops into
 # calls to wcslen, and newlib's wcslen counts 32-bit characters (the pause menu's settings labels drawn as dotted lines).
 # -fno-math-errno: sqrt / sqrtf compile to the bare vsqrt.f32 (no compare and call that would set errno; nothing reads errno after a math call).
 target_compile_options(vita_source_options INTERFACE
   -O2 -fshort-wchar -fno-builtin-wcslen -fsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=on
+  # The decompiled game passes uninitialised values around where the original did (harmless there). Without this the compiler
+  # may treat such a call as unreachable and drop the code after it (JASChannel, 11 Nov): arguments and returns are not
+  # marked "never undefined".
+  "SHELL:-Xclang -no-enable-noundef-analysis"
   -fno-fast-math -fno-math-errno -fms-extensions -ferror-limit=0
   "-ffile-prefix-map=${GALAXY_ROOT}/=" "-ffile-prefix-map=${GALAXY_ROOT}=."
   "-ffile-prefix-map=${VITASDK}=vitasdk"
@@ -104,6 +110,17 @@ if(VITA_PGO_PROFILE)
     message(FATAL_ERROR "VITA_PGO_PROFILE: no such file ${VITA_PGO_PROFILE}")
   endif()
   target_compile_options(vita_source_options INTERFACE "-fprofile-use=${VITA_PGO_PROFILE}")
+endif()
+
+# Profile recording on the console (tools/pgo/README.md, "Record on the console"): the environment variable VITA_PGO_GENERATE=1 (build.py
+# sets nothing; it is read here and in vita/vgx-game/CMakeLists.txt, so a build without it is unchanged and no cache variable remembers it)
+# compiles the game units with -fprofile-generate, the flag the armhf harness uses, so that the profile's function hashes are the same ones.
+if("$ENV{VITA_PGO_GENERATE}" STREQUAL "1")
+  if(VITA_PGO_PROFILE)
+    message(FATAL_ERROR "VITA_PGO_GENERATE=1 records a profile; it cannot be combined with VITA_PGO_PROFILE (-fprofile-use)")
+  endif()
+  message(STATUS "VITA_PGO_GENERATE=1: the game units are instrumented (-fprofile-generate)")
+  target_compile_options(vita_source_options INTERFACE -fprofile-generate)
 endif()
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)

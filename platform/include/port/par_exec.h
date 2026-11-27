@@ -19,11 +19,12 @@
 // tests/par_exec_view.cpp): the Vita build's file lists stay as they are.
 #pragma once
 
+#include "port/core3_budget.h"  // (core3-38: the core-3 yield cap and meter)
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
 
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 #else
@@ -39,7 +40,7 @@ namespace par {
 typedef void (*ItemFn)(void* ctx, uint32_t index);
 
 inline uint64_t NowUs() {
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
     return sceKernelGetProcessTimeWide();
 #else
     return static_cast< uint64_t >(
@@ -55,14 +56,14 @@ inline void CpuRelax() {
 #endif
 }
 
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
 extern "C" int port_vita_core3_available(void) __attribute__((weak));  // (vita/runtime/memory.cpp: the fourth core, proven once)
 #endif
 // The kernel's affinity mask for a worker asked on `core` (drawpar, 6 Nov): 0-2 the user cores; 3 the fourth (system) core, only
 // once it is proven for this process (CapUnlocker; port_vita_core3_available), otherwise core 1. *effective: the core asked for.
 // (With core 3, a refused thread creation is retried on core 1 by the callers.)
 inline int CoreMask(int core, int* effective) {
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
     if (core == 3 && port_vita_core3_available && port_vita_core3_available()) {
         *effective = 3;
         return 0x80000;
@@ -78,7 +79,7 @@ inline int CoreMask(int core, int* effective) {
 // A counting semaphore: the kernel's on the console, a mutex and a condition variable elsewhere.
 class Sema {
 public:
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
     bool Init(const char* name) {
         id = sceKernelCreateSema(name, 0, 0, 0x7FFF, nullptr);
         return id >= 0;
@@ -132,7 +133,7 @@ public:
         if (!work.Init("smg_par_work") || !joined.Init("smg_par_join")) {
             return ok = false;
         }
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
         if (priority <= 0) {
             const int mine = sceKernelGetThreadCurrentPriority();
             priority = mine > 0x41 ? mine - 1 : 0x9E;
@@ -145,6 +146,7 @@ public:
         if (uid < 0) {
             return ok = false;
         }
+        core3::MarkOnCore3(slot = core3::RegisterThread("par-exec"), effectiveCore == 3);  // (core3-38: before the thread starts: it reads the slot)
         Executor* self = this;
         if (sceKernelStartThread(uid, sizeof(self), &self) < 0) {
             return ok = false;
@@ -263,7 +265,7 @@ private:
     enum : uint32_t { kIdle = 0, kArmed = 1, kRunning = 2, kDone = 3, kCancelled = 3 };
     static uint32_t Encode(uint32_t g, uint32_t phase) { return (g << 2) | phase; }
 
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
     static int VitaEntry(SceSize, void* argp) {
         Executor* self = *static_cast< Executor** >(argp);
         self->Loop();
@@ -272,8 +274,10 @@ private:
 #endif
 
     void Loop() {
+        core3::Worker c3(slot, true, true);  // (core3-38: on core 3 the worker naps 100 us after every ~1 ms of items, between items only)
         for (;;) {
             work.Wait();
+            c3.Wake();
             uint32_t s = state.load(std::memory_order_acquire);
             if ((s & 3u) != kArmed || !state.compare_exchange_strong(s, (s & ~3u) | kRunning, std::memory_order_acq_rel)) {
                 continue;  // (cancelled, or a stale signal of an earlier batch)
@@ -285,6 +289,10 @@ private:
             const uint32_t n = bN, k = bK;
             uint32_t mine = 0;
             for (;;) {
+                if (front.load(std::memory_order_relaxed) >= k) {
+                    break;
+                }
+                if (mine > 0) c3.Checkpoint();  // strictly before claiming so game thread can steal remaining items during nap
                 const uint32_t i = front.fetch_add(1, std::memory_order_relaxed);
                 if (i >= k) {
                     break;
@@ -293,6 +301,10 @@ private:
                 ++mine;
             }
             for (;;) {
+                if (back.load(std::memory_order_relaxed) >= n) {
+                    break;
+                }
+                if (mine > 0) c3.Checkpoint();
                 const uint32_t i = back.fetch_add(1, std::memory_order_relaxed);
                 if (i >= n) {
                     break;
@@ -300,6 +312,7 @@ private:
                 fn(ctx, i);
                 ++mine;
             }
+            c3.Sleep();
             workerItems.store(mine, std::memory_order_relaxed);
             workerUs.store(static_cast< uint32_t >(NowUs() - t0), std::memory_order_relaxed);
             state.store((s & ~3u) | kDone, std::memory_order_seq_cst);  // (release: the results and the counters above)
@@ -312,7 +325,7 @@ private:
 
     Sema work, joined;
     bool started = false, ok = false;
-    int spin = 30, threadPriority = 0, effectiveCore = 1;
+    int spin = 30, threadPriority = 0, effectiveCore = 1, slot = -1;
     uint32_t gen = 0;
     uint64_t armedAt = 0;  // (written before the arming release store, read by the worker after its acquire)
     ItemFn bFn = nullptr;

@@ -1,0 +1,13 @@
+# select (with SMG_MP_NAME set no keyboard opens). PETARI_GAME_CLOCK=1. Then the cursor walks the six heads (right, right, down, left).
+# The Multiplayer button: FileSelect.brlyt P2ManualButton/P2Button at layout (250, -98), right-anchored at 16:9 -> screen (597, 326) of
+# 640x456. heads3d, 8 Nov 2026.
+30-30.5:A|B
+50-58:PX=0.25|PY=0.3       # pointer on file 2
+53-53.2:A
+62-68:PX=0.87|PY=0.43      # pointer on the Multiplayer button
+65-65.2:A
+73-73.2:A                  # Play Together (flow: the first play opens the character select at once)
+84-84.2:RIGHT
+88-88.2:RIGHT
+92-92.2:DOWN
+96-96.2:LEFT

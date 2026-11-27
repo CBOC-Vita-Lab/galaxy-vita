@@ -1,0 +1,34 @@
+# Play Together star delivery, guest's star. Host goes to Good Egg 1 (PETARI_STAGE); SMG_MP_TEST_STAR on the guest brings
+# the scenario star to the guest 15 s after the scene starts (real deliverNative path); STAR -> host, delivered natively
+# there; both move on together (type 4 after clear) with the host's new progress. Host saves only into its co-op copy.
+name: mp_star
+description: guest gets the star; host gets it delivered natively; both move on; host saves to mp/, SP file untouched
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 15}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect guest /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/ within 60s after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order guest /\[mp\] flow star got id=(\d+) grand=\d by=1/ before host /\[mp\] flow star got id=$1 grand=\d by=1/ within 3s'
+  - 'order host /\[mp\] flow star got id=(\d+) grand=\d by=1/ before host /\[mp\] star delivered id=$1 path=(native|synthetic)/ within 15s'
+  - 'expect host /\[mp\] star delivered id=\d+ path=native/'
+  - 'count * /\[mp\] star delivered id=/ <= 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow star dup|flow star delivery dropped|flow drop STAR|flow clear hold timeout)/'
+  - 'order host /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 5s each'
+  # file 2 already has this star (50 stars): the game asks no save then; soft
+  - '?expect host /\[mp\] save autoconfirm \(host\)/ within 90s after host /\[mp\] star delivered/'
+  - 'mp_save host'
+  - 'absent guest /\[mp\] save autoconfirm/'

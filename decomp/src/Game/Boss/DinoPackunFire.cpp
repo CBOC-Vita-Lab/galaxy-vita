@@ -53,6 +53,9 @@ void DinoPackunFire::init(const JMapInfoIter& rIter) {
     initNerve(GET_NERVE(DinoPackunFire, DinoPackunFireNrvShot));
     MR::startBtk(this, "DinoPackunFireBall");
     MR::initShadowVolumeSphere(this, 150.0f);
+#ifdef TARGET_PC
+    MR::portMarkProjectileShadow(this);  // (boss23, PETARI_BOSS_PSHADOW)
+#endif
     MR::onCalcShadow(this, nullptr);
     MR::onCalcGravity(this);
     MR::invalidateClipping(this);

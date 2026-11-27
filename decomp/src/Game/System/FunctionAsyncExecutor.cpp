@@ -117,6 +117,13 @@ void FunctionAsyncExecutor::waitForEnd(const char* pName) {
         cur++;
     }
 
+    // MP3: startOnMainThread runs the job inline (and registers nothing) when called on the main thread, so there is
+    // nothing to wait for; the original read past the end here and blocked forever (MP layouts built at system init)
+    if (cur == lst) {
+        OSUnlockMutex(&MR::MutexHolder< 2 >::sMutex);
+        return;
+    }
+
     FunctionAsyncExecInfo* info = *cur;
     OSUnlockMutex(&MR::MutexHolder< 2 >::sMutex);
     OSReceiveMessage(&info->mQueue, &info->mMessage, OS_MESSAGE_BLOCK);

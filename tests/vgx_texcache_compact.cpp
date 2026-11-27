@@ -96,6 +96,39 @@ int main(int argc, char** argv) {
         std::puts("PASS: one real cache entry switches RGBA/LA88/RGBA on content changes");
         return 0;
     }
+    if (mode=="follow") {
+        // settingsnative: the button pictures follow a swapped mapping. The patch makes a picture that depends on a setting; when the setting
+        // changes and the renderer is told (TexturePatchChanged), a texture the patch handles is decoded and patched again at its next use,
+        // once, in place (same texture id); one the patch does not handle is not touched.
+        auto bytes=Data(1,8,8), other=Data(2,8,8);
+        vgx::ResetState(); vgx::g.bpTexStale=0; vgx::Pending().clear();
+        for (unsigned i=0;i<2;++i) {
+            auto& slot=vgx::g.tex[i]; auto& d=i?other:bytes;
+            slot.valid=true; slot.avail=d.size();
+            slot.obj.data=d.data(); slot.obj.width=slot.obj.height=8; slot.obj.format=i?2:1;
+            slot.obj.minFilter=vgx::FILT_LINEAR; slot.obj.magFilter=1;
+        }
+        const uint64_t mine=XXH3_64bits(bytes.data(),bytes.size());
+        static uint64_t sMine; sMine=mine;
+        static uint8_t sShade; sShade=17;
+        struct F { static bool Needs(uint64_t h,uint32_t,uint32_t){ return h==sMine; }
+                   static void P(uint64_t h,uint32_t w,uint32_t hh,uint8_t* rgba){ if(h!=sMine) return; for(size_t i=0;i<size_t(w)*hh;++i){rgba[4*i]=sShade;rgba[4*i+1]=1;rgba[4*i+2]=2;rgba[4*i+3]=255;} } };
+        vgx::SetTexturePatchHook(F::P,F::Needs);
+        vgx::TexBind b0,b1; uint16_t w=0,h=0;
+        Require(vgx::ResolveTexture(0,b0,w,h) && vgx::ResolveTexture(1,b1,w,h) && vgx::Pending().uploads.size()==2,"both textures uploaded once");
+        Require(vgx::Pending().uploads[0].levels[0][0]==17,"the patched picture starts with the first setting");
+        vgx::TexBind c; 
+        Require(vgx::ResolveTexture(0,c,w,h) && vgx::ResolveTexture(1,c,w,h) && vgx::Pending().uploads.size()==2,"no change: a cache hit, nothing decoded again");
+        sShade=99;
+        Require(vgx::ResolveTexture(0,c,w,h) && vgx::Pending().uploads.size()==2,"a changed setting alone changes nothing until the renderer is told");
+        vgx::TexturePatchChanged();
+        Require(vgx::ResolveTexture(0,c,w,h) && vgx::Pending().uploads.size()==3 && c.texId==b0.texId,"told: the patched texture is uploaded again in place");
+        Require(vgx::Pending().uploads.back().levels[0][0]==99,"and carries the new picture");
+        Require(vgx::ResolveTexture(1,c,w,h) && vgx::Pending().uploads.size()==3,"a texture the patch does not handle is not touched");
+        Require(vgx::ResolveTexture(0,c,w,h) && vgx::Pending().uploads.size()==3,"and the picture is made again once, not at every use");
+        std::puts("PASS: a patched texture follows a changed setting (TexturePatchChanged), others are left alone");
+        return 0;
+    }
     const bool patch=mode=="legacy" || mode=="accept", mip=mode=="mip";
     const bool predicate=mode=="accept" || mode=="reject";
     Require(patch || predicate || mip || mode=="plain","known compact scenario");

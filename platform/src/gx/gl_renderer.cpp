@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -795,6 +796,13 @@ u64 Renderer::Impl::sourceHash(const ShaderUid& uid) {
 
 GLuint Renderer::Impl::buildProgram(const ShaderUid& uid) {
     GLuint prog = 0;
+    struct BuildLog {   // MP3 puppetprep (diagnostic): PETARI_GLLOG=1 logs every program build with its time
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~BuildLog() {
+            static const bool on = debugEnv("PETARI_GLLOG") != nullptr;
+            if (on) port_log("gl: program built in %.2f ms", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
+    } buildLog;
     std::string vsrc, fsrc;
     generateSources(uid, &vsrc, &fsrc);
     if (debugEnv("PETARI_GLSRC")) {
@@ -1692,10 +1700,16 @@ void Renderer::Impl::upload(Prepared& p, bool syncPrograms) {
     stateBuf = fb.buf[5];
 
     // New textures.
+    static const bool sGlLog = debugEnv("PETARI_GLLOG") != nullptr;   // MP3 puppetprep (diagnostic): the frame's texture uploads
+    const auto texT0 = std::chrono::steady_clock::now();
+    unsigned texN = 0;
+    size_t texBytes = 0;
     for (auto& img : f.textures) {
         if (img->glTex && img->glVersion == img->version) {
             continue;
         }
+        texN++;
+        texBytes += img->rgba.size() * 4;
         if (!img->glTex) {
             glGenTextures(1, &img->glTex);
         }
@@ -1716,6 +1730,10 @@ void Renderer::Impl::upload(Prepared& p, bool syncPrograms) {
         if (!keepPixels) {
             std::vector<uint32_t>().swap(img->rgba);
         }
+    }
+
+    if (sGlLog && texN != 0) {
+        port_log("gl: uploaded %u textures (%zu KB) in %.2f ms", texN, texBytes / 1024, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - texT0).count());
     }
 
     std::vector<GLuint> progs(p.uids.size());

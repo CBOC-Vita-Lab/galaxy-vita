@@ -1,0 +1,6 @@
+# 8120 probe: gate: Observatory 60 s, Performance, no switch (is PETARI_BOOT working, which picture mode, are the census lines there)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1
+PETARI_STAGE_HOLD=3600
+PETARI_FLOW_LOG=1

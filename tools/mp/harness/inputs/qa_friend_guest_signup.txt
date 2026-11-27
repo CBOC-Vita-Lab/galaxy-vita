@@ -1,0 +1,20 @@
+# friendscn (14 Nov): the GUEST of qa_lan_friend_codes / qa_friend_from_played_with. Its online account is SEEDED by run_with_fake_service.sh. A console
+# tells the room its code only once its account is loaded, and that happens when a menu first asks NetInfo() (mp_ui_net_info -> mp_ui_profile); a guest that
+# joins by SMG_MP_AUTO never opens a menu, so it opens the pause screen and the host's page once (the page's rows ask NetInfo) about 30 s before the host
+# does the same and finds Add Friend. (The earlier route pressed PLUS 2 s after the barrier: too early for the guest's load; and it needed an account.)
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+mark play /\[mp\] flow barrier release serial=1 / ~160
+mark session /ui: screen session/ ~175
+mark player /ui: screen player/ ~185
+title+8-8.5:A|B
+entry+3-3.2:A
+single+15-23:PX=0.25|PY=0.3
+single+18-18.2:A
+single+31-39:PX=0.52|PY=0.78
+single+34-34.2:A
+play+20-20.2:PLUS          # the pause screen
+session+3-3.2:C            # Players: the host's page at once
+player+5-5.2:B             # back to the pause screen
+session+12-12.2:B           # resume

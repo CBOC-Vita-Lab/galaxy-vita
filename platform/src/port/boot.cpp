@@ -9,6 +9,7 @@ extern "C" void port_dvd_load_dol_data(const char* root);
 extern "C" void port_nand_set_root(const char* root);
 extern "C" void port_zoom_set_root(const char* saveRoot);  // perf.cpp: where the camera zoom setting is kept
 extern "C" int port_boot_data_report(const char* message);
+extern "C" void mp_port_boot(const char* dataRoot) __attribute__((weak));  // MP3: platform/src/mp/mp_boot.cpp (weak: host tests include this file without it)
 
 // GameSystem.cpp's main(), renamed for the port.
 void port_game_main(void);
@@ -31,6 +32,8 @@ extern "C" void port_boot(const char* dataRoot, const char* saveRoot) {
     port_log("disc: %s (%s), %d languages", disc->id, disc->region, port_language_count());
     port_mem_set_disc_id(disc->id);
     port_dvd_load_dol_data(dataRoot);
+    // MP3: the multiplayer session layer: its settings (mp.cfg) and the data fingerprint. No session, thread or socket starts here.
+    if (mp_port_boot) mp_port_boot(dataRoot);
     port_nand_set_root(saveRoot);
     port_zoom_set_root(saveRoot);
     port_gx_init();

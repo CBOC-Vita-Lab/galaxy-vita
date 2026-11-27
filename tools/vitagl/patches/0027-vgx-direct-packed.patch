@@ -1,0 +1,52 @@
+diff -ruN a/source/custom_shaders.c b/source/custom_shaders.c
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -1694,7 +1694,13 @@
+ 				attrs[i].streamIndex = 0;
+ 				attrs[i].offset = L->offset[attr_idx];
+ 				attrs[i].componentCount = L->size[attr_idx];
+-				attrs[i].format = L->type[attr_idx] == VGL_DIRECT_F32 ? SCE_GXM_ATTRIBUTE_FORMAT_F32 : (L->type[attr_idx] == VGL_DIRECT_U8N ? SCE_GXM_ATTRIBUTE_FORMAT_U8N : SCE_GXM_ATTRIBUTE_FORMAT_U8);
++				switch (L->type[attr_idx]) {
++				case VGL_DIRECT_F32: attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_F32; break;
++				case VGL_DIRECT_U8N: attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_U8N; break;
++				case VGL_DIRECT_S16: attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_S16; break; // (Galaxy GXV_VTXPACK: whole numbers, converted to floats of the same value)
++				case VGL_DIRECT_S8: attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_S8; break;
++				default: attrs[i].format = SCE_GXM_ATTRIBUTE_FORMAT_U8; break;
++				}
+ 			} else {
+ 				attrs[i].streamIndex = nstreams;
+ 				attrs[i].offset = 0;
+@@ -1726,6 +1732,10 @@
+ 	return GL_TRUE;
+ }
+ 
++GLboolean vglDirectPackedTypes(void) {
++	return GL_TRUE;
++}
++
+ GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idx_offset, GLuint vbo_name, uint32_t base, const vglDirectLayout *layout) {
+ 	if (!cur_program || !vbo_name || !layout || mode != GL_TRIANGLES || count <= 0)
+ 		return GL_FALSE;
+diff -ruN a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1117,7 +1117,7 @@
+ // indices from the bound element array buffer at byte offset idx_offset. `key` must identify everything in the layout but `base`
+ // (same key, same table). GL_TRIANGLES only; returns GL_FALSE (nothing drawn) for anything else.
+ #define VGL_HAS_DIRECT_DRAW 1
+-enum { VGL_DIRECT_F32 = 0, VGL_DIRECT_U8N = 1, VGL_DIRECT_U8 = 2 };
++enum { VGL_DIRECT_F32 = 0, VGL_DIRECT_U8N = 1, VGL_DIRECT_U8 = 2, VGL_DIRECT_S16 = 3, VGL_DIRECT_S8 = 4 };
+ typedef struct {
+ 	uint32_t key;
+ 	uint32_t enabled;
+@@ -1127,6 +1127,10 @@
+ 	uint16_t offset[16];
+ } vglDirectLayout;
+ GLboolean vglDrawElementsDirect(GLenum mode, GLsizei count, uint32_t idx_offset, GLuint vbo_name, uint32_t base, const vglDirectLayout *layout);
++// Galaxy GXV_VTXPACK: the direct call also takes VGL_DIRECT_S16 / VGL_DIRECT_S8 attributes (not normalised: the shader reads the whole
++// numbers as floats). Returns GL_TRUE; a vitaGL without it would read those types as unsigned bytes (the caller then keeps them off it).
++#define VGL_HAS_DIRECT_PACKED 1
++GLboolean vglDirectPackedTypes(void);
+ // vgx draw caches (custom_shaders.c; all off by default): VGL_DRAWCACHE_FRAGMEMO keeps each program's patched fragment programs
+ // by blend info and target mode, VGL_DRAWCACHE_UNIREUSE points a program whose uniforms did not change at the ring copy of its
+ // last upload instead of copying its default uniform buffers again. vglGetDrawCacheStats fills 8 running counters: fragment

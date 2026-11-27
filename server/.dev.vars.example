@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `npm run dev` (wrangler dev). Never commit .dev.vars.
+RANK_HMAC_KEY_HEX=<output of: node scripts/extract-hmac-key.mjs>
+ADMIN_TOKEN=dev-admin-token
+TURN_PROVIDER=stub

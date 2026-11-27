@@ -56,6 +56,14 @@ void FileSelectCameraController::goToFarPoint() {
     setNerve(GET_NERVE_ANON(FileSelectCameraControllerNrvMoveToFarPoint));
 }
 
+void FileSelectCameraController::goToTitle() {
+#ifdef TARGET_PC
+    mFovy = ::cTitleFovy;   // rev32 F6: back from the heads, the title's fovy again (it stayed at the far point's 40: zoomed sky on the main menu)
+    mPrevFovy = ::cTitleFovy;
+#endif
+    setNerve(GET_NERVE_ANON(FileSelectCameraControllerNrvTitle));
+}
+
 void FileSelectCameraController::goToNearPoint(const TVec3f& rPoint) {
     mNearTarget.set(rPoint + TVec3f(::cNearTargetOffset));
 

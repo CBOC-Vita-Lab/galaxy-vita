@@ -255,6 +255,9 @@ void MarioActor::initMember() {
     _A18.zero();
     _A24 = 0;
     _A25 = 0;
+#ifdef TARGET_PC
+    mPortReflSkip = 0;
+#endif
     for (int i = 0; i < ARRAY_SIZE(mModels); i++) {
         mModels[i] = nullptr;
     }

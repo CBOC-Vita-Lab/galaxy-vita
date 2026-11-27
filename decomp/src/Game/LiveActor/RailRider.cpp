@@ -42,6 +42,13 @@ void RailRider::moveToNearestPos(const TVec3f& rPos) {
     syncPosDir();
 }
 
+void RailRider::moveFromCoord(f32 coord) {
+    // Same wrap/clamp before and after the step as setCoord(); move().
+    // No caller observes the intermediate spline pose or point index.
+    mCoord = mBezierRail->normalizePos(coord, 1);
+    move();
+}
+
 void RailRider::moveToNearestPoint(const TVec3f& rPos) {
     f32 nearestDistance = FLOAT_MAX;
     int nearestPoint = 0;

@@ -10,7 +10,7 @@ nice "${CXX:-clang++}" -std=gnu++20 -O1 -g -Wall -Wextra -Werror -fsanitize=addr
   -DTARGET_PC=1 -DVERSION=0 -fshort-wchar -fsigned-char -fno-strict-aliasing -fwrapv -fms-extensions \
   -Wno-register -Wno-multichar -Wno-writable-strings \
   -I"$root/platform/include" -isystem "$root/decomp/include" -isystem "$root/decomp/libs/JSystem/include" -isystem "$root/decomp/libs/RVL_SDK/include" \
-  -include "$root/platform/include/port/compat.h" "$root/tests/color8_byte_order.cpp" -o "$out/color8_byte_order"
+  -include "$root/tests/std_headers_first.h" -include "$root/platform/include/port/compat.h" "$root/tests/color8_byte_order.cpp" -o "$out/color8_byte_order"
 env -u GXV_FIX_COLOR8 "$out/color8_byte_order" 1
 for v in "" 1 0x1 2 -1; do GXV_FIX_COLOR8=$v "$out/color8_byte_order" 1; done
 for v in 0 0x0 00 invalid; do GXV_FIX_COLOR8=$v "$out/color8_byte_order" 0; done

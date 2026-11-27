@@ -29,6 +29,9 @@ static V Scaled(V v, int percent) { Scale(v.x, v.y, v.z, percent); return v; }
 int main(int argc, char** argv) {
     if (argc == 3 && !std::strcmp(argv[1], "--env")) {
         assert(Percent() == std::atoi(argv[2]));
+        // settingsnative: a live choice beats the start-up switch from then on; the switch is not read again.
+        SetPercent(75); assert(Percent() == 75);
+        SetPercent(PercentOfLevel(5)); assert(Percent() == kDefaultPercent);
         std::puts("tilt_gain: switch as started passed");
         return 0;
     }
@@ -109,5 +112,15 @@ int main(int argc, char** argv) {
     for (float sx = -1; sx <= 1; sx += 0.1f) for (float sy = -1; sy <= 1; sy += 0.1f) {
         const V v = Stick(sx, sy), w = Scaled(v, 100); assert(std::memcmp(&v, &w, sizeof v) == 0);
     }
+    // settingsnative: the live setters (the native Settings' Tilt Strength and Tilt rows). A choice before any read stands; values are held to 50..200.
+    SetPercent(PercentOfLevel(1)); assert(Percent() == 50);
+    SetPercent(PercentOfLevel(10)); assert(Percent() == 200);
+    SetPercent(10); assert(Percent() == kMinPercent);
+    SetPercent(9999); assert(Percent() == kMaxPercent);
+    for (int lv = 1; lv <= kLevels; ++lv) { SetPercent(PercentOfLevel(lv)); assert(Percent() == PercentOfLevel(lv) && LevelOfPercent(Percent()) == lv); }
+    SetPercent(100); { V v{0.3f, -0.9f, 0.1f}; V w = v; Scale(w.x, w.y, w.z, Percent()); assert(std::memcmp(&v, &w, sizeof v) == 0); }   // back at 5: bit for bit
+    SetUseStick(true); assert(UseStick());
+    SetUseStick(false); assert(!UseStick());
+    SetUseStick(true); assert(UseStick());
     std::puts("tilt_gain: percentages, bit-exact 100%, angle scaling, stops, unit length, no NaN and the stick path passed");
 }

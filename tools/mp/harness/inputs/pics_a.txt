@@ -1,0 +1,26 @@
+# integ pictures A (13 Nov): ONE console, the menus: main, How to Play, Safe Copies (via How to Play), the list, Play Together (name, characters, gathering alone), Enter a Friend's Code.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark howto /ui: window MP_HOWTO/ ~60
+mark safe /ui: window answer/ ~70
+mark keep /ui: screen keep/ ~75
+mark made /ui: safe copy made/ ~80
+mark chars /ui: screen chars/ ~110
+mark gather /ui: screen gather/ ~120
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+6-6.2:C
+howto+6-6.2:A
+howto+12-16:PX=0.38|PY=0.6
+howto+14-14.2:A
+keep+5-5.2:A
+made+3-3.2:A
+made+6-6.2:B
+made+12-12.2:A
+chars+6-6.2:A
+gather+12-12.2:B
+gather+18-18.2:DOWN
+gather+19-19.2:DOWN
+gather+20-20.2:A

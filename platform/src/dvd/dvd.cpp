@@ -18,6 +18,7 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/kernel/sysmem.h>  // (ram33: GXV_IO_PREFETCH_OUT)
 #include <unordered_map>
 #endif
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include <array>
 #include <chrono>
 #include <deque>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,6 +36,9 @@
 #include "port/heap_routing.h"
 #include "port/port.h"
 #include "port/diagnostics.h"
+#include "port/bootio.h"
+#include "port/load_split.h"
+#include "port/io_policy.h"
 extern "C" void port_gpu_memory_written(void* addr, uint32_t size);
 #include "port/qemu_hooks.h"
 #include "port/resume.h"
@@ -60,7 +65,33 @@ struct FstEntry {
     s64 size = -1;
     bool cached = false;   // size came from the sizes cache (checked against the file at its first open)
     bool checked = false;
+    uint8_t cls = PORT_DISC_OTHER;  // (cook24) which disc folder: the load-split census's class (port/load_split.h)
+    uint8_t sub = 0;                // (disc26) inside AudioRes: 1 = Stream (music), 2 = Waves (sound banks); the "io:" census splits them
 };
+
+// (cook24, port/load_split.h) the always-on disc counters of the "load-split:" lines: relaxed atomics, bumped once per read.
+namespace loadsplit {
+struct Counters {
+    std::atomic<uint64_t> reads[PORT_DISC_CLASSES], bytes[PORT_DISC_CLASSES], workerNs[PORT_DISC_CLASSES], blockedNs[PORT_DISC_CLASSES];
+    std::atomic<uint64_t> probes{0}, asyncReads{0}, queueNs{0}, opens{0}, openNs{0}, stats{0}, statNs{0}, readAheadHits{0};
+    std::atomic<uint64_t> decodes{0}, decodeNs{0}, decodeBytes{0};
+    std::atomic<uint64_t> slowest{0};  // (the slowest read since the last port_load_split_slowest: ns << 24 | entry)
+};
+static Counters g;
+static uint8_t classOf(const std::string& path) {
+    const auto starts = [&](const char* p) { return strncasecmp(path.c_str(), p, strlen(p)) == 0; };
+    if (starts("ObjectData/")) return PORT_DISC_OBJECT;
+    if (starts("StageData/")) return PORT_DISC_STAGE;
+    if (starts("LayoutData/")) return PORT_DISC_LAYOUT;
+    if (starts("AudioRes/")) return PORT_DISC_AUDIO;
+    return PORT_DISC_OTHER;
+}
+static uint8_t subOf(const std::string& path) {  // (disc26)
+    if (strncasecmp(path.c_str(), "AudioRes/Stream/", 16) == 0) return 1;
+    if (strncasecmp(path.c_str(), "AudioRes/Waves/", 15) == 0) return 2;
+    return 0;
+}
+}  // namespace loadsplit
 
 static std::vector<FstEntry> sFst;
 static std::string sDataRoot;
@@ -135,6 +166,7 @@ static u32 sBootTitleEntry = ~0u, sBootTitleBytes = 0;
 static std::atomic<bool> sFstReady{false};
 namespace AudParams { extern const int streamBlockSize, numStreamChannels; }
 extern "C" int port_boot_data_error(const char*) __attribute__((weak));
+extern "C" int port_vgx_vita_fail(const char*) __attribute__((weak));  // (vgx_host_galaxy_vita.cpp: a message on the loading screen; 1 when it can be shown)
 
 extern "C" int port_boot_data_enabled(void) {
     // GXV_BOOTDATA=1 checks only critical title audio before the game starts. Read once; default off.
@@ -157,24 +189,59 @@ extern "C" [[noreturn]] void port_boot_data_park(void) {
 
 static u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 
+// g30 Wave 7: cache sys/fst.bin (81 KiB) after its first valid read so boot does not open/read it 4 times
+// (disc probe, language check, DVD init, and mp_boot StageDataHash).
+static std::mutex sFstCacheMu;
+static std::string sFstCacheRoot;
+static std::vector<u8> sFstCacheData;
+
+extern "C" size_t port_dvd_cached_fst_copy(const char* root, uint8_t* out, size_t cap) {
+    if (!root || !*root) return 0;
+    std::lock_guard<std::mutex> lk(sFstCacheMu);
+    if (sFstCacheData.empty() || sFstCacheRoot != root) return 0;
+    if (!out) return sFstCacheData.size();
+    if (cap < sFstCacheData.size()) return 0;
+    memcpy(out, sFstCacheData.data(), sFstCacheData.size());
+    return sFstCacheData.size();
+}
+
 // The disc's file table (sys/fst.bin under `root`): 12-byte entries, the
 // root's holding their count, then the names.  Empty when missing or cut.
-static std::vector<u8> readFst(const std::string& root) {
+static std::vector<u8> readFst(const std::string& root, bool patient = false) {
+    {
+        std::lock_guard<std::mutex> lk(sFstCacheMu);
+        if (!sFstCacheData.empty() && sFstCacheRoot == root) return sFstCacheData;
+    }
     std::vector<u8> data;
-    FILE* f = fopen((root + "/sys/fst.bin").c_str(), "rb");
-    if (!f) {
+    // (bootio: open(2) and read(2) on the C library's descriptor table, not a stdio FILE: the FILE slot search of this library's fopen has no lock, and a
+    // failed open on the card for a moment is repeated for up to 3 s, logged with its SCE code, instead of ending the start-up)
+    const std::string path = root + "/sys/fst.bin";
+    // (patient: the start-up's own reads wait up to 3 s for a file that is there; a probe of a folder that may not be a copy (vr_setup) tries once)
+    bootio::Options patience;
+    if (!patient) patience.budgetMs = patience.missingMs = 0;
+    const int fd = bootio::OpenRetry(path.c_str(), O_RDONLY | O_CLOEXEC, "fst.bin", patience);
+    if (fd < 0) {
         return data;
     }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (len >= 12) {
+    const off_t len = lseek(fd, 0, SEEK_END);
+    if (len >= 12 && lseek(fd, 0, SEEK_SET) == 0) {
         data.resize((size_t)len);
-        if (fread(data.data(), 1, data.size(), f) != data.size() || (uint64_t)be32(&data[8]) * 12 >= data.size()) {
+        size_t got = 0;
+        while (got < data.size()) {
+            const ssize_t n = read(fd, data.data() + got, data.size() - got);
+            if (n <= 0) break;
+            got += (size_t)n;
+        }
+        if (got != data.size() || (uint64_t)be32(&data[8]) * 12 >= data.size()) {
             data.clear();
         }
     }
-    fclose(f);
+    close(fd);
+    if (!data.empty()) {
+        std::lock_guard<std::mutex> lk(sFstCacheMu);
+        sFstCacheRoot = root;
+        sFstCacheData = data;
+    }
     return data;
 }
 
@@ -238,31 +305,39 @@ static bool hasTexts(const std::string& root, const std::vector<u8>& fst, const 
     return fstHasRootDir(fst, language.folder) && stat(texts.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
-extern "C" const PortDisc* port_dvd_identify(const char* root) {
+static const PortDisc* identifyDisc(const char* root, bool patient) {
     PortHostAllocScope scope;
-    std::vector<u8> fst = readFst(root);
+    std::vector<u8> fst = readFst(root, patient);
     if (fst.empty()) {
         return nullptr;
     }
-    for (const PortDisc& disc : kDiscs) {
-        // The disc has the folder of its first language, and the copy the
-        // texts in it.
-        if (hasTexts(root, fst, disc.languages[0])) {
-            return &disc;
+    // (the start-up's own call retries the stat of the texts for up to 3 s as well: a stat that fails for a moment would otherwise leave no disc)
+    for (unsigned tries = 0;; ++tries) {
+        for (const PortDisc& disc : kDiscs) {
+            // The disc has the folder of its first language, and the copy the
+            // texts in it.
+            if (hasTexts(root, fst, disc.languages[0])) {
+                if (tries) port_log_summary("io: disc texts of %s found after %u tries", root, tries + 1);
+                return &disc;
+            }
         }
+        if (!patient || tries >= 60) return nullptr;
+        if (!tries) port_log_summary("io: no disc texts found under %s yet (a stat of Message.arc failed); trying again every 50 ms for up to 3 s", root);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    return nullptr;
 }
+
+extern "C" const PortDisc* port_dvd_identify(const char* root) { return identifyDisc(root, false); }
 
 extern "C" const PortDisc* port_dvd_disc(void) { return sDisc; }
 
 extern "C" void port_dvd_set_root(const char* root) {
     PortHostAllocScope scope;
     sDataRoot = root;
-    sDisc = port_dvd_identify(root);
+    sDisc = identifyDisc(root, true);
     sLanguageCount = 0;
     if (sDisc) {
-        std::vector<u8> fst = readFst(root);
+        std::vector<u8> fst = readFst(root, true);
         for (int i = 0; i < sDisc->languageCount; i++) {
             if (i == 0 || hasTexts(root, fst, sDisc->languages[i])) {
                 sLanguages[sLanguageCount++] = &sDisc->languages[i];
@@ -287,10 +362,28 @@ extern "C" void port_language_set(const char* name) {
     sLanguageWanted[n] = 0;
 }
 
+// settingsnative: the console's language, a fallback for when no language is wanted (the "System Language" choice); the disc is not read when
+// Settings start-up runs, so the choice is made here, once the disc's languages are known. A wanted language always wins.
+static char sLanguageFallback[32];
+extern "C" void port_language_set_fallback(const char* name) {
+    size_t n = 0;
+    for (; name && name[n] && n + 1 < sizeof(sLanguageFallback); n++) {
+        sLanguageFallback[n] = (char)tolower((unsigned char)name[n]);
+    }
+    sLanguageFallback[n] = 0;
+}
+
 extern "C" int port_language_wanted(void) {
     for (int i = 0; i < sLanguageCount; i++) {
         if (strcmp(sLanguageWanted, sLanguages[i]->name) == 0) {
             return i;
+        }
+    }
+    if (!sLanguageWanted[0] && sLanguageFallback[0]) {
+        for (int i = 0; i < sLanguageCount; i++) {
+            if (strcmp(sLanguageFallback, sLanguages[i]->name) == 0) {
+                return i;
+            }
         }
     }
     return 0;
@@ -704,7 +797,7 @@ static void presetSizesFromListings(const std::vector<std::string>& dirPath) {
 
 static bool loadFst() {
     PortHostAllocScope scope;
-    std::vector<u8> data = readFst(sDataRoot);
+    std::vector<u8> data = readFst(sDataRoot, true);
     if (data.empty()) {
         port_log("dvd: cannot read %s/sys/fst.bin", sDataRoot.c_str());
         return false;
@@ -741,6 +834,8 @@ static bool loadFst() {
             stack.push_back(i);
         } else {
             fe.hostPath = sDataRoot + "/files/" + full;
+            fe.cls = loadsplit::classOf(full);
+            fe.sub = loadsplit::subOf(full);
             if (strcasecmp(full.c_str(), kBootTitle) == 0) {
                 sBootTitleEntry = i;
                 sBootTitleBytes = be32(e + 8);  // AST cooking swaps fields without changing file length.
@@ -758,6 +853,27 @@ static bool loadFst() {
         presetSizesFromListings(dirPath);
     }
 #endif
+    // movie33, TEST ONLY: PETARI_MOVIE_DIR=<host folder> (default unset: nothing changes). A movie of the same name found in that folder
+    // is played from there instead of from files/MovieData (its size taken from the file, not from the sizes cache), so one full-size
+    // original can be tried on a card whose movies were shrunk, without touching the shrunk set. The sizes cache is not written for
+    // these files' places (its signature changes with the paths, so the next start without the key lists the folders again).
+    // (movie44: both lines in the basic log, port_log_summary: a player build's log.txt has no port_log lines)
+    if (const char* movieDir = getenv("PETARI_MOVIE_DIR"); movieDir && *movieDir) {
+        unsigned swapped = 0;
+        for (FstEntry& fe : sFst) {
+            if (fe.isDir || fe.name.size() < 5 || strcasecmp(fe.name.c_str() + fe.name.size() - 4, ".thp") != 0) continue;
+            if (fe.hostPath.find("/MovieData/") == std::string::npos) continue;
+            const std::string alt = std::string(movieDir) + "/" + fe.name;
+            struct stat st;
+            if (stat(alt.c_str(), &st) != 0 || st.st_size <= 96) continue;
+            fe.hostPath = alt;
+            fe.size = (s64)st.st_size;
+            fe.cached = false;
+            ++swapped;
+            port_log_summary("dvd: PETARI_MOVIE_DIR: %s is played from %s (%lld bytes)", fe.name.c_str(), alt.c_str(), (long long)st.st_size);
+        }
+        if (!swapped) port_log_summary("dvd: PETARI_MOVIE_DIR=%s holds no movie of the game's names (PrologueB.thp, ...): the card's movies play", movieDir);
+    }
     sFstReady.store(true, std::memory_order_release);  // (host paths are final: the stall report may read them)
     return true;
 }
@@ -816,6 +932,8 @@ static s64 entrySize(u32 entry) {
         const bool found = stat(fe.hostPath.c_str(), &st) == 0;
         if (!found) reportDvdError(DvdError::Stat, entry, -1, errno);
         const int64_t statNs = port_host_time_ns() - statStart;
+        loadsplit::g.stats.fetch_add(1, std::memory_order_relaxed);
+        loadsplit::g.statNs.fetch_add(static_cast<uint64_t>(statNs), std::memory_order_relaxed);
         static unsigned sSlowStats;
         if (statNs >= 5000000 && sSlowStats < 100) {  // 5 ms
             ++sSlowStats;
@@ -897,6 +1015,7 @@ struct ReadRequest {
     DVDCommandBlock* block;
     u32 entry;
     int64_t submitNs;
+    s32 priority;
 };
 
 static std::mutex sQueueMutex;
@@ -949,7 +1068,10 @@ static int openEntry(u32 entry) {
         }
     }
     const auto& path = sFst[entry].hostPath;
+    const int64_t openStart = port_host_time_ns();
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    loadsplit::g.opens.fetch_add(1, std::memory_order_relaxed);
+    loadsplit::g.openNs.fetch_add(static_cast<uint64_t>(port_host_time_ns() - openStart), std::memory_order_relaxed);
     if (fd < 0) {
         sLastOpenErrno = errno;
         reportDvdError(DvdError::Open, entry, fd, sLastOpenErrno);
@@ -975,14 +1097,22 @@ static bool reopenOn() {
     static const bool on = vgx::EnvInt("GXV_DVD_REOPEN", 1) != 0;
     return on;
 }
-// GXV_RESUME_RESET=1: also close every cached descriptor and the read-ahead windows when the system reports a resume, before the
-// first read after it (needs the resume watcher of vita/runtime/audio.cpp; default off, read once).
+// GXV_RESUME_RESET (default on since 3.0, 0 = off): also close every cached descriptor and the read-ahead windows when the system
+// reports a resume, before the first read after it (needs the resume watcher of vita/runtime/audio.cpp; read once).
 static bool resumeResetOn() {
-    static const bool on = vgx::EnvInt("GXV_RESUME_RESET", 0) != 0;
+    static const bool on = vgx::EnvInt("GXV_RESUME_RESET", 1) != 0;
     return on;
 }
-// Waits (ms) before each retry; the first retry is at once.  A test sets them to 0.
-static unsigned sReopenDelayMs[] = {0, 40, 120, 300};
+// Waits (ms) before each retry; the first retry is at once.  A test sets them to 0.  The last three are used only within
+// kResumeWindowNs of a reported resume (the card can take seconds to come back; elsewhere a failing card must not stall the worker).
+static unsigned sReopenDelayMs[] = {0, 40, 120, 300, 700, 1500, 3000};
+constexpr unsigned kReopenShortSteps = 4;
+constexpr int64_t kResumeWindowNs = 20000000000ll;
+static int64_t sResumeNs;  // when noteResume() last saw a resume (worker thread only; fix33 A1: stamped there, not at the first query)
+static bool sLazyDropPending;   // fix33 (A2): a PS-button return was seen; the descriptors are dropped when the first failure comes
+static bool recentResume() {
+    return resumeResetOn() && sResumeNs != 0 && port_host_time_ns() - sResumeNs < kResumeWindowNs;
+}
 static unsigned sReopenRecovered, sReopenGaveUp;
 
 // Errors that a retry cannot change: the file is not there, is not a file, may not be read, or the request is wrong.
@@ -1021,11 +1151,14 @@ static void waitMs(unsigned ms) {
 }
 
 // openEntry, repeated after a failure that may pass.  (errno is the last failure's when it gives up.)
+static void lazyResumeDrop();
 static int openEntryRetry(u32 entry) {
     int fd = openEntry(entry);
     if (fd >= 0 || !reopenOn() || !retriableErrno(sLastOpenErrno)) return fd;
+    lazyResumeDrop();
     unsigned attempt = 0;
     for (unsigned ms : sReopenDelayMs) {
+        if (attempt >= kReopenShortSteps && !recentResume()) break;
         ++attempt;
         waitMs(ms);
         fd = openEntry(entry);
@@ -1043,13 +1176,17 @@ static int openEntryRetry(u32 entry) {
 
 // A read failed with errno `error`: close the descriptor, open the file again and repeat the read.  `fd` is the new descriptor.
 static ssize_t rereadAfterFailure(u32 entry, int error, int& fd, void* dst, size_t want, u64 offset) {
-    if (!reopenOn() || !retriableErrno(error)) {
+    if (!reopenOn()) {
         errno = error;
         return -1;
     }
+    // (3.0) The first reopen is made whatever the error was: a descriptor the system took away can answer with any code (EINVAL,
+    // EISDIR, ...), and a fresh descriptor's own failure decides whether to go on.
+    lazyResumeDrop();
     unsigned attempt = 0;
-    int last = error;
+    int last = retriableErrno(error) ? error : EBADF;
     for (unsigned ms : sReopenDelayMs) {
+        if (attempt >= kReopenShortSteps && !recentResume()) break;
         ++attempt;
         dropOpenFile(entry);
         fd = -1;
@@ -1092,7 +1229,37 @@ extern "C" void port_irq_poll(void);
 
 static int64_t sTraceOpenNs, sTraceGpuNs, sTraceWaitNs;  // of the read being noted (worker thread only)
 
+extern "C" uint32_t port_scene_key(void) __attribute__((weak));
+extern "C" int port_screen_quiet(void) __attribute__((weak));
+extern "C" int64_t port_player_input_age_ms(void) __attribute__((weak));
+extern "C" int port_scene_loading_active(void) __attribute__((weak));  // (perf.cpp: the game's loading thread is building a scene)
+extern "C" int port_is_default_thread(void) __attribute__((weak));     // (os_thread.cpp: the caller is the Wii default thread = the game thread)
+
+// (firstuse24, GXV_FIRSTUSE_LOG, default 1; GXV_FIRSTUSE_DISC_MS, default 5) the first-use ledger's disc side: a read that took this long
+// while the screen was open (a stage playing, no fade or pause menu) is data the game fetched lazily in play: an archive, a wave bank, an
+// animation, a stream. One line each, at most 24 a minute; the totals in play are in the 5 s "dvd:" line only with diagnostics.
+static void firstUseDiscNote(u32 entry, size_t bytes, u32 offset, int64_t t0, int64_t t1) {
+    static const bool on = !getenv("GXV_FIRSTUSE_LOG") || atoi(getenv("GXV_FIRSTUSE_LOG")) != 0;
+    static const int64_t minNs = (getenv("GXV_FIRSTUSE_DISC_MS") ? (int64_t)atoi(getenv("GXV_FIRSTUSE_DISC_MS")) : 5) * 1000000ll;
+    if (!on || t1 - t0 < minNs || !port_scene_key || !port_screen_quiet || port_scene_key() == 0 || port_screen_quiet() != 0) return;
+    // (disc26) A stage's own load is not "in play": its archives are read on the loading thread while the screen counts as open (the star select,
+    // the fade). 707 of the 781 lines of five console logs were that; GXV_FIRSTUSE_DISC_LOAD=1 brings them back.
+    static const bool withLoad = vgx::EnvInt("GXV_FIRSTUSE_DISC_LOAD", 0) != 0;
+    if (!withLoad && port_scene_loading_active && port_scene_loading_active() != 0) return;
+    static int64_t windowStart = 0;
+    static unsigned lines = 0;
+    if (t1 - windowStart > 60000000000ll) { windowStart = t1; lines = 0; }
+    if (lines >= 24) return;
+    ++lines;
+    const int64_t age = port_player_input_age_ms ? port_player_input_age_ms() : -1;
+    char since[40] = "no pad input yet";
+    if (age >= 0) snprintf(since, sizeof since, "pad input %lld ms ago", (long long)age);
+    port_log_summary("first-use: disc read in play: %.1f ms, %u KiB at %u of %s (%s)", (t1 - t0) / 1e6, (unsigned)(bytes / 1024), offset,
+                     sFst[entry].hostPath.c_str() + std::min(sDataRoot.size(), sFst[entry].hostPath.size()), since);
+}
+
 static void noteRead(u32 entry, size_t bytes, u32 offset, int64_t t0, int64_t t1) {
+    firstUseDiscNote(entry, bytes, offset, t0, t1);
     static const bool on = PORT_RUNTIME_DIAGNOSTICS && (port_handheld() != 0 || getenv("PETARI_DVDLOG") != nullptr);
     // PETARI_DVDTRACE=<n>: one line per read for the first n reads (what the game reads in what order and in what pieces).
     static const int traceMax = getenv("PETARI_DVDTRACE") ? atoi(getenv("PETARI_DVDTRACE")) : 0;
@@ -1129,14 +1296,16 @@ static void noteRead(u32 entry, size_t bytes, u32 offset, int64_t t0, int64_t t1
 // before it in the same file, the worker reads the piece after it too while the game handles the one it has (the card is idle then)
 // and answers the game's next request from memory when it is for exactly that piece.  Nothing but the worker touches this.
 constexpr size_t kReadAheadMax = 65536;
-struct ReadAhead {
-    u32 entry = ~0u;
-    u64 offset = 0;
-    size_t len = 0;
-    u8 data[kReadAheadMax];
+// (disc26) four windows, one per recently read file (GXV_DVD_RA_SLOTS, 1..4, default 4; 1 = the old single window): the music stream and a
+// wave bank used to evict each other's window and both read every piece from the card. A window is filled for a file only when its
+// previous read ended exactly where this one began.
+constexpr int kRaSlots = 4;
+struct RaBuf {
+    alignas(64) u8 data[kReadAheadMax];
 };
-static ReadAhead sReadAhead;
-static u32 sSeqEntry = ~0u;  // the file of the last read and where it ended: the next read starts there when it is a sequence
+static RaBuf sRaBuf[kRaSlots];
+static port::iopol::RaTable<kRaSlots> sRa;  // (worker thread only)
+static u32 sSeqEntry = ~0u;  // the MOVIE player's mark: the file of the last read and where it ended
 static u64 sSeqEnd = 0;
 static unsigned sReadAheadHits, sReadAheadMisses;
 
@@ -1210,171 +1379,539 @@ static void movieTopUp(u32 entry, u64 end, int fdHint) {
     }
 }
 
+static void pfDropAll();  // (disc26, below)
 static void dropReadCaches() {
-    sReadAhead.entry = ~0u;
+    sRa.ClearAll();
     sMovieWin.entry = ~0u;
     sSeqEntry = ~0u;
+    pfDropAll();  // (the prefetch cache holds file contents read before the sleep; a card that changed under the console is read afresh)
 }
 
 // Worker thread, before each request: when the system reported a resume since the last one, forget every descriptor and
 // window so the next read opens its file afresh.
-static unsigned sResumeSeen;
+static unsigned sResumeSeen, sAppResumeSeen;
 static void noteResume() {
     if (!resumeResetOn()) return;
     const unsigned generation = port::ResumeGeneration();
-    if (generation == sResumeSeen) return;
-    sResumeSeen = generation;
+    if (generation != sResumeSeen) {   // the console slept: drop everything before the first read
+        sResumeSeen = generation;
+        sResumeNs = port_host_time_ns();
+        sLazyDropPending = false;
+        dropAllOpenFiles();
+        port_log("dvd: resume %u: cached files closed, read-ahead dropped", generation);
+    }
+    const unsigned app = port::ResumeAppGeneration();
+    if (app != sAppResumeSeen) {   // a plain PS-button return: keep the caches (no loss of the learned prefetch); fix them only if something fails
+        sAppResumeSeen = app;
+        sResumeNs = port_host_time_ns();
+        sLazyDropPending = true;
+        port_log("dvd: app resume %u: caches kept, dropped only if a read fails in the next 20 s", app);
+    }
+}
+// A read or open failed: when a PS-button return was just seen, close every cached descriptor and window once (the failing file's own
+// descriptor is reopened by the caller anyway; the others may be as stale).
+static void lazyResumeDrop() {
+    if (!sLazyDropPending || !recentResume()) return;
+    sLazyDropPending = false;
     dropAllOpenFiles();
-    port_log("dvd: resume %u: cached files closed, read-ahead dropped", generation);
+    port_log("dvd: a read failed after an app resume: cached files closed, read-ahead dropped");
+}
+
+// ===========================================================================================================================================
+// (disc26) Play-time disc policy: switches, long reads in pieces, the learned prefetch cache, and the "io:" census.
+//
+//   GXV_DVD_CHUNK_KIB      (default 512; 0 = off) a read longer than twice this is done in pieces of this size, and between two pieces a request
+//                          of a more urgent priority (the music streams ask at priority 1, archives at 2) is served first. Before, the one
+//                          drive worker was busy for the whole of a 2.6 MiB archive (305 ms measured, OceanRingPlanet.arc) and a music-stream
+//                          read queued behind it. Costs one extra pread per piece (~1 ms on the card); nothing else changes.
+//   GXV_DVD_RA_SLOTS      (default 4; 1 = one window) read-ahead windows, one per recently read file (see RaTable in port/io_policy.h).
+//   GXV_IO_PREFETCH_MB    (default 0 = off) the learned prefetch cache: whole files the drive worker reads while it is idle, from the list
+//                          GXV_IO_PREFETCH_LIST (lines "<stage key hex or *> <path>", e.g. "a8a904f7 /ObjectData/OceanRingPlanet.arc") when
+//                          the stage's play window begins; a later read of the file is answered from memory. Needs the RAM: off until a
+//                          console run shows the heap has it.
+//   GXV_IO_PREFETCH_OUT   (default 0, ram33) 1: the prefetch buffers are their own main-memory blocks outside the C heap, taken only while
+//                          GXV_IO_PREFETCH_FLOOR_MIB (48) of main memory stays free; a file that does not fit is passed over.
+//   GXV_IO_LEDGER_FILE    (default none) the files a stage read while it PLAYED are appended here as prefetch-list lines (written when the
+//                          window closes), so one play session writes the list the next one prefetches from.
+//   GXV_IO_LINE           (default 1) the "io:" line; GXV_IO_LINE_S (default 60) the running line's period; GXV_IO_STREAM_LATE_MS (250).
+static bool readAheadEnabled() {
+    static const bool on = !getenv("PETARI_READAHEAD") || getenv("PETARI_READAHEAD")[0] != '0';
+    return on;
+}
+static bool movieWindowEnabled() {
+    static const bool on = !getenv("PETARI_MOVIEWIN") || getenv("PETARI_MOVIEWIN")[0] != '0';
+    return on;
+}
+static size_t chunkBytes() {
+    static const size_t c = (size_t)std::max(0, (int)vgx::EnvInt("GXV_DVD_CHUNK_KIB", 512)) * 1024u;
+    return c;
+}
+static int raSlotsOn() {
+    static const int n = std::min(kRaSlots, std::max(1, (int)vgx::EnvInt("GXV_DVD_RA_SLOTS", kRaSlots)));
+    return n;
+}
+static size_t pfCapBytes() {
+    static const size_t c = (size_t)std::max(0, (int)vgx::EnvInt("GXV_IO_PREFETCH_MB", 0)) * 1048576u;
+    return c;
+}
+
+namespace ioc {
+enum { kObj, kStage, kLayout, kStream, kWave, kOther, kN };
+struct Cls {
+    std::atomic<uint64_t> n{0}, ns{0}, bytes{0}, worstNs{0}, worstLatNs{0}, s20{0}, s50{0};
+};
+struct Block {
+    std::atomic<uint64_t> n{0}, ns{0}, worstNs{0};
+};
+static std::atomic<int> active{0};  // a stage's play window is open
+static Cls cls[kN];
+static Block gameSync, otherSync, gameWait, hostJob, hostJobGame, openB;
+static std::atomic<uint64_t> raHits{0}, yields{0}, cuts{0}, pfHits{0}, pfBytes{0}, pfFiles{0}, pfSkipped{0}, streamLate{0}, worstPacked{0};
+static std::mutex lineMutex;  // the window's identity and the line
+static char stageName[48];
+static uint32_t stageKey;
+static int64_t t0Ns, lastLineNs;
+static uint64_t shaderRam0, shaderUser0, shaderMiss0;
+static unsigned lines;
+static uint32_t ledger[64];  // entries read in play (ArchiveData etc.), first read only
+static unsigned ledgerN;
+static std::mutex ledgerMutex;
+
+static inline void maxU(std::atomic<uint64_t>& a, uint64_t v) {
+    uint64_t c = a.load(std::memory_order_relaxed);
+    while (v > c && !a.compare_exchange_weak(c, v, std::memory_order_relaxed)) {}
+}
+static inline void addBlock(Block& b, int64_t ns) {
+    if (ns < 0) ns = 0;
+    b.n.fetch_add(1, std::memory_order_relaxed);
+    b.ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+    maxU(b.worstNs, static_cast<uint64_t>(ns));
+}
+static inline bool on() { return active.load(std::memory_order_relaxed) != 0; }
+static int classOf(const FstEntry& fe) {
+    if (fe.sub == 1) return kStream;
+    if (fe.sub == 2) return kWave;
+    switch (fe.cls) {
+    case PORT_DISC_OBJECT: return kObj;
+    case PORT_DISC_STAGE: return kStage;
+    case PORT_DISC_LAYOUT: return kLayout;
+    default: return kOther;
+    }
+}
+// The drive worker, after a read that really touched the card (or memory): work = the worker's own time, queue = submit to start.
+static void noteRead(u32 entry, size_t bytes, int64_t workNs, int64_t queueNs) {
+    if (!on()) return;
+    Cls& c = cls[classOf(sFst[entry])];
+    if (workNs < 0) workNs = 0;
+    if (queueNs < 0) queueNs = 0;
+    c.n.fetch_add(1, std::memory_order_relaxed);
+    c.ns.fetch_add(static_cast<uint64_t>(workNs), std::memory_order_relaxed);
+    c.bytes.fetch_add(bytes, std::memory_order_relaxed);
+    maxU(c.worstNs, static_cast<uint64_t>(workNs));
+    maxU(c.worstLatNs, static_cast<uint64_t>(workNs + queueNs));
+    if (workNs >= 20000000) c.s20.fetch_add(1, std::memory_order_relaxed);
+    if (workNs >= 50000000) c.s50.fetch_add(1, std::memory_order_relaxed);
+    const bool stream = sFst[entry].sub == 1;
+    static const int64_t lateNs = static_cast<int64_t>(std::max(1, (int)vgx::EnvInt("GXV_IO_STREAM_LATE_MS", 250))) * 1000000ll;
+    if (stream && workNs + queueNs >= lateNs) streamLate.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t packed = (static_cast<uint64_t>(workNs) << 24) | (entry & 0xFFFFFFu);
+    if (packed > worstPacked.load(std::memory_order_relaxed) && sFst[entry].sub != 1) worstPacked.store(packed, std::memory_order_relaxed);
+    if (sFst[entry].sub == 0 && sFst[entry].cls != PORT_DISC_OTHER) {  // a game file read in play: the ledger (first read of each)
+        std::lock_guard<std::mutex> lk(ledgerMutex);
+        bool seen = false;
+        for (unsigned i = 0; i < ledgerN; ++i) seen = seen || ledger[i] == entry;
+        if (!seen && ledgerN < sizeof ledger / sizeof ledger[0]) ledger[ledgerN++] = entry;
+    }
+}
+static void reset() {
+    for (Cls& c : cls) {
+        c.n = 0; c.ns = 0; c.bytes = 0; c.worstNs = 0; c.worstLatNs = 0; c.s20 = 0; c.s50 = 0;
+    }
+    for (Block* b : {&gameSync, &otherSync, &gameWait, &hostJob, &hostJobGame, &openB}) {
+        b->n = 0; b->ns = 0; b->worstNs = 0;
+    }
+    raHits = 0; yields = 0; cuts = 0; pfHits = 0; pfBytes = 0; pfFiles = 0; pfSkipped = 0; streamLate = 0; worstPacked = 0;
+    std::lock_guard<std::mutex> lk(ledgerMutex);
+    ledgerN = 0;
+}
+}  // namespace ioc
+
+static std::string relName(u32 entry) {
+    if (entry >= sFst.size()) return "?";
+    const std::string& p = sFst[entry].hostPath;
+    return p.substr(std::min(sDataRoot.size() + 7, p.size()));  // (past "<root>/files/")
+}
+
+// The prefetch list file's lines for this stage -> the entries to read ahead (worker thread).
+static std::deque<u32> sPfQueue;        // wanted entries (sQueueMutex); ~0u = "read the list for the stage now"
+static std::atomic<uint32_t> sPfStage{0};
+static constexpr int kPfItems = 8;
+static port::iopol::PfBudget<kPfItems> sPf;  // worker thread only
+static u8* sPfData[kPfItems];
+// ram33: GXV_IO_PREFETCH_OUT=1 (default 0): the prefetch cache's file buffers come from their own main-memory blocks outside the 96 MiB C heap
+// (the console's extended memory is otherwise unused by it), and only while the system keeps GXV_IO_PREFETCH_FLOOR_MIB (default 48, 16..200)
+// of free main memory after the block; below that the file is passed over (counted as "passed over"), never read into the C heap instead.
+// Off: malloc as before. On a host build the switch changes nothing (malloc).
+struct PfBuf { u8* p = nullptr; int uid = -1; };
+static int sPfUid[kPfItems];
+static bool pfOutside() {
+    static const bool on = vgx::EnvInt("GXV_IO_PREFETCH_OUT", 0) != 0;
+    return on;
+}
+static PfBuf pfAlloc(size_t size) {
+    PfBuf r;
+#if defined(__vita__)
+    if (pfOutside()) {
+        static const long floorMib = std::min(200L, std::max(16L, (long)vgx::EnvInt("GXV_IO_PREFETCH_FLOOR_MIB", 48)));
+        SceKernelFreeMemorySizeInfo info;
+        memset(&info, 0, sizeof info);
+        info.size = sizeof info;
+        const size_t bytes = (size + 4095u) & ~(size_t)4095u;
+        if (sceKernelGetFreeMemorySize(&info) < 0 || (long long)info.size_user - (long long)bytes < floorMib * 1048576ll) return r;
+        const SceUID uid = sceKernelAllocMemBlock("io_prefetch", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, (SceSize)bytes, nullptr);
+        if (uid < 0) return r;
+        void* base = nullptr;
+        if (sceKernelGetMemBlockBase(uid, &base) < 0 || !base) { sceKernelFreeMemBlock(uid); return r; }
+        r.p = static_cast<u8*>(base);
+        r.uid = uid;
+        return r;
+    }
+#endif
+    r.p = static_cast<u8*>(malloc(size));
+    return r;
+}
+static void pfFreeBuf(u8* p, int uid) {
+    if (!p) return;
+#if defined(__vita__)
+    if (uid >= 0) { sceKernelFreeMemBlock(uid); return; }
+#endif
+    (void)uid;
+    free(p);
+}
+static bool pfWorkWaiting() { return pfCapBytes() > 0 && !sPfQueue.empty(); }  // (sQueueMutex held by the caller)
+static int pfFind(u32 entry, u64 offset, size_t want) {
+    if (!pfCapBytes()) return -1;
+    const int i = sPf.Find(entry);
+    if (i < 0 || offset + want > sPf.item[i].size) return -1;
+    sPf.Touch(i);
+    return i;
+}
+static void pfDropAll() {
+    for (int i = 0; i < kPfItems; ++i) {
+        if (sPfData[i]) { pfFreeBuf(sPfData[i], sPfUid[i]); sPfData[i] = nullptr; sPfUid[i] = -1; }
+        sPf.Drop(i);
+    }
+}
+static void serveUrgent(int runningPrio, DVDCommandBlock* outer);
+// Read the list file's lines for the stage (key hex or "*"), queue the files (worker thread; a few lines of text).
+static void pfReadList() {
+    const char* path = getenv("GXV_IO_PREFETCH_LIST");
+    if (!path || !*path) return;
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    const uint32_t key = sPfStage.load(std::memory_order_relaxed);
+    char line[300];
+    unsigned queued = 0;
+    while (fgets(line, sizeof line, f)) {
+        char k[24], p[260];
+        if (sscanf(line, "%23s %259s", k, p) != 2) continue;
+        if (k[0] != '*' && (uint32_t)strtoul(k, nullptr, 16) != key) continue;
+        const s32 e = DVDConvertPathToEntrynum(p);
+        if (e < 0) continue;
+        std::lock_guard<std::mutex> lk(sQueueMutex);
+        sPfQueue.push_back((u32)e);
+        ++queued;
+    }
+    fclose(f);
+    if (queued) port_log_summary("io: prefetch: %u files listed for stage %08x in %s", queued, key, path);
+}
+// One piece of work for an idle drive: the next wanted file, read whole in pieces; abandoned (and asked for again later) the moment
+// a request arrives.
+static void prefetchStep() {
+    u32 entry;
+    {
+        std::lock_guard<std::mutex> lk(sQueueMutex);
+        if (sPfQueue.empty() || !sPending.empty()) return;
+        entry = sPfQueue.front();
+        sPfQueue.pop_front();
+    }
+    if (entry == ~0u) { pfReadList(); return; }
+    const size_t cap = pfCapBytes();
+    const s64 size = entry < sFst.size() && !sFst[entry].isDir ? entrySize(entry) : -1;
+    if (!cap || size <= 0 || (size_t)size > cap || sPf.Find(entry) >= 0) { ioc::pfSkipped.fetch_add(1, std::memory_order_relaxed); return; }
+    const int fd = openEntry(entry);  // (this is also the open-ahead: the descriptor stays in the cache)
+    if (fd < 0) return;
+    const PfBuf pb = pfAlloc((size_t)size);
+    u8* const buf = pb.p;
+    if (!buf) { ioc::pfSkipped.fetch_add(1, std::memory_order_relaxed); return; }
+    const int64_t t0 = port_host_time_ns();
+    size_t done = 0;
+    while (done < (size_t)size) {
+        {
+            std::lock_guard<std::mutex> lk(sQueueMutex);
+            if (!sPending.empty()) { sPfQueue.push_front(entry); pfFreeBuf(buf, pb.uid); return; }  // a request: the card is not idle
+        }
+        const size_t n = port::iopol::NextPiece((size_t)size - done, 256 * 1024);
+        const ssize_t got = pread(fd, buf + done, n, (off_t)done);
+        if (got <= 0) { pfFreeBuf(buf, pb.uid); return; }
+        done += (size_t)got;
+    }
+    uint32_t dropped[kPfItems];
+    int nDropped = 0;
+    const int slot = sPf.Admit(entry, (size_t)size, cap, dropped, &nDropped);
+    (void)nDropped;
+    for (int k = 0; k < kPfItems; ++k)  // (the files that made room: their buffers go)
+        if (sPfData[k] && sPf.item[k].entry == ~0u) { pfFreeBuf(sPfData[k], sPfUid[k]); sPfData[k] = nullptr; sPfUid[k] = -1; }
+    if (slot < 0) { pfFreeBuf(buf, pb.uid); return; }
+    if (sPfData[slot]) pfFreeBuf(sPfData[slot], sPfUid[slot]);
+    sPfData[slot] = buf;
+    sPfUid[slot] = pb.uid;
+    ioc::pfFiles.fetch_add(1, std::memory_order_relaxed);
+    static unsigned logged;
+    if (logged++ < 24)
+        port_log_summary("io: prefetched %s (%u KiB) in %.0f ms while the card was idle", relName(entry).c_str(), (unsigned)(size / 1024), (port_host_time_ns() - t0) / 1e6);
+}
+extern "C" int port_dvd_prefetch(const char* path) {
+    if (!pfCapBytes() || !path) return 0;
+    const s32 e = DVDConvertPathToEntrynum(path);
+    if (e < 0) return 0;
+    PortHostAllocScope scope;  // (heap36: a game thread may call this: the deque's nodes are host memory, as in submit)
+    std::lock_guard<std::mutex> lk(sQueueMutex);
+    sPfQueue.push_back((u32)e);
+    sQueueCv.notify_one();
+    return 1;
+}
+
+// Between two pieces of a long read: serve what is more urgent. Worker thread only.
+static void serveRequest(const ReadRequest& req, bool nested);
+static void (*sTestPieceHook)(size_t done) = nullptr;  // host tests only
+static void serveUrgent(int runningPrio, DVDCommandBlock* outer) {
+    for (;;) {
+        ReadRequest u;
+        {
+            std::lock_guard<std::mutex> lk(sQueueMutex);
+            if (sPending.empty() || !port::iopol::MayInterleave(sPending.front().priority, runningPrio)) return;
+            u = sPending.front();
+            sPending.pop_front();
+            sActive = u.block;
+        }
+        ioc::yields.fetch_add(1, std::memory_order_relaxed);
+        serveRequest(u, true);
+        std::lock_guard<std::mutex> lk(sQueueMutex);
+        sActive = outer;
+    }
+}
+
+// One request, start to completion (the drive worker's loop calls it; so does serveUrgent() between the pieces of a long read: nested).
+static void serveRequest(const ReadRequest& req, bool nested) {
+    const bool readAheadOn = readAheadEnabled();
+    const bool movieWindowOn = readAheadOn && movieWindowEnabled();
+    DVDCommandBlock* b = req.block;
+    s32 result;
+    noteResume();
+    int64_t workStart = port_host_time_ns();
+    sTraceWaitNs = workStart - req.submitNs;
+    loadsplit::g.queueNs.fetch_add(static_cast<uint64_t>(sTraceWaitNs > 0 ? sTraceWaitNs : 0), std::memory_order_relaxed);
+    const size_t want = b->length;
+    const u64 offset = b->offset;
+    const bool movie = readAheadOn && isMovieEntry(req.entry);
+    const bool fromMovieWin = movie && movieWindowOn && sMovieWin.entry == req.entry && offset >= sMovieWin.start &&
+                              offset + want <= sMovieWin.start + sMovieWin.len;
+    const int raSlot = (!movie && readAheadOn) ? sRa.Find(req.entry, offset, want) : -1;
+    const bool fromReadAhead = raSlot >= 0;
+    const int pfSlot = (!movie && !fromReadAhead) ? pfFind(req.entry, offset, want) : -1;  // (disc26) the learned prefetch cache
+    const bool fromPrefetch = pfSlot >= 0;
+    const int64_t queuedNs = workStart - req.submitNs;
+    int64_t nestedNs = 0;  // time spent serving urgent requests between the pieces of this read (not this read's own)
+    int fd = (fromReadAhead || fromMovieWin || fromPrefetch) ? -1 : openEntryRetry(req.entry);
+#if defined(__vita__)
+    if (fd >= 0 && sFst[req.entry].cached && !sFst[req.entry].checked) {
+        // A size from the sizes cache is compared with the real one at the file's first open (a cheap call on an open file).
+        FstEntry& fe = sFst[req.entry];
+        fe.checked = true;
+        struct stat st;
+        if (fstat(fd, &st) == 0 && (s64)st.st_size != fe.size) {
+            port_log("dvd: %s is %lld bytes, the sizes cache said %lld: deleting the cache (the next start lists the folders again)", fe.hostPath.c_str(),
+                     (long long)st.st_size, (long long)fe.size);
+            fe.size = (s64)st.st_size;
+            remove(sizeCachePath().c_str());
+        }
+    }
+#endif
+    sTraceOpenNs = port_host_time_ns() - workStart;
+    sTraceGpuNs = 0;
+    if (ioc::on() && sTraceOpenNs >= 1000000 && fd >= 0 && !fromReadAhead && !fromMovieWin && !fromPrefetch) ioc::addBlock(ioc::openB, sTraceOpenNs);
+    if (fd < 0 && !fromReadAhead && !fromMovieWin && !fromPrefetch) {
+        result = -1;
+    } else {
+        u8* dst = (u8*)b->addr;
+        int64_t readStart = port_host_time_ns();
+        ssize_t got;
+        if (fromMovieWin) {
+            memcpy(dst, sMovieWin.data + (offset - sMovieWin.start), want);
+            got = (ssize_t)want;
+            ++sMovieHits;
+            loadsplit::g.readAheadHits.fetch_add(1, std::memory_order_relaxed);
+        } else if (fromPrefetch) {
+            memcpy(dst, sPfData[pfSlot] + offset, want);
+            got = (ssize_t)want;
+            ioc::pfHits.fetch_add(1, std::memory_order_relaxed);
+            ioc::pfBytes.fetch_add(want, std::memory_order_relaxed);
+        } else if (fromReadAhead) {
+            memcpy(dst, sRaBuf[raSlot].data, want);
+            got = (ssize_t)want;
+            loadsplit::g.readAheadHits.fetch_add(1, std::memory_order_relaxed);
+            ioc::raHits.fetch_add(1, std::memory_order_relaxed);
+            if (++sReadAheadHits % 100 == 0) {
+                port_log("dvd: read-ahead served %u reads from memory (%u sequential reads were not ready)", sReadAheadHits, sReadAheadMisses);
+            }
+        } else {
+            const size_t chunk = (nested || movie) ? 0 : chunkBytes();
+            if (chunk && want > 2 * chunk) {
+                // (disc26) a long read in pieces: between two of them the more urgent requests (the music streams) go first
+                size_t done = 0;
+                got = 0;
+                ioc::cuts.fetch_add(1, std::memory_order_relaxed);
+                while (done < want) {
+                    const size_t n = port::iopol::NextPiece(want - done, chunk);
+                    ssize_t g = pread(fd, dst + done, n, (off_t)(offset + done));
+                    if (g < 0) g = rereadAfterFailure(req.entry, errno, fd, dst + done, n, offset + done);
+                    if (g < 0) { got = -1; break; }
+                    done += (size_t)g;
+                    got = (ssize_t)done;
+                    if ((size_t)g < n) break;  // end of file
+                    if (done < want) {
+                        if (sTestPieceHook) sTestPieceHook(done);  // (host tests: a request arrives between two pieces)
+                        const int64_t y0 = port_host_time_ns();
+                        serveUrgent(req.priority, b);
+                        const int64_t y1 = port_host_time_ns();
+                        if (y1 - y0 > 100000) {  // something was served
+                            nestedNs += y1 - y0;
+                            fd = openEntry(req.entry);  // (cached; the urgent request may have used the descriptor table)
+                            if (fd < 0) { got = -1; break; }
+                        }
+                    }
+                }
+                workStart += nestedNs;
+                readStart += nestedNs;
+            } else {
+                got = pread(fd, dst, want, (off_t)offset);
+                if (got < 0) got = rereadAfterFailure(req.entry, errno, fd, dst, want, offset);
+            }
+            if (movie) {
+                ++sMovieMisses;
+            }
+        }
+        int64_t readEnd;
+        if (got < 0) {
+            const int error = errno;
+            readEnd = port_host_time_ns();
+            result = -1;
+            reportDvdError(DvdError::Read, req.entry, result, error);
+            noteDvdFailure("read", sFst[req.entry].hostPath.c_str(), error);
+        } else {
+            readEnd = port_host_time_ns();
+            if ((size_t)got < want) {
+                memset(dst + got, 0, want - (size_t)got);  // past EOF the drive returns adjacent data
+            }
+            b->transferredSize = b->length;
+            result = (s32)b->length;
+            sDvdBytesRead.fetch_add((uint64_t)want, std::memory_order_relaxed);
+            const int64_t hookStart = port_host_time_ns();
+            port_gpu_memory_written(dst, (uint32_t)want);  // models, textures, display lists: see vgx_galaxy.h
+            sTraceGpuNs = port_host_time_ns() - hookStart;
+        }
+        {   // (cook24) the load-split census: this read's folder, bytes and the worker's time (open + read)
+            const uint8_t cls = sFst[req.entry].cls;
+            const int64_t spent = readEnd - workStart;
+            loadsplit::g.reads[cls].fetch_add(1, std::memory_order_relaxed);
+            if (result >= 0) loadsplit::g.bytes[cls].fetch_add(static_cast<uint64_t>(want), std::memory_order_relaxed);
+            loadsplit::g.workerNs[cls].fetch_add(static_cast<uint64_t>(spent > 0 ? spent : 0), std::memory_order_relaxed);
+            const uint64_t packed = (static_cast<uint64_t>(spent > 0 ? spent : 0) << 24) | (req.entry & 0xFFFFFFu);
+            if (packed > loadsplit::g.slowest.load(std::memory_order_relaxed)) loadsplit::g.slowest.store(packed, std::memory_order_relaxed);
+        }
+        noteRead(req.entry, want, (u32)offset, readStart, readEnd);
+        ioc::noteRead(req.entry, want, readEnd - workStart, queuedNs);
+    }
+    bool pendingNow;
+    {
+        std::lock_guard<std::mutex> lk(sQueueMutex);
+        b->currTransferSize = (u32)result;
+        if (!nested) sActive = nullptr;
+        sDone.push_back(b);
+        pendingNow = !sPending.empty();
+    }
+    port_irq_raise(PORT_IRQ_DVD);
+    port_vclock_external_end();
+    if (nested) return;  // (an urgent request between the pieces of a long read: no read-ahead of its own now, the long read goes on)
+
+    if (movie) {
+        // A movie frame that continues the one before it: keep the window ahead of the player.
+        if (movieWindowOn && result >= 0 && want >= 4096 && want <= kMovieWindow / 2) {
+            const u64 end = offset + want;
+            const bool sequence = sSeqEntry == req.entry && sSeqEnd == offset;
+            sSeqEntry = req.entry;
+            sSeqEnd = end;
+            if (sequence && !pendingNow) {
+                movieTopUp(req.entry, end, fd);
+            }
+        } else {
+            sSeqEntry = ~0u;
+        }
+        if ((sMovieHits + sMovieMisses) % 300 == 0 && sMovieHits + sMovieMisses != 0 && (fromMovieWin || movieWindowOn)) {
+            static unsigned sLoggedAt = 0;
+            if (sLoggedAt != sMovieHits + sMovieMisses) {
+                sLoggedAt = sMovieHits + sMovieMisses;
+                port_log("dvd: movie reads %u from memory, %u from the card; %u window refills, %.0f KiB each, %.1f ms on average (longest %.1f ms)", sMovieHits,
+                         sMovieMisses, sMovieTopUps, sMovieTopUps ? sMovieTopUpBytes / 1024.0 / sMovieTopUps : 0.0,
+                         sMovieTopUps ? sMovieTopUpNs / 1e6 / sMovieTopUps : 0.0, sMovieTopUpMaxNs / 1e6);
+            }
+        }
+    } else if (readAheadOn && result >= 0 && want >= 4096 && want <= kReadAheadMax) {
+        const bool sequence = sRa.NoteRead(req.entry, offset, want);
+        if (sequence && !pendingNow) {
+            const s64 size = sFst[req.entry].size;
+            const int pfd = (size > 0 && (s64)(offset + want) < size) ? (fd >= 0 ? fd : openEntry(req.entry)) : -1;
+            if (pfd >= 0) {
+                const int slot = raSlotsOn() == 1 ? 0 : sRa.SlotFor(req.entry);
+                ssize_t got = pread(pfd, sRaBuf[slot].data, want, (off_t)(offset + want));
+                if (got > 0) {
+                    if ((size_t)got < want) {
+                        memset(sRaBuf[slot].data + got, 0, want - (size_t)got);
+                    }
+                    sRa.Set(slot, req.entry, offset + want, want);
+                } else {
+                    sRa.Clear(slot);
+                }
+            }
+        }
+        if (!fromReadAhead && sequence) {
+            ++sReadAheadMisses;
+        }
+    } else {
+        sSeqEntry = ~0u;
+    }
 }
 
 static void workerMain() {
     PORT_QEMU_THREAD("dvd-worker");
     port_thread_class(2);
     port_thread_io(0, 0);  // GXV_CORE3_IO=1: the read-ahead worker tries the system core (port.h); off by default
-    const bool readAheadOn = !getenv("PETARI_READAHEAD") || getenv("PETARI_READAHEAD")[0] != '0';
-    const bool movieWindowOn = readAheadOn && (!getenv("PETARI_MOVIEWIN") || getenv("PETARI_MOVIEWIN")[0] != '0');
     for (;;) {
         ReadRequest req;
         {
             std::unique_lock<std::mutex> lk(sQueueMutex);
-            sQueueCv.wait(lk, [] { return !sPending.empty(); });
+            sQueueCv.wait(lk, [] { return !sPending.empty() || pfWorkWaiting(); });
+            if (sPending.empty()) {
+                lk.unlock();
+                prefetchStep();  // (disc26) the card is idle: one piece of the learned prefetch
+                continue;
+            }
             req = sPending.front();
             sPending.pop_front();
             sActive = req.block;
         }
-        DVDCommandBlock* b = req.block;
-        s32 result;
-        noteResume();
-        const int64_t workStart = port_host_time_ns();
-        sTraceWaitNs = workStart - req.submitNs;
-        const size_t want = b->length;
-        const u64 offset = b->offset;
-        const bool movie = readAheadOn && isMovieEntry(req.entry);
-        const bool fromMovieWin = movie && movieWindowOn && sMovieWin.entry == req.entry && offset >= sMovieWin.start &&
-                                  offset + want <= sMovieWin.start + sMovieWin.len;
-        const bool fromReadAhead = !movie && readAheadOn && sReadAhead.entry == req.entry && sReadAhead.offset == offset && sReadAhead.len == want;
-        int fd = (fromReadAhead || fromMovieWin) ? -1 : openEntryRetry(req.entry);
-#if defined(__vita__)
-        if (fd >= 0 && sFst[req.entry].cached && !sFst[req.entry].checked) {
-            // A size from the sizes cache is compared with the real one at the file's first open (a cheap call on an open file).
-            FstEntry& fe = sFst[req.entry];
-            fe.checked = true;
-            struct stat st;
-            if (fstat(fd, &st) == 0 && (s64)st.st_size != fe.size) {
-                port_log("dvd: %s is %lld bytes, the sizes cache said %lld: deleting the cache (the next start lists the folders again)", fe.hostPath.c_str(),
-                         (long long)st.st_size, (long long)fe.size);
-                fe.size = (s64)st.st_size;
-                remove(sizeCachePath().c_str());
-            }
-        }
-#endif
-        sTraceOpenNs = port_host_time_ns() - workStart;
-        sTraceGpuNs = 0;
-        if (fd < 0 && !fromReadAhead && !fromMovieWin) {
-            result = -1;
-        } else {
-            u8* dst = (u8*)b->addr;
-            const int64_t readStart = port_host_time_ns();
-            ssize_t got;
-            if (fromMovieWin) {
-                memcpy(dst, sMovieWin.data + (offset - sMovieWin.start), want);
-                got = (ssize_t)want;
-                ++sMovieHits;
-            } else if (fromReadAhead) {
-                memcpy(dst, sReadAhead.data, want);
-                got = (ssize_t)want;
-                if (++sReadAheadHits % 100 == 0) {
-                    port_log("dvd: read-ahead served %u reads from memory (%u sequential reads were not ready)", sReadAheadHits, sReadAheadMisses);
-                }
-            } else {
-                got = pread(fd, dst, want, (off_t)offset);
-                if (got < 0) got = rereadAfterFailure(req.entry, errno, fd, dst, want, offset);
-                if (movie) {
-                    ++sMovieMisses;
-                }
-            }
-            int64_t readEnd;
-            if (got < 0) {
-                const int error = errno;
-                readEnd = port_host_time_ns();
-                result = -1;
-                reportDvdError(DvdError::Read, req.entry, result, error);
-                noteDvdFailure("read", sFst[req.entry].hostPath.c_str(), error);
-            } else {
-                readEnd = port_host_time_ns();
-                if ((size_t)got < want) {
-                    memset(dst + got, 0, want - (size_t)got);  // past EOF the drive returns adjacent data
-                }
-                b->transferredSize = b->length;
-                result = (s32)b->length;
-                sDvdBytesRead.fetch_add((uint64_t)want, std::memory_order_relaxed);
-                const int64_t hookStart = port_host_time_ns();
-                port_gpu_memory_written(dst, (uint32_t)want);  // models, textures, display lists: see vgx_galaxy.h
-                sTraceGpuNs = port_host_time_ns() - hookStart;
-            }
-            noteRead(req.entry, want, (u32)offset, readStart, readEnd);
-        }
-        bool pendingNow;
-        {
-            std::lock_guard<std::mutex> lk(sQueueMutex);
-            b->currTransferSize = (u32)result;
-            sActive = nullptr;
-            sDone.push_back(b);
-            pendingNow = !sPending.empty();
-        }
-        port_irq_raise(PORT_IRQ_DVD);
-        port_vclock_external_end();
-
-        if (movie) {
-            // A movie frame that continues the one before it: keep the window ahead of the player.
-            if (movieWindowOn && result >= 0 && want >= 4096 && want <= kMovieWindow / 2) {
-                const u64 end = offset + want;
-                const bool sequence = sSeqEntry == req.entry && sSeqEnd == offset;
-                sSeqEntry = req.entry;
-                sSeqEnd = end;
-                if (sequence && !pendingNow) {
-                    movieTopUp(req.entry, end, fd);
-                }
-            } else {
-                sSeqEntry = ~0u;
-            }
-            if ((sMovieHits + sMovieMisses) % 300 == 0 && sMovieHits + sMovieMisses != 0 && (fromMovieWin || movieWindowOn)) {
-                static unsigned sLoggedAt = 0;
-                if (sLoggedAt != sMovieHits + sMovieMisses) {
-                    sLoggedAt = sMovieHits + sMovieMisses;
-                    port_log("dvd: movie reads %u from memory, %u from the card; %u window refills, %.0f KiB each, %.1f ms on average (longest %.1f ms)", sMovieHits,
-                             sMovieMisses, sMovieTopUps, sMovieTopUps ? sMovieTopUpBytes / 1024.0 / sMovieTopUps : 0.0,
-                             sMovieTopUps ? sMovieTopUpNs / 1e6 / sMovieTopUps : 0.0, sMovieTopUpMaxNs / 1e6);
-                }
-            }
-        } else if (readAheadOn && result >= 0 && want >= 4096 && want <= kReadAheadMax) {
-            const bool sequence = sSeqEntry == req.entry && sSeqEnd == offset;
-            sSeqEntry = req.entry;
-            sSeqEnd = offset + want;
-            if (sequence && !pendingNow) {
-                const s64 size = sFst[req.entry].size;
-                const int pfd = (size > 0 && (s64)(offset + want) < size) ? (fd >= 0 ? fd : openEntry(req.entry)) : -1;
-                if (pfd >= 0) {
-                    ssize_t got = pread(pfd, sReadAhead.data, want, (off_t)(offset + want));
-                    if (got > 0) {
-                        if ((size_t)got < want) {
-                            memset(sReadAhead.data + got, 0, want - (size_t)got);
-                        }
-                        sReadAhead.entry = req.entry;
-                        sReadAhead.offset = offset + want;
-                        sReadAhead.len = want;
-                    } else {
-                        sReadAhead.entry = ~0u;
-                    }
-                }
-            }
-            if (!fromReadAhead && sequence) {
-                ++sReadAheadMisses;
-            }
-        } else {
-            sSeqEntry = ~0u;
-        }
+        serveRequest(req, false);
     }
 }
 
@@ -1563,6 +2100,160 @@ static void benchDrive() {
     free(raw2);
 }
 
+// (cook24, port/load_split.h) the census's readers. Counters only; nothing here touches the card.
+extern "C" void port_load_split_disc(PortDiscSplit* out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    for (int c = 0; c < PORT_DISC_CLASSES; ++c) {
+        out->reads[c] = loadsplit::g.reads[c].load(std::memory_order_relaxed);
+        out->bytes[c] = loadsplit::g.bytes[c].load(std::memory_order_relaxed);
+        out->workerNs[c] = loadsplit::g.workerNs[c].load(std::memory_order_relaxed);
+        out->blockedNs[c] = loadsplit::g.blockedNs[c].load(std::memory_order_relaxed);
+    }
+    out->probes = loadsplit::g.probes.load(std::memory_order_relaxed);
+    out->asyncReads = loadsplit::g.asyncReads.load(std::memory_order_relaxed);
+    out->queueNs = loadsplit::g.queueNs.load(std::memory_order_relaxed);
+    out->opens = loadsplit::g.opens.load(std::memory_order_relaxed);
+    out->openNs = loadsplit::g.openNs.load(std::memory_order_relaxed);
+    out->stats = loadsplit::g.stats.load(std::memory_order_relaxed);
+    out->statNs = loadsplit::g.statNs.load(std::memory_order_relaxed);
+    out->readAheadHits = loadsplit::g.readAheadHits.load(std::memory_order_relaxed);
+    out->decodes = loadsplit::g.decodes.load(std::memory_order_relaxed);
+    out->decodeNs = loadsplit::g.decodeNs.load(std::memory_order_relaxed);
+    out->decodeBytes = loadsplit::g.decodeBytes.load(std::memory_order_relaxed);
+}
+extern "C" int port_load_split_slowest(char* name, size_t size, double* ms) {
+    const uint64_t packed = loadsplit::g.slowest.exchange(0, std::memory_order_relaxed);
+    if (!packed) return 0;
+    const u32 entry = static_cast<u32>(packed & 0xFFFFFFu);
+    if (ms) *ms = static_cast<double>(packed >> 24) / 1e6;
+    if (name && size) {
+        name[0] = 0;
+        if (entry < sFst.size()) {
+            const std::string& p = sFst[entry].hostPath;
+            const size_t cut = std::min(sDataRoot.size() + 7, p.size());  // (past "<root>/files/")
+            snprintf(name, size, "%s", p.c_str() + cut);
+        }
+    }
+    return 1;
+}
+extern "C" void port_load_note_decomp(uint32_t bytes, int64_t ns) {
+    loadsplit::g.decodes.fetch_add(1, std::memory_order_relaxed);
+    loadsplit::g.decodeBytes.fetch_add(bytes, std::memory_order_relaxed);
+    loadsplit::g.decodeNs.fetch_add(static_cast<uint64_t>(ns > 0 ? ns : 0), std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// (disc26) the "io:" census. The play window of a stage opens when its scene build ends (perf.cpp: port_scene_load_end) and closes when the
+// next scene build begins; the counters are bumped by the drive worker, DVDReadPrio, the host-job caller and the game thread's file waits.
+//   io: stage X (key K) play 83.2 s [final|so far]: <verdict>; disc reads 12 (1.2 MiB, drive 80 ms, worst 31 ms: ObjectData/Foo.arc);
+//   by class (reads / MiB / drive ms / worst ms / >=20 ms / >=50 ms): ...; game thread waited for the card: sync reads 0 (0 ms, worst 0),
+//   requested archives/files 0 (0 ms, worst 0); other guest threads in sync reads 3 (...); audio streams: 70 reads, worst latency 16 ms
+//   (queue + card), 0 at >= 250 ms; read-ahead hits 70, long reads cut 2 (urgent requests served between pieces 5), prefetch 0 hits (...);
+//   opens of 1 ms or more 3 (...); host jobs (saves, NAND) 0 (...), 0 on the game thread; shader files in play: 0 pack hits, 0 misses; ...
+// This is the regression check: the verdict must be CLEAN and "game thread waited" 0 in a normal play window.
+extern "C" void port_load_split_shader_files(uint64_t* ramHits, uint64_t* userHits, uint64_t* misses) __attribute__((weak));
+static void ioLine(const char* tag) {
+    static const bool on = vgx::EnvInt("GXV_IO_LINE", 1) != 0;
+    std::lock_guard<std::mutex> lk(ioc::lineMutex);
+    const int64_t now = port_host_time_ns();
+    ioc::lastLineNs = now;
+    if (!on) return;
+    uint64_t n = 0, ns = 0, bytes = 0, worst = 0, s20 = 0, s50 = 0;
+    for (const auto& c : ioc::cls) {
+        n += c.n; ns += c.ns; bytes += c.bytes; worst = std::max<uint64_t>(worst, c.worstNs); s20 += c.s20; s50 += c.s50;
+    }
+    // (the log keeps about 1000 characters of a line on the console: the first line is the check, the second the detail)
+    static const char* const kShort[ioc::kN] = {"Obj", "Stage", "Layout", "Strm", "Wave", "other"};
+    char byClass[360];
+    int len = 0;
+    byClass[0] = 0;
+    for (int i = 0; i < ioc::kN && len >= 0 && (size_t)len < sizeof byClass - 70; ++i) {
+        const auto& c = ioc::cls[i];
+        if (!c.n) continue;
+        len += snprintf(byClass + len, sizeof byClass - (size_t)len, " %s %ur/%.0fms/worst %.0f%s;", kShort[i], (unsigned)c.n.load(), c.ns / 1e6, c.worstNs / 1e6,
+                        c.s20 ? (c.s50 ? " (>=50: yes)" : " (>=20: yes)") : "");
+    }
+    const uint64_t wp = ioc::worstPacked.load();
+    char worstName[80] = "-";
+    if (wp) snprintf(worstName, sizeof worstName, "%s", relName((u32)(wp & 0xFFFFFFu)).c_str());
+    uint64_t ram = 0, user = 0, miss = 0;
+    if (port_load_split_shader_files) port_load_split_shader_files(&ram, &user, &miss);
+    const double gameBlockedMs = (ioc::gameSync.ns + ioc::gameWait.ns) / 1e6;
+    const double worstGameMs = std::max(ioc::gameSync.worstNs.load(), ioc::gameWait.worstNs.load()) / 1e6;
+    const char* verdict = port::iopol::Verdict(gameBlockedMs, worstGameMs, ioc::cls[ioc::kStream].worstLatNs / 1e6, (unsigned)s50, (unsigned)s20);
+    port_log_summary("io: stage %s (%08x) play %.1f s [%s]: %s; reads in play %u (%.1f MiB, %.0f ms, worst %.0f ms %s); game thread waited for the card: sync %u (%.0f ms, worst %.0f), "
+                     "files %u (%.0f ms, worst %.0f); by class:%s stream latency worst %.0f ms, %u late; host jobs %u (%.0f ms, worst %.0f, %u on the game thread); "
+                     "shader files in play %u hits, %u misses",
+                     ioc::stageName, ioc::stageKey, (now - ioc::t0Ns) / 1e9, tag, verdict, (unsigned)n, bytes / 1048576.0, ns / 1e6, worst / 1e6, worstName,
+                     (unsigned)ioc::gameSync.n.load(), ioc::gameSync.ns / 1e6, ioc::gameSync.worstNs / 1e6, (unsigned)ioc::gameWait.n.load(), ioc::gameWait.ns / 1e6,
+                     ioc::gameWait.worstNs / 1e6, byClass[0] ? byClass : " none;", ioc::cls[ioc::kStream].worstLatNs / 1e6, (unsigned)ioc::streamLate.load(),
+                     (unsigned)ioc::hostJob.n.load(), ioc::hostJob.ns / 1e6, ioc::hostJob.worstNs / 1e6, (unsigned)ioc::hostJobGame.n.load(),
+                     (unsigned)(ram + user - ioc::shaderRam0 - ioc::shaderUser0), (unsigned)(miss - ioc::shaderMiss0));
+    char ledgerText[300] = "";
+    {
+        std::lock_guard<std::mutex> l2(ioc::ledgerMutex);
+        int k = 0;
+        for (unsigned i = 0; i < ioc::ledgerN && k >= 0 && (size_t)k < sizeof ledgerText - 70; ++i)
+            k += snprintf(ledgerText + k, sizeof ledgerText - (size_t)k, "%s%s", i ? ", " : "", relName(ioc::ledger[i]).c_str());
+    }
+    port_log_summary("io-more: stage %s: other guest threads in sync reads %u (%.0f ms, worst %.0f); stream late limit %d ms; read-ahead hits %u; long reads cut %u (urgent requests "
+                     "served between pieces %u); prefetch %u hits (%.1f MiB), %u files read ahead, %u passed over; opens of 1 ms or more %u (%.0f ms, worst %.0f); game files read in play: %s",
+                     ioc::stageName, (unsigned)ioc::otherSync.n.load(), ioc::otherSync.ns / 1e6, ioc::otherSync.worstNs / 1e6,
+                     (int)vgx::EnvInt("GXV_IO_STREAM_LATE_MS", 250), (unsigned)ioc::raHits.load(), (unsigned)ioc::cuts.load(), (unsigned)ioc::yields.load(),
+                     (unsigned)ioc::pfHits.load(), ioc::pfBytes / 1048576.0, (unsigned)ioc::pfFiles.load(), (unsigned)ioc::pfSkipped.load(),
+                     (unsigned)ioc::openB.n.load(), ioc::openB.ns / 1e6, ioc::openB.worstNs / 1e6, ledgerText[0] ? ledgerText : "none");
+    ++ioc::lines;
+}
+extern "C" void port_io_play_begin(const char* stage, uint32_t key) {
+    {
+        std::lock_guard<std::mutex> lk(ioc::lineMutex);
+        ioc::reset();
+        snprintf(ioc::stageName, sizeof ioc::stageName, "%s", stage && *stage ? stage : "?");
+        ioc::stageKey = key;
+        ioc::t0Ns = ioc::lastLineNs = port_host_time_ns();
+        ioc::lines = 0;
+        uint64_t ram = 0, user = 0, miss = 0;
+        if (port_load_split_shader_files) port_load_split_shader_files(&ram, &user, &miss);
+        ioc::shaderRam0 = ram; ioc::shaderUser0 = user; ioc::shaderMiss0 = miss;
+    }
+    ioc::active.store(1, std::memory_order_release);
+    if (pfCapBytes()) {  // the learned prefetch: the worker reads the list for this stage when the card is idle
+        sPfStage.store(key, std::memory_order_relaxed);
+        PortHostAllocScope scope;  // (heap36: the game thread, at the end of a stage's load (GXV_IO_PREFETCH_MB): a new deque node here came from the scene's heap)
+        std::lock_guard<std::mutex> lk(sQueueMutex);
+        sPfQueue.push_back(~0u);
+        sQueueCv.notify_one();
+    }
+}
+extern "C" void port_io_play_end(void) {
+    if (!ioc::on()) return;
+    ioc::active.store(0, std::memory_order_release);
+    ioLine("final");
+    static const char* ledgerFile = getenv("GXV_IO_LEDGER_FILE");
+    if (ledgerFile && *ledgerFile) {  // the files this stage read while it played, as lines of the prefetch list
+        std::lock_guard<std::mutex> lk(ioc::ledgerMutex);
+        if (ioc::ledgerN) {
+            if (FILE* f = fopen(ledgerFile, "a")) {
+                if (ftell(f) < 65536)  // (capped: a list for one card's play, not a log)
+                    for (unsigned i = 0; i < ioc::ledgerN; ++i) fprintf(f, "%08x /%s\n", ioc::stageKey, relName(ioc::ledger[i]).c_str());
+                fclose(f);
+            }
+        }
+    }
+}
+extern "C" void port_io_tick(void) {
+    if (!ioc::on()) return;
+    static unsigned calls;
+    if ((++calls & 63u) != 0) return;
+    static const int periodS = vgx::EnvInt("GXV_IO_LINE_S", 60);
+    if (periodS <= 0 || port_host_time_ns() - ioc::lastLineNs < static_cast<int64_t>(periodS) * 1000000000ll) return;
+    ioLine("so far");
+}
+extern "C" void port_io_note_wait(int64_t ns) {
+    if (ioc::on() && port_is_default_thread && port_is_default_thread()) ioc::addBlock(ioc::gameWait, ns);
+}
+
 static void dvdIrq() {
     for (;;) {
         DVDCommandBlock* b;
@@ -1583,13 +2274,18 @@ static void dvdIrq() {
     OSWakeupThread(&sSyncQueue);
 }
 
-static void submit(DVDCommandBlock* b, u32 entry) {
+static void submit(DVDCommandBlock* b, u32 entry, s32 priority) {
     b->state = kStateBusy;
     b->transferredSize = 0;
     // The host drive worker frees deque nodes while it does not own the guest CPU.
     PortHostAllocScope scope;
     std::lock_guard<std::mutex> lk(sQueueMutex);
-    sPending.push_back({b, entry, port_host_time_ns()});
+    // The SDK serves priorities 0..3, FIFO within each. Invalid priorities were
+    // ignored by this port; keep accepting them as ordinary archive priority 2.
+    if (priority < 0 || priority > 3) priority = 2;
+    auto next = sPending.end();
+    while (next != sPending.begin() && std::prev(next)->priority > priority) --next;
+    sPending.insert(next, {b, entry, port_host_time_ns(), priority});
     port_vclock_external_begin();  // armhf/qemu harness: virtual time waits for the drive worker (port/vclock.h)
     sQueueCv.notify_one();
 }
@@ -1625,6 +2321,10 @@ extern "C" void port_host_job_wait(const char* what, void (*fn)(void*), void* ar
     }
     OSRestoreInterrupts(en);
     const double ms = (port_host_time_ns() - t0) / 1e6;
+    if (ioc::on()) {  // (disc26) the "io:" census: a save / NAND call in play, and whether the game thread was the one that sat in it
+        ioc::addBlock(ioc::hostJob, port_host_time_ns() - t0);
+        if (port_is_default_thread && port_is_default_thread()) ioc::addBlock(ioc::hostJobGame, port_host_time_ns() - t0);
+    }
     if (ms >= 5.0 && sLogged < 100) {
         ++sLogged;
         port_log("hostjob: %s took %.1f ms", what, ms);
@@ -1653,7 +2353,9 @@ void DVDInit(void) {
     inited = true;
     OSInitThreadQueue(&sSyncQueue);
     if (!loadFst()) {
-        if (port_boot_data_report("Game file list is unreadable. Restore converted game data and relaunch; saves unchanged."))
+        // (bootio: readFst has already tried for 3 s and logged the SCE code. The message goes on the loading screen whether or not GXV_BOOTDATA is on.)
+        static const char kMissing[] = "Game file list is unreadable. Restore converted game data and relaunch; saves unchanged.";
+        if (port_boot_data_report(kMissing) || (port_vgx_vita_fail && port_vgx_vita_fail(kMissing)))
             port_boot_data_park();
         port_fatal("dvd: game data not found under %s (expected sys/fst.bin and files/)", sDataRoot.c_str());
     }
@@ -1688,6 +2390,8 @@ BOOL DVDOpen(const char* fileName, DVDFileInfo* fileInfo) {
     s32 entry = DVDConvertPathToEntrynum(fileName);
     if (entry < 0) {
         port_log("dvd: file not found: %s", fileName);
+        static std::atomic<unsigned> sNotFound{0};  // (luigi24: the first few in the basic log; a missing archive must name itself there)
+        if (sNotFound.fetch_add(1, std::memory_order_relaxed) < 16) port_log_summary("file-missing: DVDOpen: no such file in the file table: %s", fileName);
         return FALSE;
     }
     return DVDFastOpen(entry, fileInfo);
@@ -1698,20 +2402,20 @@ BOOL DVDClose(DVDFileInfo* fileInfo) {
     return TRUE;
 }
 
+static std::atomic<uint64_t> sXsGameSyncN{0}, sXsGameSyncNs{0};  // (xskip27)
 BOOL DVDReadAsyncPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, DVDCallback callback, s32 prio) {
-    (void)prio;
+    loadsplit::g.asyncReads.fetch_add(1, std::memory_order_relaxed);
     fileInfo->callback = callback;
     DVDCommandBlock* b = &fileInfo->cb;
     b->addr = addr;
     b->length = (u32)length;
     b->offset = (u32)offset;
     b->callback = fileCallback;
-    submit(b, fileInfo->startAddr);
+    submit(b, fileInfo->startAddr, prio);
     return TRUE;
 }
 
 s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 prio) {
-    (void)prio;
     DVDCommandBlock* b = &fileInfo->cb;
     // PETARI_GAPLOG: where did a long stretch without a safe point before this read go, in the caller or in submit()?
     const int64_t gapThr = port_gap_threshold_ns();
@@ -1722,7 +2426,9 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
     b->length = (u32)length;
     b->offset = (u32)offset;
     b->callback = nullptr;
-    submit(b, fileInfo->startAddr);
+    const int64_t lsT0 = port_host_time_ns();  // (cook24) how long this caller sits in the read, for the load-split census
+    if (length <= 32 && offset == 0) loadsplit::g.probes.fetch_add(1, std::memory_order_relaxed);
+    submit(b, fileInfo->startAddr, prio);
     if (gapThr > 0) {
         const int64_t gapSubmit = port_host_time_ns() - gapT0;
         static unsigned sLogged;
@@ -1730,7 +2436,7 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
             ++sLogged;
             port_log("dvdread: %.1f ms since the last safe point when called, submit took %.1f ms; %d bytes at %d of %s; callers %p %p %p (port_irq_poll %p)",
                      gapPre / 1e6, gapSubmit / 1e6, (int)length, (int)offset, sFst[fileInfo->startAddr].hostPath.c_str(), __builtin_return_address(0),
-                     __builtin_return_address(1), __builtin_return_address(2), (void*)&port_irq_poll);
+                     (void*)0, (void*)0 /* (pgo27: return_address(1..2) walk the frame-pointer chain, which -fomit-frame-pointer builds do not keep) */, (void*)&port_irq_poll);
         }
     }
     BOOL en = OSDisableInterrupts();
@@ -1738,7 +2444,22 @@ s32 DVDReadPrio(DVDFileInfo* fileInfo, void* addr, s32 length, s32 offset, s32 p
         OSSleepThread(&sSyncQueue);
     }
     OSRestoreInterrupts(en);
+    {
+        const int64_t waited = port_host_time_ns() - lsT0;
+        loadsplit::g.blockedNs[sFst[fileInfo->startAddr].cls].fetch_add(static_cast<uint64_t>(waited > 0 ? waited : 0), std::memory_order_relaxed);
+        if (ioc::on()) ioc::addBlock(port_is_default_thread && port_is_default_thread() ? ioc::gameSync : ioc::otherSync, waited);  // (disc26)
+        if (port_is_default_thread && port_is_default_thread()) {  // (xskip27: always on, two relaxed adds: the game thread's synchronous reads, for the "xskip:" lines)
+            sXsGameSyncN.fetch_add(1, std::memory_order_relaxed);
+            sXsGameSyncNs.fetch_add(static_cast<uint64_t>(waited > 0 ? waited : 0), std::memory_order_relaxed);
+        }
+    }
     return b->state == kStateEnd ? (s32)b->transferredSize : -1;
+}
+// (xskip27) cumulative: asynchronous reads asked for, and the game thread's synchronous reads (count, ms waited), any thread
+extern "C" void port_dvd_xskip_counters(unsigned long long* asyncReads, unsigned long long* gameSyncN, double* gameSyncMs) {
+    if (asyncReads) *asyncReads = loadsplit::g.asyncReads.load(std::memory_order_relaxed);
+    if (gameSyncN) *gameSyncN = sXsGameSyncN.load(std::memory_order_relaxed);
+    if (gameSyncMs) *gameSyncMs = static_cast<double>(sXsGameSyncNs.load(std::memory_order_relaxed)) / 1e6;
 }
 
 BOOL DVDCancelAsync(DVDCommandBlock* block, DVDCBCallback callback) {
@@ -1749,6 +2470,9 @@ BOOL DVDCancelAsync(DVDCommandBlock* block, DVDCBCallback callback) {
             if (it->block == block) {
                 sPending.erase(it);
                 removed = true;
+                // (armhf/qemu harness: the drive worker will not complete it, so submit's external_begin ends here; compiled to
+                // nothing on the Vita. From Producdevity's fork, 2a1d164.)
+                port_vclock_external_end();
                 break;
             }
         }
@@ -1770,6 +2494,9 @@ s32 DVDCancel(DVDCommandBlock* block) {
             if (it->block == block) {
                 sPending.erase(it);
                 removed = true;
+                // (armhf/qemu harness: the drive worker will not complete it, so submit's external_begin ends here; compiled to
+                // nothing on the Vita. From Producdevity's fork, 2a1d164.)
+                port_vclock_external_end();
                 break;
             }
         }

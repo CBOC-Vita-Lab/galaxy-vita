@@ -3,6 +3,7 @@
 #include "Game/Enemy/KarikariDirector.hpp"
 #include "Game/LiveActor/Binder.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
+#include "Game/MP/MpBubble.hpp"
 #include "Game/Map/HitInfo.hpp"
 #include "Game/Player/MarioAbyssDamage.hpp"
 #include "Game/Player/MarioActor.hpp"
@@ -1268,7 +1269,13 @@ void Mario::forceSetHeadVecKeepSide(const TVec3f& rVec) {
 }
 
 // float regswap + bad stack ordering
+#ifdef TARGET_PC
+extern "C" void port_horizon_draw_markers();  // (horizon25, GXV_HORIZON=3: ClippingActorHolder.cpp)
+#endif
 void Mario::draw() const {
+#ifdef TARGET_PC
+    port_horizon_draw_markers();
+#endif
     if (mDrawStates._1) {
         TDDraw::cameraInit3D();
         TDDraw::setup(0, 1, 0);
@@ -1712,6 +1719,14 @@ void Mario::update() {
     }
 
     updateCubeCode();
+#ifdef TARGET_PC
+    if (MpBubble::localBubbled()) {
+        // wave8: while floating in a Play Together bubble, keep CubeCamera and timers current without re-entering swim,
+        // tripping warp/press/hazard polygons, or running physics over the bubble's live position.
+        updateTimers();
+        return;
+    }
+#endif
     mMovementStates._7 = updateBinderInfo();
 
     checkEnforceMove();

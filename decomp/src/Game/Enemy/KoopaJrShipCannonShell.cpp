@@ -188,7 +188,7 @@ bool KoopaJrShipCannonShell::tryFreeze() {
     if (!_B8)
         return false;
 
-    if (!MR::isStarPointerPointing2POnPressButton(this, "\x8e\xe3", true, false))
+    if (!MR::isStarPointerPointing2POnPressButtonNoMp(this, "\x8e\xe3", true, false))
         return false;
 
     _9C.set(mPosition);
@@ -278,7 +278,7 @@ void KoopaJrShipCannonShell::exeFreeze() {
     vec14.scale(scale);
     editPosition()->add(_9C, vec14);
 
-    if (MR::isStarPointerPointing2POnPressButton(this, "\x8e\xe3", true, false)) {
+    if (MR::isStarPointerPointing2POnPressButtonNoMp(this, "\x8e\xe3", true, false)) {
         setNerve(GET_NERVE(KoopaJrShipCannonShell, HostTypeFreeze));
         return;
     }

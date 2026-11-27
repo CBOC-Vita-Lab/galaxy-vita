@@ -28,6 +28,13 @@ namespace MR {
     f32 getNearZ();
     f32 getFarZ();
     f32 getFovy();
+#ifdef TARGET_PC
+    // (zoomclip23) The field of view the game's logic judges with: with GXV_ZOOM_LOGIC_VIEW (default 1) the game's own, never the
+    // narrower one of the handheld zoom (getFovy, the picture's). See CameraUtil.cpp.
+    f32 getFovyForLogic();
+    // (zoomclip23) true when the picture's field of view is narrower than the game's (the zoom is in force now).
+    bool isPictureZoomedIn();
+#endif
     void setCameraViewMtx(const TPos3f&, bool, bool, const TVec3f&);
     void setNearZ(f32);
     void setFovy(f32);

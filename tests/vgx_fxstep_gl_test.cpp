@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -303,10 +304,11 @@ void RunFx(const std::string& prefix, const std::string& schedule, bool independ
 
 // ---- the cheaper background
 constexpr unsigned kLevelValue[7] = {20, 60, 100, 140, 180, 220, 250};
-void AddTextured(CmdBuf& b, bool right, uint32_t tex) {
+void AddTextured(CmdBuf& b, bool right, uint32_t tex, bool perspective, bool depth, uint8_t minFilter, bool mixed) {
     // 4 vertices of 24 bytes (position, texture coordinate) per quad: 32x32 pixels, texels 0..0.75 of the 64x64 texture.
     const float x0 = right ? 0.0f : -1.0f, x1 = x0 + 1.0f;
-    const float v[] = {x0, -1, 0, 0, 0, 0,  x1, -1, 0, 0, 0.75f, 0,  x0, 0, 0, 0, 0, 0.75f,  x1, 0, 0, 0, 0.75f, 0.75f};
+    const float z = perspective ? -1.0f : 0.0f;
+    const float v[] = {x0, -1, z, 0, 0, 0,  x1, -1, z, 0, 0.75f, 0,  x0, 0, z, 0, 0, 0.75f,  x1, 0, z, 0, 0.75f, 0.75f};
     const uint32_t first = static_cast<uint32_t>(b.vtx.size() / 24);
     const size_t at = b.vtx.size();
     b.vtx.resize(at + sizeof v);
@@ -317,8 +319,11 @@ void AddTextured(CmdBuf& b, bool right, uint32_t tex) {
     d.layoutMask = VL_TEX0;
     d.texMask = 1;
     d.tex[0].texId = tex;
-    d.tex[0].minFilter = FILT_LIN_MIP_LIN;
+    d.tex[0].minFilter = minFilter;
     d.tex[0].magFilter = FILT_LINEAR;
+    d.tex[7] = d.tex[0];
+    d.tex[7].texId = 31;
+    if (mixed) d.texMask |= 1u << 7;
     d.vtxOffset = 0;
     d.vtxFirst = 0;
     d.vtxCount = 4;
@@ -330,6 +335,8 @@ void AddTextured(CmdBuf& b, bool right, uint32_t tex) {
     d.rs.scW = 640;
     d.rs.scH = 456;
     d.rs.vpH = 456;
+    d.rs.depthTest = depth;
+    d.rs.depthFunc = CMP_ALWAYS;
     b.draws.push_back(d);
     Push(b, CMD_DRAW, static_cast<uint32_t>(b.draws.size() - 1));
 }
@@ -339,15 +346,26 @@ unsigned Probe(const std::vector<uint8_t>& px, int w, int x) { // the textured q
     return best;
 }
 bool Near(double got, double want, double tol) { return got >= want - tol && got <= want + tol; }
-void RunBg(const std::string& prefix, const std::string& schedule) {
+void RunBg(const std::string& what, const std::string& prefix, const std::string& schedule) {
+    const bool perspective = what != "bg-ortho";
+    const bool depth = what != "bg-nodepth";
+    const bool mips = what != "bg-nomip";
+    const bool nearestFilter = what == "bg-nearest";
+    const bool mixed = what == "bg-mixed";
+    const bool unused = what == "bg-unused" || what == "bg-short" || what == "bg-range" || what == "bg-nonfinite";
+    const bool missing = what == "bg-missing";
     ShaderSource vs, fs;
     vs.id = fs.id = 2;
     vs.attrMask = (1u << AT_POS) | (1u << AT_TEX0);
-    vs.text = "attribute vec4 a_pos; attribute vec2 a_tex0; uniform mat4 u_proj; varying vec2 v_t;"
-              " void main() { gl_Position = u_proj * vec4(a_pos.xyz, 1.0); v_t = a_tex0; }";
+    vs.text = unused ? "attribute vec4 a_pos; attribute vec2 a_tex0; varying vec2 v_t;"
+                       " void main() { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_t = a_tex0; }"
+                     : "attribute vec4 a_pos; attribute vec2 a_tex0; uniform mat4 u_proj; varying vec2 v_t;"
+                       " void main() { gl_Position = u_proj * vec4(a_pos.xyz, 1.0); v_t = a_tex0; }";
     fs.fragment = true;
-    fs.texMask = 1;
-    fs.text = "precision mediump float; uniform sampler2D u_tex0; varying vec2 v_t; void main() { gl_FragColor = texture2D(u_tex0, v_t); }";
+    fs.texMask = mixed ? 129 : 1;
+    fs.text = mixed ? "precision mediump float; uniform sampler2D u_tex0, u_tex7; varying vec2 v_t;"
+                      " void main() { gl_FragColor = 0.5 * (texture2D(u_tex0, v_t) + texture2D(u_tex7, v_t)); }"
+                    : "precision mediump float; uniform sampler2D u_tex0; varying vec2 v_t; void main() { gl_FragColor = texture2D(u_tex0, v_t); }";
     Setup(vs, fs);
     for (unsigned frame = 2; frame <= 4; ++frame) {
         const Frame step = StepOf(schedule[frame - 2]);
@@ -355,14 +373,18 @@ void RunBg(const std::string& prefix, const std::string& schedule) {
         CmdBuf b;
         b.frame = frame;
         b.uni.assign(16, 0);
-        for (unsigned i = 0; i < 4; ++i) b.uni[i * 5] = 1;
+        b.uni[0] = b.uni[5] = 1;
+        if (perspective) b.uni[11] = -1;
+        else b.uni[10] = b.uni[15] = 1;
+        if (what == "bg-short") b.uni.resize(15);
+        if (what == "bg-nonfinite") b.uni[0] = std::numeric_limits<float>::quiet_NaN();
         if (frame == 2) // (the textures are uploaded once, in the first frame)
             for (uint32_t id : {30u, 31u}) {
                 TexUpload up;
                 up.texId = id;
                 up.width = up.height = 64;
-                up.authored = 7;
-                for (unsigned l = 0, size = 64; l < 7; ++l, size /= 2) {
+                up.authored = mips ? 7 : 1;
+                for (unsigned l = 0, size = 64; l < up.authored; ++l, size /= 2) {
                     std::vector<uint8_t> level(static_cast<size_t>(size) * size * 4, static_cast<uint8_t>(kLevelValue[l]));
                     for (size_t a = 3; a < level.size(); a += 4) level[a] = 255;
                     up.levels.push_back(std::move(level));
@@ -370,9 +392,14 @@ void RunBg(const std::string& prefix, const std::string& schedule) {
                 b.uploads.push_back(up);
                 Push(b, CMD_TEX_UPLOAD, static_cast<uint32_t>(b.uploads.size() - 1));
             }
-        AddTextured(b, false, 30); // an ordinary texture
-        AddTextured(b, true, 31);  // a character's
+        const uint8_t minFilter = nearestFilter ? FILT_LIN_MIP_NEAR : FILT_LIN_MIP_LIN;
+        // A real preceding draw supplies the projection when the ordinary draw omits it.
+        AddTextured(b, true, 31, perspective, depth, minFilter, mixed);
+        AddTextured(b, false, 30, perspective, depth, minFilter, mixed);
+        if (missing) b.draws.back().ublock[UB_PROJ] = kNoBlock;
+        if (what == "bg-range") b.draws.back().ublock[UB_PROJ] = 1000000;
         Present(b);
+        if (frame == 2) Record("first scheduled frame", {});
         backend::RequestCapture(true);
         backend::Execute(b);
         backend::RequestCapture(false);
@@ -384,9 +411,11 @@ void RunBg(const std::string& prefix, const std::string& schedule) {
         // 1.5 texels per pixel: LOD 0.585. Trilinear: level 0 + 0.585 of the step to level 1; nearest level: level 1.
         const double trilinear = kLevelValue[0] + (kLevelValue[1] - kLevelValue[0]) * 0.585, nearest = kLevelValue[1];
         std::printf("frame %u: step %c, ordinary %u, character %u (trilinear %.1f, nearest level %.0f)\n", frame, schedule[frame - 2], left, right, trilinear, nearest);
-        Require(Near(right, trilinear, 6), "the character's texture keeps its trilinear filter at every step");
-        if (step.bg) Require(Near(left, nearest, 3), "the cheaper background samples the nearest mip level");
-        else Require(Near(left, trilinear, 6), "no step: the ordinary texture is trilinear");
+        const double normal = !mips ? kLevelValue[0] : nearestFilter ? kLevelValue[1] : trilinear;
+        Require(Near(right, normal, 6), "the recognized character's texture keeps its requested filter at every step");
+        const bool eligible = what == "bg";
+        if (step.bg && eligible) Require(Near(left, kLevelValue[1], 3), "eligible perspective background samples the nearest mip level");
+        else Require(Near(left, normal, 6), "protected/unknown projection, depth, character or filter keeps its normal mip sampling");
         FILE* f = Open(prefix + ".f" + std::to_string(frame) + ".rgba");
         Save(f, px, w, h);
         Require(std::fclose(f) == 0, "close frame artifact");
@@ -398,11 +427,14 @@ void RunBg(const std::string& prefix, const std::string& schedule) {
 int main(int argc, char** argv) {
     Require(argc == 4, "usage: <fx|fxi|bg> <output prefix> <schedule of three letters>");
     const std::string what = argv[1], prefix = argv[2], schedule = argv[3];
-    Require((what == "fx" || what == "fxi" || what == "bg") && schedule.size() == 3, "mode and schedule");
+    const bool bg = what == "bg" || what == "bg-ortho" || what == "bg-nodepth" || what == "bg-mixed" || what == "bg-nomip" ||
+                    what == "bg-nearest" || what == "bg-unused" || what == "bg-missing" || what == "bg-short" ||
+                    what == "bg-range" || what == "bg-nonfinite";
+    Require((what == "fx" || what == "fxi" || bg) && schedule.size() == 3, "mode and schedule");
     Require(host::CreateContext(), "Mesa EGL context");
     Require(backend::Init(64, 64), "real backend initialization");
     traceFile = Open(prefix + ".trace");
-    if (what == "bg") RunBg(prefix, schedule); else RunFx(prefix, schedule, what == "fxi");
+    if (bg) RunBg(what, prefix, schedule); else RunFx(prefix, schedule, what == "fxi");
     glFinish();
     std::printf("PASS: %s %s: indexed draws=%u uniforms=%u targets=%u copy operations=%u reads=%u finishes=%u\n", what.c_str(), schedule.c_str(),
                 draws, uniforms, targets, copies, reads, finishes);

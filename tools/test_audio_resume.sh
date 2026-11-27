@@ -9,7 +9,7 @@ cxx="${CXX:-clang++}"
   -Iplatform/include -Itests/settings_stubs tests/audio_close.cpp -o "$out/close"
 "$out/close"
 "$cxx" -std=c++20 -O1 -g -fsanitize=address,undefined -fms-extensions -DTARGET_PC=1 -DPORT_PLATFORM_CODE=1 \
-  -DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1 -DPORT_ARMHF_HARNESS -include platform/include/port/compat.h \
+  -DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1 -DPORT_ARMHF_HARNESS -include tests/std_headers_first.h -include platform/include/port/compat.h \
   -Wno-ignored-qualifiers -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast -Wno-unknown-pragmas -Wno-unused-function \
   -Wno-frame-address -Iplatform/include -Idecomp/libs/RVL_SDK/include tests/audio_reopen.cpp -pthread -o "$out/reopen"
 for mode in retry single resume; do "$out/reopen" "$mode"; done

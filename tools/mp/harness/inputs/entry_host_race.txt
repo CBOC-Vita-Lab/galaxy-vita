@@ -1,0 +1,25 @@
+# race (13 Nov, rewritten for the one-door menus): entry_host with Star Race (the main menu's second row) instead of Play Together.
+# Title -> entry -> Multiplayer -> Star Race -> character (first play) -> the gathering screen (mode 2) -> the guest joins -> START -> (Which File?) -> in play.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose multiplayer/ ~37.2
+mark chars /\[mp\] ui: screen chars/ ~42
+mark gather /\[mp\] ui: gathering mode=2/ ~48
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+chose+3-3.2:DOWN    # Play Together -> Star Race
+chose+4-4.2:A
+chars+2-2.2:A       # character (keeps the preselected look)
+mark joined /\[mp\] slot 1 joined/ ~70
+mark falls /\[mp\] ui: screen falls/ ~75
+mark save /\[mp\] ui: screen save/ ~80
+mark spfile /\[mp\] ui: screen spfile/ ~85
+mark fileuse /\[mp\] ui: screen fileuse/ ~90
+joined+6-6.3:PLUS    # START
+falls+2-2.2:A        # (the falls question, if a race asks it)
+save+2-2.2:DOWN      # Which File?: New Co-op File -> Start from My Own File...
+save+3-3.2:A
+spfile+2-2.2:DOWN    # my file 1 -> file 2
+spfile+3-3.2:A
+fileuse+2-2.2:A      # Make a Co-op Copy (first row): the session starts

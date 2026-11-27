@@ -1,0 +1,24 @@
+# UNRUN (rules checked against the code's log lines by tests/mp/scenario_regex_test.py; the game has not played it). G8: both fall (host 20 s, guest 22 s, nobody pops), the host sends RESTART after 1 s of everyone caught, scene reloads,
+# then the guest gets the star 30 s after the reload (SMG_MP_TEST_STAR counts from each scene start). Expected: exactly one restart,
+# the gate re-arms (no second restart), the star is delivered once, no console is left behind the miss wipe.
+name: glitch_all_caught_then_star
+description: "everyone caught -> one restart -> star still shared once"
+seconds: 360
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 8000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_DIE: "20:0:abyss"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "22:1:abyss", SMG_MP_TEST_STAR: 90}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'count host /\[mp\] bubble restart sent/ == 1'
+  - 'expect guest /\[mp\] bubble restart start serial=\d+ why=message/ within 3s after host /\[mp\] bubble restart sent/'
+  - 'expect * /\[mp\] bubble restart reload/ within 20s after * /\[mp\] bubble restart start/'
+  - 'count * /\[mp\] star delivered id=/ <= 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow clear hold timeout|bubble drop RESTART)/'

@@ -121,3 +121,17 @@ int ParticleResourceHolder::getAutoEffectNum(const char* pGroupName) const {
 
     return 0;
 }
+
+#ifdef TARGET_PC
+#include "Game/Util/SystemUtil.hpp"
+// GXV_HOTPROF_PTCLCENSUS (JPAResource.cpp): the name of a particle resource from its user index (the row of the name table), for the log.
+extern "C" const char* port_particle_name(unsigned usrIdx) {
+    const ParticleResourceHolder* pHolder = MR::getParticleResourceHolder();
+    const char* pName = nullptr;
+    if (pHolder == nullptr || pHolder->mParticleNames == nullptr || static_cast< s32 >(usrIdx) >= pHolder->mParticleNames->getNumEntries() ||
+        !pHolder->mParticleNames->getValue(static_cast< s32 >(usrIdx), "name", &pName)) {
+        return nullptr;
+    }
+    return pName;
+}
+#endif

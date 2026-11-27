@@ -247,12 +247,17 @@ int main() {
     const bool on = mode && std::strcmp(mode, "0") != 0; // (off unless asked for: the default since r32)
     Check(Px(pic2, 4, 32)[0] == 255 && Px(pic2, 4, 32)[1] == 255 && Px(pic2, 4, 32)[2] == 255, "frame 2: the capture's alpha reads 1 (converted)");
     Check(on ? swaps1 == 2 : swaps1 == 0, on ? "frame 1: both converted captures made without a copy scene" : "frame 1: ordinary copies");
-    Check(on ? conv == 1 : conv == 0, on ? "frame 2: the capture converted for its TEXA reader" : "frame 2: nothing to convert");
+    const char* a1Env = std::getenv("GXV_EFBSWAP2_A1");
+    const bool a1 = on && a1Env && std::strcmp(a1Env, "0") != 0; // (swz24: the swapped RGB565 buffer's sampler returns alpha 1; the desktop emulates it with GL_TEXTURE_SWIZZLE_A = GL_ONE)
+    std::printf("a1 swaps=%u avoided=%u\n", backend::DebugA1Swaps(), backend::DebugA1Avoided());
+    Check(a1 ? conv == 0 : on ? conv == 1 : conv == 0, a1 ? "frame 2: the alpha-1 format gave the TEXA reader its alpha (no conversion)" : on ? "frame 2: the capture converted for its TEXA reader" : "frame 2: nothing to convert");
+    if (a1) Check(backend::DebugA1Swaps() >= 1 && backend::DebugA1Avoided() >= 1, "GXV_EFBSWAP2_A1: the buffer was given the format and its reader counted");
+    else Check(backend::DebugA1Swaps() == 0 && backend::DebugA1Avoided() == 0, "GXV_EFBSWAP2_A1 off: nothing set");
     const char* holdEnv = std::getenv("GXV_EFBSWAP2_HOLD");
     const bool hold = !holdEnv || std::atol(holdEnv) > 0; // (default 1800 pictures)
     const char* predEnv = std::getenv("GXV_EFBSWAP2_PREDICT");
     const bool predict = !predEnv || std::strcmp(predEnv, "0") != 0;
-    if (on && hold) {
+    if (on && hold && !a1) {
         // (frame 2 converted the indirect capture: frame 4's capture into it is an ordinary copy, frame 5 has no buffer to adopt)
         Check(adopts == 0 && holds == 1, "frame 4: the capture converted in frame 2 is held to ordinary copies (GXV_EFBSWAP2_HOLD)");
     } else {

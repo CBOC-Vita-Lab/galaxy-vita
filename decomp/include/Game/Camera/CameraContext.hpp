@@ -39,4 +39,10 @@ public:
     /* 0xB4 */ f32 mFarZ;
     /* 0xB8 */ f32 mFovy;
     /* 0xBC */ TVec2f mShakeOffset;
+#ifdef TARGET_PC
+    // (zoomclip23) The field of view the game set (setFovy's argument), before the handheld zoom narrows mFovy (CameraContext.cpp
+    // zoomedFovy). mFovy is what the picture, the screen positions and the Star Pointer use; this is the view of the original game,
+    // which the game's logic decisions (object clipping: ClippingJudge) use with GXV_ZOOM_LOGIC_VIEW. Equal to mFovy without zoom.
+    f32 mPortFovyGame;
+#endif
 };

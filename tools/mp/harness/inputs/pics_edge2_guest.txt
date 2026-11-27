@@ -1,0 +1,17 @@
+# checks83 (14 Nov): the EDGE HEAD (the off-screen player's head at the picture's edge) of scenarios/pics_edge2.yaml. The host stands still at
+# Good Egg 1; the guest runs sideways for 30 s (the stick held right: far past the host's picture), turns round and runs back for 30 s. The
+# host's frames between the two show the guest's head at the picture's edge (log: "puppet edge head slot=1"); on the way back it leaves the edge.
+# play = the scene barrier of the move to Good Egg 1.
+# scnfix (14 Nov): NAV = the first lines below are file2_observatory.txt's menu path (title -> Single Player -> file 2 -> Play This File -> the Observatory); an SMG_MP_AUTO console only opens its session once it is IN PLAY, so a script that starts at the barrier mark never got there (final run: the guest never joined, no barrier).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+8-8.5:A|B
+entry+3-3.2:A
+single+15-23:PX=0.25|PY=0.3
+single+18-18.2:A
+single+31-39:PX=0.52|PY=0.78
+single+34-34.2:A
+mark play /flow barrier release serial=1 / ~150
+play+10-40:SX=1
+play+46-76:SX=-1

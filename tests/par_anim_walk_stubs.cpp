@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+int port_logic_prof_flag = 0;  // (par25: read by J3DAnmTransformKey::calcTransform since the logic23 merge; unresolved it was a null load)
 J3DSys::J3DSys() {
 }
 J3DSys j3dSys;

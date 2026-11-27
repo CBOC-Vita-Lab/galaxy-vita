@@ -1,4 +1,5 @@
 #include "Game/Screen/PauseMenu.hpp"
+#include "Game/MP/MpMemProbe.hpp"  // memprobe
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Screen/ButtonPaneController.hpp"
 #include "Game/Screen/LuigiLetter.hpp"
@@ -35,6 +36,10 @@ namespace {
 // without a rebuild of the game. flags: 1 = the Luigi letter button is on screen (bottom middle).
 extern "C" void port_zoom_menu(int selecting);
 extern "C" void port_settings_panel_draw(int flags);
+// settingsnative: the native Settings menu (the MP menu family's KIND_SETTINGS) is open over the paused game: the pause menu's buttons are inert
+// meanwhile (Start and Select, also while a button is being captured, must not close it). platform/src/settings/settings_native.cpp.
+extern "C" bool port_settings_native_menu_open(void) __attribute__((weak));
+static inline bool settingsNativeOpen() { return port_settings_native_menu_open != nullptr && port_settings_native_menu_open(); }
 #endif
 
 namespace NrvPauseMenu {
@@ -49,6 +54,9 @@ namespace NrvPauseMenu {
 PauseMenu::PauseMenu()
     : LayoutActor("\x83\x7c\x81\x5b\x83\x59\x83\x81\x83\x6a\x83\x85\x81\x5b", true), _20(), _24(), _28(0.0f, 50.0f), _30(), mLuigiLetter(), _38(), mStageTitleOffset(0.0f, 39.0f),
       mCoinNumPos(0.0f, 0.0f), mStarPieceNumPos(0.0f, 0.0f), _54(true) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 void PauseMenu::init(const JMapInfoIter& rIter) {
@@ -115,6 +123,7 @@ void PauseMenu::init(const JMapInfoIter& rIter) {
 }
 
 void PauseMenu::appear() {
+    MpMemProbe::log("pause");
     s32 coinNum = MR::getCoinNum();
     s32 starPieceNum = MR::getStarPieceNum();
 
@@ -195,7 +204,52 @@ void PauseMenu::kill() {
     }
 }
 
+#ifdef TARGET_PC
+extern "C" void port_log(const char* fmt, ...);
+static bool sGlyphSettingsSeen = false;   // (SMG_GLYPH_TEST: Settings has been open since the pause menu came up)
+#endif
 void PauseMenu::control() {
+#ifdef TARGET_PC
+    static bool sButtonsHidden = false;
+    if (settingsNativeOpen()) {
+        sGlyphSettingsSeen = true;   // settingsnative: nothing of the pause menu runs while Settings is open; the settings file is still kept (port_zoom_menu)
+        port_zoom_menu(0);
+        if (!sButtonsHidden) {   // its own pills (Back, Quit / Back to the Observatory, the letter) stay out of the Settings' way, the leave question's too
+            MR::hidePaneRecursive(this, "NBackUp");
+            if (_24 != nullptr) MR::hidePaneRecursive(this, "NBackDown");
+            if (_38 != nullptr) MR::hidePaneRecursive(this, "LetterButton");
+            sButtonsHidden = true;
+        }
+        return;
+    }
+    if (sButtonsHidden) {
+        MR::showPaneRecursive(this, "NBackUp");
+        if (_24 != nullptr) MR::showPaneRecursive(this, "NBackDown");
+        if (_38 != nullptr) MR::showPaneRecursive(this, "LetterButton");
+        sButtonsHidden = false;
+    }
+#endif
+#ifdef TARGET_PC
+    {   // harness only (SMG_GLYPH_TEST=1, desktop): the pause menu's own message window, with its A picture (Type_Key), is opened 40 pause turns after the pause menu
+        // came up and shut at 120 (before the settings test opens Settings at about 150); once Settings has been shut again it is opened a second time and left up.
+        // It shows the A button picture the renderer patches (platform/src/port/handheld_ui.cpp), before and after a swap, in the same scene.
+        static const bool glyphTest = [] { const char* e = getenv("SMG_GLYPH_TEST"); return e && *e && atoi(e) != 0; }();
+        static int sTurn = 0, sBox = 0;
+        if (glyphTest && isNerve(GET_NERVE(PauseMenu, PauseMenuNrvSelecting))) {
+            if (sGlyphSettingsSeen && sBox == 2) { sBox = 3; sTurn = 0; }   // Settings was shut: the second box after 40 more turns
+            ++sTurn;
+            if ((sBox == 0 || sBox == 3) && sTurn == 40) {
+                _30->appear("PauseMenu_ConfirmEndGame", SysInfoWindow::Type_Key, SysInfoWindow::TextPos_Center, SysInfoWindow::MessageType_System);
+                port_log("glyph test: message window %d up", sBox == 0 ? 1 : 2);
+                if (sBox == 0) sBox = 1; else sBox = 4;
+            } else if (sBox == 1 && sTurn == 120) {
+                _30->disappear();
+                port_log("glyph test: message window 1 shut");
+                sBox = 2;
+            }
+        }
+    }
+#endif
     _20->update();
 
     if (_24 != nullptr) {
@@ -287,6 +341,9 @@ void PauseMenu::forceToWaitAllButton() {
 }
 
 void PauseMenu::exeSelecting() {
+#ifdef TARGET_PC
+    if (settingsNativeOpen()) return;   // settingsnative: Start / Select / touch belong to the Settings menu, not the pause menu
+#endif
     bool isPointingTrigger = _20->isPointingTrigger() || (_24 != nullptr && _24->isPointingTrigger()) ||
                              (!(_38 == nullptr || _38->isHidden()) && _38->isPointingTrigger());
 

@@ -4,6 +4,7 @@
 #include "Game/Util/Array.hpp"
 
 class LiveActor;
+class J3DModel;
 
 class DrawBufferGroup {
 public:
@@ -21,6 +22,11 @@ public:
     void setDrawCameraType(s32);
     void setLightType(s32);
     s32 findExecuterIndex(const char*) const;
+#ifdef TARGET_PC
+    // GXV_HRW (hrw28, PortHrwSet.cpp): this group's pass for ONE executor and ONE model of it (the pair's partial draw): the group's setup as drawOpa / drawXlu make it, then the executor's
+    // drawers send only that model's packets (gPortHrwOnly).
+    void portHrwDrawOne(const DrawBufferExecuter* pExecuter, bool xlu, const J3DModel* pOnly) const;
+#endif
 
     bool isExecutorEmpty(int index) const {
         return mExecutors[index]->mNumActors == 0;

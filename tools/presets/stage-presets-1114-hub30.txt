@@ -1,0 +1,6 @@
+# stage-presets-1114-hub30.txt (pace33 PATCH9, 14 Nov 2026; an A/B file, NOT compiled in): the Comet Observatory and its domes at the locked even 30 by a row.
+# Console 2892a: the Observatory's trouble at the re-projected 60 is the game thread (pairs 31.0-31.6 ms, 15 ms stream waits, the speed guard), not the GPU (2.8 ms a picture).
+# PATCH9 fixes the two causes found and adds the automatic fallback (GXV_HRW_STAGE_AUTO); this file is only for seeing the locked 30 there at once, to compare.
+# One switch: GXV_STAGE_PRESETS_FILE=<this file>. Every other stage as compiled in.
+AstroGalaxy class=base clip_skipempty=1 reproj=1
+AstroDome class=base clip_skipempty=1 reproj=1

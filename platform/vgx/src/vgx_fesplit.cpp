@@ -15,7 +15,9 @@
 // At the frame's end the player waits until the finishing thread has done everything, then takes its arenas.
 #include "vgx_arena.h"
 #include "vgx_fesplit.h"
+#include "vgx_fepar.h"
 #include "vgx_fixes.h"
+#include "vgx_twocore.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,9 +29,15 @@
 #include <pthread.h>
 #include <thread>
 #include <vector>
+#ifdef __vita__
+#include <psp2/kernel/threadmgr.h>
+#endif
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));
 extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));
+// core3-38: the finishing thread's meter / yield cap when it is on the fourth core (vgx_galaxy.cpp; null in host tests): wake when it leaves its wait, checkpoint after each
+// batch (it naps there when it has run ~1 ms in one piece: GXV_CORE3_YIELD), sleep before it blocks.
+extern "C" void port_core3_finisher(int what) __attribute__((weak));
 extern "C" int64_t port_host_time_ns(void) __attribute__((weak));
 
 namespace vgx {
@@ -41,7 +49,7 @@ static std::vector<uint8_t> g_joinOut; // the join log of the frame FinishFrame 
 namespace {
 
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void Log(const char* fmt, ...) {
+__attribute__((format(printf, 1, 2))) void Log(const char* fmt, ...) {
     char line[512];
     va_list ap;
     va_start(ap, fmt);
@@ -57,14 +65,16 @@ int64_t NowNs() {
 
 enum : uint32_t { OP_NEXT = 1, OP_SETFS, OP_SETVS, OP_PROJ, OP_MTX, OP_LIGHT, OP_TEV, OP_STATE, OP_JOB, OP_XFORM, OP_JOBS,
                   OP_SETFSK, OP_SETVSK, OP_SETFSID, OP_SETVSID, // (these four: GXV_FECUT_KEYID, see SendFs)
-                  OP_COPY }; // (GXV_SPLIT_COPY: a display-list cache entry's vertices into the arena, see Copy)
+                  OP_COPY,   // (GXV_SPLIT_COPY: a display-list cache entry's vertices into the arena, see Copy)
+                  OP_CALL }; // (GXV_FE_PARALLEL: a function of the player's with words of its own, see Call: vgx_fepar.h)
 constexpr uint32_t kChunkWords = 1u << 14; // 64 KiB; the largest operation (a full matrix palette) is 626 words
 struct Chunk {
     uint32_t w[kChunkWords];
     Chunk* next = nullptr;
 };
 static_assert(sizeof(FsKey) % 4 == 0 && sizeof(VsKey) % 4 == 0 && sizeof(DrawJob) % 4 == 0, "keys and jobs travel as words");
-static_assert(sizeof(RenderState) == 44 && sizeof(TexBind) == 8, "render state / texture bindings travel as words");
+static_assert(sizeof(RenderState) == 44 && sizeof(TexBind) == 12, "render state / texture bindings travel as words");
+constexpr uint32_t kTexWords = 8 * sizeof(TexBind) / 4; // (8 bindings; 24 words: GXV_LODBIAS_SAMPLER made a binding 12 bytes)
 constexpr uint32_t kJobWords = sizeof(DrawJob) / 4;
 
 int g_mode = -1;  // GXV_SPLIT
@@ -79,6 +89,9 @@ bool g_started = false;
 std::mutex& g_poolMtx = *new std::mutex;
 std::vector<Chunk*>& g_pool = *new std::vector<Chunk*>;
 Chunk* TakeChunk() {
+#if defined(VGX_CLONE_B)
+    return static_cast<Chunk*>(vgx2_take_chunk()); // (GXV_FE_TWOCORE: the second worker's chunks are the player's pool's)
+#endif
     {
         std::lock_guard<std::mutex> lk(g_poolMtx);
         if (!g_pool.empty()) {
@@ -91,24 +104,62 @@ Chunk* TakeChunk() {
     return new Chunk();
 }
 void GiveChunk(Chunk* c) {
+#if defined(VGX_CLONE_B)
+    vgx2_give_chunk(c);
+    return;
+#endif
     std::lock_guard<std::mutex> lk(g_poolMtx);
     g_pool.push_back(c);
 }
 
-// ---- shared between the two threads
-std::atomic<uint32_t> g_published{0}; // operations the player has made visible
-std::atomic<uint32_t> g_done{0};      // operations the finishing thread has done
-std::atomic<bool> g_bSleeping{false}, g_aWaiting{false};
+// ---- shared between the two threads (cache-line separated: player-written vs finisher-written)
+alignas(64) std::atomic<uint32_t> g_published{0}; // operations the player has made visible
+std::atomic<bool> g_aWaiting{false};
 std::atomic<bool> g_framing{false};   // (GXV_SPLIT_POLL_US; written by the player) it is sending a frame's operations: the finishing thread polls
+alignas(64) std::atomic<uint32_t> g_done{0};      // operations the finishing thread has done
+std::atomic<bool> g_bSleeping{false};
+std::atomic<bool> g_bBusyWait{false};
 std::mutex& g_mtx = *new std::mutex;
 std::condition_variable& g_cvB = *new std::condition_variable;
 std::condition_variable& g_cvA = *new std::condition_variable;
+#ifdef __vita__
+// Direct Vita kernel binary semaphores (maxCount=1) replace heavy libpthread-embedded mutex+condvar
+// signaling on the hot player/finisher wake paths (Strikers real-Vita proven win). Falls back to
+// g_mtx/g_cv* if creation ever fails.
+SceUID g_semA = -1;
+SceUID g_semB = -1;
+inline void SignalFinisher() {
+    if (g_semB >= 0) {
+        sceKernelSignalSema(g_semB, 1);
+    } else {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cvB.notify_all();
+    }
+}
+inline void SignalPlayer() {
+    if (g_semA >= 0) {
+        sceKernelSignalSema(g_semA, 1);
+    } else {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        g_cvA.notify_all();
+    }
+}
+#else
+inline void SignalFinisher() {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_cvB.notify_all();
+}
+inline void SignalPlayer() {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_cvA.notify_all();
+}
+#endif
 std::atomic<int64_t> g_bCpuUs{0};     // the finishing thread's CPU time (now and then)
 Chunk* g_firstChunk = nullptr;
 // Who runs the operations: the finishing thread, in batches, or the player at a frame's end when the finishing thread is not
 // running (it takes over what is left instead of waiting: never slower than the single-thread path for that part). Whoever
 // holds g_busy owns the reader and the finishing state (F).
-std::atomic<bool> g_busy{false};
+alignas(64) std::atomic<bool> g_busy{false};
 struct Reader {
     Chunk* ch = nullptr;
     uint32_t pos = 0;
@@ -187,8 +238,9 @@ inline bool RunTakes(const DrawJob& j) {
     const uint32_t* last = g_run.sub[g_run.n - 1];
     return j.kind == b.kind && j.gxPrim == b.gxPrim && j.prim == b.prim && j.copyable == b.copyable && j.layoutMask == b.layoutMask &&
            j.chunk == b.chunk && j.stride == b.stride && j.vsTwin == b.vsTwin && j.vbuf == b.vbuf && j.vtxOffset == b.vtxOffset &&
-           j.idxOffset == b.idxOffset && j.vtxFirst == b.vtxFirst && j.padTwin == b.padTwin && j.pad[0] == b.pad[0] &&
-           j.ab == 0 && b.ab == 0 && // (GXV_SHADOWFILL_BOUNDS: a job with bounds of its own is never in a run: its bounds are not a run's)
+           j.idxOffset == b.idxOffset && j.vtxFirst == b.vtxFirst && j.padTwin == b.padTwin && j.pad[0] == b.pad[0] && j.owner == b.owner &&
+           j.ab == 0 && b.ab == 0 && !((j.cover | b.cover) & 8u) && // (GXV_CLEARQ: a clear quad carries its colour in the job: never in a run)
+            // (GXV_SHADOWFILL_BOUNDS: a job with bounds of its own is never in a run: its bounds are not a run's)
            j.vtxStart == last[1] + last[6] * j.stride && j.first == last[0] + last[6];
 }
 void FlushRun(); // (below: writes the run out; called by Begin for any other operation, and by Publish)
@@ -216,6 +268,8 @@ constexpr uint32_t kKeyIdMax = 4096;
 uint8_t g_fsKept[kKeyIdMax], g_vsKept[kKeyIdMax]; // (the player's: ids whose key the finishing side keeps; set at the keeping send)
 uint64_t g_keyIdSends[4] = {}; // (counters: fragment keys sent whole / by id, vertex keys sent whole / by id; the player's)
 bool g_finished = false;
+struct SpinSite { std::atomic<uint32_t> waits{0}, spunOut{0}, takeOvers{0}, maxUs{0}, maxEverUs{0}; };
+SpinSite g_spin[2]; // (hitch30: see SpinCounters)
 std::atomic<int64_t> g_waitNs{0};      // the player's waits for the finishing thread (all frames; read by the perf line)
 std::atomic<uint32_t> g_waitFrames{0}; // frames finished split
 uint64_t g_grows = 0;
@@ -320,14 +374,44 @@ inline void End(uint32_t words) {
 }
 inline void Publish() {
     if (g_run.n) FlushRun(); // (GXV_FXJOIN: what is held goes out first)
+#if defined(VGX_CLONE_B)
+    return; // (GXV_FE_TWOCORE: the second worker's operations go to the player, vgx2_b_split_end)
+#endif
     g_published.store(g_produced, std::memory_order_release);
 }
+// (GXV_SPLIT_WAKESTAT=1, with GXV_WORKLOAD_PROBE=1: what the wake-ups cost the player. Wake calls are one per GXV_SPLIT_WAKE_JOBS jobs; a call that
+// finds the finishing thread asleep takes the mutex and signals the condition variable, three kernel calls on the console. g_wakeNs is the time of
+// those, read with the clock only when the statistics are asked for; g_finSleeps counts the times the finishing thread went to sleep.)
+uint64_t g_wakeCalls = 0, g_wakeNotifies = 0, g_wakeNs = 0, g_finSleeps = 0;
+bool WakeStat() {
+    const bool on = VGX_KNOB(EnvInt("GXV_SPLIT_WAKESTAT", 0) != 0) != 0;
+    return on;
+}
+// GXV_SPLIT_WAKE_JOBS=<n> (read once; 4..256, default 16 = as before): jobs between two wake-ups of the finishing thread. A larger n means fewer
+// kernel calls on the player while the finishing thread sleeps between batches; the operations and their order are the same, the finishing thread
+// is a little further behind and the player runs a little more of the tail itself at the frame's end (Drain).
+uint32_t WakeJobs() {
+    const uint32_t n = static_cast<uint32_t>(VGX_KNOB([] {
+        const long v = EnvInt("GXV_SPLIT_WAKE_JOBS", 16);
+        return static_cast<uint32_t>(v < 4 ? 16 : v > 256 ? 256 : v);
+    }()));
+    return n;
+}
 void Wake(bool always) {
+#if defined(VGX_CLONE_B)
+    (void)always;
+    return;
+#endif
     Publish(); // (GXV_SPLIT_PUBLISH: what is there, before the finishing thread is woken for it)
     std::atomic_thread_fence(std::memory_order_seq_cst);
+    ++g_wakeCalls;
+    // Dekker pair with ThreadMain's seq_cst store(g_bSleeping=true) + seq_cst load(g_published):
+    // fence above orders our Publish() store before this relaxed load (avoids 2 redundant dmb ish per Wake on ARMv7).
     if (always || g_bSleeping.load(std::memory_order_relaxed)) {
-        std::lock_guard<std::mutex> lk(g_mtx);
-        g_cvB.notify_one();
+        ++g_wakeNotifies;
+        const int64_t t0 = WakeStat() ? NowNs() : 0;
+        SignalFinisher();
+        if (t0) g_wakeNs += static_cast<uint64_t>(NowNs() - t0);
     }
 }
 // After `n` jobs. GXV_SPLIT_POLL_US=<n> (ported from Producdevity's fork; read once; 0..2000, default 0 = off): the first job of a
@@ -336,6 +420,10 @@ void Wake(bool always) {
 // (the fork measured ~5 % of the player's time on the console at one per 16 draws; ours sleeps after 64 empty loads, as theirs did).
 // The operations, their order and who runs them are unchanged; publication stays every GXV_SPLIT_PUBLISH jobs.
 void WakeCounted(uint32_t n) {
+#if defined(VGX_CLONE_B)
+    (void)n;
+    return;
+#endif
     if (g_pollUs > 0) {
         if (!g_framing.load(std::memory_order_relaxed)) {
             g_framing.store(true, std::memory_order_relaxed);
@@ -344,7 +432,7 @@ void WakeCounted(uint32_t n) {
         return;
     }
     g_jobsSinceWake += n;
-    if (g_jobsSinceWake >= 16) {
+    if (g_jobsSinceWake >= WakeJobs()) {
         g_jobsSinceWake = 0;
         Wake(false);
     }
@@ -359,17 +447,34 @@ void Drain() {
     int64_t lastReport = t0;
     for (unsigned spins = 0;; ++spins) {
         if (g_done.load(std::memory_order_acquire) == target) break;
-        if (!g_busy.exchange(true, std::memory_order_acquire)) {
+        // TTAS: read-only probe first so spinning never bounces exclusive cache-line ownership away from the finisher core.
+        if (!g_busy.load(std::memory_order_relaxed) && !g_busy.exchange(true, std::memory_order_acquire)) {
             g_stolen.fetch_add(RunUpTo(target, ~0u), std::memory_order_relaxed);
-            g_busy.store(false, std::memory_order_release);
+            g_busy.store(false, std::memory_order_seq_cst);
+            if (g_bBusyWait.load(std::memory_order_seq_cst)) {
+                SignalFinisher();
+            }
             break;
         }
         // (the finishing thread is in the middle of a batch: a few dozen operations)
-        if (spins < 4096) continue;
+        if (spins < 512) {
+#if defined(__arm__) || defined(__aarch64__)
+            __asm__ __volatile__("yield");
+#endif
+            continue;
+        }
         g_aWaiting.store(true, std::memory_order_seq_cst);
         if (g_busy.load(std::memory_order_seq_cst)) {
-            std::unique_lock<std::mutex> lk(g_mtx);
-            g_cvA.wait_for(lk, std::chrono::milliseconds(1), [] { return !g_busy.load(std::memory_order_acquire); });
+#ifdef __vita__
+            if (g_semA >= 0) {
+                SceUInt to = 1000;
+                sceKernelWaitSema(g_semA, 1, &to);
+            } else
+#endif
+            {
+                std::unique_lock<std::mutex> lk(g_mtx);
+                g_cvA.wait_for(lk, std::chrono::milliseconds(1), [] { return !g_busy.load(std::memory_order_acquire); });
+            }
         }
         g_aWaiting.store(false, std::memory_order_relaxed);
         const int64_t now = NowNs();
@@ -433,13 +538,13 @@ void SendState(const DrawStateRef& st) {
     g_sent.vsId = st.vsId;
     g_sent.useFs = st.useFs;
     g_sent.texMask = st.texMask;
-    constexpr uint32_t n = 3 + 11 + 16;
+    constexpr uint32_t n = 3 + 11 + kTexWords;
     uint32_t* p = Begin(OP_STATE, n);
     p[0] = st.vsId | (static_cast<uint32_t>(st.useFs) << 16);
     p[1] = st.texMask;
     p[2] = st.serial;
     CopyWords(p + 3, st.rs, 11);
-    CopyWords(p + 14, st.tex, 16);
+    CopyWords(p + 14, st.tex, kTexWords);
     End(n);
 }
 
@@ -527,7 +632,7 @@ void Run(uint32_t type, const uint32_t* p) {
         F->texMask = static_cast<uint8_t>(p[1]);
         F->serial = p[2];
         CopyWords(&F->rs, p + 3, 11);
-        CopyWords(F->tex, p + 14, 16);
+        CopyWords(F->tex, p + 14, kTexWords);
         break;
     case OP_JOB: {
         DrawJob j;
@@ -562,6 +667,11 @@ void Run(uint32_t type, const uint32_t* p) {
     case OP_COPY: { // (GXV_SPLIT_COPY)
         const uint64_t d = p[0] | (static_cast<uint64_t>(p[1]) << 32), from = p[2] | (static_cast<uint64_t>(p[3]) << 32);
         std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(d)), reinterpret_cast<const void*>(static_cast<uintptr_t>(from)), p[4]);
+        break;
+    }
+    case OP_CALL: { // (GXV_FE_PARALLEL)
+        const uint64_t f = p[0] | (static_cast<uint64_t>(p[1]) << 32);
+        reinterpret_cast<CallFn>(static_cast<uintptr_t>(f))(p + 2);
         break;
     }
     default:
@@ -607,12 +717,14 @@ void Jitter() {
 void ThreadMain() {
     if (g_threadInit) g_threadInit(g_core);
     int64_t lastCpu = 0, lastTick = 0;
+    bool awake = false;
     for (;;) {
         uint32_t pub = g_published.load(std::memory_order_acquire);
         uint32_t done = g_done.load(std::memory_order_acquire);
         if (pub == done) {
             for (int i = 0; i < 64 && pub == done; ++i) pub = g_published.load(std::memory_order_acquire);
             if (pub == done) {
+                if (awake) { awake = false; if (port_core3_finisher) port_core3_finisher(2); }
                 if (port_thread_cpu_us) {
                     const int64_t now = NowNs();
                     if (now - lastCpu > 50000000) { // (every 50 ms at most: it is a system call)
@@ -633,31 +745,53 @@ void ThreadMain() {
                     std::this_thread::sleep_for(std::chrono::microseconds(g_pollUs));
                     continue;
                 }
+                ++g_finSleeps;
                 g_bSleeping.store(true, std::memory_order_seq_cst);
                 if (g_published.load(std::memory_order_seq_cst) == done) {
-                    std::unique_lock<std::mutex> lk(g_mtx);
-                    g_cvB.wait_for(lk, std::chrono::milliseconds(2), [done] { return g_published.load(std::memory_order_acquire) != done; });
+#ifdef __vita__
+                    if (g_semB >= 0) {
+                        SceUInt to = 2000;
+                        sceKernelWaitSema(g_semB, 1, &to);
+                    } else
+#endif
+                    {
+                        std::unique_lock<std::mutex> lk(g_mtx);
+                        g_cvB.wait_for(lk, std::chrono::milliseconds(2), [done] { return g_published.load(std::memory_order_acquire) != done; });
+                    }
                 }
                 g_bSleeping.store(false, std::memory_order_relaxed);
                 continue;
             }
         }
+        if (!awake) { awake = true; if (port_core3_finisher) port_core3_finisher(0); }
         Jitter();
         if (g_busy.exchange(true, std::memory_order_acquire)) {
             // (the player is doing the rest itself: it is quick)
-            std::unique_lock<std::mutex> lk(g_mtx);
-            g_cvB.wait_for(lk, std::chrono::milliseconds(1), [] { return !g_busy.load(std::memory_order_acquire); });
+            g_bBusyWait.store(true, std::memory_order_seq_cst);
+            if (g_busy.load(std::memory_order_seq_cst)) {
+#ifdef __vita__
+                if (g_semB >= 0) {
+                    SceUInt to = 1000;
+                    sceKernelWaitSema(g_semB, 1, &to);
+                } else
+#endif
+                {
+                    std::unique_lock<std::mutex> lk(g_mtx);
+                    g_cvB.wait_for(lk, std::chrono::milliseconds(1), [] { return !g_busy.load(std::memory_order_acquire); });
+                }
+            }
+            g_bBusyWait.store(false, std::memory_order_relaxed);
             continue;
         }
         // (in batches, so that the player can take over at the end of its frame without waiting long; what is published is read
         // again now that the reader is ours: the player may have run some of it meanwhile)
         RunUpTo(g_published.load(std::memory_order_acquire), 32);
         Jitter();
-        g_busy.store(false, std::memory_order_release);
+        g_busy.store(false, std::memory_order_seq_cst);
         if (g_aWaiting.load(std::memory_order_seq_cst)) {
-            std::lock_guard<std::mutex> lk(g_mtx);
-            g_cvA.notify_all();
+            SignalPlayer();
         }
+        if (port_core3_finisher) port_core3_finisher(1);  // (after the player was told: a nap here never holds it up)
     }
 }
 
@@ -668,12 +802,19 @@ bool DiagnosticsInTheWay() {
 }
 
 void Start() {
+#if defined(VGX_CLONE_B)
+    return; // (GXV_FE_TWOCORE: never a thread of its own)
+#endif
     F = new Finisher();
     arena::ReserveSplit(F->draws, F->idx, F->uni, arena::Get()); // (they are swapped into the frame buffers: vgx_arena.h)
     if (Verify()) V = new Shadow();
     g_firstChunk = g_wr = TakeChunk();
     g_wrPos = 0;
     g_rd.ch = g_firstChunk;
+#ifdef __vita__
+    if (g_semA < 0) g_semA = sceKernelCreateSema("vgx_fe_a", 0, 0, 1, nullptr);
+    if (g_semB < 0) g_semB = sceKernelCreateSema("vgx_fe_b", 0, 0, 1, nullptr);
+#endif
     // (256 KiB of stack: the block builders keep a few KiB of floats on it; the system default is smaller on some hosts)
     pthread_attr_t attr;
     pthread_attr_init(&attr);
@@ -681,6 +822,10 @@ void Start() {
     pthread_t th;
     if (pthread_create(&th, &attr, [](void*) -> void* { ThreadMain(); return nullptr; }, nullptr) != 0) {
         pthread_attr_destroy(&attr);
+#ifdef __vita__
+        if (g_semA >= 0) { sceKernelDeleteSema(g_semA); g_semA = -1; }
+        if (g_semB >= 0) { sceKernelDeleteSema(g_semB); g_semB = -1; }
+#endif
         Log("fesplit: the finishing thread could not be started: the split stays off");
         g_mode = 0;
         return;
@@ -696,7 +841,7 @@ bool SameRec(const DrawRec& a, const DrawRec& b) {
     return a.vsId == b.vsId && a.fsId == b.fsId && a.prim == b.prim && a.texMask == b.texMask && a.cover == b.cover && a.exX == b.exX &&
            a.exY == b.exY && a.exW == b.exW && a.exH == b.exH && a.layoutMask == b.layoutMask && a.vbuf == b.vbuf && a.vtxOffset == b.vtxOffset &&
            a.vtxCount == b.vtxCount && a.idxOffset == b.idxOffset && a.idxCount == b.idxCount && a.vtxFirst == b.vtxFirst && a.vchunk == b.vchunk &&
-           SameWords(a.ublock, b.ublock, UB_COUNT) && SameStruct(a.rs, b.rs) && SameWords(a.tex, b.tex, 16) && a.ab == b.ab &&
+           SameWords(a.ublock, b.ublock, UB_COUNT) && SameStruct(a.rs, b.rs) && SameWords(a.tex, b.tex, kTexWords) && a.ab == b.ab &&
            (!a.ab || (a.abX == b.abX && a.abY == b.abY && a.abW == b.abW && a.abH == b.abH));
 }
 
@@ -806,6 +951,30 @@ void SetThreadInit(void (*fn)(int core)) { g_threadInit = fn; }
 void SetThreadTick(void (*fn)()) { g_threadTick = fn; }
 
 uint32_t StolenOps() { return g_stolen.load(std::memory_order_relaxed); }
+uint32_t BoundSpinUs() {
+    static const uint32_t v = static_cast<uint32_t>(std::min<long>(std::max<long>(EnvInt("GXV_BOUND_SPIN_US", 100), 0), 2000));
+    return v;
+}
+void NoteSpin(int site, int64_t waitNs, bool spunOut, bool tookOver) {
+    SpinSite& c = g_spin[site];
+    const uint32_t us = static_cast<uint32_t>(waitNs / 1000);
+    c.waits.fetch_add(1, std::memory_order_relaxed);
+    if (spunOut) c.spunOut.fetch_add(1, std::memory_order_relaxed);
+    if (tookOver) c.takeOvers.fetch_add(1, std::memory_order_relaxed);
+    uint32_t m = c.maxUs.load(std::memory_order_relaxed);
+    while (us > m && !c.maxUs.compare_exchange_weak(m, us, std::memory_order_relaxed)) {}
+    uint32_t e = c.maxEverUs.load(std::memory_order_relaxed);
+    while (us > e && !c.maxEverUs.compare_exchange_weak(e, us, std::memory_order_relaxed)) {}
+}
+void SpinCounters(int site, uint32_t out[5]) {
+    SpinSite& c = g_spin[site];
+    out[0] = c.waits.load(std::memory_order_relaxed);
+    out[1] = c.spunOut.load(std::memory_order_relaxed);
+    out[2] = c.takeOvers.load(std::memory_order_relaxed);
+    out[3] = c.maxUs.exchange(0, std::memory_order_relaxed);
+    out[4] = c.maxEverUs.load(std::memory_order_relaxed);
+}
+void WakeCounters(uint64_t out[4]) { out[0] = g_wakeCalls; out[1] = g_wakeNotifies; out[2] = g_wakeNs; out[3] = g_finSleeps; }
 
 // GXV_SPLIT_COPY (see vgx_fesplit.h). Not with GXV_SPLIT=2: the shadow reads the arena's vertices on the player (transforms, rigid merges).
 bool CopiesVertices() { return g_on && g_copy && !Verify(); }
@@ -850,6 +1019,9 @@ void FrameBegin() {
     on = on && g_started;
     if (on && V) V->ResetFrame();
     g_on = on;
+#if !defined(VGX_CLONE_B)
+    two::Init(); // (GXV_FE_TWOCORE)
+#endif
 }
 
 void Proj(bool stale) {
@@ -963,6 +1135,18 @@ void Tev(uint16_t fsId, const FsKey& fs, const uint16_t texW[8], const uint16_t 
     }
 }
 
+// GXV_FE_PARALLEL (vgx_fepar.h): `fn` runs with `n` words copied here, in the operations' order, on whichever thread runs them (the
+// finishing thread, or the player at a Drain), never on two at once.
+void Call(CallFn fn, const uint32_t* w, uint32_t n) {
+    uint32_t* p = Begin(OP_CALL, n + 2);
+    const uint64_t f = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(fn));
+    p[0] = static_cast<uint32_t>(f);
+    p[1] = static_cast<uint32_t>(f >> 32);
+    CopyWords(p + 2, w, n);
+    End(n + 2);
+}
+bool OffThreadOk() { return g_on && !Verify(); }
+
 void Copy(size_t offset, const uint8_t* src, uint32_t bytes) {
     uint8_t* const v = Pending().vtx.data() + offset;
     uint32_t* p = Begin(OP_COPY, 5);
@@ -1068,6 +1252,39 @@ void FlushRun() {
     }
     WakeCounted(n);
 }
+// hitch30: FinishFrame found the reader held by the finishing thread (it is in a batch of at most 32 operations, a few dozen
+// microseconds). The old loop spun on the exchange for good (its std::this_thread::yield() is empty on the console), which on a core
+// the finishing thread has to share (a stock console: GXV_STOCK_SIM=1, workers and render thread on core 1) can burn the game thread's
+// slice. Now: spin GXV_BOUND_SPIN_US (default 100; 0 = the old spin), then sleep on g_cvA as Drain does (the finishing thread
+// notifies it when it lets go; 1 ms bound). Not a take-over: the reader is the finishing thread's until its batch ends.
+void TakeReaderBounded() {
+    const int64_t t0 = NowNs();
+    const int64_t bound = static_cast<int64_t>(BoundSpinUs()) * 1000;
+    bool out = false;
+    for (unsigned spins = 1;; ++spins) {
+        if (!g_busy.load(std::memory_order_relaxed) && !g_busy.exchange(true, std::memory_order_acquire)) break;
+        if (bound == 0) continue; // (the old spin)
+        if (!out) {
+            if ((spins & 15u) != 0 || NowNs() - t0 < bound) continue; // (the clock is a kernel call on the console: every 16 polls)
+            out = true;
+        }
+        g_aWaiting.store(true, std::memory_order_seq_cst);
+        if (g_busy.load(std::memory_order_seq_cst)) {
+#ifdef __vita__
+            if (g_semA >= 0) {
+                SceUInt to = 1000;
+                sceKernelWaitSema(g_semA, 1, &to);
+            } else
+#endif
+            {
+                std::unique_lock<std::mutex> lk(g_mtx);
+                g_cvA.wait_for(lk, std::chrono::milliseconds(1), [] { return !g_busy.load(std::memory_order_acquire); });
+            }
+        }
+        g_aWaiting.store(false, std::memory_order_relaxed);
+    }
+    NoteSpin(0, NowNs() - t0, out, false);
+}
 } // namespace
 
 void FxJoinCounters(uint64_t out[2]) { out[0] = g_runJobs; out[1] = g_runOps; }
@@ -1085,8 +1302,7 @@ void FinishFrame(CmdBuf& buf) {
     Drain();
     g_waitFrames.fetch_add(1, std::memory_order_relaxed);
     // (everything is done; the reader is taken so that the finishing thread cannot touch its state while it is handed over)
-    for (unsigned spins = 0; g_busy.exchange(true, std::memory_order_acquire); ++spins)
-        if (spins > 4096) std::this_thread::yield(); // (it is between two batches of nothing: it lets go at once)
+    if (g_busy.exchange(true, std::memory_order_acquire)) TakeReaderBounded(); // (it is between two batches: it lets go at once)
     if (V) ShadowSync(buf.cmds);
     // The placeholders become the records the finishing thread made (or go: merged).
     std::vector<Cmd>& cmds = buf.cmds;
@@ -1112,8 +1328,96 @@ void FinishFrame(CmdBuf& buf) {
     g_joinOut.swap(F->joinLog);
     stats::Cur().drawCalls += F->records;
     F->ResetFrame();
-    g_busy.store(false, std::memory_order_release);
+    fepar::FrameFinished(CurrentFrame()); // (GXV_FE_PARALLEL: the reader is held: what the operations counted is the player's to read)
+    g_busy.store(false, std::memory_order_seq_cst);
+    if (g_bBusyWait.load(std::memory_order_seq_cst)) SignalFinisher();
 }
 
+// ---- GXV_FE_TWOCORE (vgx_twocore.cpp): the player's sent state for the hand-over; the second worker's chain of operations
+extern "C" int VGX2_SIDE(split_objs)(Vgx2Obj* out) {
+    int n = 0;
+    out[n++] = Vgx2Obj{&g_sentFs, static_cast<uint32_t>(sizeof g_sentFs)};
+    out[n++] = Vgx2Obj{&g_sentVs, static_cast<uint32_t>(sizeof g_sentVs)};
+    out[n++] = Vgx2Obj{&g_sent, static_cast<uint32_t>(sizeof g_sent)};
+    return n;
+}
+#if defined(VGX_CLONE_B)
+// A segment's operations: a chain of its own, from the player's pool; job numbers from 0.
+extern "C" void vgx2_b_split_begin(void) {
+    g_on = true;
+    g_jobs = 0;
+    g_sentFs = g_sentVs = -1;
+    g_sent.valid = false;
+    std::memset(g_fsKept, 0, sizeof g_fsKept); // (GXV_FECUT_KEYID: a key is sent whole the first time in each segment)
+    std::memset(g_vsKept, 0, sizeof g_vsKept);
+    g_run.n = 0;
+    g_firstChunk = g_wr = TakeChunk();
+    g_wrPos = 0;
+    g_produced = 0;
+}
+extern "C" void vgx2_b_split_end(Vgx2Seg* s) {
+    if (g_run.n) FlushRun();
+    if (!g_produced) {
+        GiveChunk(g_firstChunk);
+        s->firstChunk = s->lastChunk = nullptr;
+    } else {
+        s->firstChunk = g_firstChunk;
+        s->lastChunk = g_wr;
+    }
+    s->lastPos = g_wrPos;
+    s->ops = g_produced;
+    s->jobs = g_jobs;
+    g_firstChunk = g_wr = nullptr;
+    g_produced = 0;
+    g_on = false;
+}
+extern "C" void vgx2_b_split_drop(void) {
+    for (Chunk* c = g_firstChunk; c;) {
+        Chunk* nx = c == g_wr ? nullptr : c->next;
+        GiveChunk(c);
+        c = nx;
+    }
+    g_firstChunk = g_wr = nullptr;
+    g_produced = 0;
+    g_on = false;
+}
+#else
+extern "C" void* vgx2_take_chunk(void) { return TakeChunk(); }
+extern "C" void vgx2_give_chunk(void* c) { GiveChunk(static_cast<Chunk*>(c)); }
+// The second worker's operations go into the stream here, after the player's own: the finishing thread runs them in that order. Returns
+// the player's jobs before them (the segment's job numbers count from there).
+extern "C" uint32_t vgx2_a_split_splice(void* first, void* last, uint32_t lastPos, uint32_t ops, uint32_t jobs) {
+    const uint32_t base = g_jobs;
+    if (!first || !ops) return base;
+    if (g_run.n) FlushRun();
+    // (Begin always leaves the word for an OP_NEXT)
+    g_wr->next = static_cast<Chunk*>(first);
+    g_wr->w[g_wrPos] = OP_NEXT;
+    ++g_produced;
+    g_wr = static_cast<Chunk*>(last);
+    g_wrPos = lastPos;
+    g_produced += ops;
+    g_jobs += jobs;
+    g_jobsSincePublish = 0;
+    Wake(false);
+    return base;
+}
+extern "C" void vgx2_a_split_drop(void* first) {
+    for (Chunk* c = static_cast<Chunk*>(first); c;) {
+        Chunk* nx = c->next;
+        GiveChunk(c);
+        c = nx;
+    }
+}
+extern "C" int vgx2_a_split_on(void) { return g_on && g_started && !Verify() ? 1 : 0; }
+#endif
 } // namespace split
 } // namespace vgx
+
+// GXV_FE_PARALLEL: the decode on the finishing thread (vgx_fepar.h), compiled with the operations it rides on (every build and host
+// test that links the split links it).
+#include "vgx_fepar_impl.h"
+#if !defined(VGX_CLONE_B)
+// GXV_FE_TWOCORE: the player's side of the two-core front end (vgx_twocore.h), compiled here for the same reason.
+#include "vgx_twocore_impl.h"
+#endif

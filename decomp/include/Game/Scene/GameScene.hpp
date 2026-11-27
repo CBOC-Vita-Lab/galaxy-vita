@@ -59,6 +59,7 @@ public:
     inline bool isPlayMovie() const;
 #ifdef TARGET_PC
     s32 pauseFreezeStep() const;
+    int portHrwFresh(u32 pairId, bool pointer) const;  // (hrw27, GXV_HRW: the partial draw of a half-rate pair's second picture)
     void capturePauseFreeze() const;
     void drawPauseFreeze() const;
 #endif
@@ -72,7 +73,9 @@ public:
     u8 _29;
 #ifdef TARGET_PC
     // PETARI_PAUSE_FREEZE (GameScene.cpp): the pause menu's frozen 3D picture, drawn from one capture.
+    u32 portPipeFlags() const;  // (GXV_DRAWPIPE, dpengine: the flags that pick the draw's branches; GameScene.cpp)
     mutable s32 mPauseFreezePictures;  // pictures drawn since the pause menu opened (0: not frozen)
     mutable u32 mPauseFreezeSizeGen;   // the renderer's picture-size generation at the last capture
+    u32 mPortScriptGen;                // route24 (PETARI_SCRIPT_ANCHOR=play): this scene's number, given in init()
 #endif
 };

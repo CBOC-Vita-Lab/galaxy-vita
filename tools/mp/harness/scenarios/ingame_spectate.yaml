@@ -1,0 +1,19 @@
+name: ingame_spectate
+description: spectate - guest falls into a bubble 25 s after the scene starts and watches the host run around Good Egg
+shot_size: 960x544
+seconds: 460
+requires: {strings: [SMG_MP_AUTO_MODE, 'spectate']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory+30,128-150:SY=1,132:A,138:A,144:A,150-165:SX=1|SY=1,155:A,160:A,165-185:SY=1,170:A,175:A,180:A,185-200:SX=-1|SY=1,190:A,195:A,200-240:SY=1,205:A,210:A,215:A,220:A,225:A,230:A"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory+30,135-135.3:Z,160-160.3:Z,185-185.3:SPIN"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] bubble on slot=1 /'
+  - 'expect guest /\[mp\] spectate: /'

@@ -89,5 +89,21 @@ public:
     u32 mViewMemoGen = 0;       // (GXV_VIEW_KEEP) the memo store's generation mViewMemo belongs to
     void* mParAnim = nullptr;   // (GXV_PAR_ANIM) this model's speculation record: its job in the open batch, its misses (ModelManager.cpp)
     u32 mParAnimGen = 0;        // (GXV_PAR_ANIM) the record store's generation mParAnim belongs to
+    u64 mDlTmHash = 0;          // (GXV_DL_STATIC_TM) the content of the plain texture matrices after the last full computation (ModelManager.cpp DlStaticTmHash)
+    u8 mDlStatic = 0;           // (GXV_DL_STATIC) 0: not known; 1: its materials were computed in full, with the post-texture-matrix flag clear, and cannot change; 2: the same with the flag set
+    // (GXV_DL_LAZY_KEY, dlcrash 8 Nov) the models the deferred list refresh was last asked for: getJ3DModel() and the display-list
+    // maker's model at the time. MarioActor::changeDisplayMode points both at another body (bee, ice, ...) between turns; the flush
+    // computes only what was asked for (ModelManager.cpp port_dl_flush_stale).
+    J3DModel* mStaleDLModel = nullptr;
+    J3DModel* mStaleDLDiffModel = nullptr;
+    // (GXV_MATLOD, cpulod26) the material list was refreshed at least once; turns left out since the last refresh (0xFF fresh / not far); the model was far
+    // enough this turn for the rule to apply (the census times its refreshes)
+    u8 mCpDlMade = 0;
+    u8 mCpDlSkip = 0xFF;
+    u8 mCpDlFar = 0;
+    // (GXV_MATCALM, cpu34d) the flush's refreshes in a row that stored no changed differed list (saturates at 255; 0 at any start of a
+    // material animation); flushes left out since the last refresh
+    u8 mCalmRun = 0;
+    u8 mCalmSkip = 0;
 #endif
 };

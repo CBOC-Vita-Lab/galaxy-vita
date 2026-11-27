@@ -1,0 +1,32 @@
+# checks83 (14 Nov): two consoles reach a skippable scene (the galaxy intro of Good Egg 1), BOTH hold skip (the guest first, the host 4 s later), the vote
+# passes and both consoles leave it. With two players one vote is 1 of 2: the rule (MpFlowLogic.hpp) needs every eligible player, or after 5 s a strict
+# majority (have*2 > need), so one holder can never pass it. A full hold is that console's vote ("flow skip vote"); the console that voted first skips when the
+# other's vote arrives ("skip: ... (players voted)"), the one that votes last skips on its own vote. Both then fast-forward ("skip: fast-forward ended").
+# Lines: MpFlow.cpp ("flow skip vote N/M", "flow skip decided kind=K votes=N/M"), cutscene_skip.cpp ("skip: ..."). If the intro does not
+# play on this galaxy the "playing" marks fall back to a fixed time and the expect rules fail: that is the finding.
+# scnfix (14 Nov): votes are per skip kind and a tap of A skips the intro camera natively on a visited galaxy, so the VOTE of this scenario is on the fly-in
+# (kind 3): both tap the camera away, then both hold A in the fly-in. The fly-in is a pending skip, not a fast-forward: the vote line is "flow skip decided kind=3".
+name: skip_vote_two_consoles
+description: a skippable scene on two consoles - both hold skip (4 s apart), the vote passes, both leave it
+seconds: 240
+shot_size: 960x544
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@skip_vote_host"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+  - name: guest
+    input: "@skip_vote_guest"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL/'
+  - 'expect * /\[mp\] flow barrier release serial=1/'
+  - 'expect guest /skip: fly-in playing/'
+  - 'expect guest /\[mp\] flow skip vote \d+\/2/'
+  - 'expect host /\[mp\] flow skip vote \d+\/2/'
+  - 'expect * /\[mp\] flow skip decided kind=3 votes=\d+\/2/'
+  # (which console votes last depends on whose fly-in starts first, a wall-clock matter: run 2 had the host first, so "(players voted)" is on one of them, not always the guest; both consoles' "decided kind=3" is the proof)

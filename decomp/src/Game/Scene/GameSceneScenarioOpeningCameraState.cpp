@@ -13,6 +13,13 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
+#ifdef TARGET_PC
+#include "port/xskip.h"  // (xskip27)
+#endif
+
+#ifdef TARGET_PC
+extern "C" int port_wipe_open_site(int site) __attribute__((weak));  // (hitch33 14: platform/vgx/src/vgx_backend_gl.cpp; see GameScene.cpp)
+#endif
 
 namespace {
     NEW_NERVE(GameSceneScenarioOpeningCameraStateWait, GameSceneScenarioOpeningCameraState, Wait);
@@ -40,6 +47,15 @@ void GameSceneScenarioOpeningCameraState::start() {
     MR::hidePlayer();
     MR::startStartAnimCamera();
     MR::startStarPointerModeDemo(this);
+#ifdef TARGET_PC
+    // (hitch33 14, GXV_WIPE_OPEN_CAMERA; console job 2890) GameScene::startStagePlayFirst closed the black fade for the stage's first pictures (GXV_WIPE_OPEN_NOWIPE);
+    // the line below forced it open one turn later, so the hold was dropped and Honeyhive's first pictures and queue links were shown. While the port's hold for
+    // this scene is still owed the fade stays closed and opens in 2 turns when the port lets it go; the opening camera runs behind it meanwhile.
+    if (port_wipe_open_site && port_wipe_open_site(4)) {
+        MR::forceCloseWipeFade();
+        MR::openWipeFade(2);
+    } else
+#endif
     MR::forceOpenWipeFade();
     MR::forceToFrameCinemaFrame();
     MR::startStageBGM("BGM_START_DEMO", false);
@@ -73,8 +89,14 @@ void GameSceneScenarioOpeningCameraState::exePlay() {
     }
 
     if (trySkipTrigger()) {
+#ifdef TARGET_PC
+        port_xskip_accept(PORT_XSKIP_OPENING);  // (xskip27: the marker; the cinema frame is black at once below, so the cover is opaque from this turn)
+#endif
         end();
         MR::forceToBlankCinemaFrame();
+#ifdef TARGET_PC
+        port_xskip_cut(PORT_XSKIP_OPENING);
+#endif
         setNerve(GET_NERVE_ANON(GameSceneScenarioOpeningCameraStateWait));
     } else {
         if (MR::isStep(this, MR::getStartAnimCameraFrame() - 60)) {

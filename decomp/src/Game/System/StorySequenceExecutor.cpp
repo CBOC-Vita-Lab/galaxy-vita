@@ -1,4 +1,5 @@
 #include "Game/System/StorySequenceExecutor.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"  // MP3 integ
 #include "Game/Demo/PrologueDirector.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Scene/GameSceneFunction.hpp"
@@ -513,6 +514,20 @@ namespace {
     }
 }  // namespace
 
+namespace {
+#ifdef TARGET_PC
+    // MP3: the nerves below use the scene's demo director / wipe / camera / staff roll; after a multiplayer session sent the game
+    // back to the title the executor can still run with no scene
+    inline bool isSceneAliveForSequence() {
+        return MR::isExistSceneObj(SceneObj_DemoDirector);
+    }
+#else
+    inline bool isSceneAliveForSequence() {
+        return true;
+    }
+#endif
+}  // namespace
+
 bool StorySequenceExecutor::isNeedMoviePlayerExecutingEventEnum() const {
     for (s32 i = 0; i < _48.size(); i++) {
         const StorySequenceExecutorType::DemoSequenceInfo* pInfo = _48[i];
@@ -569,6 +584,19 @@ void StorySequenceExecutor::moveGalaxy(GalaxyMoveArgument* pMoveArgument, bool p
     if (pMoveArgument->isEqualStageScenario("AstroDome", -1)) {
         pMoveArgument->mScenarioNo = calcAproposScenarioNoOnAstroDome();
     }
+
+#ifdef TARGET_PC
+    // MP3 (B5b, the cause): a multiplayer session that ends (leader ended it, kicked, connection lost) or leaves (Return to the
+    // Observatory, Leave Race) sends the game away through this function while a story sequence is mid-flight (waiting for a demo end,
+    // playing a step, a save or the staff roll). The list below is emptied but the nerve stayed, so the next exe* read an empty list
+    // (getCurrentDemoInfo() == nullptr). The original game never moves in that state (forceStop() runs first). Cancel the sequence here:
+    // only a nerve that reads the list is touched, so every single-player path that worked is unchanged.
+    if (isNerve(GET_NERVE_ANON(StorySequenceExecutorPlayDemoSequence)) || isNerve(GET_NERVE_ANON(StorySequenceExecutorWaitTimeKeepDemoEnd)) ||
+        isNerve(GET_NERVE_ANON(StorySequenceExecutorWaitSaveEnd)) || isNerve(GET_NERVE_ANON(StorySequenceExecutorStaffRollSequence))) {
+        mNextNerve = nullptr;
+        setNerve(GET_NERVE_ANON(StorySequenceExecutorIdle));
+    }
+#endif
 
     _6C.clear();
     _48.clear();
@@ -638,6 +666,18 @@ void StorySequenceExecutor::exeWaitToSceneStart() {
 
 void StorySequenceExecutor::exePlayDemoSequence() {
     const StorySequenceExecutorType::DemoSequenceInfo* pDemoInfo = getCurrentDemoInfo();
+
+#ifdef TARGET_PC
+    // MP3: no scene (session ended, back at the title) or an emptied list (sequence cancelled): nothing to play
+    if (pDemoInfo == nullptr) {
+        setNerve(GET_NERVE_ANON(StorySequenceExecutorIdle));
+        return;
+    }
+
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+#endif
 
     if (MR::isFirstStep(this)) {
     }
@@ -750,11 +790,26 @@ void StorySequenceExecutor::exePlayDemoSequence() {
 }
 
 void StorySequenceExecutor::exeWaitTimeKeepDemoEnd() {
+    // MP3 integ: a session that ends while a story demo runs sends the game back to the title: the scene is gone (no scene object
+    // holder) but this sequence still executes: isDemoActive() dereferenced the missing scene (found: qa_sp_untouched_whole_session, host,
+    // 'flow back to title after the session'). With no scene there is no demo to wait for: keep waiting for the next scene.
+    if (!MR::isExistSceneObj(SceneObj_DemoDirector)) {
+        return;
+    }
+
     if (MR::isDemoActive()) {
         return;
     }
 
-    if (MR::isEqualString(getCurrentDemoInfo()->_4, "\x83\x47\x83\x73\x83\x8d\x81\x5b\x83\x4f\x83\x66\x83\x82")) {
+    // MP3 (B5b): the list is empty when the sequence was cancelled by the return to the title: nothing to finish
+    const StorySequenceExecutorType::DemoSequenceInfo* pCurrentInfo = getCurrentDemoInfo();
+
+    if (pCurrentInfo == nullptr) {
+        setNerve(GET_NERVE_ANON(StorySequenceExecutorIdle));
+        return;
+    }
+
+    if (MR::isEqualString(pCurrentInfo->_4, "\x83\x47\x83\x73\x83\x8d\x81\x5b\x83\x4f\x83\x66\x83\x82")) {
         MR::offPlayerControl();
     }
 
@@ -768,7 +823,21 @@ void StorySequenceExecutor::exeWaitSaveEnd() {
         return;
     }
 
+#ifdef TARGET_PC
+    // MP3: no scene (no demo director to end the save demo in) or a cancelled sequence (empty list)
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+#endif
+
     MR::endDemo(mSaveObj, "\x83\x5a\x81\x5b\x83\x75");
+
+#ifdef TARGET_PC
+    if (_48.size() == 0) {
+        setNerve(GET_NERVE_ANON(StorySequenceExecutorIdle));
+        return;
+    }
+#endif
 
     _48[0]++;
 
@@ -776,18 +845,33 @@ void StorySequenceExecutor::exeWaitSaveEnd() {
 }
 
 void StorySequenceExecutor::exeStartSaveAfterSequence() {
+    // MP3: tryStartSave() starts a demo in the scene's demo director
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+
     if (tryStartSave()) {
         setNerve(GET_NERVE_ANON(StorySequenceExecutorWaitSaveEndAfterSequence));
     }
 }
 
 void StorySequenceExecutor::exeWaitSaveEndAfterSequence() {
+    // MP3: tryWaitSaveEnd() ends a demo in the scene's demo director
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+
     if (tryWaitSaveEnd()) {
         setNerve(GET_NERVE_ANON(StorySequenceExecutorFadeinAfterSequence));
     }
 }
 
 void StorySequenceExecutor::exeFadeinAfterSequence() {
+    // MP3: the wipe holder and the camera director belong to the scene
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+
     if (!MR::isFirstStep(this) || !MR::isWipeOpen()) {
         if (!tryStartFadein()) {
             return;
@@ -802,6 +886,11 @@ void StorySequenceExecutor::exeFadeinAfterSequence() {
 }
 
 void StorySequenceExecutor::exeStaffRollSequence() {
+    // MP3: the staff roll, the layouts and the player belong to the scene
+    if (!isSceneAliveForSequence()) {
+        return;
+    }
+
     StaffRoll* pStaffRoll = MR::getStaffRoll();
 
     if (MR::isFirstStep(this)) {
@@ -810,6 +899,12 @@ void StorySequenceExecutor::exeStaffRollSequence() {
         MR::openWipeFade();
 
         const StorySequenceExecutorType::DemoSequenceInfo* pDemoInfo = getCurrentDemoInfo();
+
+        // MP3: a cancelled sequence has no entry (and no staff roll to start)
+        if (pDemoInfo == nullptr || pStaffRoll == nullptr) {
+            setNerve(GET_NERVE_ANON(StorySequenceExecutorIdle));
+            return;
+        }
 
         if (pDemoInfo->_2 == 12) {
             pStaffRoll->appear();

@@ -52,6 +52,13 @@ public:
     void removeIfIsEqualHeap(JKRHeap*);
     static void startCreateResourceHolderOnMainThread(const char*, CreateResourceHolderArgs*);
     static void startCreateLayoutHolderOnMainThread(const char*, CreateResourceHolderArgs*);
+#ifdef TARGET_PC
+    // precomp26 (GXV_STAGE_ENUM): the holders loaded, in the order they were added (game thread; PortStageEnum.cpp)
+    // (xcheck31, 13 Nov: the init thread adds holders while the frame thread walks them, and MR::Vector::push_back raises its count before it stores the
+    // element, so a walker could read a slot not written yet. The walkers read a count PUBLISHED after the element is complete: ResourceHolderManager.cpp.)
+    u32 portHolderCount() const;
+    ResourceHolder* portHolderAt(u32 i) const { return i < portHolderCount() ? mResourceArray[static_cast< int >(i)].mResourceHolder : nullptr; }
+#endif
 
 private:
     ResourceHolderManagerName2Resource* createAndAddInner(const char*, MakeArchiveFileNameFuncPtr, FuncPtrB);

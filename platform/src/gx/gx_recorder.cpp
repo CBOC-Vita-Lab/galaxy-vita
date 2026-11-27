@@ -601,7 +601,7 @@ struct StatsThread {
             std::shared_ptr<const DrawSpans> spans;
             DrawSpanError error;
             if (!buildDrawSpans(frame, spans, error, options)) {
-                port_log("stats: frame %llu: draw spans rejected: word %zu opcode %u: %s", (unsigned long long)frame->number, error.commandWord,
+                port_log("stats: frame %llu: draw spans rejected: word %u opcode %u: %s", (unsigned long long)frame->number, (unsigned)error.commandWord,
                          error.opcode, error.message.c_str());
                 continue;
             }
@@ -678,16 +678,16 @@ struct StatsThread {
             }
             if (++logged == 1) port_log("stats: legend: draws are GX draws with vertices (spans); idx = triangle-list indices after primitive expansion; "
                                          "uid = distinct ShaderUid, vs/tev = distinct vertex-side / TEV-side subsets; cum = cumulative over sampled frames");
-            port_log("stats: frame %llu: %zu draws (%u recorded) %llu verts %llu idx; %zu copies (%u xfb, %u tex)%s; tex binds %llu, images used %zu "
-                     "(%.1f MB decoded), efb-tex draws %llu, untextured draws %llu; frame images %zu (%.1f MB); blended %llu ztest %llu; "
-                     "uid %zu (+%zu new) cum %zu, vs %zu cum %zu, tev %zu cum %zu; unique images cum %zu (%.1f MB); texcache %zu entries %.1f MB, efb refs %zu; "
+            port_log("stats: frame %llu: %u draws (%u recorded) %llu verts %llu idx; %u copies (%u xfb, %u tex)%s; tex binds %llu, images used %u "
+                     "(%.1f MB decoded), efb-tex draws %llu, untextured draws %llu; frame images %u (%.1f MB); blended %llu ztest %llu; "
+                     "uid %u (+%u new) cum %u, vs %u cum %u, tev %u cum %u; unique images cum %u (%.1f MB); texcache %u entries %.1f MB, efb refs %u; "
                      "span build %.2f ms; sampled %llu replaced %llu",
-                     (unsigned long long)frame->number, spans->draws().size(), frame->draws, (unsigned long long)vertices, (unsigned long long)indices,
-                     spans->copies().size(), xfb, tex, copyText, (unsigned long long)texBinds, frameImages.size(), imageBytes / 1048576.0,
-                     (unsigned long long)efbTexDraws, (unsigned long long)noTexDraws, frame->textures.size(), recordedBytes / 1048576.0,
-                     (unsigned long long)blended, (unsigned long long)ztest, frameUids.size(), newUids, allUids.size(), frameVertex.size(), allVertex.size(),
-                     frameTev.size(), allTev.size(), allImages.size(), allImageBytes / 1048576.0, cache.texEntries, cache.texBytes / 1048576.0,
-                     cache.efbCopies, buildMs, (unsigned long long)offeredNow, (unsigned long long)replacedNow);
+                     (unsigned long long)frame->number, static_cast<unsigned>(spans->draws().size()), frame->draws, (unsigned long long)vertices, (unsigned long long)indices,
+                     static_cast<unsigned>(spans->copies().size()), xfb, tex, copyText, (unsigned long long)texBinds, static_cast<unsigned>(frameImages.size()), imageBytes / 1048576.0,
+                     (unsigned long long)efbTexDraws, (unsigned long long)noTexDraws, static_cast<unsigned>(frame->textures.size()), recordedBytes / 1048576.0,
+                     (unsigned long long)blended, (unsigned long long)ztest, static_cast<unsigned>(frameUids.size()), static_cast<unsigned>(newUids), static_cast<unsigned>(allUids.size()), static_cast<unsigned>(frameVertex.size()), static_cast<unsigned>(allVertex.size()),
+                     static_cast<unsigned>(frameTev.size()), static_cast<unsigned>(allTev.size()), static_cast<unsigned>(allImages.size()), allImageBytes / 1048576.0, static_cast<unsigned>(cache.texEntries), cache.texBytes / 1048576.0,
+                     static_cast<unsigned>(cache.efbCopies), buildMs, (unsigned long long)offeredNow, (unsigned long long)replacedNow);
             port_log("stats: frame %llu: draw sizes <=4/<=8/<=32/<=128/more verts: %llu/%llu/%llu/%llu/%llu; runs of identical draw state %llu",
                      (unsigned long long)frame->number, (unsigned long long)sizeHist[0], (unsigned long long)sizeHist[1], (unsigned long long)sizeHist[2],
                      (unsigned long long)sizeHist[3], (unsigned long long)sizeHist[4], (unsigned long long)stateRuns);
@@ -732,6 +732,7 @@ struct Recorder final : Backend {
     std::shared_ptr<RecorderConsumer> consumer;
     std::shared_ptr<const Frame> rejectedFrame;
     bool delivering=false, failed=false, hadXfb=false;
+    size_t xfbEnd = 0;  // cmds.size() just after the last EFB->XFB copy of the frame being recorded
     u64 cacheAccess=0;
     u32 markers=0;
     bool cameraValid=false;
@@ -1070,8 +1071,8 @@ struct Recorder final : Backend {
                     if (flags != d.flags || (u32)prim != d.prim || dlCheckScratch.size() != n ||
                         memcmp(dlCheckScratch.data(), verts.data() + first, n * 4) != 0) {
                         if (dlCheckBad++ < 20) {
-                            port_log("dlcheck: cached draw differs: prim %x/%x flags %x/%x words %zu/%zu", prim, d.prim, flags, d.flags,
-                                     dlCheckScratch.size(), n);
+                            port_log("dlcheck: cached draw differs: prim %x/%x flags %x/%x words %u/%u", prim, d.prim, flags, d.flags,
+                                     static_cast<unsigned>(dlCheckScratch.size()), static_cast<unsigned>(n));
                         }
                     }
                     if (dlCheckDraws % 200000 == 0) {
@@ -1163,8 +1164,13 @@ struct Recorder final : Backend {
         if (toXfb) {
             frame->xfbCopies++;
             hadXfb=true;
+            xfbEnd = c.size();
             dispatch();
             finishNativeCopy();
+            // MP3 render: without a consumer a frame used to be published at the next VI flip, which comes at any safe point: draws of the
+            // NEXT game frame recorded before the flip (after this copy, which clears the EFB) went out with this one, and the harness
+            // captured them as the picture (clear colour + map only: no sky, actors or HUD). The frame ends at its display copy, as in vgx.
+            if (!consumer && !frameAtVi()) publishFrame();
             return;
         }
         u32 addr = (bp[0x4B] & 0xFFFFFF) << 5;
@@ -1415,11 +1421,29 @@ struct Recorder final : Backend {
         if (frame->xfbCopies == 0 && frame->cmds.size() < (16u << 20)) {
             return;
         }
+        publishFrame();
+    }
+
+    // PETARI_FRAME_AT_VI=1: the old behaviour (publish at the VI flip), for A/B runs; it also logs frames that carry a tail of the next frame.
+    static bool frameAtVi() {
+        static const bool on = getenv("PETARI_FRAME_AT_VI") != nullptr;
+        return on;
+    }
+
+    void publishFrame() {
+        if (frameAtVi() && frame->xfbCopies && xfbEnd < frame->cmds.size()) {
+            static unsigned logged;
+            if (logged++ < 100) {
+                port_log("frame %llu: %u command words after its last display copy (of %u)", (unsigned long long)frameNumber,
+                         static_cast<unsigned>(frame->cmds.size() - xfbEnd), static_cast<unsigned>(frame->cmds.size()));
+            }
+        }
+        xfbEnd = 0;
         frame->number = frameNumber++;
         static const bool perfLog = getenv("PETARI_PERFLOG") != nullptr;
         if (perfLog && frame->number % 600 == 0) {
-            port_log("perf: recorded frame %llu: %u draws, %zu vertex words, %zu command words, %zu textures", (unsigned long long)frame->number,
-                     frame->draws, frame->verts.size(), frame->cmds.size(), frame->textures.size());
+            port_log("perf: recorded frame %llu: %u draws, %u vertex words, %u command words, %u textures", (unsigned long long)frame->number,
+                     frame->draws, static_cast<unsigned>(frame->verts.size()), static_cast<unsigned>(frame->cmds.size()), static_cast<unsigned>(frame->textures.size()));
             size_t entries = 0, bytes = 0;
             for (auto& kv : dlCache) {
                 for (DlEntry& e : kv.second.ways) {
@@ -1429,10 +1453,10 @@ struct Recorder final : Backend {
             }
             const DlStats& s = dlStats;
             port_log("perf: display lists per frame: %llu calls, %llu from the cache, %llu recorded; %llu KB of arrays hashed, %llu KB of vertices "
-                     "copied, %llu KB decoded; cache %zu lists, %zu MB",
+                     "copied, %llu KB decoded; cache %u lists, %u MB",
                      (unsigned long long)(s.calls / 600), (unsigned long long)(s.hits / 600), (unsigned long long)(s.recorded / 600),
                      (unsigned long long)(s.hashedBytes / 600 / 1024), (unsigned long long)(s.copiedWords * 4 / 600 / 1024),
-                     (unsigned long long)(s.decodedWords * 4 / 600 / 1024), entries, bytes >> 20);
+                     (unsigned long long)(s.decodedWords * 4 / 600 / 1024), static_cast<unsigned>(entries), static_cast<unsigned>(bytes >> 20));
             dlStats = DlStats();
         }
         // Lists not called for 10 s leave the display list cache.
@@ -1548,6 +1572,10 @@ extern "C" int port_vgx_active(void);
 extern "C" void port_vgx_marker(uint32_t kind); // vgx_galaxy.cpp
 extern "C" void port_gx_marker(uint32_t kind) {
     if (port_vgx_active()) { port_vgx_marker(kind); return; } // (vgx: in the GX stream, GXV_CHARAA only; no flush for them)
+    if ((kind & 0xFFu) == 11u) return; // (PORT_GX_MARK_PHASE: vgx's GXV_GEOPASS only)
+    if ((kind & 0xFFu) >= 28u && (kind & 0xFFu) <= 31u) return; // (PORT_GX_MARK_BGCAT, BG_*: vgx's GXV_BGLAYER only)
+    if (kind == 12u || kind == 13u) return; // (PORT_GX_MARK_HUDN_*: vgx's GXV_HUD_NATIVE only)
+    if ((kind & 0xFFu) == 33u) return; // (PORT_GX_MARK_STAGE_ENUM_DRAW: vgx's GXV_STAGE_ENUM only)
     __PortGXFifoFlush();
     PortHostAllocScope hostAlloc;
     if (gpu::sRecorder && gpu::backend() == gpu::sRecorder) {

@@ -1,0 +1,13 @@
+# 8184 Q4: Quality stutter Q4: optional: GXV_Q30_DRAIN=0 (the model's S1 chain says the drain re-thins a healed margin; skip if Q0 shows no drain holds); Honeyhive 120 s, then Beach Bowl 180 s
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_PICTURE_MODE=30
+GXV_Q30_SEP=1
+GXV_POSE_PHASE_CENSUS=1
+GXV_TURN_PROF=1
+GXV_Q30_DRAIN=0

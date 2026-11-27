@@ -1,0 +1,22 @@
+# file2_observatory, then (racefix) an A tap every second from 2 s to 60 s after the race is armed: the guest skips its galaxy opening camera
+# (the native tap at GameSceneScenarioOpeningCameraState.cpp; file 2 has visited Good Egg) while the host's does not, so the guest reaches Action
+# first. GUESS: the opening of EggStarGalaxy:1 starts about 10-20 s after "race armed" (barrier + load) and lasts several seconds; the tap window
+# is wide on purpose, taps before the opening only make the player jump behind the loading screen. Not verified in a game.
+# Title -> entry screen -> Single Player -> file select -> file 2 (Yoshi icon, 50 stars) -> "Play This File" -> the Observatory (Comet Observatory,
+# AstroGalaxy). File 1 (Mario, 0 stars) would start the prologue (storybook), not the Observatory: use file 2.
+# MARKS (11 Nov, harnessfix): the presses wait for the game's own log lines instead of fixed times since boot, which drifted by ~20 s between
+# runs (a cold disk, a loaded machine) and fell out of step whenever a screen was added (the entry screen). `mark NAME /REGEX/ ~FALLBACK`
+# declares a line to wait for; `NAME+<t>[-<t1>]:items` runs <t> game seconds after it was printed (all on the game clock, PETARI_GAME_CLOCK=1).
+# FALLBACK = the absolute time of the old timeline (8 Nov, mp-int desktop build): used only with a game binary that has no mark support.
+# The original all-absolute timeline is kept as file2_observatory_timed.txt.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+8-8.5:A|B           # (old 30 s) A+B on the title
+entry+3-3.2:A             # (old 35 s) entry screen: Single Player (its cursor starts there on a fresh mp.cfg)
+single+15-23:PX=0.25|PY=0.3   # (old 50-58 s) pointer on file 2 (screen 400,310 of 640x456; pointer -1..1, y down)
+single+18-18.2:A          # (old 53 s)
+single+31-39:PX=0.52|PY=0.78  # (old 66-74 s) pointer on "Play This File" (485,405)
+single+34-34.2:A          # (old 69 s)
+mark armed /\[mp\] race armed serial=\d+/ ~110
+armed+2-2.2:A,armed+3-3.2:A,armed+4-4.2:A,armed+5-5.2:A,armed+6-6.2:A,armed+7-7.2:A,armed+8-8.2:A,armed+9-9.2:A,armed+10-10.2:A,armed+11-11.2:A,armed+12-12.2:A,armed+13-13.2:A,armed+14-14.2:A,armed+15-15.2:A,armed+16-16.2:A,armed+17-17.2:A,armed+18-18.2:A,armed+19-19.2:A,armed+20-20.2:A,armed+21-21.2:A,armed+22-22.2:A,armed+23-23.2:A,armed+24-24.2:A,armed+25-25.2:A,armed+26-26.2:A,armed+27-27.2:A,armed+28-28.2:A,armed+29-29.2:A,armed+30-30.2:A,armed+31-31.2:A,armed+32-32.2:A,armed+33-33.2:A,armed+34-34.2:A,armed+35-35.2:A,armed+36-36.2:A,armed+37-37.2:A,armed+38-38.2:A,armed+39-39.2:A,armed+40-40.2:A,armed+41-41.2:A,armed+42-42.2:A,armed+43-43.2:A,armed+44-44.2:A,armed+45-45.2:A,armed+46-46.2:A,armed+47-47.2:A,armed+48-48.2:A,armed+49-49.2:A,armed+50-50.2:A,armed+51-51.2:A,armed+52-52.2:A,armed+53-53.2:A,armed+54-54.2:A,armed+55-55.2:A,armed+56-56.2:A,armed+57-57.2:A,armed+58-58.2:A,armed+59-59.2:A

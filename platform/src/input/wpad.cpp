@@ -58,6 +58,8 @@ static WPADConnectCallback sConnectCb[4];
 static WPADExtensionCallback sExtCb[4];
 static int sReportedConnected[4];
 static int sReportedExtension[4];
+static int sExtRefresh[4];                  // KPADReads since the Nunchuk was last reported
+static const int kExtRefreshReads = 30;
 
 extern "C" void port_input_request_pause(void);
 extern "C" unsigned long long port_gx_recording_frame(void);
@@ -76,10 +78,55 @@ static bool latLogOn() {
     return on;
 }
 
-extern "C" void port_input_set(int chan, const PortPadState* state) {
+// GXV_LATENCY24 (latency24): when the pad state the game reads was sampled. The poll thread's sample time (port_input_set, channel 0), the sample
+// time of the state the game's last KPADRead of channel 0 returned (the picture the game draws next shows what that read did; the display
+// callback measures pad sample to flip from it, vgx_galaxy.cpp port_vgx_present_turn / vgx_host_galaxy_vita.cpp), the age of the sample at
+// each read, and the host's resampler: a function the host registers (entry.cpp PadResample) that polls the pad once more on the game
+// thread right before the read, so that the game's state is as fresh as the system's own sample (GXV_LATENCY24_PAD).
+static std::atomic<int64_t> sPadSampleNs{0}, sReadSampleNs{0};
+static std::atomic<void (*)(void)> sResample{nullptr};
+static std::atomic<uint64_t> sAgeReads{0}, sAgeSumNs{0}, sAgeMaxNs{0}, sAgeResamples{0};
+extern "C" void port_input_set_resampler(void (*fn)(void)) { sResample.store(fn, std::memory_order_release); }
+extern "C" int64_t port_input_read_sample_ns(void) { return sReadSampleNs.load(std::memory_order_relaxed); }
+extern "C" void port_input_note_resample(void) { sAgeResamples.fetch_add(1, std::memory_order_relaxed); }
+// The reads since the last call: how many, the mean and the largest age of the state at the read (ms), how many were preceded by a resample.
+extern "C" void port_input_age_take(unsigned* reads, double* meanMs, double* maxMs, unsigned* resamples) {
+    const uint64_t n = sAgeReads.exchange(0, std::memory_order_relaxed), sum = sAgeSumNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t mx = sAgeMaxNs.exchange(0, std::memory_order_relaxed), rs = sAgeResamples.exchange(0, std::memory_order_relaxed);
+    *reads = static_cast<unsigned>(n);
+    *meanMs = n ? sum / 1e6 / static_cast<double>(n) : 0.0;
+    *maxMs = mx / 1e6;
+    *resamples = static_cast<unsigned>(rs);
+}
+
+// (firstuse24: GXV_PLAYERWARM / "first-use:" log) when the pad of channel 0 last had a button down or the stick away from the middle:
+// the renderer's player-action list records the programs a draw has to link in the few seconds after that, because those are the ones
+// Mario's run / jump / spin effects need (they are linked by the first draw that has them, a 20-300 ms hitch).
+static std::atomic<int64_t> sLastActiveNs{0};
+extern "C" int64_t port_player_input_age_ms(void) {
+    const int64_t at = sLastActiveNs.load(std::memory_order_relaxed);
+    if (at == 0) return -1;
+    return (port_host_time_ns() - at) / 1000000;
+}
+
+extern "C" int port_xskip_test_a(void) __attribute__((weak));  // (xskip27: platform/src/port/xskip.cpp)
+extern "C" void port_input_set(int chan, const PortPadState* stateIn) {
     if (chan < 0 || chan >= 4) {
         return;
     }
+    // (xskip27, PETARI_XSKIP_TEST) the harness's press of A, on top of the real pad: the rising edge and the hold are the game's own reads of it
+    PortPadState testPad;
+    const PortPadState* state = stateIn;
+    if (chan == 0 && port_xskip_test_a && port_xskip_test_a()) {
+        testPad = *stateIn;
+        testPad.connected = 1;
+        testPad.buttons |= 0x0800;
+        state = &testPad;
+    }
+    if (chan == 0 && state->connected &&
+        ((state->buttons & 0xFFFF) != 0 || __builtin_fabsf(state->stickX) > 0.3f || __builtin_fabsf(state->stickY) > 0.3f))
+        sLastActiveNs.store(port_host_time_ns(), std::memory_order_relaxed);
+    if (chan == 0) sPadSampleNs.store(port_host_time_ns(), std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(sInputMutex);
     const uint32_t kPlusMinus = 0x0010 | 0x1000;
     if (chan == 0 && state->connected && (state->buttons & kPlusMinus & ~sPad[0].buttons)) {
@@ -174,6 +221,12 @@ extern "C" int port_title_confirm(void) {
     return sPad[0].connected && ((sPad[0].buttons & 0x0010) || sPad[0].touched) ? 1 : 0;
 }
 
+// MP3 vitabtn: a finger is on the front screen right now (the multiplayer menus choose rows and heads by touch, and a touch shows your pointer to the others).
+extern "C" int port_input_touched(void) {
+    std::lock_guard<std::mutex> lk(sInputMutex);
+    return sPad[0].connected && sPad[0].touched ? 1 : 0;
+}
+
 extern "C" int port_input_tilt_active(void) {
     const int64_t at = sTiltUsedAt.load();
     return at != 0 && port_host_time_ns() - at < 500000000;
@@ -251,17 +304,27 @@ static bool shakePulseRead(int chan, bool held, bool abTrigger, float acc[3]) {
 // as the Bluetooth stack does.  Runs on the game thread from KPADRead.
 static void pollConnection(int chan, const PortPadState& s) {
     if (s.connected != sReportedConnected[chan]) {
-        sReportedConnected[chan] = s.connected;
-        if (!s.connected) {
-            sReportedExtension[chan] = 0;
-        }
-        if (sConnectCb[chan]) {
-            sConnectCb[chan](chan, s.connected ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER);
+        // A change nobody has been told about stays pending until the game has registered its callback: a connection seen before
+        // that was marked as reported and lost, and the game then never learned that the pad was there (issue 36).
+        if (sConnectCb[chan] || !s.connected) {
+            sReportedConnected[chan] = s.connected;
+            if (!s.connected) {
+                sReportedExtension[chan] = 0;
+            }
+            if (sConnectCb[chan]) {
+                sConnectCb[chan](chan, s.connected ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER);
+            }
         }
     }
-    if (s.connected && !sReportedExtension[chan] && sExtCb[chan]) {
-        sReportedExtension[chan] = 1;
-        sExtCb[chan](chan, WPAD_DEV_FREESTYLE);
+    if (s.connected && sReportedConnected[chan] && sExtCb[chan]) {
+        // The Nunchuk is the handheld's own stick: always there while the pad is.  The game keeps "Nunchuk present" only from the
+        // last callback and clears it when it handles a disconnect, so the report is repeated about every half second.  The callback
+        // only sets that flag, so repeating it is harmless, and a state lost any other way heals itself.
+        if (!sReportedExtension[chan] || ++sExtRefresh[chan] >= kExtRefreshReads) {
+            sReportedExtension[chan] = 1;
+            sExtRefresh[chan] = 0;
+            sExtCb[chan](chan, WPAD_DEV_FREESTYLE);
+        }
     }
 }
 
@@ -358,7 +421,21 @@ s32 KPADRead(s32 chan, KPADStatus samples[], u32 length) {
         return 0;
     }
     u32 pressedSince = 0;
+    if (chan == 0) {
+        if (void (*resample)(void) = sResample.load(std::memory_order_acquire)) resample();  // (GXV_LATENCY24_PAD: the freshest sample)
+    }
     PortPadState s = snapshotForRead(chan, &pressedSince);
+    if (chan == 0) {
+        const int64_t sampled = sPadSampleNs.load(std::memory_order_relaxed), now = port_host_time_ns();
+        sReadSampleNs.store(sampled, std::memory_order_relaxed);
+        if (sampled > 0 && now >= sampled) {
+            const uint64_t age = static_cast<uint64_t>(now - sampled);
+            sAgeReads.fetch_add(1, std::memory_order_relaxed);
+            sAgeSumNs.fetch_add(age, std::memory_order_relaxed);
+            uint64_t seen = sAgeMaxNs.load(std::memory_order_relaxed);
+            while (age > seen && !sAgeMaxNs.compare_exchange_weak(seen, age, std::memory_order_relaxed)) {}
+        }
+    }
     pollConnection(chan, s);
     KPADStatus* k = &samples[0];
     memset(k, 0, sizeof(*k));

@@ -91,6 +91,77 @@ void port_input_use_tilt(float neutralPitchDeg);
 #define PORT_GX_MARK_SCENE_DEPTH 7  // the 3D scene's depth is complete (image effects and a Z clear follow)
 #define PORT_GX_MARK_POINTER_BEGIN 8  // the pointer's 2D cursor (inside the HUD markers)
 #define PORT_GX_MARK_POINTER_END 9
+// gpu23 (GXV_INDCAP_SKIP): the next EFB copy is the "Indirect" screen capture (CaptureScreenDirector, no other capture timing asked
+// for): only draws of the same picture that come after it read what it makes (the next picture captures again before its readers).
+#define PORT_GX_MARK_TRANSIENT_COPY 10
+// The game's draw phase from here on (decomp GameScene::draw3D / draw2D, SceneFunction), in bits 8-15: GXV_GEOPASS's census
+// (vgx_geopass.inc). Written into the vgx GX stream only with GXV_GEOPASS on; ignored by every other renderer.
+#define PORT_GX_MARK_PHASE 11
+// hud24 (GXV_HUD_NATIVE): the 2D draws of a scene that draws its layouts outside the HUD markers (ScenarioSelectScene's layouts, PlayTimerScene's):
+// the same meaning as HUD_BEGIN / HUD_END for the native-resolution 2D layer, and nothing else (no edge smoothing rectangles). Written into the vgx
+// GX stream only with GXV_HUD_NATIVE on; ignored by every other renderer.
+#define PORT_GX_MARK_HUDN_BEGIN 12
+#define PORT_GX_MARK_HUDN_END 13
+// prewarm24 (GXV_PREWARM): the draws between these are resolved by the vgx front end for their shader programs and not drawn; the front end puts
+// its register state back at the end (vgx_draw.cpp WarmScopeMarker). Written into the vgx GX stream only with GXV_PREWARM on; ignored by every
+// other renderer.
+#define PORT_GX_MARK_WARM_BEGIN 14
+#define PORT_GX_MARK_WARM_END 15
+// layoutwarm24 (GXV_LAYOUTWARM_LOG): the draws between these (the kind in bits 0-7, the layout's census id in bits 8-23) are one layout's draw in play: the
+// front end counts the program variants and textures it makes for it. Written into the vgx GX stream only with GXV_LAYOUTWARM_LOG on; ignored by every
+// other renderer.
+#define PORT_GX_MARK_LAYOUT_BEGIN 19
+#define PORT_GX_MARK_LAYOUT_END 20
+// bglayer25 (GXV_BGLAYER=2, the census): the draws that follow, up to the next marker of this kind with id 0, belong to one draw category (bits 8-15: 1 + the
+// MR::DrawBufferType, or 64 + the MR::DrawType). The vgx front end tallies draws and indices by it. Written into the vgx GX stream only with GXV_BGLAYER on
+// (and GXV_DRAWPIPE=0); ignored by every other renderer.
+#define PORT_GX_MARK_BGCAT 28
+// bglayer25 (GXV_BGLAYER=1, the far-background layer cache): BG_BEGIN opens the far layer's draws of a picture that renders it (nothing else is drawn between it and BG_END
+// but the far layer, first in the picture after the clear); BG_END (the view slot in bits 8-23) closes it: the front end copies the picture so far into the layer cache and
+// remembers the slot's view; BG_REUSE (the slot in bits 8-23) stands where the far layer's draws would be in a picture that leaves them out: the front end draws the cache as
+// the backdrop, turned from the view it was made for to this slot's. The game writes the slot's view first (port_vgx_bglayer_view). Written into the vgx GX stream only
+// with GXV_BGLAYER on; ignored by every other renderer.
+#define PORT_GX_MARK_BG_BEGIN 29
+#define PORT_GX_MARK_BG_END 30
+#define PORT_GX_MARK_BG_REUSE 31
+// shadow25 (GXV_SILH_GATE): written just before the silhouette fill's capture, hint in bits 8-15: 1 the player's silhouette cannot show in this picture,
+// 2 it may. Written into the vgx GX stream only with GXV_SILH_GATE on; ignored by every other renderer.
+#define PORT_GX_MARK_SILH_HINT 32
+// precomp26 (GXV_STAGE_ENUM): inside a PORT_GX_MARK_WARM_BEGIN / _END scope, in place of a J3D shape's geometry: the vgx front end resolves the draw the state would make (no
+// vertices, no textures, nothing recorded) and hands its program variant to the back end's enumeration. Bits 8-15: the highest position-matrix row the shape's vertices
+// name (0xFF none), bits 16-23: the vertex count of the shape's smallest primitive (0 not known). Written into the vgx GX stream only with GXV_STAGE_ENUM on; ignored by
+// every other renderer.
+#define PORT_GX_MARK_STAGE_ENUM_DRAW 33
+// hrw26 (GXV_HRW): a picture the render thread keeps for a second presentation; value = (pair id << 8) as vgx::kHrwMarker carries it.
+#define PORT_GX_MARK_HRW 34
+// hrw27 (GXV_HRW): the owner of the draws that follow (value = id << 8 | phase, in bits 8-23 of the marker; 0 = nobody's), and the end of a pair's partial draw (value = the pair's number). Written into the vgx GX
+// stream only with GXV_HRW 1, 2 or 4; ignored by every other renderer. The ids and phases are vgx_hrw.h's OwnerIdValue / OwnerPhase.
+#define PORT_GX_MARK_OWNER 35
+#define PORT_GX_MARK_FRESH_END 36
+#define PORT_GX_MARK_HRW_PLAIN 37 // Pair A promises not to ask for fresh geometry on B.
+// hotprof (GXV_HOTPROF_TEVCOL=2): the verify pair (register high half, then low half) written before a TEV colour write the game would leave out.
+// Kinds 28/29 are the BGLAYER markers above: one kind must have one meaning (they were shared until 20 Nov 2026).
+#define PORT_GX_MARK_TEVCOL_REG 38
+#define PORT_GX_MARK_TEVCOL_VAL 39
+// bloom37 (GXV_BLOOM_BRACKET): the normal bloom's scene bracket (BloomEffect::preDraw's capture of the scene into _24 and black fill, postDraw's put-back). The sub-kind is in bits 8-15:
+// 1 the next EFB copy is the bracket's scene capture, 2 / 3 the black fill's draws begin / end, 4 / 5 the put-back draw begins / ends, 6 no glow source drew (the bracket is dead: the capture, the fill
+// and the put-back restore what was there). Written into the vgx GX stream only with GXV_BLOOM_BRACKET on (and GXV_HRW 0); ignored by every other renderer.
+#define PORT_GX_MARK_BLOOM_BRACKET 40
+#define PORT_BB_CAPTURE 1
+#define PORT_BB_FILL_BEGIN 2
+#define PORT_BB_FILL_END 3
+#define PORT_BB_PUT_BEGIN 4
+#define PORT_BB_PUT_END 5
+#define PORT_BB_DEAD 6
+#define PORT_HRW_OWN_MARIO 1
+#define PORT_HRW_OWN_POINTER 2
+#define PORT_HRW_OWN_SKY 0xFE
+#define PORT_HRW_PH_PLAYER_DRAW 1
+#define PORT_HRW_PH_PLAYER_DECO_OPA 2
+#define PORT_HRW_PH_PLAYER_DECO_XLU 3
+#define PORT_HRW_PH_POINTER 4
+#define PORT_HRW_PH_SKY 5
+#define PORT_GX_OWNER(id, phase) (PORT_GX_MARK_OWNER | (((((unsigned)(id)) << 8) | (unsigned)(phase)) << 8))
 #define PORT_GX_CAMERA_WORDS 33
 // Word 25 of the camera record: presentation hints.
 #define PORT_GX_CAMERA_DIORAMA 1     // gameplay: show the scene as a VR diorama
@@ -146,6 +217,12 @@ int port_vr_diorama(void);
 void port_vr_transit_begin(const void* host);
 void port_vr_transit_end(const void* host);  // only if `host` began it
 const void* port_vr_transit_host(void);
+// anticip32 (GXV_ANTICIPATE, default off: the call returns at once): the game announces a moment that
+// is known to be heavy or to start a fast camera, so the scaling engine can give up a little far
+// detail BEFORE it and put it back after (platform/include/port/anticipate.h; perf.cpp "anticip32").
+// kind: 1 launch star, 2 sling star, 4 boss battle, 5 power-up change; the moment begins in about
+// lead_ms and lasts about last_ms. Drawing only: it changes no game value and no timing.
+void port_anticipate_event(int kind, int lead_ms, int last_ms);
 // The pause menu reports each frame whether its buttons wait for a choice;
 // meanwhile the VR layer shows its settings panel beside it.
 void port_vr_pause_menu(int selecting);
@@ -201,6 +278,9 @@ void port_irq_poll(void);
 // Logging / fatal errors from the port layer.
 void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void port_fatal(const char* fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
+// (fmt32: also declared in port/diagnostics.h; repeated here, in the header every game and runtime unit is given, so that the compiler checks the
+// format of every call, also in units that only carry their own plain declaration of it)
+void port_log_summary(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 #ifdef __cplusplus
 }

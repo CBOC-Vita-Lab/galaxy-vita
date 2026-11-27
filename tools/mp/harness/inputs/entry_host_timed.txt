@@ -1,0 +1,37 @@
+# (11 Nov, harness3: the power-save tip no longer shows on entering the Multiplayer menu (conntest 716f9e1: only after a laggy session / the test): the old "42 A tip" press is gone)
+# entry (9 Nov): host of a two-player Same Wi-Fi room through the menus (no autopilot). PETARI_GAME_CLOCK=1, SMG_MP_NAME set (no
+# keyboard). Title -> entry screen -> Multiplayer -> tip -> Play Together -> Same Wi-Fi -> character (SMG_MP_LOOK) -> Host a Room ->
+# More Options -> Save -> Copy a File -> file 2 -> co-op file 1 -> Back -> Open the Room -> (guest joins) -> Start. The session then
+# loads co-op file 1 (the copy of file 2: the Observatory) the way "Play This File" does.
+30-30.5:A|B
+35-35.2:DOWN               # entry: Multiplayer
+37-37.2:A
+44-44.2:A                  # Play Together
+46-46.2:DOWN               # Internet -> Same Wi-Fi
+47-47.2:A
+49-49.2:A                  # character
+51-51.2:A                  # Host a Room
+53-53.2:DOWN               # Room Settings: Open the Room -> Mode -> Falls -> Players -> More Options
+54-54.2:DOWN
+55-55.2:DOWN
+56-56.2:DOWN
+57-57.2:A                  # More Options
+59-59.2:A                  # Save
+61-61.2:DOWN               # co-op 1..6, Copy a File
+62-62.2:DOWN
+63-63.2:DOWN
+64-64.2:DOWN
+65-65.2:DOWN
+66-66.2:DOWN
+67-67.2:A                  # Copy a File
+69-69.2:DOWN               # file 1 -> file 2
+70-70.2:A
+72-72.2:A                  # co-op file 1 (new)
+74-74.2:B                  # back to Room Settings (cursor on More Options)
+76-76.2:UP
+77-77.2:UP
+78-78.2:UP
+79-79.2:UP
+80-80.2:A                  # Open the Room
+110-110.2:A                # Start (the guest has joined)
+116-116.2:A                # (again, in case the guest came late; a lobby without guests only buzzes)

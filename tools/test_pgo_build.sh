@@ -35,6 +35,21 @@ configure rgen -DARMHF_PGO_GEN=ON -DARMHF_PROFILE_RT="$tmp/rt.a" -DARMHF_PGO_GEN
 configure ruse -DARMHF_PGO_USE_RENDERER="$tmp/p.profdata"
 [ "$(count ruse 'fprofile-use=')" = "$(count ruse 'fprofile-use=.*\(platform/vgx/src\|platform/src/gx\)')" ]
 [ "$(count ruse 'fprofile-use=')" -gt 20 ]
+# the console's code generation (ARMHF_VITA_MATCH, default ON with ARMHF_VITA_RUNTIME_FLAGS; needs VITASDK): noundef analysis off and the
+# Vita's libstdc++ headers on the game units too, the SDK's psp2 headers for the back end only, the game units still at -O2
+if [ -n "${VITASDK:-}" ] && [ -f "$VITASDK/arm-vita-eabi/include/psp2/gxm.h" ]; then
+  configure vm -DARMHF_PGO_GEN=ON -DARMHF_PROFILE_RT="$tmp/rt.a" -DARMHF_PGO_GEN_RENDERER=ON -DARMHF_VGX_BACKEND=gl-stub -DARMHF_VITA_RUNTIME_FLAGS=ON
+  [ "$(count vm 'decomp/src/.*no-enable-noundef-analysis\|no-enable-noundef-analysis.*decomp/src/')" -gt 1800 ]
+  [ "$(count vm 'decomp/src/Game/Map/KCollision.cpp' | head -1)" = 1 ]
+  ninja -C "$tmp/vm" -t commands | grep 'decomp/src/Game/Map/KCollision.cpp' | grep -q -- "-isystem $VITASDK/arm-vita-eabi/include/c++/"
+  ! ninja -C "$tmp/vm" -t commands | grep 'decomp/src/Game/Map/KCollision.cpp' | grep -q -- ' -O3'
+  ninja -C "$tmp/vm" -t commands | grep 'vgx_backend_gl.cpp' | grep -q 'psp2-overlay'
+  ! ninja -C "$tmp/vm" -t commands | grep 'vgx_draw.cpp' | grep -q 'psp2-overlay'
+  configure vm0 -DARMHF_PGO_GEN=ON -DARMHF_PROFILE_RT="$tmp/rt.a" -DARMHF_VGX_BACKEND=gl-stub -DARMHF_VITA_RUNTIME_FLAGS=ON -DARMHF_VITA_MATCH=OFF
+  [ "$(count vm0 'decomp/src/.*no-enable-noundef-analysis')" = 0 ]
+else
+  echo "(no VITASDK: the ARMHF_VITA_MATCH checks are skipped)"
+fi
 if cmake -S armhf -B "$tmp/bad2" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$root/armhf/toolchain.cmake" -DARMHF_PGO_GEN_RENDERER=ON > "$tmp/bad2.log" 2>&1; then
   echo "ARMHF_PGO_GEN_RENDERER without ARMHF_PGO_GEN must fail"; exit 1
 fi

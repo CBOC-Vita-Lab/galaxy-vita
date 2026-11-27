@@ -75,6 +75,9 @@ void KoopaFireShort::init(const JMapInfoIter& rIter) {
     pointerOffset.set(0.0f);
     MR::initStarPointerTarget(this, 100.0f, pointerOffset);
     MR::initShadowVolumeSphere(this, 200.0f);
+#ifdef TARGET_PC
+    MR::portMarkProjectileShadow(this);  // (boss23, PETARI_BOSS_PSHADOW)
+#endif
 
     MR::invalidateClipping(this);
 
@@ -164,7 +167,7 @@ void KoopaFireShort::exeFly() {
         MR::validateHitSensors(this);
     }
 
-    if (MR::isStarPointerPointing2POnPressButton(this, "\x8e\xe3", true, false)) {
+    if (MR::isStarPointerPointing2POnPressButtonNoMp(this, "\x8e\xe3", true, false)) {
         TVec3f gravity = -mGravity;
         MR::calcStarPointerWorldVelocityDirectionOnPlane(&mVelocity, mPosition, gravity, 1);
 

@@ -297,6 +297,9 @@ void MoviePlayingSequence::exePlayStart() {
         // the game would wait for it for ever.
         if (!port_disc_file_present(::getMovieName(mInfo))) {
             port_log("movie: %s is not on the data card, skipped", ::getMovieName(mInfo));
+            if (getenv("PETARI_MOVIE") != nullptr) {  // (movie44, test only: the basic log too)
+                port_log_summary("movie: %s is not on the data card, skipped", ::getMovieName(mInfo));
+            }
             MR::forceCloseWipeFade();
             setNerve(GET_NERVE(MoviePlayingSequence, HostTypeEndWait));
             return;

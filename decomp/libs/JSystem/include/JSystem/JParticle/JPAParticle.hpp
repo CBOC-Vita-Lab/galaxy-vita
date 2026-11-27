@@ -153,6 +153,13 @@ public:
 
     virtual void draw(JPABaseEmitter*, JPABaseParticle*) {
     }
+#ifdef TARGET_PC
+    // GXV_PAR_PTCL: as JPAEmitterCallBack::portCalcKind (1: execute does nothing; 2: runs game code on the game thread and writes only
+    // the particle it is given; 0: unknown, the turn stays serial).
+    virtual int portCalcKind() const {
+        return 0;
+    }
+#endif
 };
 
 static inline u32 COLOR_MULTI(u32 a, u32 b) {

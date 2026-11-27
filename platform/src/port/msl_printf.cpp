@@ -33,6 +33,10 @@ struct Out {
 };
 
 // Formats one conversion into `o` using `spec` (a complete bionic format).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
+// fmt1131: spec is built by this engine from the parsed conversion, never text from outside
 template < typename T >
 void emit(Out& o, const char* spec, T value) {
     char local[256];
@@ -50,6 +54,7 @@ void emit(Out& o, const char* spec, T value) {
         o.put(big, (size_t)n);
         free(big);
     }
+#pragma GCC diagnostic pop
 }
 
 // 16-bit string -> UTF-8.

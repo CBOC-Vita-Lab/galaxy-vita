@@ -18,6 +18,9 @@
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpFlow.hpp"  // MP3: guests see the host's star choice (Play Together)
+#endif
 
 namespace {
     const char* const cStarPaneName[] = {"Star1", "Star2", "Star3", "Star4", "Star5", "Star6", "Star7"};
@@ -70,6 +73,13 @@ namespace NrvScenarioSelectLayout {
     NEW_NERVE(ScenarioSelectLayoutNrvWaitCometWarning, ScenarioSelectLayout, WaitCometWarning);
     NEW_NERVE(ScenarioSelectLayoutNrvDisappearCometWarning, ScenarioSelectLayout, DisappearCometWarning);
 }  // namespace NrvScenarioSelectLayout
+
+#ifdef TARGET_PC
+// flow23: PETARI_FLOW's choice on the star select (decomp/src/Game/Scene/GameScene.cpp)
+extern "C" int port_flow_want_star(void);
+extern "C" int port_flow_pick_steps(void);
+extern "C" void port_flow_note_pick(int want, int picked, unsigned shown);
+#endif
 
 void ScenarioSelectLayout_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -672,6 +682,75 @@ void ScenarioSelectLayout::exeWaitScenarioSelect() {
     updateSelectedScenario();
     updateScenarioText();
     MR::startSystemLevelSE("SE_DM_LV_SENARIO_SEL_FLY");
+
+#ifdef TARGET_PC
+    // MP3: a guest in Play Together does not choose: the host's choice (or cancel) is applied, the guest's input is ignored
+    if (mp_active()) {
+        s32 hostSelected = 0;
+        switch (MpFlowHooks::scenarioSelectGuest(&hostSelected)) {
+        case 1:
+            return;
+        case 2:
+            mSelectedScenarioNo = hostSelected;
+            _28 = true;
+            MR::startSystemSE("SE_SY_DECIDE_1");
+            MR::startCSSound("CS_CLICK_CLOSE", nullptr, 0);
+            mBackButton->disappear();
+            setNerve(GET_NERVE(ScenarioSelectLayout, ScenarioSelectLayoutNrvDecide));
+            return;
+        case 3:
+            MR::startSystemSE("SE_SY_GALAXY_DECIDE_CANCEL");
+            mBackButton->disappear();
+            setNerve(GET_NERVE(ScenarioSelectLayout, ScenarioSelectLayoutNrvCancel));
+            return;
+        default:
+            break;
+        }
+    }
+    // flow23 (PETARI_FLOW, decomp/src/Game/Scene/GameScene.cpp): the console's unattended entry chooses here, PETARI_FLOW_PICK turns after
+    // the select waits, exactly as the pad's A (trySelect) or B (tryCancel) would. Nothing happens without PETARI_FLOW.
+    if (const s32 want = port_flow_want_star()) {
+        if (MR::isGreaterStep(this, port_flow_pick_steps())) {
+            u32 shown = 0;
+            s32 first = -1, picked = -1;
+            for (s32 i = 0; i < 7; i++) {
+                if (mStar[i]->_30) {
+                    continue;
+                }
+                const s32 no = mStar[i]->mScenarioNo;
+                if (no > 0 && no < 32) {
+                    shown |= 1u << no;
+                }
+                if (first < 0) {
+                    first = no;
+                }
+                if (no == want) {
+                    picked = no;
+                }
+            }
+            if (want < 0) {
+                port_flow_note_pick(-1, -1, shown);
+                MR::startSystemSE("SE_SY_GALAXY_DECIDE_CANCEL");
+                mBackButton->disappear();
+                setNerve(GET_NERVE(ScenarioSelectLayout, ScenarioSelectLayoutNrvCancel));
+                return;
+            }
+            if (picked < 0) {
+                picked = first;
+            }
+            port_flow_note_pick(want, picked, shown);
+            if (picked > 0) {
+                mSelectedScenarioNo = picked;
+                _28 = true;
+                MR::startSystemSE("SE_SY_DECIDE_1");
+                MR::startCSSound("CS_CLICK_CLOSE", nullptr, 0);
+                mBackButton->disappear();
+                setNerve(GET_NERVE(ScenarioSelectLayout, ScenarioSelectLayoutNrvDecide));
+                return;
+            }
+        }
+    }
+#endif
 
     if (tryCancel()) {
         return;

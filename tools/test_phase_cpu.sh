@@ -15,24 +15,36 @@ if test -n "${PHASE_CPU_BASELINE_PERF:-}"; then
     test -f "$PHASE_CPU_BASELINE_PERF"
     cp "$PHASE_CPU_BASELINE_PERF" "$out/baseline/perf.cpp"
 else
-    git show 392ee7009fe1152b5bd397e6398f00404303a264:platform/src/port/perf.cpp > "$out/baseline/perf.cpp"
+    # Final 1.2 already includes workload/slip hooks; isolate phase changes from those additions.
+    git show fc78e5e3a50ab2bc7fb52867796d66a8be278da2:platform/src/port/perf.cpp > "$out/baseline/perf.cpp"
 fi
-for mode in diagnostic quiet silent vita-gate armhf-gate; do
+for mode in diagnostic quiet silent vita-quiet vita-silent armhf-gate; do
     define=(-DPORT_RUNTIME_DIAGNOSTICS=1 -DPORT_LOGGING=1)
     case "$mode" in
         quiet) define=(-DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1);;
         silent) define=(-DPORT_RUNTIME_DIAGNOSTICS=1 -DPORT_LOGGING=0);;
-        vita-gate) define+=(-D__vita__);;
+        vita-quiet) define=(-DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1 -D__vita__);;
+        vita-silent) define=(-DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=0 -D__vita__);;
         armhf-gate) define+=(-DPORT_ARMHF_HARNESS);;
     esac
     "${CXX:-clang++}" -std=c++20 "${flags[@]}" "${define[@]}" -fsanitize=address,undefined \
         tests/phase_cpu.cpp "${link[@]}" -pthread -o "$out/test-$mode"
-    if test "$mode" = diagnostic; then
+    if test "$mode" = diagnostic || test "$mode" = vita-quiet; then
         # On first: a missing production observer must fail behavior, not compilation.
         "$out/test-$mode" 1 1 basic
         for setting in unset 0 2 -1 invalid 9999999999999999999999999999999999; do "$out/test-$mode" "$setting" 0 basic; done
         for setting in 0x1 1suffix; do "$out/test-$mode" "$setting" 1 basic; done
         for scenario in faults matched endpoints boundaries threads all-phases; do "$out/test-$mode" 1 1 "$scenario"; done
+        if test "$mode" = vita-quiet; then
+            for setting in unset 0 2 -1 invalid; do "$out/test-$mode" "$setting" 0 disabled; done
+            if test "$(uname -s)" = Linux; then
+                "${CXX:-clang++}" -std=c++20 "${flags[@]}" "${define[@]}" -DPHASE_CPU_TEST_EMUTLS=1 \
+                    -femulated-tls -fsanitize=address,undefined tests/phase_cpu.cpp "${link[@]}" \
+                    -Wl,--wrap=__emutls_get_address -pthread -o "$out/test-vita-emutls"
+                for setting in unset 0 2 -1 invalid; do "$out/test-vita-emutls" "$setting" 0 disabled; done
+                "$out/test-vita-emutls" 1 1 emutls-errno
+            fi
+        fi
     else
         "$out/test-$mode" 1 0 basic
         nm "$out/test-$mode" > "$out/$mode-symbols.txt"

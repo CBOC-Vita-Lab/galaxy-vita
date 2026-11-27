@@ -1,0 +1,33 @@
+# STRENGTHENED (rigfix, from chk-harness): the old rules judged almost nothing (a host-only line, or crash/stall only). Every log pattern below was
+# checked against the format strings in platform/src/mp, decomp/src/Game/MP and net/src; NOT run against the game (the first real run decides).
+name: pt_probe
+description: probe
+seconds: 220
+min_speed: 0.4
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@entry_host"
+    env: {SMG_MP_NAME: host, SMG_KEYBOARD_NAME: host, SMG_MP_LOOK: 0}
+  - name: guest
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: guest, SMG_KEYBOARD_NAME: guest, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'metric * wall_s >= 176'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect host /\[mp\] slot 1 joined name=\S+ rejoin=0 .*players=2/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/'
+  - 'expect * /\[mp\] flow session start role=(host|guest)/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30s'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - 'absent guest /\[mp\] session ended reason=host-left/ before shutdown'

@@ -5,6 +5,9 @@
 #include "Game/Util/MathUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include <JSystem/J3DGraphAnimator/J3DAnimation.hpp>
+#ifdef TARGET_PC
+#include "port/xskip.h"
+#endif
 
 namespace NrvCinemaFrame {
     NEW_NERVE(CinemaFrameNrvScreen, CinemaFrame, Screen);
@@ -16,6 +19,20 @@ namespace NrvCinemaFrame {
     NEW_NERVE(CinemaFrameNrvFrameToScreen, CinemaFrame, FrameToScreen);
 };  // namespace NrvCinemaFrame
 
+#ifdef TARGET_PC
+// xskip27 (GXV_XSKIP): after an accepted skip the frame is fully black (the Blank nerve); a request to leave the black (Blank -> Frame, Blank -> Screen) waits while
+// port_xskip_cover_hold says the stage's work is not done (at most GXV_XSKIP_HOLD_MS), and is made by exeBlank on the first turn it does not. One frame object a scene.
+namespace {
+    int sXsHeld = 0;           // 0 none, 1 Blank -> Frame asked, 2 Blank -> Screen asked
+    bool sXsReleasing = false;  // (the release's own call is not held again)
+    unsigned sXsBlankTurn = 0;  // the turn exeBlank last ran
+}
+// 1 while the frame has been black this turn or the turn before (GameScene::update asks, for the "xskip:" cover marker)
+extern "C" int port_xskip_cinema_blank(void) {
+    return sXsBlankTurn != 0 && port_xskip_turn_no() - sXsBlankTurn <= 1 ? 1 : 0;
+}
+#endif
+
 CinemaFrame::CinemaFrame(bool isConnectToScene) : LayoutActor("\x83\x56\x83\x6c\x83\x7d\x83\x74\x83\x8c\x81\x5b\x83\x80", true) {
     if (isConnectToScene) {
         MR::connectToScene(this, MR::MovementType_Layout, MR::CalcAnimType_Layout, MR::DrawBufferType_None, MR::DrawType_CinemaFrame);
@@ -23,6 +40,11 @@ CinemaFrame::CinemaFrame(bool isConnectToScene) : LayoutActor("\x83\x56\x83\x6c\
 }
 
 void CinemaFrame::init(const JMapInfoIter& rIter) {
+#ifdef TARGET_PC
+    sXsHeld = 0;
+    sXsReleasing = false;
+    sXsBlankTurn = 0;
+#endif
     initLayoutManager("CinemaFrame", 1);
     initNerve(GET_NERVE(CinemaFrame, CinemaFrameNrvScreen));
     kill();
@@ -101,6 +123,12 @@ void CinemaFrame::tryFrameToBlank() {
 }
 
 void CinemaFrame::tryBlankToFrame() {
+#ifdef TARGET_PC
+    if (!sXsReleasing && !MR::isDead(this) && isNerve(GET_NERVE(CinemaFrame, CinemaFrameNrvBlank)) && port_xskip_cover_hold()) {
+        sXsHeld = 1;
+        return;
+    }
+#endif
     if (MR::isDead(this)) {
         appear();
     }
@@ -114,6 +142,12 @@ void CinemaFrame::tryBlankToFrame() {
 }
 
 void CinemaFrame::tryFrameToScreen() {
+#ifdef TARGET_PC
+    if (!sXsReleasing && !MR::isDead(this) && isNerve(GET_NERVE(CinemaFrame, CinemaFrameNrvBlank)) && port_xskip_cover_hold()) {
+        sXsHeld = 2;
+        return;
+    }
+#endif
     if (MR::isDead(this)) {
         appear();
     }
@@ -171,6 +205,20 @@ void CinemaFrame::exeBlank() {
         MR::startAnim(this, "Open", 0);
         MR::setAnimFrameAndStop(this, 0.0f, 0);
     }
+#ifdef TARGET_PC
+    sXsBlankTurn = port_xskip_turn_no();
+    if (sXsHeld != 0 && !port_xskip_cover_hold()) {  // (xskip27) the work is done or the cap is reached: the request that was held is made now
+        const int held = sXsHeld;
+        sXsHeld = 0;
+        sXsReleasing = true;
+        if (held == 1) {
+            tryBlankToFrame();
+        } else {
+            tryFrameToScreen();
+        }
+        sXsReleasing = false;
+    }
+#endif
 }
 
 void CinemaFrame::exeScreenToFrame() {

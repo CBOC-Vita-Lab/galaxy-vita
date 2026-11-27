@@ -16,6 +16,7 @@
 // Off means identity: ShakeScale(v, false) returns v and CapFlashAlpha(a, ..., false) returns a, bit for bit.
 #pragma once
 
+#include <atomic>
 #include <cstdlib>
 #include "hot_knob.h"
 
@@ -37,7 +38,17 @@ inline bool ParseSwitch(const char* v) {
 }
 
 // GXV_REDUCED_MOTION, read once. The Settings menu sets it at start-up (platform/src/settings/settings_launch.cpp); env.txt wins.
+// settingsnative: the native Settings menu turns it on and off while the game runs (SetLive, relaxed: one load more here; -1 = no live choice,
+// the start-up switch decides).
+inline std::atomic<int>& LiveCell() {
+    static std::atomic<int> gLive{-1};
+    return gLive;
+}
+inline void SetLive(bool on) { LiveCell().store(on ? 1 : 0, std::memory_order_relaxed); }
+inline void ClearLive() { LiveCell().store(-1, std::memory_order_relaxed); }
 inline bool Enabled() {
+    const int live = LiveCell().load(std::memory_order_relaxed);
+    if (live >= 0) return live != 0;
     return PORT_HOT_KNOB(bool, ParseSwitch(std::getenv("GXV_REDUCED_MOTION")));  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h)
 }
 

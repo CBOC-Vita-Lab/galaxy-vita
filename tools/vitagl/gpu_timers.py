@@ -357,6 +357,11 @@ uint32_t vglRtLastGpuFrame(vglRtGpuFrame *out) {
 	return h;
 }
 
+/* sizeof(vglRtGpuFrame): vglRtLastGpuFrame writes the whole struct, so a caller that declares its own copy of it (the Galaxy back end's
+ * VgxRtGpuFrame, through weak symbols) must check it is this big before it passes its own. A caller whose library lacks this function
+ * takes the struct to be the one it was written for. */
+uint32_t vglRtGpuFrameSize(void) { return (uint32_t)sizeof(vglRtGpuFrame); }
+
 void vglRtGpuCounters(uint32_t *timed, uint32_t *untimed, uint32_t *late, uint32_t *pending) {
 	*timed = rt_scenes_timed;
 	*untimed = rt_scenes_untimed;
@@ -443,6 +448,7 @@ typedef struct {
 	uint16_t scenes, timed;
 } vglRtGpuFrame;
 uint32_t vglRtLastGpuFrame(vglRtGpuFrame *out); // the newest finished frame; returns frames finished so far (0: none)
+uint32_t vglRtGpuFrameSize(void); // sizeof(vglRtGpuFrame), for a caller with its own copy of the struct
 void vglRtGpuCounters(uint32_t *timed, uint32_t *untimed, uint32_t *late, uint32_t *pending);
 // scene timers (GXV_GPU_SCENES): a vertex notification per scene too, a second watcher, and the scenes one by one
 typedef struct {

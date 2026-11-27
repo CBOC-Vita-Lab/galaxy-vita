@@ -8,13 +8,21 @@
 #include "revolution/gx/shortcut_pe_misc.h"
 #include "private/flipper.h"
 #include "revolution/os.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 static GXDrawSyncCallback TokenCB;
 static GXDrawDoneCallback DrawDoneCB;
 static volatile GXBool DrawDone;
 static OSThreadQueue FinishQueue;
+#ifdef TARGET_PC
+#include "port/drawdone_other.h"
+// GXV_DRAWDONE_OTHER (port/drawdone_other.h): the GXSetDrawDone calls so far, for a wait made by a thread other than the game thread.
+static volatile u32 DrawDoneSets;
+#endif
 
 void GXSetMisc(GXMiscToken token, u32 val) {
+    PORT_GXCAP(GXSetMisc, (token, val));
     switch (token) {
         case GX_MT_NULL:
             break;
@@ -36,6 +44,7 @@ void GXSetMisc(GXMiscToken token, u32 val) {
 }
 
 void GXFlush(void) {
+    PORT_GXCAP(GXFlush, ());
     if (gx->dirtyState) {
         __GXSetDirtyState();
     }
@@ -58,6 +67,7 @@ void GXFlush(void) {
 }
 
 void GXResetWriteGatherPipe(void) {
+    PORT_GXCAP_ABANDON(GXResetWriteGatherPipe);
     while (PPCMfwpar() & 0x1) {
 
     }
@@ -101,6 +111,7 @@ void __GXAbort(void) {
 }
 
 void GXAbortFrame(void) {
+    PORT_GXCAP_ABANDON(GXAbortFrame);
     __GXAbort();
 
     if (__GXIsGPFifoReady()) {
@@ -112,9 +123,21 @@ void GXAbortFrame(void) {
 }
 
 void GXSetDrawSync(u16 token) {
+    PORT_GXCAP(GXSetDrawSync, (token));
     BOOL en;
     u32 reg = 0;
+#ifdef TARGET_PC
+    // (GXV_DRAWPIPE=4 with GXV_GXCAPTURE_SYNC=1, console run of 11 Nov: the recorded call is replayed on the draw thread beside the
+    // game thread's update, and the draw thread is no guest thread: the guest OS refuses its calls and the pipeline switches itself
+    // off. The interrupts are held off here so that nothing else writes the FIFO between the two commands and the flush. While a
+    // replay runs beside the game thread (__PortGXCap == 3 past the hook: on the game thread the hook has joined the replay first,
+    // so only the replaying thread gets here with 3) nothing else can: the FIFO is the replay's, every GX entry point of any other
+    // thread joins it first, and the guest's interrupt handlers run on guest threads. The two commands and the flush are the same.)
+    const int replayThread = __PortGXCap == 3;
+    en = replayThread ? FALSE : OSDisableInterrupts();
+#else
     en = OSDisableInterrupts();
+#endif
     reg = PE_TOKEN_INT(token, 0x48);
     GX_WRITE_RA_REG(reg);
 
@@ -122,6 +145,9 @@ void GXSetDrawSync(u16 token) {
     SC_PE_TOKEN_SET_RID(reg, 0x47);
     GX_WRITE_RA_REG(reg);
     GXFlush();
+#ifdef TARGET_PC
+    if (!replayThread)
+#endif
     OSRestoreInterrupts(en);
     gx->bpSentNot = GX_FALSE;
 }
@@ -133,6 +159,7 @@ extern void port_gx_drawdone_settle(int point) __attribute__((weak));
 #endif
 
 void GXSetDrawDone(void) {
+    PORT_GXCAP_ABANDON(GXSetDrawDone);
     u32 reg;
 #ifdef TARGET_PC
     if (port_gx_drawdone_settle) {
@@ -150,6 +177,9 @@ void GXSetDrawDone(void) {
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_GX_FINISH_FLUSH);
     GXFlush();
     DrawDone = GX_FALSE;
+#ifdef TARGET_PC
+    DrawDoneSets++;  // (GXV_DRAWDONE_OTHER; with interrupts disabled, as the flag)
+#endif
 #if defined(__vita__)
     if (trace) port_log("native-gx finish=%u flush-complete", trace);
 #endif
@@ -161,6 +191,7 @@ void GXSetDrawDone(void) {
 }
 
 void GXWaitDrawDone(void) {
+    PORT_GXCAP_ABANDON(GXWaitDrawDone);
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_GX_FINISH_WAIT);
     BOOL en = OSDisableInterrupts();
     while (!DrawDone) {
@@ -170,27 +201,49 @@ void GXWaitDrawDone(void) {
 }
 
 void GXDrawDone(void) {
+    PORT_GXCAP_ABANDON(GXDrawDone);
     GXSetDrawDone();
     GXWaitDrawDone();
 }
 
+#ifdef TARGET_PC
+// GXV_DRAWDONE_OTHER (port/drawdone_other.h; MainLoopFramework.cpp port_gx_drawdone_settle / port_gx_view_write_from): a thread other
+// than the game thread (the loading thread) waits for the finish outstanding now, without taking the game thread's deferred wait. It
+// sleeps in the same queue (every finish interrupt wakes it) but is done as soon as the flag is set OR a later GXSetDrawDone has been
+// issued: the game thread resetting the flag before this thread gets the CPU can no longer hide the finish from it (the starvation
+// that kept a stage from loading at 60 pictures a second).
+void port_gx_wait_finish_other(void) {
+    PORT_GXCAP_ABANDON(port_gx_wait_finish_other);
+    BOOL en = OSDisableInterrupts();
+    const u32 ticket = DrawDoneSets;
+    while (!port_drawdone_other_seen(DrawDone, DrawDoneSets, ticket)) {
+        OSSleepThread(&FinishQueue);
+    }
+    OSRestoreInterrupts(en);
+}
+#endif
+
 void GXPixModeSync(void) {
+    PORT_GXCAP(GXPixModeSync, ());
     GX_WRITE_RA_REG(gx->peCtrl);
     gx->bpSentNot = GX_FALSE;
 }
 
 void GXTexModeSync(void) {
+    PORT_GXCAP(GXTexModeSync, ());
     u32 reg = TX_LOADBLOCK3(0, 0, 0x63);
     GX_WRITE_RA_REG(reg);
     gx->bpSentNot = GX_FALSE;
 }
 
 void GXPokeAlphaMode(GXCompare func, u8 threshold) {
+    PORT_GXCAP(GXPokeAlphaMode, (func, threshold));
     u32 reg = (u32)(func << 8 | threshold);
     GX_PE_REG_WRITE_U16(3, reg);
 }
 
 void GXPokeAlphaRead(GXAlphaReadMode mode) {
+    PORT_GXCAP(GXPokeAlphaRead, (mode));
     u32 reg = 0;
     SC_PE_PI_CTL_SET_AFMT(reg, mode);
     SC_PE_PI_CTL_SET_ZFMT(reg, 1);
@@ -198,12 +251,14 @@ void GXPokeAlphaRead(GXAlphaReadMode mode) {
 }
 
 void GXPokeAlphaUpdate(GXBool update_en) {
+    PORT_GXCAP(GXPokeAlphaUpdate, (update_en));
     u32 reg = GX_PE_REG_READ_U16(1);
     SC_PE_CMODE0_SET_ALPHA_MASK(reg, update_en);
     GX_PE_REG_WRITE_U16(1, reg);
 }
 
 void GXPokeBlendMode(GXBlendMode type, GXBlendFactor src, GXBlendFactor dst, GXLogicOp op) {
+    PORT_GXCAP(GXPokeBlendMode, (type, src, dst, op));
     u32 reg = GX_PE_REG_READ_U16(1);
     SC_PE_CMODE0_SET_BLEND_ENABLE(reg, ((type == GX_BM_BLEND) || (type == GX_BM_SUBTRACT)));
     SC_PE_CMODE0_SET_BLENDOP(reg, (type == GX_BM_SUBTRACT));
@@ -216,12 +271,14 @@ void GXPokeBlendMode(GXBlendMode type, GXBlendFactor src, GXBlendFactor dst, GXL
 }
 
 void GXPokeColorUpdate(GXBool update_en) {
+    PORT_GXCAP(GXPokeColorUpdate, (update_en));
     u32 reg = GX_PE_REG_READ_U16(1);
     SC_PE_CMODE0_SET_COLOR_MASK(reg, update_en);
     GX_PE_REG_WRITE_U16(1, reg);
 }
 
 void GXPokeDstAlpha(GXBool enable, u8 alpha) {
+    PORT_GXCAP(GXPokeDstAlpha, (enable, alpha));
     u32 reg = 0;
     SC_PE_CMODE1_SET_CONSTANT_ALPHA(reg, alpha);
     SC_PE_CMODE1_SET_CONSTANT_ALPHA_ENABLE(reg, enable);
@@ -229,12 +286,14 @@ void GXPokeDstAlpha(GXBool enable, u8 alpha) {
 }
 
 void GXPokeDither(GXBool dither) {
+    PORT_GXCAP(GXPokeDither, (dither));
     u32 reg = GX_PE_REG_READ_U16(1);
     SC_PE_CMODE0_SET_DITHER_ENABLE(reg, dither);
     GX_PE_REG_WRITE_U16(1, reg);
 }
 
 void GXPokeZMode(GXBool compare_en, GXCompare func, GXBool update_en) {
+    PORT_GXCAP(GXPokeZMode, (compare_en, func, update_en));
     u32 reg = 0;
     SC_PE_ZMODE_SET_ENABLE(reg, compare_en);
     SC_PE_ZMODE_SET_FUNC(reg, func);
@@ -247,10 +306,12 @@ u32 __PortGXPeekARGB(u16 x, u16 y);
 u32 __PortGXPeekZ(u16 x, u16 y);
 
 void GXPeekARGB(u16 x, u16 y, u32* color) {
+    PORT_GXCAP(GXPeekARGB, (x, y, color));
     *color = __PortGXPeekARGB(x, y);
 }
 
 void GXPeekZ(u16 x, u16 y, u32* z) {
+    PORT_GXCAP(GXPeekZ, (x, y, z));
     *z = __PortGXPeekZ(x, y);
 }
 #else
@@ -271,7 +332,8 @@ void GXPeekZ(u16 x, u16 y, u32* z)  {
 }
 #endif
 
-GXDrawSyncCallback GXSetDrawSyncCallback(GXDrawSyncCallback cb) { 
+GXDrawSyncCallback GXSetDrawSyncCallback(GXDrawSyncCallback cb) {
+    PORT_GXCAP_ABANDON(GXSetDrawSyncCallback); 
     GXDrawSyncCallback oldcb = TokenCB;
     BOOL en = OSDisableInterrupts();
     TokenCB = cb;
@@ -300,6 +362,7 @@ static void GXTokenInterruptHandler(__OSInterrupt, OSContext* context)
 }
 
 GXDrawDoneCallback GXSetDrawDoneCallback(GXDrawDoneCallback cb) {
+    PORT_GXCAP_ABANDON(GXSetDrawDoneCallback);
     GXDrawDoneCallback oldcb = DrawDoneCB;
     BOOL en = OSDisableInterrupts();
     DrawDoneCB = cb;

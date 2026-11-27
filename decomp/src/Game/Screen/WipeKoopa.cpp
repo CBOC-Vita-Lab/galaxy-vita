@@ -2,6 +2,9 @@
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/LayoutUtil.hpp"
 #include <JSystem/J3DGraphAnimator/J3DAnimation.hpp>
+#ifdef TARGET_PC
+#include "port/compat.h"
+#endif
 
 namespace {
     static const s32 sAnimFrame = 90;
@@ -38,9 +41,15 @@ void WipeKoopa::exeWipeOut() {
     if (MR::isAnimStopped(this, 0)) {
         setNerve(GET_NERVE_ANON(WipeKoopaNrvClose));
     }
+#ifdef TARGET_PC
+    port_vr_wipe(0, 0.0f, 0x000000);   // (14 Nov: the Bowser wipe tells the port too; closing = not covered yet)
+#endif
 }
 
 void WipeKoopa::exeClose() {
+#ifdef TARGET_PC
+    port_vr_wipe(0, 1.0f, 0x000000);   // (14 Nov, as WipeGameOver: closed = the screen is covered, no in-between pictures behind it)
+#endif
 }
 
 void WipeKoopa::wipe(s32 frame) {

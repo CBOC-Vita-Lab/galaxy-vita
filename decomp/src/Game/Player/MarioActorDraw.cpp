@@ -1,6 +1,11 @@
 #include "Game/LiveActor/DisplayListMaker.hpp"
 #include "port/offset32.h"
+#include "port/player_assets.h"
+#ifdef TARGET_PC
+#include "port/mirror25.h"
+#endif
 #include "Game/LiveActor/ModelManager.hpp"
+#include "Game/MP/MpSelfPuppet.hpp"
 #include "Game/MapObj/CollectCounter.hpp"
 #include "Game/MapObj/IceStep.hpp"
 #include "Game/Player/DLchanger.hpp"
@@ -19,6 +24,7 @@
 #include "Game/Util/FileUtil.hpp"
 #include "Game/Util/FixedPosition.hpp"
 #include "Game/Util/FootPrint.hpp"
+#include "Game/Util/FurMulti.hpp"
 #include "Game/Util/JointUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/MathUtil.hpp"
@@ -27,6 +33,7 @@
 #include "Game/Util/MtxUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/SchedulerUtil.hpp"
+#include "Game/Util/ScreenUtil.hpp"
 #include <JSystem/J3DGraphAnimator/J3DJoint.hpp>
 #include <JSystem/J3DGraphAnimator/J3DModelData.hpp>
 #include <JSystem/J3DGraphBase/J3DMaterial.hpp>
@@ -35,6 +42,7 @@
 #include <JSystem/JUtility/JUTNameTab.hpp>
 #include <JSystem/JUtility/JUTTexture.hpp>
 #include <cstring>
+extern "C" void port_log_summary(const char* fmt, ...);
 #include <revolution/gd/GDBase.h>
 
 namespace MR {
@@ -61,11 +69,17 @@ namespace {
             pModel->mExtraMtxBuffer[i] = new (0x20) Mtx[0xC00 / sizeof(Mtx)];
         }
     }
+    static bool sMpSelfHidFur = false;
 }  // namespace
 
 void MarioActor::initDrawAndModel() {
+    sMpSelfHidFur = false;
     _218 = new DrawAdaptor(MR::Functor(this, &MarioActor::drawShadow), MR::DrawType_AlphaShadow);
+#ifdef TARGET_PC
+    _21C = new DrawAdaptor(MR::Functor(this, &MarioActor::drawSilhouetteMp), MR::DrawType_0x28);   // (MP3: the self puppet's hide flag is tested in the wrapper)
+#else
     _21C = new DrawAdaptor(MR::Functor(this, &MarioActor::drawSilhouette), MR::DrawType_0x28);
+#endif
     _220 = new DrawAdaptor(MR::Functor(this, &MarioActor::drawPreWipe), MR::DrawType_CometScreenFilter);
     _228 = new DrawAdaptor(MR::Functor(this, &MarioActor::drawScreenBlend), MR::DrawType_CenterScreenBlur);
     _22C = new DrawAdaptor(MR::Functor(this, &MarioActor::drawIndirect), MR::DrawType_0x24);
@@ -146,6 +160,13 @@ void MarioActor::initDrawAndModel() {
 }
 
 void MarioActor::initBeeMario() {
+#ifdef TARGET_PC
+    // after community PR #34 by Arfatnaik0 (CBOC-Vita-Lab/galaxy-vita): a second call must not build a second body/wings pair over an existing
+    // one (the late retry, GXV_POWERUP_RETRY, calls this after the stage start).
+    if (_9E4 != nullptr || _9E8 != nullptr) {
+        return;
+    }
+#endif
     J3DModelX* model;
     const char* modelName;
     const char* archiveName;
@@ -190,6 +211,17 @@ void MarioActor::initBeeMario() {
 
     _9F0 = 0;
     _3D2 |= 0x10;
+
+#ifdef TARGET_PC
+    // beefix25: made after swapTextureInit and initHand (the late retry of GXV_POWERUP_RETRY: they ran at the stage start with no Bee, so the Bee
+    // eyelid slots _B6C[4..7] were never made and the Bee body's hand joints were not hidden). At the stage start _B64 / _B6C do not exist yet:
+    // swapTextureInit and initHand do both after this. After community PR #34 by Arfatnaik0 (initBeeTextureSwap), plus the hands.
+    if (_B64 != nullptr && _B6C != nullptr) {
+        initBeeTextureSwap();
+        MR::hideJoint(mModels[2], "HandR0");
+        MR::hideJoint(mModels[2], "HandL0");
+    }
+#endif
 }
 
 void MarioActor::initHopperMario() {
@@ -242,6 +274,15 @@ void MarioActor::initIceMario() {
         return;
     }
 
+#ifdef TARGET_PC
+    // luigi24: initHand makes the ice hands (their own archives) whenever _9C0 exists; with one of them not loaded the ModelHolder cannot be made.
+    // The item's makeArchiveList asks for all three together, so this only acts when the converted data or a load went wrong: no ice mode then.
+    if (!MR::isLoadedObjectOrLayoutArchive("IceMarioHandL") || !MR::isLoadedObjectOrLayoutArchive("IceMarioHandR")) {
+        port_log_summary("player-assets: %s loaded but IceMarioHandL/R not: no ice mode", modelName);
+        return;
+    }
+#endif
+
     MR::createAndAddResourceHolder(archiveName);
 
     _9C0 = new ModelHolder(modelName, true);
@@ -284,6 +325,14 @@ void MarioActor::initInvincibleMario() {
     if (!MR::isLoadedObjectOrLayoutArchive(modelName)) {
         return;
     }
+
+#ifdef TARGET_PC
+    // luigi24: as for ice: initHand makes InvincibleMarioHandL/R whenever _9C8 exists.
+    if (!MR::isLoadedObjectOrLayoutArchive("InvincibleMarioHandL") || !MR::isLoadedObjectOrLayoutArchive("InvincibleMarioHandR")) {
+        port_log_summary("player-assets: %s loaded but InvincibleMarioHandL/R not: no rainbow mode", modelName);
+        return;
+    }
+#endif
 
     MR::createAndAddResourceHolder(archiveName);
 
@@ -359,7 +408,14 @@ void MarioActor::initBoneMario() {
     _3D2 |= 0x100;
 }
 
+#ifdef TARGET_PC
+extern "C" void port_drawpipe_note(int what);  // (GXV_DRAWPIPE, dpengine: SceneFunction.cpp)
+#endif
 void MarioActor::changeDisplayMode(u8 mode) {
+#ifdef TARGET_PC
+    if (mCurrModel != mode) port_log_summary("mario: body %u -> %u", (unsigned)mCurrModel, (unsigned)mode); // (2.3: power-up tests; one line a switch)
+    if (mCurrModel != mode) port_drawpipe_note(0);  // (a form switch retargets the draw lists: the pipelined draw stays serial for the turns around it)
+#endif
     mCurrModel = mode;
     mMarioAnim->mXanimePlayer->setModel(mModels[mCurrModel]);
     mMarioAnim->mXanimePlayerUpper->setModel(mModels[mCurrModel]);
@@ -375,7 +431,129 @@ void MarioActor::changeDisplayMode(u8 mode) {
     mSearchLightThrowPos->setBaseMtx(handMtx);
 }
 
+#ifdef TARGET_PC
+// prewarm24 (GXV_PREWARM_LOG=1, log only): once per stage, the player's body models the stage loaded (mModels: 0 normal, 1 .., 2 bee,
+// 3 .., 4 .., 5 spring; the form models are made at the player's set-up and kept hidden) with their material counts and which is drawn.
+// The warm-up scope does not draw the hidden form models: their materials' display lists, fog and lights are built by the player's own
+// view calculation only for the current body (calcViewAndEntry), so a draw of another body outside it would not give the keys its first
+// real draw gives. Their programs come from the player list (GXV_PLAYERWARM, recorded at the first form change after a pad input and
+// queued in every stage), its built-in seed and the shader pack's power-up tour (pack24 job PU); this line tells the console run which
+// forms a stage can show, so that their absence from the lists can be checked against the "first-use:" lines.
+extern "C" uint32_t port_scene_key(void) __attribute__((weak));
+static void PortPrewarmFormCensus(const MarioActor* actor, J3DModelX* const* models, u32 cur) {
+    static int on = -1;
+    static uint32_t lastKey = 0;
+    if (on < 0) {
+        const char* e = getenv("GXV_PREWARM_LOG");
+        on = e != nullptr && atoi(e) != 0 ? 1 : 0;
+    }
+    if (!on || !port_scene_key) return;
+    const uint32_t key = port_scene_key();
+    if (key == 0 || key == lastKey) return;
+    lastKey = key;
+    char line[400];
+    int w = snprintf(line, sizeof line, "prewarm: stage %08x: the player's body models loaded:", key);
+    for (u32 i = 0; i < 6 && w > 0 && w < static_cast< int >(sizeof line) - 48; ++i) {
+        if (models[i] == nullptr) continue;
+        w += snprintf(line + w, sizeof line - static_cast< size_t >(w), " %u (%u materials%s)", static_cast< unsigned >(i),
+                      static_cast< unsigned >(models[i]->mModelData->getMaterialNum()), i == cur ? ", drawn now" : ", hidden: player list / pack only");
+    }
+    port_log_summary("%s", line);
+    (void)actor;
+}
+// ---- mario24: the "player-look:" line (agents/mario24/REPORT.txt). A few seconds into a scene the player's own numbers are handed to the renderer's
+// log line (platform/src/gx/vgx_galaxy.cpp), which adds what it knows: his textures, the filters and bias they get, the passes over the picture.
+// Here: the zoom, the camera distance, how tall he stands on the picture, his depth as the game's depth-of-field ramp sees it (8 bits). Nothing of it
+// changes a pixel or the game: the values are read, once a picture; the weak functions are absent from builds without the vgx front end.
+extern "C" void port_player_look(float heightFrac, float camDist, float zoom, int z8, int isLuigi, int body) __attribute__((weak));
+extern "C" void port_player_look_z8(int z8) __attribute__((weak));
+extern "C" float port_camera_zoom(void);
+extern "C" int port_safe_cam_exists(void);
+namespace {
+const MarioActor* sPlayerLookActor = nullptr;
+unsigned sPlayerLookTurns = 0;
+bool sPlayerLookDone = false;
+// Mario's height in the game's units for the on-screen estimate (feet to the top of the cap, about; the line says it is an estimate)
+constexpr f32 kPlayerLookHeight = 160.0f;
+}  // namespace
+void MarioActor::portPlayerLook() const {
+    if (port_player_look == nullptr || !port_safe_cam_exists()) {
+        return;
+    }
+    if (sPlayerLookActor != this) {  // (a new scene's player)
+        sPlayerLookActor = this;
+        sPlayerLookTurns = 0;
+        sPlayerLookDone = false;
+    }
+    const TVec3f feet = mPosition;
+    const f32 z = MR::calcCameraDistanceZ(feet);
+    const f32 n = MR::getNearZ(), f = MR::getFarZ();
+    if (port_player_look_z8 != nullptr && z > n) {
+        // the game's depth at his distance, GX's 24-bit depth z' = f / (f - n) x (1 - n / z), whose top 8 bits the depth-of-field's ramp reads
+        const f32 zp = (f / (f - n)) * (1.0f - n / z);
+        port_player_look_z8(static_cast< int >(zp * 255.0f));
+    }
+    if (sPlayerLookDone || ++sPlayerLookTurns < 240) {
+        return;
+    }
+    sPlayerLookDone = true;
+    const TVec3f& g = getGravityVec();
+    TVec3f head;
+    head.x = feet.x - g.x * kPlayerLookHeight;
+    head.y = feet.y - g.y * kPlayerLookHeight;
+    head.z = feet.z - g.z * kPlayerLookHeight;
+    TVec2f a, b;
+    MR::calcScreenPosition(&a, feet);
+    MR::calcScreenPosition(&b, head);
+    const f32 sh = static_cast< f32 >(MR::getScreenHeight());
+    const f32 dy = a.y > b.y ? a.y - b.y : b.y - a.y;
+    const f32 dx = a.x > b.x ? a.x - b.x : b.x - a.x;
+    const f32 frac = sh > 0.0f ? __builtin_sqrtf(dx * dx + dy * dy) / sh : 0.0f;
+    int zi = 0;
+    if (z > n) {
+        zi = static_cast< int >((f / (f - n)) * (1.0f - n / z) * 255.0f);
+    }
+    port_player_look(frac, z, port_camera_zoom(), zi, gIsLuigi ? 1 : 0, static_cast< int >(mCurrModel));
+}
+#endif
+
 void MarioActor::calcViewAndEntry() {
+#ifdef TARGET_PC
+    PortPrewarmFormCensus(this, mModels, mCurrModel);
+    portPlayerLook();
+#endif
+    // MP3: self-puppet hides local Mario's body, so suppress DrawBuffer-drawn Boo (_9A4) and Bee (_9E8 wings / _9EC fur) too.
+    // Use hideModelAndOnCalcAnim so Boo/Bee BCK state machines keep advancing while hidden; restore live hidden models
+    // unconditionally when !hideSelf (vanilla MarioActor never calls MR::hideModel on _9A4/_9E8, only appear/kill).
+    const bool hideSelf = MpSelfPuppet::hideLocalBody();
+    if (hideSelf) {
+        if (_9A4 != nullptr && !MR::isDead(_9A4) && !MR::isHiddenModel(_9A4)) {
+            MR::hideModelAndOnCalcAnim(_9A4);
+        }
+        if (_9E8 != nullptr && !MR::isDead(_9E8) && !MR::isHiddenModel(_9E8)) {
+            MR::hideModelAndOnCalcAnim(_9E8);
+        }
+        if (_9EC != nullptr && mMario->isPlayerModeBee()) {
+            _9EC->offDraw(-1);
+            sMpSelfHidFur = true;
+        }
+    } else {
+        if (_9A4 != nullptr && !MR::isDead(_9A4) && !_482 && MR::isHiddenModel(_9A4)) {
+            MR::showModel(_9A4);
+        }
+        if (_9E8 != nullptr && !MR::isDead(_9E8) && !_482 && !_1A1 && MR::isHiddenModel(_9E8)) {
+            MR::showModel(_9E8);
+            if (_9EC != nullptr) {
+                _9EC->onDraw(-1);
+            }
+            sMpSelfHidFur = false;
+        } else if (sMpSelfHidFur) {
+            if (_9EC != nullptr && !_482 && !_1A1) {
+                _9EC->onDraw(-1);
+            }
+            sMpSelfHidFur = false;
+        }
+    }
     decideShadowMode();
 
     J3DModelX* model = getJ3DModel();
@@ -418,6 +596,9 @@ void MarioActor::calcViewAndEntry() {
     } else {
         _A24 = 0;
         _A25 = 0;
+#ifdef TARGET_PC
+        mPortReflSkip = 0;
+#endif
     }
 
     calcViewSearchLight();
@@ -480,6 +661,11 @@ void MarioActor::drawMarioModel() const {
     drawSpinInhibit();
     drawSphereMask();
     bool res = drawDarkMask();
+
+    // MP3: the local player's character is drawn by a self puppet (MpPuppets): no body, face or hands here
+    if (MpSelfPuppet::hideLocalBody()) {
+        return;
+    }
 
     J3DModelX* model = mModels[mCurrModel];
 
@@ -546,6 +732,51 @@ bool MarioActor::isAllHidden() const {
     return hidden;
 }
 
+// The four Bee eyelid texture slots _B6C[4..7], from the Bee model's "mario_eyeLid.0" on. Called by swapTextureInit (the Bee made with the
+// player) and by initBeeMario when it runs late. Moved out of swapTextureInit and made after community PR #34 by Arfatnaik0
+// (CBOC-Vita-Lab/galaxy-vita), with what the review of that PR asked for: _B64 (the scratch table of texture pointers) was allocated from the
+// NORMAL body's texture count (_B60) and the Bee's count was used to fill it; here only min(Bee count, _B60) entries are stored (the luigi24
+// cap), a missing "mario_eyeLid.0" uses the normal body's index like the original code (the community version fell back to 0), and the four
+// textures must lie inside both the Bee's table and _B64, otherwise the slots stay empty (swapTexture then leaves the eyes alone) and one line
+// is logged, instead of reading past the table.
+void MarioActor::initBeeTextureSwap() {
+    if (_9E4 == nullptr || _B64 == nullptr || _B6C == nullptr || _B60 == 0) {
+        return;
+    }
+
+    J3DModelData* beeData = MR::getJ3DModelData(_9E4);
+    const u32 textureNum = beeData->mMaterialTable.mTexture->getNum();
+
+    int found = -1;
+    for (u16 i = 0; i < textureNum; i++) {
+        const char* texName = beeData->mMaterialTable.mTextureName->getName(i);
+        if (strcmp(texName, "mario_eyeLid.0") == 0) {
+            found = i;
+            break;
+        }
+    }
+    const unsigned first = portBeeEyelidFirst(found, _B70);
+
+    for (u32 i = 0; i < textureNum && i < _B60; i++) {
+        _B64[i] = MR::getResTIMG(_9E4, i);
+    }
+
+    if (!portBeeEyelidFits(first, textureNum, _B60)) {
+        for (u32 i = 4; i < 8; i++) {
+            _B6C[i].mDL = nullptr;
+            _B6C[i].mSize = 0;
+        }
+        port_log_summary("player-assets: Bee eyelid textures not made (first %u, Bee textures %u, table %u)", first, (unsigned)textureNum,
+                         (unsigned)_B60);
+        return;
+    }
+
+    createTextureDL(&_B6C[4], 0, first);
+    createTextureDL(&_B6C[5], 0, first + 1);
+    createTextureDL(&_B6C[6], 0, first + 2);
+    createTextureDL(&_B6C[7], 0, first + 3);
+}
+
 void MarioActor::swapTextureInit() {
     J3DModelData* actorData = MR::getJ3DModelData(this);
     const u32 textureCount = actorData->mMaterialTable.mTexture->getNum();
@@ -558,6 +789,15 @@ void MarioActor::swapTextureInit() {
     }
 
     _B6C = new DLholder[12];
+#ifdef TARGET_PC
+    // beefix25: slots 4..11 (Bee, spring) stay unmade for a stage without that form (or until a late initialisation); swapTexture reads them
+    // in those modes and the new[] memory is not zeroed.
+    for (u32 i = 0; i < 12; i++) {
+        _B6C[i].mDL = nullptr;
+        _B6C[i].mSize = 0;
+        _B6C[i]._6 = 0;
+    }
+#endif
 
     u16 texNo = 0;
     for (u16 i = 0; i < textureCount; i++) {
@@ -576,26 +816,7 @@ void MarioActor::swapTextureInit() {
     createTextureDL(&_B6C[3], 0, texNo + 3);
 
     if (_9E4 != nullptr) {
-        J3DModelData* beeData = MR::getJ3DModelData(_9E4);
-        const u32 textureNum = beeData->mMaterialTable.mTexture->getNum();
-
-        for (u16 i = 0; i < textureNum; i++) {
-            J3DModelData* modelData = MR::getJ3DModelData(_9E4);
-            const char* texName = modelData->mMaterialTable.mTextureName->getName(i);
-            if (strcmp(texName, "mario_eyeLid.0") == 0) {
-                texNo = i;
-                break;
-            }
-        }
-
-        for (u32 i = 0; i < textureNum; i++) {
-            _B64[i] = MR::getResTIMG(_9E4, i);
-        }
-
-        createTextureDL(&_B6C[4], 0, texNo);
-        createTextureDL(&_B6C[5], 0, texNo + 1);
-        createTextureDL(&_B6C[6], 0, texNo + 2);
-        createTextureDL(&_B6C[7], 0, texNo + 3);
+        initBeeTextureSwap();
     }
 
     if (_A00 != nullptr) {
@@ -611,7 +832,13 @@ void MarioActor::swapTextureInit() {
             }
         }
 
+#ifdef TARGET_PC
+        // luigi24: _B64 holds the normal body's textures (new ResTIMG*[_B60]); a form with more textures than that wrote past it. Same result
+        // whenever the form has no more textures than the body (every case that ran before); otherwise the extra ones are not stored.
+        for (u32 i = 0; i < textureNum && i < _B60; i++) {
+#else
         for (u32 i = 0; i < textureNum; i++) {
+#endif
             _B64[i] = MR::getResTIMG(_A00, i);
         }
 
@@ -794,7 +1021,9 @@ void MarioActor::drawIndirect() const {
 }
 
 void MarioActor::drawIndirectModel() const {
-    if (isAllHidden()) {
+    // MP3: self puppet (MpPuppets): no reflection or Ice body of the MarioActor.
+    // (merge of 3.0 on c181: folded into c181's own test with a non-short-circuit OR, so the function has c181's control flow and PGO profile; the flag is a plain global bool)
+    if (isAllHidden() | MpSelfPuppet::hideLocalBody()) {
         return;
     }
 
@@ -861,6 +1090,12 @@ void MarioActor::drawReflectModel() const {
         return;
     }
 
+#ifdef TARGET_PC
+    if (mPortReflSkip) {
+        return;  // (reflfur25, GXV_MIRROR25 >= 1: the mirrored model is outside the frustum; its matrices were not calculated either)
+    }
+#endif
+
     if (isUseScreenBox()) {
         captureScreenBox();
     }
@@ -886,6 +1121,16 @@ void MarioActor::drawReflectModel() const {
     model->mFlags.clear();
 
     if (_A08 == 2) {
+#ifdef TARGET_PC
+        if (port::mirror25::Level() >= 2) {
+            // GXV_MIRROR25 = 2 (reflfur25): ONE pass. The additive pass (flag 1D: ZMode LEQUAL + write) with ZMode ALWAYS + write called after it: it punches
+            // the floor's depth itself, so the depth-only pass (display list 5, ZScaleOffset 1e-5) is left out: half of the reflection's draws and vertices.
+            model->mFlags._1D = true;
+            model->mPortZAlwaysOn = true;
+            mDLchanger->addDL(model);
+        } else
+#endif
+        {
         GXSetZScaleOffset(1.0f, 0.00001f);
         model->mFlags._1A = true;
         model->setDrawView(3);
@@ -893,6 +1138,7 @@ void MarioActor::drawReflectModel() const {
         model->mFlags._1A = false;
         model->mFlags._1D = true;
         mDLchanger->addDL(model);
+        }
     } else {
         if (isUseScreenBox()) {
             mDLchanger->addDL(model);
@@ -905,6 +1151,9 @@ void MarioActor::drawReflectModel() const {
     model->setDrawView(3);
     model->directDraw(nullptr);
     model->mFlags.clear();
+#ifdef TARGET_PC
+    model->mPortZAlwaysOn = false;
+#endif
 
     MR::hideJoint(model, "HandR0");
     MR::hideJoint(model, "HandL0");
@@ -934,7 +1183,8 @@ void MarioActor::drawModelBlur() const {
     }
 
     model->_1E4 = false;
-    if (!_A6E) {
+    // MP3: self puppet (MpPuppets): no motion-blur copies of the MarioActor's body (folded into c181's test, see drawIndirectModel)
+    if ((!_A6E) | MpSelfPuppet::hideLocalBody()) {
         return;
     }
 
@@ -963,6 +1213,14 @@ void MarioActor::drawModelBlur() const {
 }
 
 void MarioActor::createTextureDL(DLholder* pHolder, u16 texMapID, u16 texIndex) {
+#ifdef TARGET_PC
+    // beefix25: _B64 has _B60 entries (the normal body's texture count); a form's eyelid index past that, or an unset entry, made no list.
+    if (_B64 == nullptr || texIndex >= _B60 || _B64[texIndex] == nullptr) {
+        pHolder->mDL = nullptr;
+        pHolder->mSize = 0;
+        return;
+    }
+#endif
     MR::ProhibitSchedulerAndInterrupts prohibit(false);
 
     u8 tempDL[0x200] ATTRIBUTE_ALIGN(32);
@@ -1008,6 +1266,11 @@ void MarioActor::swapTexture(const char* pMaterialName, u8 texNo) const {
     J3DModelData* modelData = MR::getJ3DModelData(this);
     u16 materialNo = MR::getMaterialNo(modelData, pMaterialName);
 
+#ifdef TARGET_PC
+    if (_B6C == nullptr) {
+        return;
+    }
+#endif
     const DLholder* holder = _B6C;
     const u8 modelIdx = mCurrModel;
     u8* dl = holder[texNo].mDL;

@@ -361,6 +361,7 @@ bool ApplyRules(std::vector<Tok>& t) {
 
 struct Patched {
     uint64_t hash = 0;
+    uint32_t mapping = ~0u;   // port::controls::MappingGeneration() it was made under: the title's "press START" names the pause button
     bool changed = false;
     std::vector<uint16_t> text;
 };
@@ -379,6 +380,7 @@ bool port_handheld_texture_needs_rgba(uint64_t hash, uint32_t width, uint32_t he
 void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8_t* rgba) {
     const TexturePatch patch = FindTexturePatch(hash, width, height);
     if (patch.texture) {
+        port_log("handheld: A button texture %ux%u (jump on %s)", width, height, port::controls::RemapEnabled() ? port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Jump)->id : "cross");   // once per decode: a re-decode after a swap shows here
         if (port::controls::RemapEnabled() && strcmp(port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Jump)->id, "cross")) {
             BlitGlyph(rgba, width, height, ButtonGlyph(Action::Jump));
             return;
@@ -398,6 +400,7 @@ void port_handheld_texture(uint64_t hash, uint32_t width, uint32_t height, uint8
         return;
     }
     if (patch.sheet) {
+        port_log("handheld: picture font sheet patched (first glyph %d, jump on %s)", patch.sheet->first, port::controls::RemapEnabled() ? port::controls::PrimaryButton(port::controls::ActiveMapping(), Action::Jump)->id : "cross");   // vitabtn: once per sheet decode (shows the button pictures are the handheld's)
         for (const Cell& c : kCells) {
             const int k = c.glyph - patch.sheet->first;
             if (k < 0 || k >= 9) continue;
@@ -431,8 +434,10 @@ const void* port_handheld_message(const void* original) {
     std::lock_guard<std::mutex> lock(sLock);
     if (!sPatched) sPatched = new std::unordered_map<const void*, Patched>();
     Patched& p = (*sPatched)[original];
-    if (p.hash != h) {
+    const uint32_t mapping = port::controls::MappingGeneration();
+    if (p.hash != h || p.mapping != mapping) {
         p.hash = h;
+        p.mapping = mapping;
         std::vector<Tok> t = Tokenize(s);
         // (at least 40: the dialogue box holds about 41 characters; a short message's own width is no limit)
         const int width = std::max(LongestLine(t), 40);

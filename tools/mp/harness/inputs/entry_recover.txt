@@ -1,0 +1,7 @@
+# Title -> entry screen -> Multiplayer: opening the Multiplayer menu offers the recovery file of a session that ended unexpectedly (MpMenuSequence
+# openMain: "ui: recovery offered stars=N"). Marks as in file2_observatory.txt. Nothing is pressed after the offer: the scenario looks at the dialog.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+title+8-8.5:A|B
+entry+3-3.2:DOWN          # Single Player -> Multiplayer
+entry+5-5.2:A

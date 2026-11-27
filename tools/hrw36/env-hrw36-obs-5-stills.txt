@@ -1,0 +1,12 @@
+# env-hrw36-obs-5-stills.txt (warp36, 14 Nov 2026): the candidate with stills: 12 pairs written to ux0:data/smg/hrw31 (GXV_HRW_WARP_DIR, the folder of the earlier stills) as pair<N>_A / _B (shown) / _B0 (rotation only, no box) / _BF / _T (true redraw) .ppm, and one 'hrw: warp stills' line a pair (mean difference of B and of B0 from T: B must be the smaller). The stills hitch: not a run to judge smoothness by. The Comet Observatory (the hub: no stage line; load the save and walk out). Stand still, then jump on the spot 20 times, then run-and-jump across the deck, 2 minutes in all. Look at the ground round his feet and his shadow on each jump. Jump while pairs 300-800 pass (10-27 s after the stage settles).
+# Performance mode (its table sets GXV_HRW=5, depth mode 4 and the rest); needs a build with commit 'warp36:'. Judge on the 'hrw: warp36' line (every 5 s): ground parallax mean / max / bins, 'pairs on his ground plane', 'shaped boxes'; beside it 'fps:', 'even:', 'hrw: warp' (warp pass ms, fell back by reason).
+GXV_CHARAA_AUTO=0
+GXV_SHADERPACK=1
+GXV_PICTURE_MODE=60
+GXV_HRW36_PLANE=1
+GXV_HRW36_BOX=1
+GXV_HRW_WARP_DUMP=12
+GXV_HRW_WARP_TRUTH=1
+GXV_HRW_WARP_DUMP_FROM=300
+GXV_HRW_WARP_EVERY=40
+GXV_HRW_WARP_DUMP_MIN_PX=0

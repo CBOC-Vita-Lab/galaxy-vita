@@ -10,7 +10,12 @@ The opt-in `GXV_ASTRO_DOME_ZOOM_GUARD=1` keeps the original field of view in
 edge. A zoom can move its center offscreen even while part of its model remains
 visible. The game's pointer target rejects offscreen centers before checking
 radius overlap. The guard does not modify that target rule, the actor, input,
-saved zoom or any other stage's gameplay zoom. It is default off and read once.
+saved zoom or any other stage's gameplay zoom. It is off when unset and read once;
+the Vita build sets it to 1 (vita/vgx-game/entry.cpp, since 2.0).
+
+The test also checks the other reasons the zoom is set aside (a fixed game camera,
+`GXV_ZOOM_FIXEDCAM`; a Pull Star in reach, `GXV_ZOOM_PULLSTAR`): they ease to 1.0 in
+24 updates and back like a cutscene, and are not asked at camera creation.
 
 Coverage includes every zoom step from 1.0 to 2.0, 4:3 and 16:9 projection,
 default/OFF/ON/non-enabling flag values, read-once behavior, other gameplay,

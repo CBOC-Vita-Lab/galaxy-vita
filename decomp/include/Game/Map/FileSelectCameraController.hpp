@@ -14,6 +14,7 @@ public:
     virtual void control();
 
     void goToFarPoint();
+    void goToTitle();   // menuback32: back to the title's high view (the heads' Back)
     void goToNearPoint(const TVec3f&);
     bool isAtFarPoint() const;
     bool isAtNearPoint() const;

@@ -1,0 +1,6 @@
+node_modules
+fake/certs/
+.wrangler/
+.dev.vars
+*.log
+public/

@@ -256,7 +256,11 @@ s32 JASChannel::initialUpdateDSPChannel(JASDsp::TChannel* i_channel) {
     }
     mVibrate.resetCounter();
     mTremolo.resetCounter();
-    u16 mixer_volume[6];
+    // (Port: zeroed. In Dolby mode updateEffectorParam() takes the automatic mixer and writes nothing here, so the loop below passed
+    // uninitialised values on, as on the Wii. The DSP ignores the mixer volumes in that mode, but to the compiler an uninitialised
+    // argument is undefined behaviour: with the profile of 11 Nov it treated the Dolby path as unreachable after setAutoMixer() and
+    // let it run on into updateMixer()'s code with dead registers: a crash at the title's first music in every launch, c60p-c64.)
+    u16 mixer_volume[6] = {};
     updateEffectorParam(i_channel, mixer_volume, effect_params);
     for (u8 i = 0; i < 6; i++) {
         i_channel->setMixerInitVolume(i, mixer_volume[i]);
@@ -327,7 +331,11 @@ s32 JASChannel::updateDSPChannel(JASDsp::TChannel* i_channel) {
         }
     }
 
-    u16 mixer_volume[6];
+    // (Port: zeroed. In Dolby mode updateEffectorParam() takes the automatic mixer and writes nothing here, so the loop below passed
+    // uninitialised values on, as on the Wii. The DSP ignores the mixer volumes in that mode, but to the compiler an uninitialised
+    // argument is undefined behaviour: with the profile of 11 Nov it treated the Dolby path as unreachable after setAutoMixer() and
+    // let it run on into updateMixer()'s code with dead registers: a crash at the title's first music in every launch, c60p-c64.)
+    u16 mixer_volume[6] = {};
     updateEffectorParam(i_channel, mixer_volume, effect_params);
     for (u8 i = 0; i < 6; i++) {
         i_channel->setMixerVolume(i, mixer_volume[i]);

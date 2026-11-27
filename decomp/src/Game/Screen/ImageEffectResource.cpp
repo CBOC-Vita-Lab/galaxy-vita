@@ -40,6 +40,12 @@ void ImageEffectResource::createBloomTexture() {
     if (_20 == nullptr) {
         _20 = createTexture(0.25f, GX_TF_RGB565);
     }
+
+#ifdef TARGET_PC
+    if (_24 == nullptr) {  // (GXV_BLOOM_FOLD=2's glow: 2 KB; made always, a stage's switch can change after the effect was made)
+        _24 = createTexture(0.0625f, GX_TF_RGB565);
+    }
+#endif
 }
 
 void ImageEffectResource::createBlurTexture() {

@@ -1,0 +1,41 @@
+# final run (14 Nov), reconnect/session case h: the SPEED GUARD in a session (GXV_SPEED_GUARD, default on; lodgate removed the session gate from it: "speed guard not
+# gated"). REAL-TIME run: no PETARI_GAME_CLOCK (that clock hides game speed: the game never falls behind it), so the final run marks this row `Q` (QUIET: nothing else on the
+# machine). The guest sleeps 25 ms in every drawn turn (SMG_MP_TEST_SLOW_MS="25:5": the existing desktop knob of mp_governor.yaml; the limit level 5 is never
+# reached, so the sleep never stops): its pictures take longer than 2 turns, so the game would run in slow motion without the guard. The guard must repay the lost game
+# time with extra undrawn turns / dropped pictures and keep the game at ~100 % of real time: the census lines "speed: <stage>: game speed NN.N % (worst 1 s ..)" (one per
+# 5 s window, speed31 acceptance line; windows with loading / covered screens are not counted by the game itself).
+# 14 Nov (final run 165217: 0 extra turns and 0 dropped pictures in 130 windows, game speed 45-60 % after the session started): on the desktop the frame-skip rule is OFF unless
+# PETARI_FRAMESKIP is set (perf.cpp FrameskipDecide: maxRun = port_handheld() ? 3 : 0, return 0 before the guard's filter), so nothing could repay the slow console's time. PETARI_FRAMESKIP=5 is
+# the player's default ("Game speed Full", tests/player_settings_launch.cpp). The sleep itself only runs inside a session (MpQuality::turn), so the windows before it are unslowed.
+# Thresholds are for the desktop (llvmpipe, 2 processes on 2 cores), not the Vita's 98 %: at least 4 counted windows (the regex test cannot sample a 9x.x figure, so 'good' = counted and not below 90 %), at most one window below 90 %, and the guard visibly acted
+# (extra turns or dropped pictures > 0). A window below 95 % is a soft finding. Not run yet (needs QUIET): the first real-time two-console scenario of the sweep;
+# the input script (inputs/file2_observatory.txt) runs on wall time here instead of the game clock, so its presses can drift by a few seconds; its marks follow the game's lines.
+name: qa_speed_guard_slow_console
+description: "one console slowed (25 ms sleep per drawn turn), real time: the speed guard keeps game speed near 100 % (no slow motion), the other console too"
+seconds: 330
+min_speed: 0.8
+requires: {strings: [SMG_MP_TEST_SLOW_MS, GXV_SPEED_GUARD]}
+env: {PETARI_SHOT_MS: 10000, PETARI_FRAMESKIP: 5}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_SLOW_MS: "25:5"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect * /speed: guard ON/'
+  - 'expect * /\[mp\] session started/'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 /'
+  # the slowed console: game speed stays near real time, and the guard did it
+  - 'count guest /speed: .+?: game speed \d+\.\d % \(worst/ >= 4'
+  - 'count guest /speed: .+?: game speed ([0-7]\d|8\d)\.\d % \(worst/ <= 1'
+  - 'expect guest /speed: .+?: game speed \d+\.\d % .*(pictures dropped by the guard [1-9]\d*|, [1-9]\d* extra turns,)/'
+  - '?absent guest /speed: .+?: game speed ([0-8]\d|9[0-4])\.\d % \(worst/'
+  # the other console runs at speed too
+  - 'count host /speed: .+?: game speed \d+\.\d % \(worst/ >= 4'
+  - 'count host /speed: .+?: game speed ([0-7]\d|8\d)\.\d % \(worst/ <= 1'

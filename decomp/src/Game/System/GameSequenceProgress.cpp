@@ -24,10 +24,82 @@
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpFlow.hpp"  // MP3: galaxy moves follow the host in a multiplayer session
+#endif
 
 namespace {
     static const s32 sTimingPlayingTicoSE = 180;
 };  // namespace
+
+#ifdef TARGET_PC
+// fastboot32 (13 Nov): PETARI_BOOT (GameScene.cpp, end of the file): when the logos end, load a save file as the file select's "Play This
+// File" does and ask for a galaxy at once: no title, no file select, no hub. Test-only; unset = one cached test here, nothing else.
+#include "Game/System/GameSequenceDirector.hpp"
+#include "Game/System/SaveDataHandleSequence.hpp"
+#include "Game/System/UserFile.hpp"
+#include "Game/Util/MessageUtil.hpp"
+extern "C" int port_boot_file(void);     // 0 = off, 1..6 = that save file, -1 = the first file that exists
+extern "C" void port_boot_file_found(int file);
+extern "C" int port_boot_request(void);  // asks for the galaxy; 0 = nothing asked
+extern "C" void port_log_summary(const char* fmt, ...);
+
+// true: a galaxy move was asked for in place of the title (MR::requestChangeSceneAfterBoot).
+static bool portBootFromLogo(GameSequenceProgress* pProgress) {
+    const int asked = port_boot_file();
+    if (asked == 0) {
+        return false;
+    }
+    SaveDataHandleSequence* pSave = SingletonHolder< GameSystem >::get()->mSequenceDirector->mSaveDataHandleSequence;
+    UserFile* pFile = pSave != nullptr ? pSave->getCurrentUserFile() : nullptr;
+    if (pFile == nullptr || pSave->isActive() || pProgress->mGalaxyCometScheduler == nullptr) {
+        port_log_summary("boot: PETARI_BOOT: the save data is not ready at the end of the logos: the normal title");
+        return false;
+    }
+    // What the file select shows for a file: its config and the game data of its last player (in memory, from the save the logo scene
+    // read: LogoScene::exeMountGameData). The save has six files (FileSelector.cpp USER_FILE_NUM; "config1".."config6").
+    int file = 0;
+    char state[8];
+    for (int i = 1; i <= 6; i++) {
+        pSave->restoreUserFile(pFile, i);
+        const bool ok = pFile->isCreated() && !pFile->mIsGameDataCorrupted && !pFile->mIsConfigDataCorrupted;
+        state[i - 1] = ok ? 'y' : pFile->isCreated() ? 'x' : '-';
+        if (ok && file == 0 && (asked < 0 || asked == i)) {
+            file = i;
+        }
+    }
+    state[6] = 0;
+    if (file == 0) {
+        port_log_summary("boot: PETARI_BOOT: no save file to load (asked: %s%d; files 1-6: %s, y = there, x = damaged, - = empty): the normal title",
+                         asked < 0 ? "the first that exists, " : "", asked < 0 ? 0 : asked, state);
+        return false;
+    }
+    pSave->restoreUserFile(pFile, file);  // (the loop left the last file in pFile: this file's last player again)
+    port_boot_file_found(file);
+    port_log_summary("boot: PETARI_BOOT: save file %d of files 1-6 %s (y = there, x = damaged, - = empty)", file, state);
+    // FileSelector::exeDemo ("Play This File"): the load, the player's name, then the move
+    const bool isMario = pFile->mIsPlayerMario;
+    GameSequenceFunction::startGameDataLoadSequence(file, isMario);
+    enum { cNameSize = 11 };  // (UserFile.cpp USER_NAME_SIZE = RFL_NAME_LEN + 1: setUserName copies that many)
+    wchar_t name[cNameSize];
+    for (u32 i = 0; i < cNameSize; i++) {
+        name[i] = 0;
+    }
+    const char* pNameId = isMario ? "System_FileSelect_Icon000" : "System_FileSelect_Icon001";
+    if (MR::isExistGameMessage(pNameId)) {
+        MR::copyString(name, MR::getGameMessageDirect(pNameId), cNameSize);
+    }
+    GameSequenceFunction::reserveUserName(name);
+    if (!port_boot_request()) {
+        MR::requestChangeStageInGameAfterLoadingGameData();  // (the hub, exactly as the file select goes on)
+        return true;
+    }
+    // what a move "after loading game data" (type 6) does on top of the move just asked for (resetGameDataAfterChangeScene, requestGalaxyMove)
+    pProgress->mGalaxyCometScheduler->restoreStateFromGameData();
+    pProgress->mLuigiLeftSupplier->syncWithFlags();
+    return true;
+}
+#endif
 
 namespace {
     NEW_NERVE(GameSequenceProgressBooting, GameSequenceProgress, Booting);
@@ -128,7 +200,13 @@ void GameSequenceProgress::startScene() {
 
 void GameSequenceProgress::endScene() {
     if (isNerve(GET_NERVE_ANON(GameSequenceProgressLogo))) {
+#ifdef TARGET_PC
+        if (!portBootFromLogo(this)) {  // (fastboot32: PETARI_BOOT; unset = the title, as ever)
+            MR::requestChangeSceneAfterBoot();
+        }
+#else
         MR::requestChangeSceneAfterBoot();
+#endif
 
         GameSystemFunction::setResetOperationApplicationReset();
 
@@ -150,6 +228,12 @@ void GameSequenceProgress::requestChangeScene(const char* pName) {
 }
 
 void GameSequenceProgress::requestGalaxyMove(const GalaxyMoveArgument& rMoveArg) {
+#ifdef TARGET_PC
+    // MP3: a guest runs only the moves the host commands (its own reload after a miss and the title excepted)
+    if (mp_active() && MpFlowHooks::refuseGalaxyMove(rMoveArg)) {
+        return;
+    }
+#endif
     updateGameDataGalaxyVisitedFlag();
     GameSequenceFunction::storeSceneStartGameDataHolder();
 
@@ -164,6 +248,12 @@ void GameSequenceProgress::requestGalaxyMove(const GalaxyMoveArgument& rMoveArg)
 
     GalaxyMoveArgument moveArg(rMoveArg);
     mStorySequenceExecutor->moveGalaxy(&moveArg, isNerve(GET_NERVE_ANON(GameSequenceProgressResetProcessing)) || mIsCancelScenarioSelect);
+#ifdef TARGET_PC
+    // MP3: the destination is final here: the host sends MOVE; a guest running a host command takes the host's destination
+    if (mp_active()) {
+        MpFlow::onGalaxyMove(&moveArg);
+    }
+#endif
 
     mGalaxyCometScheduler->syncWithFlags();
 

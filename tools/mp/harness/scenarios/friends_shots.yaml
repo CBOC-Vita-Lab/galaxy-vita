@@ -1,0 +1,16 @@
+# menus2 (12 Nov): Friends, Requests, a request, Blocked Players in the game's look, one console, against the local fake service.
+# Needs SMG_ONLINE_URL / SMG_ONLINE_DIR (wt/flow-scratch/menus2-friends.sh sets them and fills the account).
+name: friends_shots
+description: Friends screens (look) against the local fake service
+seconds: 330
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@friends_host"
+    env: {SMG_MP_NAME: Alex, SMG_KEYBOARD_NAME: Alex, SMG_MP_LOOK: 0}
+rules:
+  - 'nocrash *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect host /\[mp\] ui: screen friends/'
+  - 'expect host /\[mp\] ui: screen board/'

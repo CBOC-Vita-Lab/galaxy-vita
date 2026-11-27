@@ -2,6 +2,11 @@
 #include "Game/LiveActor/LiveActor.hpp"
 #include "Game/Map/CollisionParts.hpp"
 #include "Game/MapObj/StarPieceDirector.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpCoStar.hpp"  // MP3 costar: the players' pointers hold enemies
+#include "port/mp_bridge.h"
+#include "port/mp_gate.h"  // settingsnative: Star Bit Reach is held to 1 in a Star Race
+#endif
 #include "Game/Screen/LayoutManager.hpp"
 #include "Game/Screen/StarPointerController.hpp"
 #include "Game/Screen/StarPointerDirector.hpp"
@@ -35,6 +40,8 @@ void StarPointerUtil_FORCE_MATCH_SDATA2() {
 
 #ifdef TARGET_PC
 extern "C" int port_star_bit_reach(void);  // platform/src/port/perf.cpp: 1 (the game's own) .. 5
+// settingsnative: the level the game uses. In a Star Race (MP_MODE_RACE) it is 1 whatever is stored (port/mp_gate.h StarBitReachLevel).
+static int starBitReachLevel() { return port::mpgate::StarBitReachLevel(port_star_bit_reach(), mp_active() && mp_mode() == MP_MODE_RACE); }
 #endif
 
 namespace {
@@ -106,7 +113,13 @@ namespace {
 
     bool checkPointingWithoutCheckZ(StarPointerTargetInfo* pTargetInfo, const TVec3f& rOffset, const TVec2f& rPointerPos, f32 zMargin,
                                     f32 radiusMargin) {
+#ifdef TARGET_PC
+        // (the sphere selector's / file select's pointing: a planet whose centre is past the picture's edge but whose disc is on it)
+        return checkPointingTarget(pTargetInfo, rOffset, rPointerPos, ::hPointColRayLength, radiusMargin) ||
+               pTargetInfo->mTarget->isPointingEdge(rPointerPos, ::hPointColRayLength, radiusMargin);
+#else
         return checkPointingTarget(pTargetInfo, rOffset, rPointerPos, ::hPointColRayLength, radiusMargin);
+#endif
     }
 
     bool isStarPointerPointingCore(StarPointerTargetInfo* pTargetInfo, const LiveActor* pActor, s32 channel, StarPointerFunc1 targetPointCheckFunc,
@@ -341,6 +354,20 @@ namespace MR {
         return false;
     }
 
+    // MP3 costar: the same question for the bosses' own bodies: the game's second pointer only. Other players' pointers never hold a boss (the
+    // call sites of Game/Boss and the Koopa Jr. ship's cannon shell use this one: that is what protects the bosses, not a name list).
+    bool isStarPointerPointing2POnPressButtonNoMp(const LiveActor* pActor, const char* pStrength, bool enableTouch, bool disableShoot) {
+        StarPointerTargetInfo info(pActor->mStarPointerTarget, nullptr, nullptr);
+
+        if (::isStarPointerPointingCore(&info, pActor, WPAD_CHAN1, ::checkPointingTarget, MR::testCorePadButtonA, enableTouch, disableShoot, false)) {
+            if (pStrength != nullptr && ::getStarPointerLayout(WPAD_CHAN1)->isChanceToRumble()) {
+                MR::tryRumblePad(pActor, pStrength, WPAD_CHAN1);
+            }
+            return true;
+        }
+        return false;
+    }
+
     bool isStarPointerPointing2POnPressButton(const LiveActor* pActor, const char* pStrength, bool enableTouch, bool disableShoot) {
         StarPointerTargetInfo info(pActor->mStarPointerTarget, nullptr, nullptr);
 
@@ -350,6 +377,12 @@ namespace MR {
             }
             return true;
         }
+#ifdef TARGET_PC
+        // MP3 costar: Play Together's pointers (every player's, held button) hold enemies like the second player's did
+        if (mp_active() && MpCoStar::holds(pActor)) {
+            return true;
+        }
+#endif
         return false;
     }
 
@@ -396,7 +429,7 @@ namespace MR {
     // while nothing aims. Level 1 (the default) is the game's own: nothing is added.
     bool isStarPointerPointingStarPieceAssist(const LiveActor* pActor) {
         static const f32 sRadiusScales[] = {1.5f, 2.0f, 3.0f};
-        const int level = port_star_bit_reach();
+        const int level = starBitReachLevel();
         if (level <= 1) {
             return false;
         }
@@ -418,6 +451,49 @@ namespace MR {
         info.mRadiusScale = sRadiusScales[level - 2];
         return ::isStarPointerPointingCore(&info, pActor, WPAD_CHAN0, ::checkPointingTargetWide, ::always, false, false, false) ||
                ::isStarPointerPointingCore(&info, pActor, WPAD_CHAN1, ::checkPointingTargetWide, ::always, false, false, false);
+    }
+    // GXV_IDLE25 (idle25, ActorTurnLod.cpp): the star pointer's answer WITHOUT its side effects. isStarPointerPointingCore runs the same tests and
+    // then calls onReaction (the pointer's touch state, rumble) and records the channel; an actor that skips its movement as idle asks this first and
+    // runs the real movement on the turn it is true. Same order and same tests as the core up to and including checkPointingTarget (the
+    // functions the star bit's isStarPointerPointing1Por2P and the petit's isStarPointerPointing2POnPressButton pass); never writes anything.
+    bool portStarPointerReaches(const LiveActor* pActor, s32 channel) {
+        if (!::getStarPointerLayout(channel)->mIsPointerValid) {
+            return false;
+        }
+        if (!MR::isConnectedWPad(channel)) {
+            return false;
+        }
+        if (channel == WPAD_CHAN1 && MR::isStarPointer2PTransparencyMode()) {
+            return false;
+        }
+        if (channel == WPAD_CHAN0 && ::getStarPointerOnOffController()->compareMode(StarPointerMode_1PInvalid2PValid)) {
+            return false;
+        }
+        StarPointerController* controller = ::getStarPointerController(channel);
+        if (!controller->isInScreen()) {
+            return false;
+        }
+        StarPointerLayout* layout = ::getStarPointerLayout(channel);
+        if (layout == nullptr || layout->isSingleTouch()) {
+            return false;
+        }
+        StarPointerTargetInfo info(pActor->mStarPointerTarget, nullptr, nullptr);
+        return ::checkPointingTarget(&info, controller->mWorldPos, controller->mPastInfo.mPos, controller->getViewDistZ(), layout->getRadius());
+    }
+
+    // The port's Star Bit reach (isStarPointerPointingStarPieceAssist) above level 1: conservative, true whenever a pointer is valid, connected and
+    // on the screen on either channel (level 5 does not need the pointer on the screen); the assist's own tests are not repeated.
+    bool portStarPointerAssistMayAct() {
+        if (starBitReachLevel() <= 1) {
+            return false;
+        }
+        for (s32 channel = WPAD_CHAN0; channel <= WPAD_CHAN1; ++channel) {
+            if (::getStarPointerLayout(channel)->mIsPointerValid && MR::isConnectedWPad(channel) &&
+                (starBitReachLevel() >= 5 || ::getStarPointerController(channel)->isInScreen())) {
+                return true;
+            }
+        }
+        return false;
     }
 #endif
 

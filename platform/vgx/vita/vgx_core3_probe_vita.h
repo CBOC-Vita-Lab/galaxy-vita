@@ -6,10 +6,15 @@
 extern "C" int port_vita_core3_available(void) __attribute__((weak));  // the one proof of the fourth core (vita/runtime/memory.cpp)
 
 namespace vgx::core3probe {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#pragma GCC diagnostic ignored "-Wformat-security"
+// fmt1131: every caller passes a literal; a template cannot carry the format attribute
 template <typename... Args> inline void Log(const char* format, Args... args) {
     if (&port_log_summary) port_log_summary(format, args...);
     else port_log(format, args...);
 }
+#pragma GCC diagnostic pop
 
 struct VitaKernel {
     const SceUID uid = sceKernelGetThreadId();

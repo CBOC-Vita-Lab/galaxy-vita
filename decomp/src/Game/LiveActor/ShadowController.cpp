@@ -11,6 +11,20 @@
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
 #ifdef TARGET_PC
+extern "C" float port_pb_shadow_clip(void);
+extern "C" int port_cc_flag;  // (far30: bit 1 = GXV_DISTCENSUS)
+extern "C" void port_dist_note_shadow(float x, float y, float z);
+extern "C" float port_pb_player_dist2(float x, float y, float z);  // (decomp/src/Game/LiveActor/LodCtrl.cpp)
+extern "C" float port_detail_dist(int rule, float base);  // (detail25)
+extern "C" float port_popin_zoom(void);  // (popin24: LodCtrl.cpp)
+extern "C" float port_pb_scale(void);    // (popin25: LodCtrl.cpp; the zoom ratio times GXV_PB_DEMO's widening in a flight)
+extern "C" int port_pb_demo_off(void);   // (popin25: GXV_PB_DEMO=2 in a flight: the budget is off)
+extern "C" float port_pb_lead(float limit);  // (popin25: GXV_POPIN_LEAD: appear earlier for a fast camera)
+extern "C" void port_popin_event(int kind, int appear, const LiveActor* pActor, const TVec3f* pPos, float radius);
+#include "port/popin.h"
+#include "port/popin_site.h"
+#include "port/honey_shadow.h"
+extern "C" int port_pb_budget_on(void);
 extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
 #include "Game/Map/CollisionCategorizedKeeper.hpp"
 #include "Game/Map/CollisionDirector.hpp"
@@ -23,6 +37,17 @@ extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging bu
 #include "port/shadow_memo_hooks.h"
 #include <cstring>
 extern "C" int64_t port_host_time_ns(void);
+// GXV_UNDRAWN_LEAN (undrawn26, platform/src/port/perf.cpp, port/undrawn_lean.h): a controller that no logic reads is cast once before the picture
+// (port_shadow_flush_pending, GameSystem::frameLoop) instead of at the end of every turn. Exact: the cast is a function of the actor's state and the
+// world, none of which changes between the end of a turn and the start of the next one; the flush casts the state of the last turn, which is the
+// cast the original makes last. Not for counted casts (one-time modes) and not in the Performance budget (its far flag has a hysteresis state).
+extern "C" int port_undrawn_lean_shadows(void);
+extern "C" int port_undrawn_shadow_decide(const void* ctrl, const char* owner, int logicRead, unsigned collMode, unsigned gravMode, int pb);
+namespace {
+bool sLeanFlushing = false;
+ShadowController* sLeanKeep[0x500];
+ShadowController* sLeanRun[0x500];
+}  // namespace
 
 // GXV_SHADOWMEMO (shadowmemo, 6 Nov; default 1): ShadowControllerHolder's projection casts (one line cast against the map or the
 // water surface per shadow per turn) reuse the last turn's answer when the cast's arguments are bit-identical and nothing it
@@ -38,6 +63,9 @@ extern "C" int64_t port_host_time_ns(void);
 // collision parts audits the hooks (a change no hook reported is "unhooked"); the gate stays on. "shadowmemo:" basic-log line every
 // 600 holder turns. GXV_SHADOWMEMO=0: the cast every time, as before (hooks disarmed).
 namespace {
+    port::popin::HoneyShadowHolds sHoneyHolds;
+    bool sHoneyStage = false, sHoneyHoldBatch = false;
+    u32 sFloorCostTick = 0;  // (popin31b: the sample counter of the kept shadows timed for the census)
     typedef port::shadowmemo::Snapshot< PortHostVector< port::shadowmemo::SnapEntry > > PortSnap;
     const u32 kMemoScanCap = 256;  // (more changes than this since a memo's last look: cast again)
     port::shadowmemo::Log< 1024 > sMemoLog;
@@ -295,6 +323,10 @@ ShadowControllerHolder::ShadowControllerHolder() : NameObj("\x89\x65\x8a\xc7\x97
         _24 = true;
     }
 #ifdef TARGET_PC
+    const char* honeyHold = std::getenv("GXV_HONEY_SHADOW_HOLD");
+    sHoneyStage = !(honeyHold && *honeyHold == '0') && MR::isEqualStageName("HoneyBeeKingdomGalaxy");
+    sHoneyHolds = {};
+    sHoneyHoldBatch = false;
     // (shadowmemo: a new scene: hooks disarmed until its first run arms them, which drops every memo; the audit and the gate
     // start again)
     port_shadowmemo_armed = 0;
@@ -343,6 +375,29 @@ void ShadowControllerHolder::initAfterPlacement() {
 }
 
 void ShadowControllerHolder::updateController() {
+#ifdef TARGET_PC
+    // (undrawn26) the controllers this call leaves for the flush stay in the list, the others are cast as always
+    u32 leanKept = 0;
+    if (!sLeanFlushing && port_undrawn_lean_shadows() && _18.size() != 0 && _18.size() <= 0x500) {
+        const bool pb = port_pb_shadow_clip() > 0.0f;
+        u32 runN = 0;
+        const u32 n = _18.size();
+        for (u32 i = 0; i < n; i++) {
+            ShadowController* c = _18[i];
+            if (port_undrawn_shadow_decide(c, c->mActor != nullptr ? c->mActor->mName : nullptr, c->mPbLogicRead ? 1 : 0, c->_60, c->_61, pb ? 1 : 0)) {
+                sLeanKeep[leanKept++] = c;
+            } else {
+                sLeanRun[runN++] = c;
+            }
+        }
+        if (leanKept != 0) {
+            _18.clear();
+            for (u32 i = 0; i < runN; i++) {
+                _18.push_back(sLeanRun[i]);
+            }
+        }
+    }
+#endif
     int size = _18.size();
 #ifdef TARGET_PC
     {
@@ -378,16 +433,48 @@ void ShadowControllerHolder::updateController() {
     }
 #endif
 
+#ifdef TARGET_PC
+    // GXV_PB_SHADOW (Performance-mode visual budget; 2800 in Performance mode, 0 = as the game): the shadows' far clip, which the game
+    // has only in the hub (AstroGalaxy, the castle gardens), applies in every galaxy, so a far actor's shadow is neither projected (no
+    // collision cast) nor drawn (volume or surface). Never within 1200 units of the player (Mario's own, his companions').
+    const f32 pbShadowClip = port_pb_shadow_clip();
+    // (popin31: with GXV_PB_MINPX the floor decides every shadow in every galaxy and the Honeyhive hold has nothing left to do; it stays for the A/B.
+    // popin31b: the shadows' own floor, GXV_PB_MINPX_SHADOW, which GXV_PB_MINPX sets when it is unset)
+    sHoneyHoldBatch = sHoneyStage && pbShadowClip > 0.0f && port_pb_budget_on() && !port_pb_demo_off() && port::popin::HystPct() == 0.0f && !(port_pb_floor.kHeldK[port::popin::kFlShadow] > 0.0f);
+    if (sHoneyHoldBatch) sHoneyHolds.begin();
+#endif
     for (u32 i = 0; i < size; i++) {
+#ifdef TARGET_PC
+        if (pbShadowClip > 0.0f) {
+            _18[i]->updateFarClippingPb(_24 ? mFarClip : 100000.0f, pbShadowClip);
+        } else
+#endif
         if (_24) {
             _18[i]->updateFarClipping(mFarClip);
         }
 
+#ifdef TARGET_PC
+        if (__builtin_expect(_18[i]->mPbFloorKept != 0, 0) && port::popin::CostSample(sFloorCostTick)) {
+            // popin31b: a shadow the floor kept (it would be far-clipped without it): its update timed for the census's price line
+            const int64_t t0 = port_host_time_ns();
+            _18[i]->update();
+            port_pb_floor_cost(port::popin::kFlShadow, static_cast< u32 >(port_host_time_ns() - t0));
+        } else
+#endif
         _18[i]->update();
+        if (__builtin_expect((port_cc_flag & 2) != 0, 0) && _18[i]->mActor != nullptr) {
+            port_dist_note_shadow(_18[i]->mActor->mPosition.x, _18[i]->mActor->mPosition.y, _18[i]->mActor->mPosition.z);  // (far30, GXV_DISTCENSUS)
+        }
     }
 
+#ifdef TARGET_PC
+    if (sHoneyHoldBatch) sHoneyHolds.end();
+#endif
     _18.clear();
 #ifdef TARGET_PC
+    for (u32 i = 0; i < leanKept; i++) {
+        _18.push_back(sLeanKeep[i]);  // (undrawn26: still to be cast, by the next picture's flush)
+    }
     if (sMemoActive) {
         sMemoActive = false;
         if (!sMemoVerify) {
@@ -399,6 +486,22 @@ void ShadowControllerHolder::updateController() {
     }
 #endif
 }
+
+#ifdef TARGET_PC
+// GameSystem::frameLoop, before a picture's draw: the casts the turns since the last picture left out, from the state they ended in.
+extern "C" void port_shadow_flush_pending(void) {
+    if (!port_undrawn_lean_shadows() || !MR::isExistSceneObj(SceneObj_ShadowControllerHolder)) {
+        return;
+    }
+    ShadowControllerHolder* pHolder = MR::getSceneObj< ShadowControllerHolder >(SceneObj_ShadowControllerHolder);
+    if (pHolder->_18.size() == 0) {
+        return;
+    }
+    sLeanFlushing = true;
+    pHolder->updateController();
+    sLeanFlushing = false;
+}
+#endif
 
 ShadowControllerList::ShadowControllerList(LiveActor* pActor, u32 listCount) : mShadowList(), mHost(pActor) {
     mShadowList.init(listCount);
@@ -452,7 +555,11 @@ void ShadowController::requestCalc() {
 }
 
 void ShadowController::update() {
-    if (isDraw()) {
+    const bool draw = isDraw();
+#ifdef TARGET_PC
+    if (sHoneyStage) mHoneyWasDrawn = draw;
+#endif
+    if (draw) {
         updateDirection();
         updateProjection();
     }
@@ -466,6 +573,60 @@ void ShadowController::updateFarClipping(f32 clip) {
     f32 cameraDistZ = MR::calcCameraDistanceZ(dropPos);
     _67 = cameraDistZ >= clip;
 }
+
+#ifdef TARGET_PC
+void ShadowController::updateFarClippingPb(f32 clip, f32 pbClip) {
+    TVec3f dropPos;
+    getDropPos(&dropPos);
+    const f32 cameraDistZ = MR::calcCameraDistanceZ(dropPos);
+    _67 = cameraDistZ >= clip;  // (the game's own: the hub)
+    // (popin24) GXV_POPIN_ZOOM: the far clip and the player's range scale with the zoom ratio (1 when off); GXV_POPIN_HYST: a shadow
+    // far-clipped by the budget returns popin-pct nearer than it left. Idempotent for one position.
+    const f32 zoom = port_pb_scale();  // (popin25: the zoom ratio times GXV_PB_DEMO's widening)
+    const f32 hystPct = port::popin::HystPct();
+    const bool was = mPbShadowFar;
+    bool far = false;
+    bool kept = false;  // (popin31b: the floor kept it)
+    if (!_67 && !mPbLogicRead && !port_pb_demo_off()) {
+        const f32 limit = port_detail_dist(1, pbClip) * zoom + port_pb_lead(pbClip * zoom);  // (popin25: + GXV_POPIN_LEAD's margin)
+        const f32 pl = 1200.0f * zoom;
+        far = cameraDistZ >= (was ? limit - port::popin::Band(limit, hystPct) : limit);
+        if (far) {
+            const f32 plReach = was ? pl - port::popin::Band(pl, hystPct) : pl;
+            far = port_pb_player_dist2(dropPos.x, dropPos.y, dropPos.z) > plReach * plReach;
+        }
+        if (sHoneyHoldBatch && sHoneyHolds.keep(this, mHoneyWasDrawn && !was, far, cameraDistZ, limit)) far = false;
+        if (far && __builtin_expect(port::popin::GuardOn(port::popin::kFlShadow), 0)) {
+            // popin31: GXV_PB_MINPX: the shadow is clipped only while its caster is under the floor on the picture (the depth along the view is never more than the
+            // distance: careful); GXV_PB_DEMO=2's release after a flight: a shadow in the picture is not taken. popin31b: the shadows' own floor
+            // (GXV_PB_MINPX_SHADOW); a shadow the floor kept is marked for the census's price line
+            const int v = port::popin::CutVerdict(port::popin::kShadow, was, portFloorRadius(), cameraDistZ, dropPos.x, dropPos.y, dropPos.z);
+            far = v == port::popin::kCutOk;
+            kept = v == port::popin::kCutFloor;
+        }
+    }
+    mPbFloorKept = kept ? 1 : 0;
+    if (far) {
+        _67 = true;
+        port_logic_count(14, 1);
+    }
+    if (far != was) {
+        mPbShadowFar = far;
+        if (port::popin::LogOn()) {
+            port_popin_event(port::popin::kShadow, far ? 0 : 1, mActor, &dropPos, -1.0f);
+        }
+    }
+}
+#endif
+
+#ifdef TARGET_PC
+// popin31: the shadow's size for the floor: its caster's model extent (from the actor's origin, its scale and pose in it) with the margin; a caster with no
+// model: 300 (the game's default clipping sphere). Measured again every 64 turns (port/popin_site.h CachedExtent).
+f32 ShadowController::portFloorRadius() {
+    const f32 ext = port::popin::CachedExtent(mPbFloorExt, mPbFloorAt, mActor);
+    return port::popin::SizeRadius(ext > 0.0f ? 0.0f : 300.0f, ext, 0.0f);
+}
+#endif
 
 void ShadowController::updateDirection() {
     if (isCalcGravity()) {
@@ -537,6 +698,9 @@ void ShadowController::updateProjection() {
             }
             if (reuse) {
                 m.mSeq = sMemoLog.seq;  // (its answer stands as of now: the next look starts here)
+            }
+            if (__builtin_expect(mPbFloorKept != 0, 0) && port::popin::CensusOn()) {
+                port_pb_floor_shadow_memo(reuse ? 1 : 0);  // (popin31b: a shadow the floor kept: is its ground probe the memo's answer? the census's price line)
             }
             if (timeIt) {
                 const int64_t dl = port_host_time_ns() - tl;

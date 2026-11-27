@@ -13,12 +13,16 @@
 extern "C" {
 #endif
 unsigned port_resume_generation(void) __attribute__((weak));
+// fix33 (A2): the same for a plain return from the PS button (the application resumed, the console did not sleep). Nothing is dropped for it
+// up front: it only opens the resume window, and the disc reader closes its descriptors if a read or open fails inside that window.
+unsigned port_resume_app_generation(void) __attribute__((weak));
 #ifdef __cplusplus
 }
 
 namespace port {
 
 inline unsigned ResumeGeneration() { return port_resume_generation ? port_resume_generation() : 0u; }
+inline unsigned ResumeAppGeneration() { return port_resume_app_generation ? port_resume_app_generation() : 0u; }
 
 // Retry schedule after failed opens: now, then 250 ms, 500 ms, 1 s, then every 2 s.  Time is in nanoseconds on any
 // monotonic clock the caller picks.

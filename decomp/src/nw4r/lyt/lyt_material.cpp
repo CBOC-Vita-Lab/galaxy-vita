@@ -648,6 +648,12 @@ namespace nw4r {
             static GXTevKAlphaSel kAlpSels[GX_MAX_TEXMAP] = {GX_TEV_KASEL_K3_A, GX_TEV_KASEL_K3_B, GX_TEV_KASEL_K3_G, GX_TEV_KASEL_K3_R,
                                                              GX_TEV_KASEL_K2_A, GX_TEV_KASEL_K2_B, GX_TEV_KASEL_K2_G, GX_TEV_KASEL_K2_R};
 
+#ifdef TARGET_PC
+            if (detail::gPortWarmPass != 0) {  // (layoutwarm24: a warm-up pass, common.h)
+                modulate = detail::gPortWarmPass == 2;
+                alpha = detail::gPortWarmPass == 2 ? 0x80 : 0xFF;
+            }
+#endif
             bool useVtxColor = true;
             bool useMatColor = false;
 

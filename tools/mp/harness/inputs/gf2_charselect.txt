@@ -1,0 +1,15 @@
+# gamefix2 (11 Nov): Title -> entry screen -> Multiplayer -> tip -> Play Together -> Same Wi-Fi -> the character select, then the cursor
+# walks the heads (right, right, down, left) so the guide band, arrows and pointer draw over/after the 3D heads. PETARI_GAME_CLOCK=1,
+# SMG_MP_NAME set (no keyboard). Same first steps as @entry_host.
+30-30.5:A|B
+35-35.2:DOWN               # entry: Multiplayer
+37-37.2:A
+42-42.2:A                  # power-save tip
+44-44.2:A                  # Play Together
+46-46.2:DOWN               # Internet -> Same Wi-Fi
+47-47.2:A
+55-55.2:RIGHT
+59-59.2:RIGHT
+63-63.2:DOWN
+67-67.2:LEFT
+71-71.2:RIGHT

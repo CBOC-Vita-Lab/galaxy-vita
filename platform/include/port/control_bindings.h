@@ -52,6 +52,13 @@ const ButtonInfo* PrimaryButton(const CompiledMapping&, Action);
 // Called once before input/game initialization. The immutable copy also drives prompts.
 bool SetActiveMapping(const ProfileMapping&, ProfileId, const ControllerCaps&, std::string& error);
 const CompiledMapping& ActiveMapping();
+// settingsnative: a button swap while the game runs. Stage compiles `map` for the profile and frozen controller in use (any thread; false and `error`
+// when it is not valid there) into an immutable copy in the host heap that is never freed; the input thread calls CommitStagedMapping at the top of
+// its poll (true = the mapping changed, the caller drops its held-button state); ActiveMapping() always returns the newest committed one.
+// MappingGeneration() counts the commits: the button pictures (platform/src/port/handheld_ui.cpp) are made again when it changes.
+bool StageActiveMapping(const ProfileMapping&, std::string& error);
+bool CommitStagedMapping();
+uint32_t MappingGeneration();
 void FreezeActiveCapabilities(const ControllerCaps&);
 const ControllerCaps& ActiveCapabilities();
 bool RemapEnabled();

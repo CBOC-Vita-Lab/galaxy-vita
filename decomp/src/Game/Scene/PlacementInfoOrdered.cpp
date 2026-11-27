@@ -1,5 +1,6 @@
 #include "Game/Scene/PlacementInfoOrdered.hpp"
 #include "Game/LiveActor/AllLiveActorGroup.hpp"
+#include "Game/MP/MpWorld.hpp"  // MP3: placement registry
 #include "Game/Map/PlanetMapCreator.hpp"
 #include "Game/NameObj/ModelChangableObjFactory.hpp"
 #include "Game/NameObj/NameObjFactory.hpp"
@@ -16,6 +17,13 @@ namespace {
         return NameObjFactory::getCreator(rIdentifier.mName);
     }
 }  // namespace
+
+#ifdef TARGET_PC
+// boss23 (GameScene.cpp, "boss tour"): the boss actors of the stage are noted as they are made (their class names, a short list), for
+// the per-leg boss warp of PETARI_STAGE, the "boss:" log lines and the boss-fight cuts. One string scan per kind of object, none per object.
+extern "C" int port_boss_kind(const char* pObjName);
+extern "C" void port_boss_note(int kind, NameObj* pObj, const char* pName);
+#endif
 
 PlacementInfoOrdered::PlacementInfoOrdered(int count) : mIndexArray(), mIndexCount(), mSetArray(), mOrderedSetArray(), mCount(count) {
     mIndexArray = new Index[count];
@@ -91,13 +99,26 @@ void PlacementInfoOrdered::initPlacement() {
         CreationFuncPtr creator = ::getCreator(*pSet);
         if (creator != nullptr) {
             const char* pName = MR::getJapaneseObjectName(pSet->mName);
+#ifdef TARGET_PC
+            const int bossKind = port_boss_kind(pSet->mName);
+#endif
             for (link = pSet->mList.mHead; link != nullptr; link = link->mNextLink) {
                 const JMapInfoIter& rIter = static_cast< Index* >(link->mValue)->getInfoIter();
                 MR::setCurrentPlacementZoneId(MR::getPlacedZoneId(rIter));
+                // MP3: shared world (Play Together): remember the actor range this placement row creates (stable object keys).
+                s32 mpActorsBefore = mp_active() ? MR::getAllLiveActorGroup()->getObjNum() : 0;
                 pObj = creator(pName);
                 MR::initLiveActorSystemInfo(rIter);
                 pObj->init(rIter);
+#ifdef TARGET_PC
+                if (bossKind >= 0) {
+                    port_boss_note(bossKind, pObj, pName);
+                }
+#endif
                 MR::initLiveActorSystemInfo(rIter);
+                if (mp_active()) {  // MP3: register the row's actors (sub 0 = pObj)
+                    MpWorldSync::registerPlacement(rIter, pObj, mpActorsBefore, MR::getAllLiveActorGroup()->getObjNum());
+                }
                 MR::clearCurrentPlacementZoneId();
             }
         }

@@ -8,6 +8,9 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SequenceUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpFlow.hpp"  // MP3: guests in a session do not change stages
+#endif
 
 namespace {
     const s32 cChangeStageWaitFrame = 5;
@@ -78,6 +81,12 @@ void AstroChangeStageCube::movement() {
         if (!isInVolume(*playerPos)) {
             return;
         }
+#ifdef TARGET_PC
+        // MP3: the host moves everyone; a guest walking in gets a toast (rate-limited) and stays
+        if (mp_active() && MpFlowHooks::refuseGuestGalaxyStart()) {
+            return;
+        }
+#endif
 
         mIsValid = false;
 

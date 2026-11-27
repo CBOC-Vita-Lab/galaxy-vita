@@ -1,0 +1,13 @@
+# integ (13 Nov): pictures of the Connection Test screen (one console, the inputs of mp_conntest). Not a test: nocrash only.
+name: pics_conntest
+description: pictures - the Connection Test screen while it runs and its result
+seconds: 260
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: game
+    input: "@pics_conntest"
+    env: {SMG_ONLINE_URL: "http://127.0.0.1:18797", SMG_MP_LOOK: 0}
+rules:
+  - 'nocrash *'
+  - 'expect game /\[mp\] ui: screen conntest/'

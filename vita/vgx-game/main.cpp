@@ -40,8 +40,18 @@ extern "C" int __wrap_pte_osSemaphoreCancellablePend(SceUID semaphore, unsigned 
 
 extern "C" int port_vita_game_entry(int argc, char** argv);
 extern "C" void port_log_flush(void);
+// MP3: net/src/vlink_vita_radio.cpp: sceAppUtilInit + sceCommonDialogSetConfigParam, which the Nearby (ad hoc NetCheck) dialog and the
+// name / room-code keyboard need. Strikers 1.3 does this on the process's main thread before anything else starts: its first hardware
+// logs showed "CommonDialog configuration failed" when the set-up was left to the renderer's thread alone (the renderer's call in
+// vgx_host_galaxy_vita.cpp now only completes what is missing). Weak: no net/, no call. It opens no socket and starts no thread.
+extern "C" int np_vita_radio_system_init(void) __attribute__((weak));
+extern "C" void port_card_write_flush(unsigned waitMs);  // (hitch30: platform/src/os/os_alarm.cpp: the card-write queue; the calling thread does what is queued, at most waitMs)
+extern "C" void port_fast_tls_init(void) __attribute__((weak));   // (tls40: vita/vgx-game/fast_tls.c; the first thing on the main thread)
 int main(int argc, char** argv) {
+    if (port_fast_tls_init) port_fast_tls_init();
+    if (np_vita_radio_system_init) np_vita_radio_system_init();
     const int result = port_vita_game_entry(argc, argv);
+    port_card_write_flush(3000);  // (hitch30: learned lists and memories queued for the card are written before the process ends; this also prints the "card:" line)
     port_log_flush();  // (the log is written in batches: what is still waiting goes to the card before the process ends)
     sceKernelExitProcess(result);
     return result;

@@ -1,0 +1,7 @@
+# 8160 DMA-B: GXV_DMA_LOAD=2 (verify: must say 0 differed); Observatory then Honeyhive, hold 2400 turns
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=2400
+PETARI_FLOW_LOG=1
+GXV_DMA_LOAD=2

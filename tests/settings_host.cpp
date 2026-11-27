@@ -25,6 +25,7 @@ static bool WaitLogOn() {return false;}
 static uint64_t NowUs() {return 0;}
 static struct {void Add(uint64_t) {}} g_hiddenFinishWait;
 static std::atomic<unsigned> g_presentSlotEpoch{0};
+extern "C" void port_vgx_fif_retire(void) {}   // (GXV_FIF: the real one is in vgx_galaxy.cpp; the extracted hook calls it)
 #include "settings_host_actual.inc"
 int main() {
     assert(port_vgx_vita_fixed_cap_supported());

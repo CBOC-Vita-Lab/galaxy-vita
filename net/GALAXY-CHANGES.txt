@@ -1,0 +1,190 @@
+net/ — the Strikers Charged online stack, vendored into Super Mario Galaxy 3.0 (agent `net`, 8 Nov 2026)
+==========================================================================================================
+
+Source: Strikers Charged Vita 1.3 (branch knobs, commit 92f5bc6f39d41b4da42ec95a8e357f6d330ae8f5), our own code.
+  native/platform/sdk/net/{vlink*, np_https*, np_keyboard*}          -> net/src/
+  native/platform/sdk/net/online/*  (+ third_party/monocypher 4.0.3) -> net/src/online/
+  native/platform/sdk/dwc/np_online_ime_vita.cpp                     -> net/src/np_online_ime_vita.cpp
+  native/tools/net/{natsim*, turnsim*, online_test.cpp, https_*, run_online_tests.sh, run_signal_http_test.sh, build_natsim.sh} -> net/tests/
+  dependencies/{lock.json (network_dependencies), Makefile.mbedtls, mbedtls/} -> net/deps/ ; tools/build-mbedtls.py -> tools/mp/build-mbedtls.py
+NOT taken (Strikers game code): so_net.cpp, np_lan.*, np_menu_flow.*, np_menu_ui.cpp, np_notice.cpp, tools/net/net_test.cpp + run_tests.sh
+(they test so_net / the Strikers rule fingerprint), menu_flow_test.cpp, season_*.
+The first commit on branch `net` is the unchanged copy: `git diff <that commit> -- net/` shows every change below.
+
+Layout and includes (mechanical)
+--------------------------------
+* Sources keep their Strikers file names. Includes "platform/sdk/net/X" became relative ("X", "online/X", "../X"), so net/ needs no include
+  path of its own; tests include "../src/...". net/include/ holds np_glue.h and forwarding headers (vlink.h, np_online.h, np_online_api.h,
+  np_net.h, np_signal.h, np_signal_http.h, np_http.h, np_json.h, np_app_version.h, np_keyboard.h, np_https.h, vlink_vita_radio.h) for
+  Galaxy code (platform/src/mp/mp_service.cpp: np_https.h + np_json.h).
+* Re-applying a Strikers sync: copy the files, run the include rewrite and the MSC_ -> SMG_ rewrite (both are plain text substitutions),
+  then re-apply the hunks marked "Galaxy" (grep -rn Galaxy net/src net/tests).
+
+Environment prefix: every MSC_ became SMG_ (mechanical, sources and tests)
+-------------------------------------------------------------------------
+  MSC_KEYBOARD_{NAME,CODE,CODE_FILE,CANCEL,DELAY_FRAMES}   -> SMG_KEYBOARD_...      (desktop test keyboard)
+  MSC_LAN_{MODE,DIALOG,EXCLUSIVE,KEEPALIVE_MS,LINKWATCH,WIFI_RCVBUF}  -> SMG_LAN_...
+  MSC_LINK_{BCAST,DELAY_THREAD,MFS,NAME,PORT,TRACE,VIP}  -> SMG_LINK_...
+  MSC_NET_{APP,BUILD,DELAY_MS,DROP,DUP,HONOR_STEER,HOPELESS_MS,HOST_WAIT_MS,INVITE,INVITE_FILE,JITTER_MS,KEEPALIVE_MS,LOCAL_IP,LOG_ADDRS,
+           MAX_PACKETS,MODE,PEER_LOST_MS,PORT,PUNCH_INTERVAL_MS,PUNCH_TIMEOUT_MS,REBUILD_LIMIT_MS,RELAY,RELAY_LIMIT_MS,RELAY_ONLY,
+           RELAY_WAIT_MS,RESOLVE_LIMIT_MS,ROOM_LIMIT_MS,SELFTEST,SERVER,SIGNAL_DIR,SIM,SIM_ID,SIM_PRIV,STALE_MS,STATS_MS,STUN,SYM_RELAY,
+           TOKEN,TRY_LOCAL,TURN_ADDR,TURN_BIND_MS,TURN_LIFETIME,TURN_PERM_MS,TURN_SECRET,TURN_TTL,TURN_URLS}  -> SMG_NET_...
+  MSC_ONLINE_APP_VERSION, MSC_ONLINE_URL                 -> SMG_ONLINE_APP_VERSION, SMG_ONLINE_URL
+  MSC_TEST_{SERVER,TOKEN0,TOKEN1,TURN_BUDGET,TURN_PLAYER,TURN_SESSION} -> SMG_TEST_... (tests; Galaxy adds SMG_TEST_TOKEN2/3)
+New in Galaxy: SMG_NET_TOPOLOGY=star|mesh (default star), SMG_KEYBOARD_TEXT, SMG_KEYBOARD_TEXT_FILE (desktop keyboard, any prompt),
+SMG_LAN_MODE=adhoc|wifi|online (only read by the weak NpMenuLinkMode default).
+
+Identity (so Galaxy and Strikers consoles never mix)
+----------------------------------------------------
+* VLink frame magic "MSLK" -> "SMGK" (0x534D474B), fragment magic "MSLF" -> "SMGF" (0x534D4746)       vlink.cpp, vlink.h
+* Default UDP port 41000 -> 41100: NpNet::kDefaultPort (np_net.h), the UDP backend (vlink_udp.cpp), the Same Wi-Fi socket (vlink_vita.cpp),
+  the NAT simulator's fixed private port (np_udp_posix.cpp sim mode, tests/natsim_proxy.cpp). (Simulated addresses inside online_test.cpp
+  still say 41000: they are only addresses in the simulated world.)
+* Ad hoc id MSCH00002 -> SMGV00001 (also Galaxy's title id), group MSCMP001 -> SMGMP001            vlink_vita_radio.cpp
+* Thread / socket / callback names strikers_mp_rx, msc_lan, msc_lan_power, msc_online, msc_dns -> smg_*
+* HTTPS User-Agent StrikersVita -> GalaxyVita                                                      np_https.cpp
+* App version (X-Msc-App) 1.3.0 -> 3.0.0                                                           online/np_app_version.h
+* Every service request carries "X-Msc-Game: smg"                                                 online/np_signal_http.cpp Headers()
+* No default service URL: np_service_url.h no longer names msc-online for the Vita; the build's NP_ONLINE_URL (cmake/MpBuildDefs.cmake) defaults to https://galaxy.psvita.dev (14 Nov 2026), "none" = no service; no fallback to workers.dev.
+  HttpSignal additionally ignores any base URL containing "msc-online" (logged), so Galaxy can never reach the Strikers service.
+* Kept: the X-Msc-* header family and the punch / data KDF labels "MSCN punch v1" / "MSCN data v1" (the service code is shared; the keys
+  are per room and per pair anyway, so the labels do not let the games mix).
+
+Couplings to the Strikers game replaced by net/include/np_glue.h (C API)
+-----------------------------------------------------------------------
+* vlink_vita.cpp included np_lan.h / np_menu_flow.h, vlink_online.cpp and np_online_ime_vita.cpp declared NpLan* functions. Now:
+  Galaxy implements NpLanLinkLost, NpLanPeerLost (new), NpLanOnSuspend, NpLanOnResume, NpMenuLinkMode; net/src/np_glue.cpp has weak
+  defaults (VLink::Default().SetLost + NpNetOnLinkLost; log; suspend/resume = link lost; SMG_LAN_MODE).
+  net/ provides NpLanPlayerName, NpLanRadioPoll, NpLanRadioStop (Vita: vlink_vita.cpp as before; desktop: np_glue.cpp, new: online first,
+  else the POSIX UDP backend from SMG_LINK_*) and NpNetFrame() (new: once per frame; Vita = np_vita_radio_pump, desktop = NpNetPoll).
+  All glue functions have C linkage now (Strikers: some C++).
+* NpLanFingerprint is not needed by net/ (it was so_net.cpp's); Galaxy's fingerprint is MpCore's (DESIGN.md section 3).
+
+Multi-peer (rooms of up to 4) and the star topology — online/np_online.*, np_signal.h, np_signal_http.cpp, np_signal_fake.cpp
+------------------------------------------------------------------------------------------------------------------------------
+* OnlineConfig::topology: TOPOLOGY_STAR (default) = the host peers with every guest, a guest only with the host; TOPOLOGY_MESH = Strikers.
+  OnlineNet::TopologyPeer() decides; SyncMembers, RefreshCandidates, UpdatePhase, UpdateRelay (relay wanted only for topology peers),
+  the relay-failed check and Started() consider topology peers only.
+* Per-pair punch time and relay advice: SigMember::{pid, punchAtMs, steerRelay, steerReason}; the member's values win, SigRoom's are the
+  fallback (two-player views, the fakes).
+* ApplyRoom parses "members":[{slot,pid,name,vip,link,endpoint|null,punchAtMs,steer:{relay,reason}}] (at most 8 entries looked at; a bad,
+  repeated or own slot is skipped; non-objects skipped); without members[] the legacy single "peer" is read as before. "slot" bounds
+  0..3 (was 0..1). Server times for punchAtMs go through one helper (LocalTime) that rejects NaN / absurd values.
+* PunchReport's peer slot goes to the service: {"result","path","ms","peer":n}.
+* Per-member loss: OnlineConfig::onPeerLost(ctx, slot, why), once per lost connected path (Peer LOST/CLOSED, or a connected member that
+  left the room view). onLost still means "no member connected" (a host losing one guest of three gets onPeerLost only).
+  vlink_online.cpp forwards it to NpLanPeerLost.
+* A member joining while others are connected: the same candidates are posted again (no new STUN: a new public port would make the
+  connected members punch afresh).
+
+Host migration (DESIGN.md section 8; coordinator request) — online/np_online.*, np_signal.h, np_signal_http.cpp, np_signal_fake.cpp
+-----------------------------------------------------------------------------------------------------------------------------------
+* SigRoom::hostSlot / hostEpoch from the room view ("host_slot"/"host_epoch" or the smg service's "hostSlot"/"hostEpoch"; absent = 0/0).
+  The star is centred on the room's host: when it moves, the path to the old host is torn down (onPeerLost(old)), the new host begins
+  paths to every guest, the guests to the new host (fresh hellos and keys; the service's per-pair punchAtMs applies).
+* OnlineConfig::hostMigrationWaitMs (30 s): a console whose path to the host ended waits that long for a new host and a path to it while
+  other members are in the room; only then onLost / OnLinkLost. OnlineInfo::{hostSlot, hostEpoch, migrating}.
+* The memory fake moves the host to the lowest remaining slot on Leave and on SignalMemoryHubEvict (new: what the service does with a
+  member that went silent).
+
+Smaller changes
+---------------
+* The sceNet pool: one define NP_NET_POOL_BYTES = 2 MiB (vlink_vita_radio.h; -D can raise it) used by all four sceNetInit sites (ad hoc
+  radio, Same Wi-Fi, online socket, HTTPS client); each logs its sceNetInit result and pool size. Strikers used 1 MiB at each site; Halo CE
+  Vita found 1 MiB too small once sockets ask for larger buffers (SO_RCVBUF refused with ENOLIBMEM 0x804101C9, then ENOBUFS).
+* Every setsockopt result is checked and logged (vlink_vita.cpp, vlink_udp.cpp, np_udp_vita.cpp, np_udp_posix.cpp, np_https_sys.cpp); a
+  socket that cannot be made non-blocking is closed and not used. Nothing in net/ calls scePowerSetConfigurationMode.
+* The keyboard: np_online_ime_vita.cpp takes the limit per request (NpOnlineImeOpenMax, up to 16 characters; Strikers fixed 10), and
+  np_keyboard_vita.cpp passes the caller's maxChars. np_keyboard_host.cpp: SMG_KEYBOARD_TEXT / SMG_KEYBOARD_TEXT_FILE.
+* Tests: online_test.cpp expects version 3.0.0 and X-Msc-Game, its HTTP test uses the built version and accepts a room that outlives its
+  host; StubServer records request bodies; Console has topology / onPeerLost / migration-wait options. New: tests/online_star_test.inc
+  (4-console star rig with a symmetric guest on the relay, guest drop + rejoin, host drop + migration, host leave, migration timeout,
+  mesh, members[] parsing, the msc-online refusal, and the same star + migration against the service over HTTP when four accounts exist).
+  run_online_tests.sh: paths for net/, M=-m64 default, CC/CXX overridable (GCC for ASan here). run_signal_http_test.sh registers 4 accounts.
+
+Kept unchanged (Strikers 1.3 security fixes): turn_.Tick() before the signaling status check, the room key checks (no zero / short key),
+XChaCha20-Poly1305 per-pair keys from both hellos, the 64-packet replay window, bounded JSON (12 levels, 4000 nodes), oversize-datagram
+refusal, punch-report clamp. The 1.3 "NpNetLeave on failure" fix lived in np_menu_flow.cpp (not taken): Galaxy's session layer must call
+NpLanRadioStop() / NpNetLeave() itself when NpLanRadioPoll returns -1 or the phase is FAILED (a failed session otherwise keeps its socket).
+
+vitareview2 (9 Nov 2026): process-long sceNet stack, and the log in log.txt
+--------------------------------------------------------------------------
+* NP_NET_KEEP_STACK (vlink_vita_radio.h, default 1; -DNP_NET_KEEP_STACK=0 = Strikers): the ad hoc radio's cleanup no longer calls sceNetCtlTerm /
+  sceNetTerm, frees the pool it gave sceNet, or unloads SCE_SYSMODULE_NET (it still ends the ad hoc layers, the socket, the worker and the
+  dialog). np_https (g_netUp) and the online socket cache "the stack is up" and share it with the Same Wi-Fi path, which already never terminated it;
+  after a Nearby session that had initialised the stack first they were left with a dead one (resolver / socket errors until a restart). A later
+  session's sceNetInit answers EBUSY and frees its own spare pool (already handled). Hunks marked "Galaxy" / NP_NET_KEEP_STACK in vlink_vita_radio.cpp.
+* np_log.h (new): NpLogf(tag, fmt, ...) = the old fprintf(stderr, "[tag] ...") plus, on the Vita, port_log_summary (the basic log, log.txt;
+  weak, so a link without the port still works). VLV_LOG, VLINK_LOG, NPN_LOG, the radio's one-line events (sceNetInit, ad hoc id accepted /
+  refused, NetCheck dialog, CommonDialog set-up, cell gone / peer seen), np_https_sys's Log, the https failure line and the keyboard failure
+  now use it. Per-packet lines (vlink.cpp "rx" / "tx", SMG_LINK_TRACE) stay stderr-only (VLINK_TRACE). -DNP_LOG_STDERR_ONLY = Strikers.
+  Volume: one line per event; the periodic per-member link statistics (SMG_NET_STATS_MS) and each https request line are the busiest.
+
+nocap (8 Nov 2026): the ad hoc receive worker without the Vita's fourth core
+--------------------------------------------------------------------------
+* vlink_vita_radio.cpp (hunks marked "Galaxy (MP3 nocap)"): smg_mp_rx keeps core 2 and the process default priority (as Strikers), which is
+  below the front end's player on that core; SMG_MP_RX_PRIO=0x40..0xBF (env.txt) changes the priority for a console A/B. A 10 ms receive
+  wait that timed out and came back late records how late (np_vita_radio_rx_late_take_max): the time the worker waited for its core.
+  platform/src/mp/mp_core_vita.cpp prints it with the ring's peak every 10 s in a Nearby session ("[mp] net ad hoc: rx late max X ms,
+  ring peak N"). No thread of net/ asks for the system core (tests/mp/nocap_build.sh checks it).
+
+strikerport (13 Nov 2026 night): Strikers fixes made after the vendoring (net/ from Strikers 1.3 at 92f5bc6f), ported and adapted
+----------------------------------------------------------------------------------------------------------------------------------
+* 9b42bef1 SinceMs (np_net.h): elapsed times never wrap (a timer stamped from a later clock read gives 0). Used in np_online, np_peer, np_turn,
+  np_signal_http and, as ours, np_natpmp / np_upnp.
+* 3833213a Peer::CreditLocalStall + kLocalStallMs (np_online.cpp Tick): a gap over 1.5 s between two ticks (a scene load) is the local console's
+  stall, not the partner's silence. MpCore::receiveAll keeps its own credit for the session layer (separate counters; no double credit).
+* 3e30e6cf OnlineNet::CheckPartnerLost: NOT TAKEN (ported, then reverted). OnLinkStart clears peerBegun_, so after a Wi-Fi blip a rebuilding
+  host reads its guests as "lost" at once and would Fail after 2 s instead of the 45 s rebuild (Galaxy guests poll every 300 s once started;
+  Strikers polls every 1.7 s and never sees it); a host whose only guest dropped before linking would Fail at ~22 s though others could still
+  join; and the service already closes or migrates a room whose host is lost, so the gain is small.
+* 905feeba (certificate half): a certificate refused only for its dates fails as NP_HTTPS_E_CLOCK (np_https_cert_is_date_fault); the menu maps it
+  to the existing "set the date and time" sentence (mp_service.cpp transport 3 -> MP_ERR_CLOCK).
+Not ported: the idle gate of 905feeba, held polls / hold.js / worker_gate.js, online-save rule, LAN menus, desync blame, friends / quick match.
+
+netport31 (17 Nov 2026): Strikers network fixes of 15-16 Nov, ported where Galaxy had the same bug
+----------------------------------------------------------------------------------------------------
+* heldpoll23 (c9e362b4): np_http.h HttpStart(..., ioTimeoutMs, ...) + HeldIoMs(hold) = hold + 10 s; np_signal_http.cpp StartJob passes it for a
+  held room poll. Galaxy's service holds a room poll 25 s while the room forms and 55 s for a settled host (server rooms4.js pollPlan, 8 s
+  busy); np_https ended every request after 10 s without a byte, so on the console every held poll failed, counted towards kPollGiveUp and
+  the room was given up after about 4 minutes. Ordinary requests keep 10 s (np_https.cpp DefaultIoMs). The plain desktop client
+  (np_http_plain.cpp) applies the same no-data limit now (default 10 s), so the host tests see the console's rule.
+* Give-way (new, follows from the above): np_https runs ONE request at a time, so a menu's request (friends, times, invites) waited for a
+  whole hold (up to 55 s). np_https_waiting(except) / NpNet::HttpOthersWaiting(handle): the held poll is given up when another request
+  waits and asked again at once behind it (the existing svcfix2 path that already did this for the signaling's own queue).
+* onmatch23 (735f4f4a): a "Content-Type: x" header line is taken as the request's content type instead of refusing the request (no Galaxy
+  caller sends one today; the plain clients accepted it, the console did not). PUT and DELETE were already sent correctly in Galaxy.
+  One service address for the sign-in and the rooms was already the case (mp_svc_signin_poll hands ServiceUrl() to NpNetConfigureService);
+  tests/mp/service_test.cpp now checks it.
+* onmatch23 (uncommitted, finished here): the socket budget. np_https_sys counts every socket and epoll id per pool (HTTPS, UPnP), refuses a
+  new connection while 2 of a pool are open (a leak shows as a refused request and a log line, it cannot drain the console's table), and
+  np_https logs the counts (every 20 sockets and after each failure that opened one). np_https_socket_stats(). Audit: every error / timeout /
+  cancel path of np_https, np_https_sys (Vita and POSIX), np_http_plain, np_upnp closes its socket; no leak found. The plain client now closes
+  the socket of a request given up (HttpCancel) within 50 ms instead of keeping it until its own time limit.
+* onlogin23 (15b8b1a1): NOT ported, Galaxy has no SO layer and opens no link before a session (tests/mp/online_nolink_test.cpp proves the
+  path under the console's link rule).
+Tests: net/tests/https_test.cpp (held / ordinary, waiting, Content-Type, PUT/DELETE, 60 failing polls and the socket counts),
+net/tests/online_test.cpp (TestHeldPollNoDataLimit, TestHeldPollGivesWay, TestPlainSocketsAcrossFailingPolls; --netport31 runs only these),
+net/tests/netport31_mutants.sh, tests/mp/online_nolink_build.sh.
+
+mpwifi44 (22 Nov 2026): the reason of a link that did not come up
+-----------------------------------------------------------------
+The owner's console (build console27) answered "Couldn't connect to Wi-Fi. Check your Wi-Fi settings." to Play Together while it was on Wi-Fi and
+the connection check passed. NpLanRadioPoll's -1 carried no reason, so the game showed the Wi-Fi sentence for every one of them.
+* np_glue.h NpLanRadioFailKind(const char** why): why the last NpLanRadioPoll answered -1. 1 = the console is not connected to an access point or
+  has no address (sceNetCtlInetGetState read and not CONNECTED, no IP): the only case the player is told to check the Wi-Fi settings; 2 = anything
+  else (the NET module, sceNetInit, sceNetCtlInit, a refused sceNetCtlInetGetState, the socket, SO_NBIO, the bind, an online session that failed,
+  online chosen without a session); 0 = not known (Nearby keeps its own lines). vlink_vita.cpp WifiOpen sets it at every `return false`, with the
+  SCE code, and logs "Same Wi-Fi could not open: <why>" (three of those returns logged nothing before). np_glue.cpp (desktop): 2 for its UDP link.
+* vlink_vita.cpp WifiOpen, the bind. The console's log (console27, an iPhone hotspot, the first Play Together after boot, nothing online run yet):
+  "sceNetInit (Same Wi-Fi, pool 2048 KiB): 0x00000000", "bind to UDP port 41100 failed", every time, with no code. WHY the Vita refuses that
+  bind is not known yet (nothing of the game holds the port: the only other binds are the online / by-address socket, which was not open). The
+  online socket already walks eight ports for the same symptom (np_net.h kPortTries, C3). Same Wi-Fi does the same now: the configured port,
+  then the next seven; g_wifi.port is the one that bound (back to the configured one at close). Discovery still works across the range: the
+  subnet broadcast goes to all eight ports (answers are unicast to the asker's port), 255.255.255.255 to the first. Every step is logged:
+  sceNetSocket's result with the address and netmask, each refused bind with its code, the socket id, SO_BROADCAST's result and sin_len, and the
+  port finally used. No SO_REUSEADDR: if the system or a plug-in owns 41100, sharing it would hand it our datagrams. The desktop UDP backend
+  (vlink_udp.cpp, the Mac bot, emulators) still uses one port: a console on 41101+ reaches it with its probes, not by the bot's broadcasts.
+The game side (platform/src/mp): mp_netglue.cpp mp_net_link_fail, mp_transport_vlink.cpp (MP_ERR_INTERNAL instead of MP_ERR_NO_WIFI for kind 2),
+mp_core.cpp scanError / scanRetry, mp_gather.cpp (a failed start no longer stays; gathering without the local link). Not compiled into a VPK or
+run on a console by the author: syntax-checked with arm-vita-eabi-g++ only. Tests: tests/mp/gather_wifi_test.cpp (the hook scripted).

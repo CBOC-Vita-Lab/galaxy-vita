@@ -24,11 +24,13 @@
 namespace vgx {
 bool LogEnabled() { return false; }
 }
+// (bowl32: the back end's basic-log hook is called by FirstUseSummary; the harness had none, which the test never reached before the 3.1 back end)
+extern "C" void port_log_summary(const char*, ...) {}
 namespace {
 using namespace vgx;
 constexpr int W = 128, H = 96;
 alignas(32) unsigned char destinations[4][32];
-alignas(4096) uint8_t ram[1 << 16];
+alignas(4096) uint8_t ram[1 << 18]; // (bowl32: was 1 << 16; DD_COPIES makes up to three more sets of the meshes)
 unsigned failures = 0;
 void Check(bool ok, const char* label) {
     std::printf("%s: %s\n", ok ? "PASS" : "FAIL", label);
@@ -144,6 +146,7 @@ struct Mesh {
     uint8_t* nrm = nullptr;
 };
 Mesh g_mesh[4];
+Mesh g_meshC[3][4]; // (bowl32: DD_COPIES=n, tools/test_vgx_dldedup_gl.sh: n lists with the same bytes at other addresses, with arrays of their own)
 uint32_t g_ramTop = 0;
 uint8_t* Take(uint32_t bytes) {
     uint8_t* p = ram + g_ramTop;
@@ -243,6 +246,8 @@ int main(int argc, char** argv) {
     MakeMesh(g_mesh[1], 70);
     MakeMesh(g_mesh[2], 400);
     MakeMesh(g_mesh[3], 8);
+    const int copies = std::getenv("DD_COPIES") ? std::min(3, std::max(0, std::atoi(std::getenv("DD_COPIES")))) : 0;
+    for (int c = 0; c < copies; ++c) { MakeMesh(g_meshC[c][0], 44); MakeMesh(g_meshC[c][1], 70); MakeMesh(g_meshC[c][2], 400); MakeMesh(g_meshC[c][3], 8); }
     hle::RegisterGuestRam(ram, sizeof ram);
     // a first picture with big overlapping shapes: the texture of the textured material
     Material('A'); BP(0x40, 1u | (7u << 1) | (1u << 4));
@@ -258,12 +263,22 @@ int main(int argc, char** argv) {
     const std::vector<Obj> scene = Scene();
     uint64_t hash = 14695981039346656037ull;
     std::vector<uint8_t> px;
+    // (SI_VARY=1, tools/test_vgx_staticinst_gl.sh: objects left out by frame, and every fifth frame a vertex of the second mesh moved, its write
+    // notified: the cache builds that list again; unset: the scene is the same every frame, as before)
+    const bool vary = std::getenv("SI_VARY") && std::atoi(std::getenv("SI_VARY")) != 0;
     for (int f = 0; f < frames; ++f) {
         char cur = 0;
+        if (vary && f % 5 == 4) {
+            uint8_t* p = (copies ? g_meshC[0][1] : g_mesh[1]).pos + 12 * (1 + f % 70); // (DD_COPIES: the first copy's array moves, and with it the pictures of the objects that draw it: the scene without copies moves the same vertex of the same mesh by the same value only if that copy is object-for-object the same; the runner compares dedupe on / off in the same scene)
+            Put32(p + 8, f2u(0.25f + 0.01f * (f % 7)));
+            hle::NotifyGuestWrite(p, 12);
+        }
+        int k = 0;
         for (const Obj& o : scene) {
+            if (vary && ((k++ * 7 + f) % 9) == 0) continue;
             if (o.mat != cur) { Material(o.mat); cur = o.mat; }
             LoadMatrix(0, o.id, o.pl);
-            DrawList(g_mesh[o.kind]);
+            DrawList(copies ? g_meshC[static_cast<unsigned>(o.id) % static_cast<unsigned>(copies)][o.kind] : g_mesh[o.kind]); // (DD_COPIES: the model's lists are n copies, by object)
         }
         const uint32_t id = Copy(1, true);
         FrontPresent(false, nullptr);
@@ -287,5 +302,16 @@ int main(int argc, char** argv) {
     std::printf("picture %dx%d hash %016llx\n", W, H, static_cast<unsigned long long>(hash));
     std::printf("records %zu\n", g_frameRecords.back());
     std::printf("copybytes %llu\n", (unsigned long long)c[1]);
+    // (GXV_STATIC_INST, tools/test_vgx_staticinst_gl.sh)
+    uint64_t si[3] = {}, sl[5] = {};
+    StaticInstCounters(si);
+    DlStaticInstCounters(sl);
+    std::printf("staticinst runs %llu joins %llu refused %llu lists %llu bytes %llu rebuilds %llu listsrefused %llu made %llu\n", (unsigned long long)si[0],
+                (unsigned long long)si[1], (unsigned long long)si[2], (unsigned long long)sl[0], (unsigned long long)sl[1], (unsigned long long)sl[2],
+                (unsigned long long)sl[3], (unsigned long long)sl[4]);
+    uint64_t dd[8] = {};
+    DlDedupCounters(dd);
+    std::printf("dedup made %llu hits %llu wouldhits %llu instshared %llu liveshared %llu statbufs %llu\n", (unsigned long long)dd[0], (unsigned long long)dd[1], (unsigned long long)dd[2],
+                (unsigned long long)dd[3], (unsigned long long)dd[4], (unsigned long long)dd[5]);
     return failures ? 1 : 0;
 }

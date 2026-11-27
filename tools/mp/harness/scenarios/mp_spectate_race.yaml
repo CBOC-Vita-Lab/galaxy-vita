@@ -1,0 +1,21 @@
+name: mp_spectate_race
+description: spectate - Star Race, guest finishes first and watches the host who is still racing; both finish, results, back to normal
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, 'spectate']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500}
+processes:
+  - name: host
+    input: "@file2_observatory+30,150-165:SY=1,160:A,165-175:SX=1|SY=1,170:A,175-190:SY=1,180:A,185:A,190-200:SX=-1|SY=1,195:A,200-230:SY=1,205:A,210:A,215:A,220:A,225:A"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 70}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] race finish slot=1 /'
+  - 'expect guest /\[mp\] spectate: start watching/'
+  - 'expect host /\[mp\] race results /'
+  - 'expect guest /\[mp\] race results /'
+  - 'absent * /\[mp\] (race hold timeout|race drop)/'

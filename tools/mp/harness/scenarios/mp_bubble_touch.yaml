@@ -1,0 +1,44 @@
+# Bubbles (Play Together falls, default setting): the guest falls (SMG_MP_TEST_DIE: damage death 25 s after the Good Egg scene
+# starts), loses one life, floats in the BigBubble to the host; SMG_MP_TEST_BUBBLE_NEAR parks the bubble on the host after
+# 1.5 s, so the host's body touches it: popped by slot 0, the guest lands beside the host. No miss demo, no reload, no restart.
+# Screenshots every 2 s: look at the guest's and the host's shots between "bubble on" and "bubble off" (the bubble with the
+# player inside on the guest; the bubble around the guest's puppet on the host).
+name: mp_bubble_touch
+description: guest falls into a bubble (1 life), the host's touch pops it, guest lands beside him; nobody restarts
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE, SMG_MP_TEST_BUBBLE_NEAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25:1", SMG_MP_TEST_BUBBLE_NEAR: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect * /\[mp\] bubble scene init holder=1/ after host /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'expect guest /\[mp\] bubble test die: slot 1 serial=1 damage lives=\d+/'
+  # one life lost (the real decrement), not out of lives, a near fall (bubble where he fell), floating to the host
+  - 'expect guest /\[mp\] bubble on slot=1 lives=(\d+)->\d+ out=0 far=0 target=0 serial=1/ within 2s after guest /bubble test die: slot 1/'
+  - 'absent guest /\[mp\] bubble on slot=1 lives=(\d+)->\1 /'
+  - 'order guest /\[mp\] bubble on slot=1 lives=\d+->(\d+) / before host /\[mp\] bubble msg from=1 on=1 lives=$1 by=-1 out=0/ within 5s'
+  - 'expect host /\[mp\] bubble remote on slot=1/ within 3s after host /\[mp\] bubble msg from=1 on=1/'
+  - 'expect host /\[mp\] ui: toast "guest is in a bubble!"/'
+  # the host's touch: popped by 0, lands beside 0, a BUBBLE off with by=0 reaches the host, his puppet bubble bursts
+  - 'expect guest /\[mp\] bubble off slot=1 by=0 land=0 why=touch lives=\d+/ within 15s after guest /\[mp\] bubble on slot=1/'
+  - 'order guest /\[mp\] bubble off slot=1 by=0 / before host /\[mp\] bubble msg from=1 on=0 lives=\d+ by=0 out=0/ within 5s'
+  - 'expect host /\[mp\] bubble remote off slot=1 popped=1/ within 3s after host /\[mp\] bubble msg from=1 on=0/'
+  - 'expect guest /\[mp\] ui: toast "host popped .*"/'
+  # no game miss, no reload, no restart, no second bubble
+  - 'absent * /\[mp\] bubble restart/'
+  - 'absent guest /\[mp\] flow (dead slot|own move type=5)/'
+  - 'absent host /\[mp\] flow dead slot=1/'
+  - 'count guest /\[mp\] bubble on slot=1/ == 1'
+  - 'absent * /\[mp\] bubble drop/'
+  - 'exit * == 0'

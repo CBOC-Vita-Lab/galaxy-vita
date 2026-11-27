@@ -48,22 +48,15 @@ int main(int argc,char** argv) {
     // Every Display row focused, then every command: its help must stay inside the safe text bounds and not be truncated.
     {const auto saved=state.working;state.working=session.document.config;
      for(unsigned row=0;row<kDisplayRows+3;++row) {state.row=row;char name[40];std::snprintf(name,sizeof name,"display-row-%02u",row);if(!render(name,state))return false;}
-     // The presets, and a row changed by hand.
-     const char* presets[]={"best","balanced","performance"};
-     for(unsigned i=0;i<3;++i) {state.working=session.document.config;ApplyPreset(state.working,static_cast<Preset>(i));state.row=RowPreset;char name[40];std::snprintf(name,sizeof name,"display-preset-%s",presets[i]);if(!render(name,state))return false;}
      state.working.sharpness=Sharpness::Strong;state.row=RowSharpness;if(!render("display-custom",state))return false;
      // The HD pack missing, and the scrolled-down list.
      state.working=session.document.config;session.hdtexPack=false;state.row=RowHdTextures;if(!render("display-hd-not-installed",state))return false;session.hdtexPack=true;
      state.working=session.document.config;state.row=RowLanguage;if(!render("display-scrolled",state))return false;
      state.working=saved;}
-    // Picture mode: Quality, Performance (with its Dynamic resolution and Anti-aliasing words), the Performance preset, Locked 30, and
-    // Quality and Locked 30 on a build without the fixed 30 cap: every help line must fit untruncated.
-    {const auto saved=state.working;state.working=session.document.config;state.row=RowRate;if(!render("display-mode-quality",state))return false;
-     state.working.performance60=true;if(!render("display-mode-performance",state))return false;
-     state.row=RowDynamic;if(!render("display-mode-performance-dynamic-row",state))return false;state.row=RowAntiAliasing;if(!render("display-mode-performance-aa-row",state))return false;
-     state.working=session.document.config;ApplyPreset(state.working,Preset::Performance);state.row=RowPreset;if(!render("display-preset-performance-mode",state))return false;
-     state.working=session.document.config;state.working.fpsLimit=30;state.row=RowRate;if(!render("display-mode-locked-30",state))return false;
-     session.features={false,true};state.working=session.document.config;if(!render("display-mode-quality-no-cap",state))return false;
+    // Picture mode (modes26): Performance (60, the default), Quality (30), and Quality on a build without the fixed 30 cap: every help line must fit untruncated.
+    {const auto saved=state.working;state.working=session.document.config;state.row=RowRate;if(!render("display-mode-performance",state))return false;
+     state.working.fpsLimit=30;state.working.performance60=false;if(!render("display-mode-quality",state))return false;
+     session.features={false,true};state.working=session.document.config;state.working.fpsLimit=30;state.working.performance60=false;if(!render("display-mode-quality-no-cap",state))return false;
      state.working.fpsLimit=30;if(!render("display-mode-locked-30-unavailable",state))return false;session.features={true,true};
      state.working=saved;}
     // The Reduced motion row focused, off and on.
@@ -96,7 +89,7 @@ int main(int argc,char** argv) {
     state.modal=Modal::Conflict;state.candidateButton="circle";state.conflictAction="star_bits";state.modalChoice=0;if(!render("conflict-cancel",state))return false;
     state.modalChoice=1;if(!render("conflict-swap",state))return false;
     state.modal=Modal::ResetProfile;if(!render("reset-profile",state))return false;
-    state.modal=Modal::None;state.page=Page::Display;state.row=RowEffects;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return false;
+    state.modal=Modal::None;state.page=Page::Display;state.row=RowDepthOfField;state.message="Settings replacement rename failed. Changes remain editable.";if(!render("save-failure",state))return false;
     session.document.editable=false;Begin(state,session);if(!render("newer-readonly",state))return false;
     session.document.editable=true;session.document.config.language="Unavailable language";Begin(state,session);state.row=RowLanguage;if(!render("language-unavailable",state))return false;
     session.document.config.language="";session.languages.names.clear();Begin(state,session);state.row=RowLanguage;if(!render("game-data-unavailable",state))return false;

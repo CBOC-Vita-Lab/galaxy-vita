@@ -52,6 +52,9 @@ public:
     void destroyScene();
     bool isStopSound() const;
     bool isReadyToStartScene() const;
+#ifdef TARGET_PC
+    bool isReadyToStartSceneMp() const;  // MP3: the session's start barrier, else isReadyToStartScene
+#endif
     bool isFirstUpdateSceneNerveNormal() const;
     void startScene();
     void updateScene();

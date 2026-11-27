@@ -1,0 +1,11 @@
+# 8145 K1-cold: cold-card control (tag c31k): Observatory then Honeyhive
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=3600
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_SHADER_CACHE_TAG=c31k
+GXV_STAGEWARM_FILE=ux0:data/smg/c31k-stagewarm.bin
+GXV_SHADERLIST=ux0:data/smg/c31k-shaderlist.bin

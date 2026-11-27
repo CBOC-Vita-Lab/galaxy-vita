@@ -1,0 +1,40 @@
+# worldsync: a console that joins AFTER enemies were defeated gets the defeats. The host is alone in Good Egg 1; 5 s after the scene is live it defeats 3 enemies
+# through the game's own death path (SMG_MP_TEST_KILL, desktop hook; the KILLs go to nobody: no guest yet). The guest console is STARTED by that mark
+# (HARNESS_START_ON: the host's "world test kill: killed=3" line), boots, joins as a drop-in and lands in the host's galaxy.
+# mp-next: nothing replays kills to a joiner, so the guest never applies them (no "objmap" lines, no remote kills).
+# worldsync: the host answers the guest's REGCRC with the scene's kill / purple / chip state (OBJMAP) and the guest applies all 3 defeats.
+name: latejoin_after_kills
+description: "guest joins a galaxy after the host defeated 3 enemies: the guest gets the 3 defeats (OBJMAP)"
+seconds: 420
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_KILL]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_KILL: "5:3"}
+  - name: guest
+    seconds: 300
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_START_ON: 'host|\[mp\] world test kill: killed=3 serial=\d+|0'}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed|Assertion|OSPanic|FATAL/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] world test kill: killed=3 serial=\d+/'
+  - 'expect host /\[mp\] slot 1 joined name=guest/ after host /\[mp\] world test kill: killed=3/'
+  - 'expect guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy .*role=guest/ within 120s after host /\[mp\] slot 1 joined/'
+  - 'expect guest /\[mp\] world reg n=\d+ crc=[0-9a-f]+ / after guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy/'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  # the state map: the host answers the joiner's REGCRC with the 3 defeats, the guest applies exactly those
+  - 'expect host /\[mp\] world objmap sent kill=3 purple=\d+ chip=\d+ chunks=[1-9]\d* to=1/ within 60s after guest /\[mp\] world reg n=/'
+  - 'expect guest /\[mp\] world objmap applied kind=1 start=\d+ bits=3/ within 60s after guest /\[mp\] world reg n=/'
+  - 'expect guest /\[mp\] world kill key=\S+ src=remote/ within 60s after guest /\[mp\] world reg n=/'
+  - 'count guest /\[mp\] world kill key=\S+ src=remote/ >= 3'
+  - 'count guest /\[mp\] world kill key=\S+ src=remote/ <= 3'   # idempotent: the repeated summaries never re-apply
+  - 'absent guest /\[mp\] world drop type=kill/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

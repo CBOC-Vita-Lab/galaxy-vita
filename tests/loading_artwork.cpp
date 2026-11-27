@@ -15,6 +15,42 @@ void Check(bool valid, const char* message) {
     if (!valid) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
 }
 bool InBand(unsigned x, unsigned y) { return x >= 184 && x < 776 && y >= 390 && y < 477; }
+bool InPrompt(unsigned x, unsigned y) { return x >= 224 && x < 736 && y >= 416 && y < 450; }
+std::vector<uint32_t> ReadPreparedBackground(const std::vector<uint32_t>& capture) {
+    { std::ofstream out(kCapture, std::ios::binary); out.write(reinterpret_cast<const char*>(capture.data()), kPixels * 4); }
+    Check(loading::Init(), "captured background initializes");
+    const std::vector<uint32_t> result(loading::detail::g_bg, loading::detail::g_bg + kPixels);
+    loading::Release();
+    std::filesystem::remove(kCapture);
+    return result;
+}
+void CheckPromptRemoval() {
+    std::vector<uint32_t> sky(kPixels);
+    for (unsigned y = 0; y < 544; ++y)
+        for (unsigned x = 0; x < 960; ++x) {
+            const bool cloud = x >= 265 && x < 305 && y >= 420 && y < 442;
+            sky[y * 960 + x] = cloud ? loading::detail::Pack(140, 205, 235) : loading::detail::Pack(12 + y / 20, 70 + y / 4, 120 + y / 5);
+        }
+    Check(ReadPreparedBackground(sky) == sky, "a cyan horizon and clouds without prompt text remain pixel-identical, with no donor rectangle");
+    auto prompt = sky;
+    const auto glyph = [&](int left, int top, int right, int bottom) {
+        for (int y = top - 5; y < bottom + 5; ++y)
+            for (int x = left - 5; x < right + 5; ++x)
+                if (InPrompt(x, y)) prompt[y * 960 + x] = loading::detail::Pack(3, 6, 12);
+        for (int y = top; y < bottom; ++y)
+            for (int x = left; x < right; ++x) prompt[y * 960 + x] = loading::detail::Pack(240, 244, 248);
+    };
+    glyph(330, 421, 336, 435);
+    glyph(343, 421, 349, 435);
+    glyph(224, 416, 229, 421);
+    glyph(731, 445, 736, 450);
+    const auto cleaned = ReadPreparedBackground(prompt);
+    Check(cleaned == sky, "white glyphs and five-pixel dark outlines are removed locally, including at all prompt boundaries");
+    for (unsigned y = 0; y < 544; ++y)
+        for (unsigned x = 0; x < 960; ++x)
+            if (!InPrompt(x, y)) Check(cleaned[y * 960 + x] == prompt[y * 960 + x], "logo, copyright and every pixel outside the prompt remain unchanged");
+    std::puts("PASS: prompt removal preserves the local cyan/cloud background and removes glyph outlines without a rectangular patch");
+}
 std::vector<uint32_t> RenderOnce(float progress, const char* caption = "Preparing shaders") {
     std::vector<uint32_t> frame(kPixels + 64, kGuard);
     loading::State state;
@@ -65,6 +101,7 @@ int main(int argc, char** argv) {
     Check(argc == 3, "capture (or -) and scratch directory supplied");
     std::filesystem::current_path(argv[2]);
     std::filesystem::create_directories("ux0:data/smg/art");
+    CheckPromptRemoval();
     std::vector<uint32_t> original(kPixels);
     if (std::string(argv[1]) == "-") {  // a synthetic capture
         for (unsigned y = 0; y < 544; ++y)
@@ -90,6 +127,7 @@ int main(int argc, char** argv) {
     std::filesystem::remove(kCapture);
     { std::ofstream out(kCapture, std::ios::binary); out.write(reinterpret_cast<const char*>(original.data()), kPixels * 4); }
     Check(loading::Init(), "the loader initializes with a capture");
+    WritePreview("loading-background.ppm", std::vector<uint32_t>(loading::detail::g_bg, loading::detail::g_bg + kPixels));
     for (float progress : {0.0f, 0.5f, 1.0f}) {
         const auto frame = RenderOnce(progress);
         for (unsigned y = 0; y < 544; ++y)

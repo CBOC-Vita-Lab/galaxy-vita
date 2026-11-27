@@ -1,0 +1,35 @@
+# PREPARED. The guest loads its file first; the host 30 s later. Once in the Observatory the host jumps to Good Egg 1 and
+# then back to the Observatory (PETARI_STAGE list, a direct requestGalaxyMove = MOVE type 0); the guest follows each
+# MOVE with the same serial and galaxy; the scene barrier releases both.
+name: mp_move
+description: galaxy MOVE followed by the guest (same serial), scene barrier, and the way back
+seconds: 320
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2,
+          PETARI_STAGE: "EggStarGalaxy:1,AstroGalaxy:1", PETARI_STAGE_HOLD: 1800}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[OS\] port: jumping to EggStarGalaxy scenario 1/'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/ within 2s after host /port: jumping to EggStarGalaxy/'
+  # every host MOVE is followed by the guest with the same galaxy and serial
+  - 'order host /\[mp\] flow move type=\d+ galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=\d+ galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s each'
+  - 'order host /\[mp\] flow move .* serial=(\d+) role=host/ before host /\[mp\] flow barrier release serial=$1 waited=\d+ms players=2/ within 60s each'
+  - 'order host /\[mp\] flow barrier release serial=(\d+) / before guest /\[mp\] flow barrier release serial=$1 / within 3s each'
+  - 'absent * /\[mp\] flow (move refused type=(?!6 )|move not taken|drop|move unmirrored|record leave)/'
+  # the guest pressing Play on its own file (type 6) is refused and then taken as the host's command: allowed, not spammed
+  - '?count guest /\[mp\] flow move refused/ <= 5'
+  - 'absent guest /\[mp\] flow own move type=(?!6 )/'
+  - 'expect guest /\[mp\] flow move type=\d+ galaxy=AstroGalaxy .*role=guest/ within 90s after host /\[mp\] flow barrier release/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left))/'

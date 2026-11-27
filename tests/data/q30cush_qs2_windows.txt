@@ -1,0 +1,22 @@
+# q30cush31b fixture: the per-window "margin ms" histograms of the console run QS2 (job 8202, build e76e06fc, Quality, GXV_Q30_CUSHION=1) from 15:48:03 to 15:49:28 (consecutive 5 s windows
+# of the q30sep: lines, copied by hand; the rest of the run has no picture with a margin under 12 ms and no long hold except the lines below).
+# columns: window-end time | pictures | holds of 3 vblanks | holds of 4+ | histogram (margin ms bin:count; unk = no anchor, margin not measured, the cushion is not fed)
+# The log has no per-picture order: tests/q30cushion.cpp places the thin pictures itself (spread / clustered) and says so.
+15:48:03 150 1 0 12-16:1 16-20:33 20-25:99 30-40:17
+15:48:08 150 0 0 30-40:150
+15:48:13 150 0 0 30-40:150
+15:48:18 150 0 0 30-40:150
+15:48:23 130 1 3 0-2:1 4-6:1 12-16:2 16-20:2 20-25:37 30-40:55 40+:32
+15:48:28 152 0 0 16-20:21 20-25:25 25-30:14 30-40:55 40+:37
+15:48:33 150 2 0 4-6:1 6-8:1 8-12:1 12-16:1 16-20:4 20-25:73 25-30:52 30-40:3 40+:14
+15:48:38 150 0 0 2-4:1 6-8:2 8-12:5 12-16:8 16-20:9 20-25:41 25-30:30 40+:54
+15:48:43 150 1 0 8-12:4 12-16:16 16-20:9 20-25:9 25-30:36 30-40:8 40+:68
+15:48:48 151 0 0 12-16:1 16-20:1 20-25:5 25-30:116 30-40:2 40+:26
+15:48:53 150 1 0 8-12:11 20-25:5 25-30:18 30-40:11 40+:105
+15:48:58 150 0 0 6-8:1 8-12:8 12-16:2 16-20:1 20-25:21 40+:117
+15:49:03 150 0 0 unk:150
+15:49:08 150 0 0 unk:150
+15:49:13 150 0 0 unk:150
+15:49:18 150 1 0 unk:150
+15:49:23 150 1 0 unk:150
+15:49:28 151 1 0 12-16:2 16-20:35 20-25:38 25-30:15 30-40:25 40+:36

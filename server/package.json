@@ -1,0 +1,22 @@
+{
+  "name": "msc-online-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Online service for the Strikers Charged Vita port: sign-in, rooms, ranked, rankings (Cloudflare Worker + Durable Object).",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:core": "vitest run --project core",
+    "test:worker": "vitest run --project worker",
+    "fake": "node fake/server.mjs",
+    "dev": "wrangler dev"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "vitest": "^4.1.12",
+    "wrangler": "4.156.0"
+  }
+}

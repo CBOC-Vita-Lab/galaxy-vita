@@ -67,6 +67,7 @@ public:
     void attenuateVelocity();
     static bool isNeedBubble(const JMapInfoIter&);
     static void makeArchiveList(NameObjArchiveListCollector*, const JMapInfoIter&);
+    bool mpRemoteGet();  // MP3: shared purple coins: another player got this coin (counts it here once; false if not alive)
 
     CoinHostInfo* mHostInfo;   // 0x8C
     FlashingCtrl* mFlashCtrl;  // 0x90

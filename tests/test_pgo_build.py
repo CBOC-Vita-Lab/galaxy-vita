@@ -142,7 +142,7 @@ class PgoBuildTests(unittest.TestCase):
                 (root / rel).write_text("")
             source_build.mkdir()
             (source_build / "compile_commands.json").write_text(json.dumps([
-                {"directory": str(root), "file": str(root / "decomp/x.cpp"), "command": f"clang++ -O2 -fprofile-use=/old.profdata -c x.cpp -o x.o"},
+                {"directory": str(root), "file": str(root / "decomp/x.cpp"), "command": "clang++ -O2 -DMP_BUILD_ID=test -fprofile-use=/old.profdata -c x.cpp -o x.o"},
                 {"directory": str(root), "file": str(root / "decomp/y.c"), "command": "clang -O2 -c y.c -o y.o"}]))
             profile = base / "p.profdata"
             profile.write_bytes(b"\xfflprofi\x81")
@@ -205,6 +205,29 @@ class PgoBuildTests(unittest.TestCase):
         entry = {"arguments": ["clang++", "-O2", "-fprofile-use=/b/pgo/x.profdata", "-MD", "-c", "a.cpp", "-o", "a.o",
                                "-fprofile-instr-use=/b/y.profdata", "-Wall"]}
         self.assertEqual(gen.base_command(entry), ["clang++", "-O2", "-Wall"])
+
+
+@unittest.skipUnless(shutil.which(os.environ.get("HOST_CXX", "clang++")), "needs a host clang++")
+class VitaEnvTest(unittest.TestCase):
+    """tools/pgo/gen_vita_env.py: entry.cpp's defaults, then the Settings start-up layer of the picture mode."""
+
+    @staticmethod
+    def env(*args):
+        out = subprocess.run([sys.executable, "-I", str(ROOT / "tools/pgo/gen_vita_env.py"), *args], check=True,
+                             capture_output=True, text=True).stdout
+        line = out.split('VITA_ENV="', 1)[1].rsplit('"', 1)[0].replace("\\\n", " ")
+        return dict(kv.split("=", 1) for kv in line.split())
+
+    def test_settings_layer_of_each_picture_mode(self):
+        entry, perf, quality = self.env("--entry-only"), self.env(), self.env("--picture-mode", "30")
+        self.assertEqual(entry["GXV_SPLIT"], "1")
+        self.assertNotIn("GXV_PICTURE_MODE", entry)
+        self.assertEqual(entry["GXV_AUTOQ_TARGET"], "30")   # (entry.cpp's start-up value, which the Settings start-up replaces)
+        self.assertEqual((perf["GXV_PICTURE_MODE"], perf["GXV_AUTOQ_TARGET"], perf["SMG_ATOMIC_SAVES"]), ("60", "60", "1"))
+        self.assertEqual(quality["GXV_PICTURE_MODE"], "30")
+        self.assertNotEqual(perf, quality)
+        for key in entry:   # the layer only changes or adds keys
+            self.assertIn(key, perf)
 
 
 if __name__ == "__main__":

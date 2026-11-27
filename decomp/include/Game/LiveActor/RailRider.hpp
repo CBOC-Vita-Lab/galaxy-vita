@@ -8,6 +8,7 @@ public:
     RailRider(s32, s32);
 
     void move();
+    void moveFromCoord(f32);
     void moveToNearestPos(const TVec3f&);
     void moveToNearestPoint(const TVec3f&);
     void moveToNextPoint();

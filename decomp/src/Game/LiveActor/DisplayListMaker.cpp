@@ -9,6 +9,14 @@
 #include <JSystem/J3DGraphBase/J3DSys.hpp>
 #include <algorithm>
 
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#if defined(__vita__) && PORT_LOGGING
+extern "C" u32 port_workload_anim_material_diff_context(void);
+extern "C" void port_workload_anim_material_diff_counts(u32 context, u32 scanned, u32 flagged, u32 calls);
+#endif
+#endif
+
 void DisplayListMaker_FORCE_MATCH_INLINE(J3DTexture* pTexture, const ResTIMG& rTexture) {
     pTexture->setResTIMG(0, rTexture);
 }
@@ -23,17 +31,46 @@ DisplayListMaker::DisplayListMaker(J3DModel* pModel, const ResourceHolder* pResH
 }
 
 void DisplayListMaker::update() {
+    PortDlGameEnter();  // (GXV_PAR_DL: the material controls write the shared materials; J3DSys.hpp)
     std::for_each(mMaterialCtrl.begin(), mMaterialCtrl.end(), std::mem_fun(&MaterialCtrl::update));
 }
 
 void DisplayListMaker::diff() {
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    const u32 diffContext = gPortParDlRun ? 0u : port_workload_anim_material_diff_context();  // (GXV_PAR_DL: not on the worker)
+    u32 scanned = 0, flagged = 0, calls = 0;
+#endif
     for (u16 i = 0; i < mModel->getModelData()->getMaterialNum(); i++) {
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+        if (diffContext) ++scanned;
+#endif
         if (mCurFlag[i]) {
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+            if (diffContext) ++flagged;
+#endif
+#ifdef TARGET_PC
+            // (GXV_PAR_DL: during the overlap the game thread holds the guest's interrupts off for the whole flush, and the worker that
+            // runs this is no guest thread: it must not touch the guest scheduler. Outside the overlap, as the original.)
+            if (gPortParDlRun) {
+                J3D_MSYS.setMatPacket(mModel->getMatPacket(i));
+                mModel->getModelData()->getMaterialNodePointer(i)->diff(getDiffFlag(i));
+                continue;
+            }
+#endif
             MR::ProhibitSchedulerAndInterrupts prohibit(false);
-            j3dSys.setMatPacket(mModel->getMatPacket(i));
+            J3D_MSYS.setMatPacket(mModel->getMatPacket(i));
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+            if (diffContext) ++calls;
+#endif
             mModel->getModelData()->getMaterialNodePointer(i)->diff(getDiffFlag(i));
         }
     }
+#if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
+    if (!gPortParDlRun) {
+        port_workload_anim_material_diff_counts(diffContext, scanned, flagged, calls);
+    }
+#endif
 }
 
 void DisplayListMaker::newDifferedDisplayList() {

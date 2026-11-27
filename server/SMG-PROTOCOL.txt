@@ -1,0 +1,297 @@
+SMG-PROTOCOL.txt - the Galaxy 3.0 online service (worker smg-online, GAME=smg), protocol version 1
+=====================================================================================================
+
+The same code as the Strikers service (PROTOCOL.md), deployed a second time with the game set to smg (SERVICE_GAME=smg on
+Cloudflare, GAME=smg for the fake server and the tests). Everything in PROTOCOL.md section 1 (conventions, errors, retries) holds
+unless this file says otherwise. This file lists every endpoint the Galaxy client may call and every field it can rely on.
+Answers may gain fields; requests are strict (an unknown field is 400 unknown_field with "field").
+
+0. Headers, versions, errors
+----------------------------
+Every request from the game carries:
+  X-Msc-Game: smg          required on every non-open route. Absent means "msc" (Strikers): 400 game_mismatch.
+                           A value other than msc / smg: 400 bad_game. Open routes (info, time, servers, /times,
+                           /v1/public/times) accept no header (a browser); a wrong one is still 400 game_mismatch.
+  X-Msc-App: 3.0.0         required (REQUIRE_APP_VERSION=1 in production). Below MIN_APP_VERSION (default 3.0.0):
+                           426 update_required {minVersion}. Every error carries latestVersion (default 3.0.0).
+  X-Msc-Proto: 1           optional (default 1).
+  X-Msc-Build: <8..64 hex> optional. When sent, rooms match on version AND build (see "version tag").
+  Authorization: Bearer <43-char token>   on every "player" route.
+Body: JSON, at most 4096 bytes (413 too_large), except POST /v1/report: at most 294912 bytes (288 KiB: the worst case of JSON-escaping a 48,000-byte log; the edge checks Content-Length and the streamed size
+before the body is parsed). Methods: GET and POST suffice for everything (np_https speaks only those);
+DELETE forms exist for convenience.
+Error body: {"error":{"code":"...","message":"...", ...extra, "latestVersion":"3.0.0"}}. Branch on code.
+Version tag: X-Msc-App, plus "+<build lowercased>" when X-Msc-Build is sent. Rooms remember the creator's tag; only the same tag
+joins (409 version_mismatch), and quick match / the public list / "joinable" only consider rooms of the caller's tag.
+
+Galaxy error codes in addition to PROTOCOL.md:
+  400 bad_game, game_mismatch, bad_mode, bad_settings (+field), bad_param (+field), bad_time (+field, reason too_fast|too_slow),
+      bad_splits, bad_build, bad_category, own_code, bad_code
+  403 not_friends, not_member
+  404 player_not_found, room_not_found
+  409 version_mismatch, room_full, room_started, own_room, friends_full (+max), room_not_ready, blocked, blocks_full (+max)
+  410 room_closed, room_expired
+  429 rate_limited (+retryAfterSec; reason hourly_cap for times)
+Routes that do not exist in Galaxy (404 not_found, at the edge): /v1/ranked/*, /v1/rank/*, /v1/matches/*, /v1/me/matches,
+/v1/public/leaderboard, /leaderboard.
+
+1. Service info (open)
+----------------------
+GET /v1/info
+  {"proto":1,"minProto":1,"game":"smg","serverMs":..,"kill":[],"message":null,
+   "features":{"rooms":true,"quick":true,"friends":true,"times":true,"turn":true,"ranked":false,"ranking":false},
+   "limits":{"nameMin":2,"nameMax":10,"maxMembers":4,"friendsMax":50,"settingsMaxBytes":512,"timesPerHour":30,
+             "timeFloorFrames":600,"timeCapFrames":432000},
+   "stun":["stun.cloudflare.com:3478"],"punch":{"intervalMs":700,"tries":7,"lingerMs":5000},
+   "roomCodeAlphabet":"ABCDEFGHJKMNPQRSTUVWXYZ23456789","app":{"min":"3.0.0","latest":"3.0.0"},
+   "link":{"pingAfterSec":5,"lostAfterSec":15,"joinAckSec":5,"natLifeSec":30,"onlineSec":60},"servers":[]}
+GET /v1/time, GET /v1/servers: as PROTOCOL.md section 2.
+GET /v1/prove?n=<32 lowercase hex digits>   (deploy-time proof; open, no token, no version header; 10 per minute per address)
+  -> 200 {"proof":"<64 hex>"} with proof = HMAC-SHA256(key = the service's ADMIN_TOKEN, message = "smg-online prove v1\n" + the request URL's host name,
+  lower case + "\n" + n). 404 not_found exactly like the admin routes when ADMIN_TOKEN is not set (or is too short); 400 bad_request for a missing or malformed n.
+  The deploy script asks it, with a fresh n, before it sends an address the admin token: only the service that holds the admin secret can answer, and the host
+  name is part of the message, so an answer made for another host name does not verify. Neither n nor the proof is logged. Game clients never call it.
+Kill switches (admin): all, register, rooms, turn, friends, quick, times. A switched-off feature answers 503 service_disabled.
+
+2. Accounts (as PROTOCOL.md section 3)
+--------------------------------------
+POST /v1/register {"name":"Player"} (+ optional "region", "relayOnly", "pow")
+  -> {"pid":100123,"code":"K7QM-4DXT","token":"<43>","name":"Player","region":2,"relayOnly":false,"createdMs":..}
+  Name rules: 2..10 characters after trimming, A-Z a-z 0-9 space . _ -, first and last a letter or digit, no double space,
+  at least 2 letters/digits; NOT unique in Galaxy (two players may both be "Mario": the room view's members[].label tells them apart);
+  reserved / filtered words 400 bad_name
+  {reason}. The client keeps pid, token, name and code in <data>/online/online.dat.
+GET /v1/me, PUT /v1/me {"name"?,"region"?,"relayOnly"?}, DELETE /v1/me (no body; the player's own delete: removes the account, its friend code, friendships and
+  requests both ways, blocks, star times, invites and room membership (a room it hosted passes to the remaining members and closes when empty); answer 200 {"ok":true}; a second call with the
+  same token is 401 unauthorized = already gone; 3 an hour per account; a banned account gets 403 banned), GET /v1/players/{code} -> {"pid","code","name","region"}.
+Presence: any authenticated call marks the player online for 60 s (memory only).
+
+3. Rooms (up to 4 members, star topology through the host)
+----------------------------------------------------------
+Codes: 6 characters of the alphabet above (input case-insensitive, spaces and dashes ignored).
+Slots 0..3 never change for a member. The host starts in slot 0; hostSlot says who hosts now (section 3.9).
+Virtual IPs: base 10.(64..127).x.0 per room, member vip = base + slot + 1 (slot 0 -> .1, slot 3 -> .4). Unique among live rooms.
+States: open (one member) -> joined (2+ members, not all posted an endpoint) -> ready (2+ members, all posted) -> started
+  (the host and at least one guest called /started). A started room stays started while members come and go.
+  Terminal: closed (closedReason: last_left, lost, replaced, account_deleted) and expired. Closed rooms are readable ~5 min.
+TTLs: open 10 min, joined/ready 20 min, started 3 h (from the start), then expired.
+A player is in one room at a time: creating, joining or quick-matching leaves every other live room (as "leave" below).
+
+3.1 POST /v1/rooms -> room view                                   10 per 10 min
+  {"mode":"coop"|"race", "maxMembers":2..4, "visibility":"code"|"friends"|"public", "settings":{...}}   all optional;
+  defaults coop, 4, code, {"dropIn":true}.
+  settings (serialised <= 512 bytes), allowlist, integers in range or booleans, nothing else:
+    interaction 0..2, sharedKills bool, rivals 0..2, raceWait 0..255, nameTags 0..2, dropIn bool (default true),
+    sharedPurple bool, sharedChips bool, galaxy 0..63, scenario 0..8
+  The service only stores settings (lists, quick match, drop-in); the session itself carries MpSettings.
+  visibility: code = only by code; friends = ONLY the host's mutual friends, by friend code or by room code (svcfix3: a stranger who
+  has the code of a friends room gets 404 room_not_found, as for a wrong code); shown in GET /v1/friends; public = anyone with the code,
+  also quick match and GET /v1/rooms/public.
+
+3.2 POST /v1/rooms/join -> room view                              20 per 10 min
+  {"code":"K7QM4D"}  or  {"friend":"XXXX-XXXX"} (exactly one).
+  Takes the first free slot (0 included, once its first owner left), or the slot the same player left less than 15 s ago.
+  Idempotent for a member. Errors: bad_code, room_not_found, own_room (the current host), room_closed, room_expired,
+  version_mismatch, room_full, room_started (started and settings.dropIn false).
+  By friend: player_not_found, not_friends (not mutual), room_not_found (the friend is in no room, or a code-only one).
+
+3.3 GET /v1/rooms/{code}[?v=<version>] -> room view + "changed":true, or {"code","state","version","changed":false}
+  Members only (403 not_member). Poll every 1.5-2 s: every call is presence (link) for that member.
+
+3.4 POST /v1/rooms/{code}/endpoint {"public","local","nonce","nat"?,"candidates"?,"relay"?} -> room view
+  Exactly as PROTOCOL.md section 4 (relay-only accounts send only relay + nonce). Posting resets this member's punch verdicts.
+  A "relay" address (also a candidate of type "relay") must not be private / LAN / loopback / link-local / CGNAT, and is accepted only from an
+  account that minted relay credentials (POST /v1/turn) within their lifetime, else 403 relay_not_allowed. Only a "host" candidate may be
+  private. srflx / observed candidates are public addresses.
+
+3.5 POST /v1/rooms/{code}/punch {"result":"ok"|"fail","path":"direct"|"lan"|"relay","ms"?:0..120000,"peer"?:slot} -> view
+  The pair is (host, guest). A guest reports about the host (peer omitted or = hostSlot; anything else 400). The host names the
+  guest with "peer" (required when it has more than one guest). Per pair, "fail" from either side wins; failures minus successes
+  >= 2 for the two pids (kept 7 days) steer their next pairs to the relay (steer.reason pair_failures).
+
+3.6 POST /v1/rooms/{code}/started (no body) -> room view
+  Call once your link with the host works (the host: once one guest's does). 409 room_not_ready before this member and the
+  host both posted endpoints. Room -> started when the host and >= 1 guest called it. A drop-in guest calls it after its own
+  endpoint exchange.
+
+3.7 POST /v1/rooms/{code}/leave (no body, or {"summary":{...}}) or DELETE /v1/rooms/{code}
+  The optional "summary" (beta diagnostics; small, within the normal 4096 bytes; any other field is 400 unknown_field): {"transport":"udp"|"relay",
+  "ended":"leave"|"host_lost"|"kicked"|"error:<code>", "relay_used":bool, "dur_s","members","rx_rate","gap_mean_ms","gap_max_ms","buf_mean_ms",
+  "buf_max_ms","extrap","hold","snap","late","stall100","tx_fail", "app"?}. Numbers are clamped; an unusable summary is ignored and never fails the leave. "ended" is leave, host_lost, kicked or error:<letters and underscores>. Recorded when this call removed the member, when the member's room had already closed or expired, or when the member had already been removed (host lost, kicked: the leave answers 403 not_member but the summary is still taken from a former member of that room), once per player and room, 20 a player and 3,000 in all a day; the leave never waits on the store for more than 2.5 s (counted from the call; a summary is dropped when more than 3 stores are already waiting).
+  Stored without player id, name or address (a ring of 500 plus per-UTC-day aggregates; admin: GET /v1/admin/summaries).
+  -> {"ok":true,"state":"joined","hostSlot":1,"hostEpoch":1}  (state "closed" when you were the last member)
+  The member's row goes; the room lives on. Leaving a closed/expired room: {"ok":true,"state":"closed"}.
+
+3.8 The room view (exactly as implemented; a guest's view of a 3-member room, endpoints posted)
+  {"code":"GPQSY3","game":"smg","kind":"room","mode":"coop","visibility":"friends","topology":"star","maxMembers":4,
+   "settings":{"galaxy":4,"scenario":1,"dropIn":true},"state":"ready","version":8,"role":"guest","slot":1,
+   "hostSlot":0,"hostEpoch":0,"createdMs":1793361600000,"expiresMs":1793362800000,"closedReason":null,"matchId":null,
+   "you":{"pid":100002,"name":"Bert","vip":"10.110.129.2"},
+   "peer":null,
+   "members":[
+     {"slot":0,"pid":100001,"name":"Sally","code":"K7QM-4DXT","vip":"10.110.129.1","link":"ok",
+      "endpoint":{"public":"203.0.113.1:41100","local":"192.168.1.1:41100","candidates":[],"relay":null,
+                  "nonce":"AAAAAAAAAAA=","nat":null,"ageMs":0,"stale":false},
+      "punchAtMs":1793361601000,"steer":{"relay":false,"reason":null}},
+     {"slot":1,"pid":100002,"name":"Bert","code":"PQ2R-9HXA","vip":"10.110.129.2","link":"ok","endpoint":null,"punchAtMs":null,
+      "steer":{"relay":false,"reason":null}},
+     {"slot":2,"pid":100003,"name":"Cleo","code":"M4TT-ZE7B","vip":"10.110.129.3","link":"ok","endpoint":null,"punchAtMs":null,
+      "steer":{"relay":false,"reason":null}}],
+   "session":{"key":"k/92xqkJnrxDLMMSFYgVy+mJiy1tkBqxlC4PU66s3iU=","cookie":1543051938,"punchAtMs":1793361601000,
+              "punch":{"intervalMs":700,"tries":7,"lingerMs":5000},"stun":["stun.cloudflare.com:3478"],"natLifeSec":30,
+              "steer":{"relay":false,"reason":null}},
+   "started":{"you":false,"peer":false,"room":false},"changed":true}
+  Field rules:
+  * role: "host" when slot == hostSlot, else "guest". slot = your slot (never changes).
+  * members[].label / nameDup (svcfix3): display names are not unique. nameDup is true when another member of the room has the same name
+    (case folded); label is then the name plus " #" and the last 4 characters of the friend code ("Mario #4DXT"), else label == name.
+    Show label wherever two players could be confused.
+  * members[].code: the member's public player code (XXXX-XXXX, as GET /v1/me gives it to its owner; the "friend code"). Only
+    members see a view, so only co-members of a service room learn it; the game shows "Add Friend" / "Block" with it (netcore).
+  * members: every member, sorted by slot, you included. For each: link ok | quiet (no call for 5 s) | lost (15 s); your own
+    entry is "ok" with endpoint null.
+  * Star topology: the pairs are (hostSlot, guest). A guest gets endpoint / punchAtMs / steer for the host entry only; the
+    other guests' entries always have endpoint null, punchAtMs null, steer {relay:false,reason:null}. The host gets them for
+    every guest. endpoint is null until BOTH of the pair posted; its shape is PROTOCOL.md's peer.endpoint (relay-only
+    accounts: no public/local/candidates). stale: older than natLifeSec and no punch verdict for that pair since (re-run STUN
+    and re-post).
+  * punchAtMs (server clock) = max(host post time, guest post time, time of the last host change) + PUNCH_DELAY_MS (1000).
+  * steer per pair: relay_only (either account), nat (either posted nat "symmetric"), pair_failures.
+  * peer (Strikers field): only in a room of exactly 2 members: the other member {pid,name,slot,vip,link,endpoint}; else null.
+  * session: null while you are alone or after the room ended. key (32 bytes base64) and cookie are per room, shared by all
+    members (AEAD nonce = sender slot || 3 zero bytes || 64-bit counter, as PROTOCOL.md; slots are unique so nonces are).
+    session.punchAtMs / steer: a guest's pair with the host; the host's only pair when it has exactly one guest; else null /
+    {relay:false,reason:null} (read members[] instead).
+  * started: you = you called /started; peer = (host) any guest did / (guest) the host did; room = state is started.
+  * matchId: always null (no match records in Galaxy). kind: always "room".
+
+3.9 Host migration (DESIGN.md section 8)
+  When the host leaves (3.7, or by creating/joining another room, or account deletion) or its link is lost (no call for 15 s,
+  noticed on any other member's call or by the 60 s sweep):
+  * its member row goes; if nobody is left the room closes (closedReason last_left, or lost);
+  * otherwise the LOWEST remaining slot becomes host: hostSlot = that slot, hostEpoch + 1, the room code, key, cookie, vips and
+    every other slot stay; all punch verdicts are cleared; every guest's pair with the new host gets a fresh punchAtMs (>= the
+    time of the change + 1 s) and the guest sees the new host's endpoint (the new host sees each guest's) at once. Addresses
+    older than 30 s show stale:true: re-run STUN, re-post, punch/relay to the new host.
+  * started rooms stay started; unstarted rooms settle to open/joined/ready by their members.
+  * The old host coming back within 15 s gets its old slot back as a guest (if still free).
+  * A GUEST with no call for 60 s (a crashed console) is dropped the same way (its slot frees; if it was the only guest the room
+    goes back to open). After a service restart (presence is memory only) every member starts a fresh grace period.
+  Clients detect a change by hostEpoch growing in the view.
+
+3.10 POST /v1/quick {"mode":"coop"|"race"} -> room view + "quick":"joined"|"created"     10 per 10 min
+  Joins the OLDEST public room of the same mode and version tag with a free slot whose host is not lost (and, when started,
+  that takes drop-ins); otherwise creates a public room (maxMembers 4, settings {"dropIn":true}) with you as host.
+
+3.11 GET /v1/rooms/public[?mode=coop|race] -> {"rooms":[...]}                              12 per minute
+  Up to 20 joinable public rooms of your version tag, oldest first. Names only (no pid, no address):
+  {"code":"K7QM4D","mode":"race","state":"open","players":1,"maxMembers":4,"host":"Ana","names":["Ana"],
+   "galaxy":3,"scenario":1}   (galaxy/scenario from settings, or null)
+
+3.12 POST /v1/turn {"room":"K7QM4D"} -> TURN credentials (PROTOCOL.md section 7) for members of a joined/ready/started
+  room. POST /v1/turn/usage as PROTOCOL.md.
+
+3.12a POST /v1/turn/check (no body, no room) -> a 300 s TURN credential (tag "check") for the console's relay self-test; 2 a player a day (429
+  turn_player_limit), 6 an address a day, 60 a day in all (503 turn_budget; a new account draws on the new-account slice as a normal pass does); counted inside the daily credential allowance; the hard stop, the
+  kill switch "turn" and revoke apply.
+
+3.12b POST /v1/report (beta problem report, sent only with the player's consent) {"v":1,"kind":"user"|"after_error",
+  "where":"mp_menu"|"settings"|"post_session","note"?:<=200 chars,"check"?:{flat},"stats"?:{flat},"log":<=48000 bytes} -> 201 {"id":"<8 chars>"}
+  Body up to 294912 bytes (413 too_large past it; log over 48000 bytes is 413). Flat object: <=40 keys, short strings or numbers. The text is masked
+  (IPv4/IPv6, e-mail, 32+ hex, control characters) before storage. 3 a player and 30 an address a day (429), 10/h rate limit; 503 report_budget
+  (the day's share used up), report_storage, report_unavailable (no database); kill switch "report" (503 service_disabled).
+  Kept 30 days (at most 2000 rows / 64 MB, oldest dropped); deleted with the account (DELETE /v1/me).
+
+3.13 Far-away invites (5-character code; the blob is sealed on the console, opaque here)
+  POST /v1/invites {"code":"KCBC4","blob":"<48 chars base64url>"} -> {"code","expiresMs","ttlSec","keepSec":300}   10 per 10 min
+  POST /v1/invites/resolve {"code"} -> {"blob","expiresMs"}                                                     20 per 10 min
+  POST /v1/invites/{code}/keep -> {"code","expiresMs","ttlSec","keepSec"} (every keepSec)                                        20 per 10 min
+  POST /v1/invites/{code}/close (or DELETE /v1/invites/{code})                                               30 per 10 min
+  Errors: bad_code, bad_blob, invite_taken 409, invite_not_found 404, invite_expired / invite_closed 410, own_invite 409,
+  version_mismatch 409, invite_full 409, busy 503, rate_limited 429. Wrong codes count against the per-address allowance of 3.2.
+
+4. Friends and presence (mutual only)
+-------------------------------------
+POST /v1/friends {"code":"XXXX-XXXX"}                                                        20 per hour
+  -> {"ok":true,"added":true,"friend":{"code":"K7QM-4DXT","name":"Ben","mutual":false}}
+  Idempotent (added:false). Code: dash, spaces and case optional. Errors: bad_code, player_not_found, own_code,
+  friends_full (at most 50 added).
+POST /v1/friends/remove {"code"}  or  DELETE /v1/friends/{code}  -> {"ok":true,"removed":true|false}      20 per hour
+  Removes your side only (the friendship stops being mutual).
+POST /v1/friends/dismiss {"code"}  -> {"ok":true,"dismissed":true|false}                                60 per hour
+  Drops one entry of "incoming" (they added you, you did not add them). Idempotent. A mutual friend is not touched (use remove).
+  They may send a new request later (use block to stop that).
+POST /v1/friends/block {"code"}  -> {"ok":true,"blocked":true|false}                                    30 per hour
+  Deletes the friendship rows in BOTH directions and records the block. From then on their POST /v1/friends toward you answers the
+  same {"ok":true,"added":true,...} as any pending request but stores nothing (no request reaches you, they learn nothing), and no
+  presence or room is shared (both are mutual-only). You cannot add them while blocked (409 blocked). At most 200 blocked players
+  (SMG_BLOCKS_MAX, 409 blocks_full). Idempotent. Deleting either account removes the block.
+POST /v1/friends/unblock {"code"}  -> {"ok":true,"unblocked":true|false}                                30 per hour
+  Does not restore the friendship. All three are covered by the "friends" kill switch.
+GET /v1/friends                                                                              6 per minute
+  {"friends":[{"code":"K7QM-4DXT","name":"Ben","mutual":true,"online":true,
+               "room":{"code":"R9TQ2M","joinable":true,"mode":"race"}}],
+   "incoming":[{"code":"ABCD-EFGH","name":"Cy"}],"blocked":[{"code":"WXYZ-2345","name":"Di"}],"max":50,"onlineSec":60}
+  friends: the players YOU added, sorted by name. Only mutual ones show presence: online = any authenticated call in the
+  last 60 s; room = their live room when its visibility is friends or public (else null); joinable = you could join now
+  (free slot, same version tag, not started or drop-in allowed). Non-mutual entries: online false, room null.
+  incoming: players who added you and you have not added back (newest first, up to 50).
+Join a friend's room: POST /v1/rooms/join {"friend":"XXXX-XXXX"} (3.2).
+
+5. Star times
+-------------
+Frames are logic turns at 60/s. galaxy 0..63 (the game's galaxy index), star 1..8 (scenario). category = players in the run
+(1..4); the board keeps the best time per (player, galaxy, star, category).
+
+POST /v1/times                                                                               30 per hour (stored)
+  {"galaxy":5,"star":2,"frames":3600,"players":1,"build":"3.0.0","room"?:"K7QM4D","splits"?:[600,1200],
+   "digest"?:"<32 hex>"}
+  -> {"ok":true,"best":true,"verified":false,"flagged":false,"confirmed":0,
+      "personalBest":{"frames":3600,"verified":false},"rank":1,"category":1}
+  Checks: frames integer, >= the star's floor (SMG_STAR_FLOORS "g:s" over the shipped table src/core/smg_floors.js, else
+  SMG_TIME_FLOOR_FRAMES = 600) else 400 bad_time
+  reason too_fast; <= 432000 (2 h) else too_slow. build in SMG_TIME_BUILDS (default "3.0.0") else 400 bad_build.
+  splits: at most 16 strictly increasing integers 1..frames. digest: 32 hex. room: you must be a member (403 not_member).
+  30 per player per rolling hour (429 rate_limited reason hourly_cap). best: this became your personal best.
+  Flag: a new best more than 25 % faster than your previous best is kept but flagged: hidden from everybody else's boards and
+  the public page until an admin clears it (/v1/admin/flags, kind time_jump).
+  Verified (category >= 2 with a room that is started):
+    coop - another member of the room submitted the same galaxy/star within +-2 frames in the last 30 min; both become
+           verified (confirmed = how many earlier submissions this one confirmed).
+    race - the room has another member now, or another member already submitted this star from this room.
+  Solo times are never verified.
+
+POST /v1/times/get {"galaxy":5,"star":2,"category"?:1..4,"mode"?:"top"|"near"|"friends","limit"?:1..50}   40 per minute
+  -> {"galaxy":5,"star":2,"category":null,"mode":"top","total":12,"offset":0,
+      "rows":[{"rank":1,"name":"Ana","frames":3400,"players":2,"verified":true,"you":false}, ...],
+      "you":{"rank":10,"frames":4100,"players":1,"verified":false}|null}
+  category omitted: each player once, with their best over all categories (players = that run's). Defaults: mode top, limit 20.
+  Order: frames, then who got there first, then pid; rank is competition rank (ties share it: 1,2,2,4).
+  near: the page around you (you in the middle when possible); top when you have no time. friends: you + mutual friends,
+  ranked among themselves. Banned players never appear; flagged rows only to their owner.
+
+GET /v1/public/times (open, no token)                                                       30 per minute per address
+  no query -> {"updatedMs":..,"stars":[{"galaxy":5,"star":2,"players":12,"best":3400}, ...]}
+  ?galaxy=5&star=2[&category=1..4][&limit=1..100 (50)]
+     -> {"galaxy":5,"star":2,"category":null,"updatedMs":..,
+         "rows":[{"rank":1,"name":"Ana","frames":3400,"players":2,"verified":true,"dateMs":<hour>}]}
+  Names only. Cached 60 s. GET /times is the web page that shows it.
+
+6. Rate limits (per player unless noted; 429 + Retry-After)
+-----------------------------------------------------------
+register: as PROTOCOL.md. rooms create 10/10 min, join 20/10 min, view 150/min, endpoint 20/min, punch 30/min,
+started/leave 20/min, quick 10/10 min, public rooms 12/min, friends list (presence poll) 6/min, friend add 20/h,
+friend remove 20/h, times submit 30/h (plus the stored 30/h cap), times get 40/min, public times 30/min per address,
+/times page 60/min per address, TURN as PROTOCOL.md.
+
+7. Client recipe (platform/src/mp/mp_service.cpp and the net agent's signaling)
+-------------------------------------------------------------------------------
+* First use: POST /v1/register; keep pid/token/name/code in online.dat (magic SMGO, CRC32). A 401 later means the account is
+  gone: register again.
+* Friends screen: GET /v1/friends at most every 10 s (6/min).
+* Host: POST /v1/rooms, post the endpoint, poll the view every 1.5-2 s, punch to each guest at members[g].punchAtMs, report
+  /punch with peer, /started when the session begins.
+* Guest: join (code / friend / quick), post the endpoint, punch the host at the host entry's punchAtMs (also session.punchAtMs),
+  /punch, /started.
+* Watch hostEpoch: when it grows and hostSlot is you, you are the host now; otherwise punch the new host.
+* After a Star Race finish: POST /v1/times with the room code while still a member.

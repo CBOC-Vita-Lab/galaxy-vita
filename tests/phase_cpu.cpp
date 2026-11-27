@@ -21,6 +21,17 @@ struct FakeClock {
 static thread_local FakeClock clockState;
 static std::atomic<unsigned> parses{0};
 static bool insideCheckpoint = false;
+#if defined(PHASE_CPU_TEST_EMUTLS)
+static std::atomic<unsigned> tlsLookups{0};
+static std::atomic<bool> tlsChangesErrno{false};
+extern "C" void* __real___emutls_get_address(void*);
+extern "C" void* __wrap___emutls_get_address(void* control) {
+    ++tlsLookups;
+    void* result = __real___emutls_get_address(control);
+    if (tlsChangesErrno.load()) errno = EDOM;
+    return result;
+}
+#endif
 namespace vgx {
 static long PhaseEnvInt(const char* name, long fallback) {
     if (strcmp(name, "GXV_PHASECPU") == 0) ++parses;
@@ -50,12 +61,17 @@ extern "C" int64_t port_host_time_ns() {
     return clockState.wall;
 }
 #if defined(__vita__)
-extern "C" int64_t port_thread_cpu_us() { return clockState.cpu; }
+extern "C" int64_t port_thread_cpu_us() {
+    timespec ts{};
+    if (PhaseClockGettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return 0;
+    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
+}
+static_assert(PORT_PHASE_CPU_COMPILED == 0, "the public game-code gate must remain unchanged on Vita");
 #endif
 extern "C" void port_log(const char*, ...) {}
 extern "C" void port_log_summary(const char* fmt, ...) {
     if (insideCheckpoint) std::abort();
-#if PORT_PHASE_CPU_COMPILED
+#if PORT_PHASE_CPU_COMPILED || (defined(__vita__) && PORT_LOGGING && !PORT_RUNTIME_DIAGNOSTICS)
     const unsigned wallReads=clockState.wallReads,cpuReads=clockState.cpuReads;
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_DRAW);
     if (clockState.wallReads!=wallReads || clockState.cpuReads!=cpuReads) std::abort();
@@ -159,15 +175,55 @@ int main(int argc, char** argv) {
             checkRow(row("unclassified"),256,256,2560000,256,2560000,512);
             checkRow(row("draw"),256,256,5120000,256,5120000,768);
             checkRow(row("calc-anim"),256,256,7680000,256,7680000,1280);
-            require(sGameProgress.load()==0 && sTurn.phase==0, "native checkpoint leaves old global progress lane untouched");
+            require(sGameProgress.load()==0 && sTurn.phase==0, "private observer leaves quiet/native global progress lane untouched");
             for (unsigned i=0;i<256;++i) turn();
             require(rows().size()==10 && number(header(1,1),"turns")==512, "second bounded report is cumulative");
             checkRow(row("whole",1,1),512,512,30720000,512,30720000,5120);
         } else require(rows().empty(), "disabled or compiled-out observer never reports");
-#if !defined(__vita__) && !defined(PORT_ARMHF_HARNESS) && PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING
+#if PORT_PHASE_CPU_COMPILED || (defined(__vita__) && PORT_LOGGING)
         require(parses.load()==1, "read-once real EnvInt parsing, including disabled setting");
 #else
         require(parses.load()==0, "compiled-out observer does not inspect control");
+#endif
+    } else if (scenario == "disabled") {
+        require(!on, "disabled scenario requires the observer off");
+        const unsigned wallReads=clockState.wallReads,cpuReads=clockState.cpuReads;
+#if defined(PHASE_CPU_TEST_EMUTLS)
+        const unsigned lookups=tlsLookups.load();
+#endif
+        for (unsigned i=0;i<256;++i) {
+            checkpoint(PORT_GAME_PHASE_FRAME_BEGIN);
+            port_perf_frame_begin();
+            checkpoint(PORT_GAME_PHASE_DRAW);
+            checkpoint(PORT_GAME_PHASE_CALC_ANIM);
+            port_perf_frame_work_done();
+            checkpoint(PORT_GAME_PHASE_WAIT_RETRACE);
+            checkpoint(PORT_GAME_PHASE_FRAME_COMPLETE);
+        }
+#if defined(PHASE_CPU_TEST_EMUTLS)
+        require(tlsLookups.load()==lookups,"disabled quiet hooks never look up emulated TLS");
+#endif
+        require(clockState.wallReads==wallReads && clockState.cpuReads==cpuReads,"disabled quiet hooks read no clocks");
+        require(rows().empty(),"disabled quiet hooks never report");
+    } else if (scenario == "emutls-errno") {
+#if defined(PHASE_CPU_TEST_EMUTLS) && PORT_PHASE_CPU_AVAILABLE
+        require(on && port::phasecpu::Enabled(),"emulated TLS errno scenario requires the observer on");
+        tlsChangesErrno.store(true);
+        for (bool ending : {false, true}) {
+            std::thread foreign([ending] {
+                const unsigned before=tlsLookups.load();
+                errno=E2BIG;
+                if (ending) port::phasecpu::End();
+                else port::phasecpu::Checkpoint(PORT_GAME_PHASE_DRAW);
+                require(errno==E2BIG,"enabled inactive first-use hooks preserve errno across emulated TLS lookup");
+                require(tlsLookups.load()>before,"first-use hook reached the errno-clobbering TLS wrapper");
+            });
+            foreign.join();
+        }
+        tlsChangesErrno.store(false);
+        require(rows().empty(),"inactive first-use hooks never report");
+#else
+        require(false,"emulated TLS errno scenario requires the wrapped fixture");
 #endif
     } else if (scenario == "faults") {
         for (unsigned i=0;i<256;++i) {

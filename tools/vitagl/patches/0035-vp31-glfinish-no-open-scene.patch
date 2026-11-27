@@ -1,0 +1,37 @@
+Patch 0035 (vp31, vglup31; define VP31_FINISH_NOSCENE). Adapted from upstream vitaGL commit 74c5a4a "Fix a potential deadlock in glFinish."
+(Alessio Tosto; LGPL-3.0-or-later): glFinish ends the open scene, calls sceGxmFinish with no scene open and leaves the restart to
+needs_scene_reset (as vglSubmitWithoutSwap and vglFinishUniformPoolScene already do), instead of scene_reset() (end + begin a new scene)
+followed by sceGxmFinish inside the new scene. Not upstream's text: this tree's scene_reset returns a result (patch 0009) and its glFinish
+keeps the scene_not_flushed gate. Define off = the old text. UNTESTED on hardware.
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -1909,11 +1909,29 @@
+ 
+ 	// Waiting for GPU to finish drawing jobs
+ 	if (scene_not_flushed) {
++#ifdef VP31_FINISH_NOSCENE
++		// (patch 0035, upstream 74c5a4a "Fix a potential deadlock in glFinish", adapted to this tree: the open scene is ended and the
++		// GPU is waited for with no scene open; the next call that needs a scene starts it through needs_scene_reset. The old text
++		// ended the scene, began a new one on the bound target and called sceGxmFinish inside it. The uniform state is given again,
++		// as vglFinishUniformPoolScene does, because the next scene begins afresh.)
++		if (needs_end_scene) {
++			scene_end();
++			needs_end_scene = GL_FALSE;
++		}
++		sceGxmFinish(gxm_context);
++		needs_scene_reset = GL_TRUE;
++		dirty_frag_unifs = 0xFFFFFFFF;
++		dirty_vert_unifs = 0xFFFF;
++		dirty_shader_frag_unifs = GL_TRUE;
++		dirty_shader_vert_unifs = GL_TRUE;
++		scene_not_flushed = GL_FALSE;
++#else
+ 		dirty_framebuffer = GL_TRUE;
+ 		GLboolean began = scene_reset(); // On failure the old scene is already ended; finishing it needs no new scene
+ 		(void)began;
+ 		sceGxmFinish(gxm_context);
+ 		scene_not_flushed = GL_FALSE;
++#endif
+ 	}
+ }
+ 

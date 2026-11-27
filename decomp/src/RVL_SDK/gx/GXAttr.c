@@ -1,9 +1,14 @@
+#if defined(TARGET_PC)
+#include "port/array_skip.h"
+#endif
 #include "revolution/gx/GXEnum.h"
 #include "revolution/gx/GXGeometry.h"
 #include "private/xf_mem.h"
 #include "revolution/gx.h"
 #include "revolution/gx/GXRegs.h"
 #include "revolution/gx/shortcut_xf_mem.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 
 static inline void __GXXfVtxSpecs(void) {
@@ -104,6 +109,7 @@ static inline void SETVCDATTR(GXAttr Attr, GXAttrType Type) {
 }
 
 void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
+    PORT_GXCAP(GXSetVtxDesc, (attr, type));
     SETVCDATTR(attr, type);
     if (gx->hasNrms || gx->hasBiNrms) {
         SC_CP_VCD_REG_LO_SET_NRM(gx->vcdLo, gx->nrmType);
@@ -159,6 +165,7 @@ void __GXCalculateVLim(void) {
 }
 
 void GXClearVtxDesc(void) {
+    PORT_GXCAP(GXClearVtxDesc, ());
     gx->vcdLo = 0;
     SC_CP_VCD_REG_LO_SET_POS(gx->vcdLo, GX_DIRECT);
     gx->vcdHi = 0;
@@ -239,6 +246,7 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
 }
 
 void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+    PORT_GXCAP(GXSetVtxAttrFmt, (vtxfmt, attr, cnt, type, frac));
     u32 *va, *vb, *vc;
     va = &gx->vatA[vtxfmt];
     vb = &gx->vatB[vtxfmt];
@@ -249,6 +257,7 @@ void GXSetVtxAttrFmt(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType typ
 }
 
 void GXSetVtxAttrFmtv(GXVtxFmt vtxfmt, const GXVtxAttrFmtList* list) {
+    PORT_GXCAP(GXSetVtxAttrFmtv, (vtxfmt, list));
     u32 *va, *vb, *vc;
     va = &gx->vatA[vtxfmt];
     vb = &gx->vatB[vtxfmt];
@@ -284,6 +293,10 @@ void __GXSetVAT(void) {
 }
 
 void GXSetArray(GXAttr attr, const void* base_ptr, u8 stride) {
+    PORT_GXCAP(GXSetArray, (attr, base_ptr, stride));
+#if defined(TARGET_PC)
+    __PortArrValid = 0;  // (GXV_ARRAYSKIP, port/array_skip.h)
+#endif
     GXAttr cpAttr;
     u32 phyAddr;
     attr = (attr == GX_VA_NBT) ? GX_VA_NRM : attr;
@@ -294,10 +307,12 @@ void GXSetArray(GXAttr attr, const void* base_ptr, u8 stride) {
 }
 
 void GXInvalidateVtxCache(void) {
+    PORT_GXCAP(GXInvalidateVtxCache, ());
     GX_WRITE_U8(0x48);
 }
 
 void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc src_param, u32 mtx, GXBool normalize, u32 pt_texmtx) {
+    PORT_GXCAP(GXSetTexCoordGen2, (dst_coord, func, src_param, mtx, normalize, pt_texmtx));
     u32 reg = 0, row, bumprow, form;
     GXAttr mtxIdAttr;
     form = 0;
@@ -460,6 +475,7 @@ void GXSetTexCoordGen2(GXTexCoordID dst_coord, GXTexGenType func, GXTexGenSrc sr
 }
 
 void GXSetNumTexGens(u8 nTexGens) {
+    PORT_GXCAP(GXSetNumTexGens, (nTexGens));
     SC_GEN_MODE_SET_NTEX(gx->genMode, nTexGens);
     gx->dirtyState |= 0x2000004;
 }

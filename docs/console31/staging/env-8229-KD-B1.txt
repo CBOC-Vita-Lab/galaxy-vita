@@ -1,0 +1,11 @@
+# 8229 KD-B1: keepdepth31, Performance + 60 Assist: GXV_HRW_BOXDEPTH=1 (the player box keyed on the full-size depth; read 'boxes keyed on the full-size depth' near the box count and 'no depth texture' 0); Honeyhive 120 s then Beach Bowl 90 s, scripted (control: S0)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_HRW36_PLANE=1
+GXV_HRW36_PLANE_R=500
+GXV_HRW_BOXDEPTH=1

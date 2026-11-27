@@ -182,4 +182,13 @@ public:
     /* 0xD0 */ J3DVtxColorCalc* mVtxColorCalc;
     /* 0xD4 */ J3DVtxShader* mUnkCalc1;
     /* 0xD8 */ J3DUnkCalc2* mUnkCalc2;
+#ifdef TARGET_PC
+    u32 mPortCullPicture;  // (GXV_PLANT_DRAWCULL, gamepar: the picture (J3DPortPicture) in which this model is wholly off-screen and not drawn)
+    u32 mPortCensusStamp;  // (GXV_STREAM_CENSUS, lighter25: the size of its actor's clipping sphere for a counted picture; port/stream_census.h)
+    u8 mPortTinyCulled;    // (GXV_TINYCULL, lighter25: mPortCullPicture was set by the tiny-model cull, ClippingActorHolder.cpp)
+    u8 mPortFarCulled;     // (GXV_FARDRAW, cpucuts25: the stamp in mPortCullPicture was made by the far-draw cut: the pose flush may leave the model out)
+    u8 mPortFade;          // (GXV_THINFADE, q30fin26: the model's base scale is being faded by port/piecefade.h; the view pass writes it)
+    u8 mPortBowl;          // (GXV_BOWL_POSE, bowl31: 1 the logic was handed its joint matrices, 2 its pose was left out and is owed; port/bowl_pose.h; the padding byte)
+    u32 mPortHrwTag;       // (GXV_HRW, hrw28: the owner id of this model's unit in the pair in flight, 0 = none. Its draws in the first picture carry the owner marker; its joints are not left out; PortHrwSet.cpp)
+#endif
 };

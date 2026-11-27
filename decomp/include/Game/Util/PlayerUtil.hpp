@@ -107,6 +107,7 @@ namespace MR {
     bool isPlayerElementModeNormal();
     bool isPlayerSkating();
     void changePlayerItemStatus(s32);
+    bool canChangePlayerItemStatus(s32);  // port (relfix24): false when the form change would be refused
     void curePlayerElementMode();
     bool isPlayerParalyzing();
     bool isPlayerDamaging();

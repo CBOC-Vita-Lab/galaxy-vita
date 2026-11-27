@@ -6,6 +6,9 @@
 #include "Game/Util/Functor.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include <JSystem/JParticle/JPAEmitterManager.hpp>
+#ifdef TARGET_PC
+extern int gPortPtclStageCalc;  // (JPAEmitterManager.cpp, flow23)
+#endif
 
 namespace {
     void connectToSceneCalcAnimAdaptor(NameObjAdaptor* pAdaptor, const MR::FunctorBase& rFunctor, int calcAnimType) {
@@ -30,6 +33,12 @@ ParticleCalcExecutor::ParticleCalcExecutor(const EffectSystem* pEffectSystem, bo
 void ParticleCalcExecutor::movementNormal() {
     if (mMovementEnabled && mUpdateRequested) {
         mEffectSystem->mEmitterHolder->update(false);
+#ifdef TARGET_PC
+        // (flow23: the scene's own effect system is the one made with list adaptors; the star select's has none. The Performance
+        // budget's and the boss cut's thinning apply to the stage's calc only: JPAEmitterManager::calcNormal.)
+        gPortPtclStageCalc = mNormalAdaptor != nullptr ? 1 : 0;
+        mEffectSystem->mEmitterManager->calcNormal();  // (the nine calcs below; GXV_PAR_PTCL runs the independent emitters on two cores)
+#else
         mEffectSystem->mEmitterManager->calc(0);
         mEffectSystem->mEmitterManager->calc(1);
         mEffectSystem->mEmitterManager->calc(2);
@@ -39,6 +48,7 @@ void ParticleCalcExecutor::movementNormal() {
         mEffectSystem->mEmitterManager->calc(6);
         mEffectSystem->mEmitterManager->calc(7);
         mEffectSystem->mEmitterManager->calc(8);
+#endif
     }
 
     mUpdateRequested = false;

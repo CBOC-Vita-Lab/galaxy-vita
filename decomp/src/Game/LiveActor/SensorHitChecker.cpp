@@ -11,6 +11,11 @@
 #include "Game/LiveActor/LiveActor.hpp"
 extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
 extern "C" int port_hl_sensor_on(void);                  // GXV_HL_SENSOR (hivelogic), platform/src/port/perf.cpp: 0 off, 1 on, 2 verify
+extern "C" int port_sensor_bp_on(void);                  // GXV_SENSOR_BP (update23), platform/src/port/perf.cpp: 0 off, 1 on, 2 verify
+extern "C" int port_upd_prefetch_on(void);               // GXV_UPD_PREFETCH (update23), platform/src/port/perf.cpp: 0 off, 1 on
+#include "port/sensor_bp.h"
+#include "port/obj_cut.h"  // (PortOcDue: the "sensor-bp:" line)
+#include "port/diagnostics.h"
 // GXV_HL_SENSOR=2 (perf.cpp): counts a turn's compared sensors, and logs the first mismatches with the host's name.
 extern "C" void port_hl_verify_sensor(unsigned compared, unsigned mismatched, const char* host, unsigned type, unsigned fastCount,
                                       unsigned origCount);
@@ -91,8 +96,26 @@ namespace {
 
     s32 hlCollect(const SensorGroup* pGroup, HlSensor* pOut) {
         s32 n = 0;
-        for (s32 i = 0; i < pGroup->mSensorCount; i++) {
+        const s32 count = pGroup->mSensorCount;
+        const bool prefetch = port_upd_prefetch_on() != 0;
+        for (s32 i = 0; i < count; i++) {
             HitSensor* pSensor = pGroup->mSensors[i];
+            if (prefetch) {
+                // GXV_UPD_PREFETCH (update23; exact: hints only, nothing is read for the result): the sensors are scattered heap
+                // objects and each test also reads its host's flags; ask for the lines of the sensor 4 ahead (type .. radius,
+                // validity .. host) and the host flags of the one 2 ahead (its sensor was asked for 2 steps ago).
+                if (i + 4 < count) {
+                    const char* q = reinterpret_cast< const char* >(pGroup->mSensors[i + 4]);
+                    __builtin_prefetch(q);
+                    __builtin_prefetch(q + 0x20);
+                }
+                if (i + 2 < count) {
+                    const LiveActor* pHost = pGroup->mSensors[i + 2]->mHost;
+                    if (pHost != nullptr) {
+                        __builtin_prefetch(&pHost->mFlag);
+                    }
+                }
+            }
             if (pSensor->mValidByHost && pSensor->mValidBySystem && !MR::isClipped(pSensor->mHost)) {
                 HlSensor& rOut = pOut[n++];
                 rOut.x = pSensor->mPosition.x;
@@ -143,6 +166,79 @@ namespace {
                 hlAttack(pList[i], pList[x]);
             }
         }
+    }
+
+    // GXV_SENSOR_BP (update23, 8 Nov; default 1, exact; port/sensor_bp.h has the proof): the 14 loops above, in the same order, but a
+    // pair whose sensors are apart by more than both radii (with a margin) along the axis of the widest spread is not looked at; the
+    // others are tested by hlAttack in the original order, so every hit list gets the same sensors in the same order. Turns with a
+    // NaN, infinite or huge (> 1e9) coordinate or radius, or with no room for the keys, run the plain loops (false returned).
+    // 0: the plain loops. 2: verify (as GXV_HL_SENSOR=2: the original loops run after, their lists are used and compared).
+    port::sensorbp::Scratch sBp;
+    uint32_t sBpTurns, sBpPlain, sBpTick;
+    uint64_t sBpSensors, sBpPairs, sBpTested;
+    int64_t sBpLast;
+
+    bool hlBroadPhase(HlSensor* const* lists, const s32* counts) {
+        using namespace port::sensorbp;
+        const int axis = ChooseAxis(lists, counts, 6);
+        s32 total = 0, most = 0;
+        for (s32 g = 0; g < 6; g++) {
+            total += counts[g];
+            most = counts[g] > most ? counts[g] : most;
+        }
+        if (axis < 0 || !Grow(sBp.keys, sBp.keyCap, total) || !Grow(sBp.cand, sBp.candCap, most)) {
+            ++sBpPlain;
+            return false;
+        }
+        enum { P, R, E, S, M, C };
+        Group grp[6];
+        Key* pKeys = sBp.keys;
+        grp[P].keys = nullptr;  // (the player group is never the inner one)
+        grp[P].n = counts[P];
+        grp[P].maxW = 0.0;
+        for (s32 g = R; g <= C; g++) {
+            grp[g] = BuildGroup(lists[g], counts[g], axis, pKeys);
+            pKeys += counts[g];
+        }
+        const auto attack = [](const HlSensor& a, const HlSensor& b) { hlAttack(a, b); };
+        uint32_t tested = 0;
+        int32_t* cand = sBp.cand;
+        Groups(lists[P], counts[P], lists[C], grp[C], axis, cand, attack, tested);
+        Groups(lists[P], counts[P], lists[M], grp[M], axis, cand, attack, tested);
+        Groups(lists[P], counts[P], lists[R], grp[R], axis, cand, attack, tested);
+        Groups(lists[P], counts[P], lists[S], grp[S], axis, cand, attack, tested);
+        Groups(lists[P], counts[P], lists[E], grp[E], axis, cand, attack, tested);
+        Groups(lists[R], counts[R], lists[C], grp[C], axis, cand, attack, tested);
+        Groups(lists[R], counts[R], lists[M], grp[M], axis, cand, attack, tested);
+        Groups(lists[R], counts[R], lists[S], grp[S], axis, cand, attack, tested);
+        Groups(lists[R], counts[R], lists[E], grp[E], axis, cand, attack, tested);
+        Groups(lists[E], counts[E], lists[C], grp[C], axis, cand, attack, tested);
+        Groups(lists[E], counts[E], lists[M], grp[M], axis, cand, attack, tested);
+        Groups(lists[E], counts[E], lists[S], grp[S], axis, cand, attack, tested);
+        Groups(lists[C], counts[C], lists[M], grp[M], axis, cand, attack, tested);
+        SameGroup(lists[C], grp[C], axis, cand, attack, tested);
+        ++sBpTurns;
+        sBpSensors += static_cast< uint32_t >(total);
+        sBpTested += tested;
+        sBpPairs += static_cast< uint64_t >(counts[P]) * static_cast< uint64_t >(counts[C] + counts[M] + counts[R] + counts[S] + counts[E]) +
+                    static_cast< uint64_t >(counts[R]) * static_cast< uint64_t >(counts[C] + counts[M] + counts[S] + counts[E]) +
+                    static_cast< uint64_t >(counts[E]) * static_cast< uint64_t >(counts[C] + counts[M] + counts[S]) +
+                    static_cast< uint64_t >(counts[C]) * static_cast< uint64_t >(counts[M]) +
+                    static_cast< uint64_t >(counts[C]) * static_cast< uint64_t >(counts[C] + 1) / 2;
+#if PORT_LOGGING
+        // about every 5 s (logging builds): sensor-bp: N turns: a turn S sensors taking part, P pairs in the loops, T tested (x %); K plain
+        if (PortOcDue(sBpLast, sBpTick)) {
+            const double t = sBpTurns != 0 ? static_cast< double >(sBpTurns) : 1.0;
+            port_log_summary("sensor-bp: %u turns (GXV_SENSOR_BP): a turn %.1f sensors taking part, %.1f pairs in the 14 loops, %.1f tested (%.1f %%); "
+                             "%u turns plain (NaN / huge values / no room)",
+                             sBpTurns, static_cast< double >(sBpSensors) / t, static_cast< double >(sBpPairs) / t,
+                             static_cast< double >(sBpTested) / t,
+                             sBpPairs != 0 ? 100.0 * static_cast< double >(sBpTested) / static_cast< double >(sBpPairs) : 0.0, sBpPlain);
+            sBpTurns = sBpPlain = 0;
+            sBpSensors = sBpPairs = sBpTested = 0;
+        }
+#endif
+        return true;
     }
 }  // namespace
 #endif
@@ -243,23 +339,28 @@ void SensorHitChecker::movement() {
                 pNext += counts[g];
             }
             enum { P, R, E, S, M, C };
-            hlGroups(lists[P], counts[P], lists[C], counts[C]);
-            hlGroups(lists[P], counts[P], lists[M], counts[M]);
-            hlGroups(lists[P], counts[P], lists[R], counts[R]);
-            hlGroups(lists[P], counts[P], lists[S], counts[S]);
-            hlGroups(lists[P], counts[P], lists[E], counts[E]);
-            hlGroups(lists[R], counts[R], lists[C], counts[C]);
-            hlGroups(lists[R], counts[R], lists[M], counts[M]);
-            hlGroups(lists[R], counts[R], lists[S], counts[S]);
-            hlGroups(lists[R], counts[R], lists[E], counts[E]);
-            hlGroups(lists[E], counts[E], lists[C], counts[C]);
-            hlGroups(lists[E], counts[E], lists[M], counts[M]);
-            hlGroups(lists[E], counts[E], lists[S], counts[S]);
-            hlGroups(lists[C], counts[C], lists[M], counts[M]);
-            hlSameGroup(lists[C], counts[C]);
-            if (hlMode != 2) {
+            const int bpMode = port_sensor_bp_on();
+            // GXV_SENSOR_BP: the same loops through the broad phase (false: a turn it does not take, the plain loops)
+            if (bpMode == 0 || !hlBroadPhase(lists, counts)) {
+                hlGroups(lists[P], counts[P], lists[C], counts[C]);
+                hlGroups(lists[P], counts[P], lists[M], counts[M]);
+                hlGroups(lists[P], counts[P], lists[R], counts[R]);
+                hlGroups(lists[P], counts[P], lists[S], counts[S]);
+                hlGroups(lists[P], counts[P], lists[E], counts[E]);
+                hlGroups(lists[R], counts[R], lists[C], counts[C]);
+                hlGroups(lists[R], counts[R], lists[M], counts[M]);
+                hlGroups(lists[R], counts[R], lists[S], counts[S]);
+                hlGroups(lists[R], counts[R], lists[E], counts[E]);
+                hlGroups(lists[E], counts[E], lists[C], counts[C]);
+                hlGroups(lists[E], counts[E], lists[M], counts[M]);
+                hlGroups(lists[E], counts[E], lists[S], counts[S]);
+                hlGroups(lists[C], counts[C], lists[M], counts[M]);
+                hlSameGroup(lists[C], counts[C]);
+            }
+            if (hlMode != 2 && bpMode != 2) {
                 return;
             }
+            // GXV_HL_SENSOR=2 or GXV_SENSOR_BP=2: the lists made above are checked against the original loops' below.
             // GXV_HL_SENSOR=2: keep the copies' hit lists, clear, run the original loops (their lists are the ones used), compare.
             if (hlSnapshot(groups)) {
                 for (s32 g = 0; g < 6; g++) {

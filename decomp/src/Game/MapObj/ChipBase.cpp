@@ -362,6 +362,17 @@ void ChipBase::exeGot() {
     kill();
 }
 
+// MP3: shared star chips: the local get without the player's sensors (noticeGetChip + Got nerve).
+bool ChipBase::mpRemoteGet() {
+    if (MR::isDead(this) || isNerve(GET_NERVE(ChipBase, ChipBaseNrvGot)) || isNerve(GET_NERVE(ChipBase, ChipBaseNrvDeactive))) {
+        return false;
+    }
+
+    MR::noticeGetChip(mChipType, this, mGroupID);
+    setNerve(GET_NERVE(ChipBase, ChipBaseNrvGot));
+    return true;
+}
+
 bool ChipBase::isGettable() const {
     if (MR::isDead(this)) {
         return false;

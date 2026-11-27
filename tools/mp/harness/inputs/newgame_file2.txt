@@ -1,0 +1,20 @@
+# final run (14 Nov): the same walk as file2_observatory.txt (title -> entry -> Single Player -> file 2 -> "Play This File"), then A every 4 s for 40 s to answer whatever a NEW
+# file asks (the dialogues that create it: character, confirm). Used by scenarios/qa_save_deleted_stays_deleted.yaml on a save folder where GameData.bin is missing: the first
+# A on file 2 / "Play This File" makes the game create GameData.bin. The pointer is held on the dialog's Yes button (measured from the first run's shots).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+8-8.5:A|B
+entry+3-3.2:A
+single+15-23:PX=0.25|PY=0.3
+single+18-18.2:A
+single+26-90:PX=0.28|PY=0.59   # pointer on "Yes" of "Create a game file on this planet?" (screen ~410,363 of 640x456), held while the A presses below run (the pointer falls back to the centre when no PX/PY is held: the first run's A presses all missed the button)
+single+34-34.2:A
+single+38-38.2:A
+single+42-42.2:A
+single+46-46.2:A
+single+50-50.2:A
+single+54-54.2:A
+single+58-58.2:A
+single+62-62.2:A
+single+66-66.2:A

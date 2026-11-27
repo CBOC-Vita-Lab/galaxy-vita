@@ -25,7 +25,19 @@
 #include <atomic>
 
 #include "port/heap_routing.h"
+#include "port/mp_bridge.h"  // MP3: skip vote in a multiplayer session
+#include "port/mp_gate.h"    // MP3 lodgate: SkipHoldWaits
 #include "port/port.h"
+#include "port/xskip.h"  // (xskip27)
+#include "port/lockstep.h"  // (fmt32)
+
+// MP3: (decomp/src/Game/MP/MpFlow.cpp, game thread) kind > 0: the local hold is complete, vote and return whether everyone agreed;
+// kind < 0: only ask whether the group decided to skip the cutscene -kind. Weak reference: absent in programs without the game.
+namespace MpFlow {
+bool skipVote(int contextKind) __attribute__((weak));
+}
+static bool mpSkipVote(int kind) { return MpFlow::skipVote == nullptr || MpFlow::skipVote(kind); }
+static bool mpSkipQuery(int kind) { return MpFlow::skipVote != nullptr && MpFlow::skipVote(-kind); }
 
 // (defined by the Vita build's renderer host: free memory and the renderer's own holdings; absent elsewhere)
 extern "C" void port_vgx_vita_log_memory(const char* when) __attribute__((weak));
@@ -47,6 +59,9 @@ int sPending = PORT_SKIP_NONE;
 int64_t sPendingAt = 0;
 int64_t sBlockedAt = 0;  // last port_skip_interrupt (a choice on screen)
 unsigned sForwardUpdates = 0;
+unsigned sContextCalls = 0;       // (xskip27) port_skip_context calls = game turns
+unsigned sTakeAtCall = 0;         // (xskip27) the call count when port_skip_take last handed a skip over
+bool sTookOnce = false;
 unsigned sInjectPhase = 0;  // A held on phases 0 and 1, released on 2
 int64_t sForwardStart = 0;
 int64_t sForwardEndAt = 0;  // when a fast-forward last ended with its cutscene
@@ -89,6 +104,7 @@ void startForward(int64_t now) {
     sInjectPhase = 2;  // released first: the next update presses A anew
     sInjectA.store(false);
     sForward.store(true);  // before sSkips: see port_skip_indicator
+    port_xskip_accept(PORT_XSKIP_FORWARD);  // (xskip27: the marker; a fast-forward is the generic path)
     port_host_heap_log("at the start of a fast-forward");
     logRendererMemory("at the start of a fast-forward");
 }
@@ -115,11 +131,16 @@ int port_skip_movie_playing(void) { return sMoviePlaying.load(std::memory_order_
 
 void port_skip_context(int kind) {
     int64_t now = port_host_time_ns();
+    ++sContextCalls;
     bool held = port_input_real_a() != 0;
     bool resumed = contextStale(now);  // first update of a scene, or after a stall
     sContextAt.store(now);
     sMoviePlaying.store(kind == PORT_SKIP_MOVIE, std::memory_order_relaxed);
 
+    // (merge 3.0 on c181) c181's fmt32 switched the fast-forward off in a lockstep session here (one that ran ended, none started, no hold-skip for the two fast-forward kinds).
+    // The 3.0 line decided the opposite (Fable's checks83 review, 14 Nov: the fast-forward draws nothing and runs the same turns packed tighter, like catch-up turns; gated, an accepted
+    // session skip becomes a black wait at normal speed; the vote below owns whether a skip happens, and a skip held up by a reconnect waits in SkipHoldWaits). The 3.0 behaviour is
+    // kept; single player is unchanged (lockstep::On() was false there).
     if (sForward.load()) {
         if (resumed) {
             endForward("the scene changed");
@@ -140,8 +161,11 @@ void port_skip_context(int kind) {
     // press is the player's own, such as the one confirming a galaxy in the
     // dome right after its lecture was skipped, and must not skip what it
     // starts.
+    // MP3 lodgate: continuing a skip the session voted (active) or one in a dialogue is fine; held but not active (a reconnect) it must not start a local skip, it waits like the full hold below.
+    const bool sessionHeld = port_net_session_lockstep() != 0;
+    const bool sessionActive = mp_active();
     if (!sForward.load() && (kind == PORT_SKIP_DEMO || kind == PORT_SKIP_TALK) && held && sMaskA.load() && sForwardEndAt &&
-        now - sForwardEndAt < 1000000000) {
+        now - sForwardEndAt < 1000000000 && !port::mpgate::SkipHoldWaits(sessionHeld, sessionActive, kind == PORT_SKIP_TALK)) {
         port_log("skip: %s following, still skipping", kindName(kind));
         sKind = kind;
         sForwardEndAt = 0;
@@ -165,20 +189,35 @@ void port_skip_context(int kind) {
         sNeedRelease = false;
     }
     bool blocked = now - sBlockedAt < 100000000;
-    if (kind == PORT_SKIP_NONE || sHoldSeconds <= 0.0f || !held || sNeedRelease || blocked) {
+    // MP3: in a session the others' votes can decide the skip without a local hold (dialogue stays local)
+    bool groupSkip = false;
+    if (sessionActive && kind != PORT_SKIP_NONE && kind != PORT_SKIP_TALK && !blocked && mpSkipQuery(kind)) {
+        groupSkip = true;
+        port_log("skip: %s (players voted)", kindName(kind));
+    }
+    if (!groupSkip && (kind == PORT_SKIP_NONE || sHoldSeconds <= 0.0f || !held || sNeedRelease || blocked)) {
         sHoldStart = 0;
         sProgress.store(0.0f);
         return;
     }
-    if (!sHoldStart) {
-        sHoldStart = now;
+    if (!groupSkip) {
+        if (!sHoldStart) {
+            sHoldStart = now;
+        }
+        float p = (float)((now - sHoldStart) / (sHoldSeconds * 1e9));
+        sProgress.store(p < 1.0f ? p : 1.0f);
+        if (p < 1.0f) {
+            return;
+        }
+        // MP3: a full hold is this player's vote; the skip waits for the others (the ring stays full)
+        if (port::mpgate::SkipHoldWaits(sessionHeld, sessionActive, kind == PORT_SKIP_TALK)) {
+            return;   // MP3 lodgate: a reconnect (held, not active): the ring stays full, no vote; the hold skips again once the session is back, or as in single player if it gave up
+        }
+        if (sessionActive && !mpSkipVote(kind)) {
+            return;
+        }
+        port_log("skip: %s", kindName(kind));
     }
-    float p = (float)((now - sHoldStart) / (sHoldSeconds * 1e9));
-    sProgress.store(p < 1.0f ? p : 1.0f);
-    if (p < 1.0f) {
-        return;
-    }
-    port_log("skip: %s", kindName(kind));
     sHoldStart = 0;
     sNeedRelease = true;
     sProgress.store(0.0f);
@@ -201,8 +240,13 @@ int port_skip_take(int kind) {
         return 0;
     }
     sPending = PORT_SKIP_NONE;
+    sTakeAtCall = sContextCalls;  // (xskip27)
+    sTookOnce = true;
     return 1;
 }
+
+// (xskip27) game turns since a held-A skip was handed over (-1: never): the intro camera's / starter's accept tells a hold of A from a tap
+int port_skip_last_take_age_turns(void) { return sTookOnce ? static_cast<int>(sContextCalls - sTakeAtCall) : -1; }
 
 int port_skip_interrupt(void) {
     sBlockedAt = port_host_time_ns();

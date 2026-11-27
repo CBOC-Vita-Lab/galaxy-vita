@@ -1,5 +1,7 @@
 #include "Game/Enemy/KariKariDirector.hpp"
 #include "Game/MapObj/BlackHole.hpp"
+#include "Game/MP/MpBubble.hpp"  // MP3: Play Together "Bubbles" falls
+#include "Game/MP/MpGame.hpp"    // wave8: MpGame::sessionHeld() across brief reconnects
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Player/MarioConst.hpp"
 #include "Game/Util/CameraUtil.hpp"
@@ -40,6 +42,11 @@ void MarioActor::initBlackHoleOut() {
 }
 
 void MarioActor::exeGameOverBlackHole2() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     if (MR::isFirstStep(this)) {
         MR::setCubeBgmChangeInvalid();
         MR::clearBgmQueue();

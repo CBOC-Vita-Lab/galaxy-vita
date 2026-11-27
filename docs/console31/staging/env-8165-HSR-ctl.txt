@@ -1,0 +1,6 @@
+# 8165 HSR-ctl: control for HSR-gain: Dreadnought, nothing, 240 s
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=CannonFleetGalaxy:1
+PETARI_STAGE_HOLD=14400
+PETARI_FLOW_LOG=1

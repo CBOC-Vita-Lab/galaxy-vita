@@ -1,0 +1,33 @@
+# Pre-ship #6 (late join) + #18 (water with puppets): the host is alone in Beach Bowl (HeavenlyBeachGalaxy:1) and swims;
+# the guest boots 45 s later, joins mid-galaxy (WHERE), lands in the same scene, puppets on both sides, no crash.
+name: mp_latejoin_water
+description: guest joins while the host is in a water galaxy; WHERE brings it in; puppets both ways in water
+seconds: 360
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory,110-150:SY=1,115:A,125:A,135:A,150-170:SX=1"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "HeavenlyBeachGalaxy:1"}
+  - name: guest
+    delay: 110
+    seconds: 220
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow move type=0 galaxy=HeavenlyBeachGalaxy/'
+  - 'expect guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy .*role=guest/ within 120s after host /\[mp\] slot 1 joined/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/ within 30s after guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy/'
+  # drop-in (mp-int 16:51): spare puppets, the late joiner shows its real character at once
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 30s after guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/ within 30s after guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy/'
+  # a real drop-in: the host was already in the galaxy when the guest joined; it must not wait out the 20 s barrier
+  - 'expect host /\[mp\] slot 1 joined name=guest/ after host /\[mp\] flow barrier release serial=\d+ /'
+  # drop-in barrier fix (mp-int 034dd7d): the consoles in the scene re-send LOADED: the joiner is released within seconds
+  - 'expect guest /\[mp\] flow barrier release serial=\d+ waited=\d{1,4}ms/'

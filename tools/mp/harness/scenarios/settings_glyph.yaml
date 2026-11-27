@@ -1,0 +1,31 @@
+# settingsnative round 5 (setnat31): do the button PICTURES follow a button swap made in the pause menu's Settings? (Fable's v3 condition for live buttons.)
+# One process, desktop only, test hooks only (never in a player's build path: each is an env switch read once):
+#   SMG_GLYPH_TEST=1          the pause menu opens its own message window (SysInfoWindow Type_Key: the A picture the renderer patches, handheld_ui.cpp)
+#                             40 pause turns after it came up ("glyph test: message window 1 up" = glyph-before), shuts it at 120, and opens it again
+#                             40 turns after Settings shut ("... window 2 up" = glyph-after-live).
+#   SMG_SETTINGS_PAUSE_TEST=1 the pause menu being up is the Settings request (the desktop has no Triangle request), 150 frames after it came up
+#   SMG_SETTINGS_SWAP_TEST=1  Settings swaps Jump to Circle through the real model 150 frames after it opened, saves and closes
+# The shots (every second) around the two window lines are the evidence: window 1 must show Cross, window 2 Circle.
+# glyph-after-reload: run again with the same PETARI_DATA_DIR (the player-settings.cfg run 1 wrote) and without SMG_SETTINGS_SWAP_TEST:
+#   window 1 must already show Circle. (run_one.sh -n glyph-reload -s 200 -i @settings_glyph -e PETARI_DATA_DIR=<run 1's folder> plus this env)
+# The input waits for a galaxy (PETARI_STAGE + PETARI_MEM_PROBE=1 print the anchor line), then Plus.
+name: settings_glyph
+description: button pictures before a swap, right after a live swap from the pause menu's Settings (and, run again, after a restart)
+seconds: 200
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 1000, PETARI_HANDHELD: 1, PETARI_HANDHELD_UI: 1, GXV_REMAP: 1, PETARI_MEM_PROBE: 1, PETARI_STAGE: "EggStarGalaxy:1",
+      SMG_GLYPH_TEST: 1, SMG_SETTINGS_PAUSE_TEST: 1, SMG_SETTINGS_SWAP_TEST: 1}
+processes:
+  - name: game
+    input: "@settings_glyph"
+rules:
+  - 'nocrash *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect * /glyph test: message window 1 up/ within 190s'
+  - 'expect * /glyph test: message window 1 shut/ within 190s'
+  - 'expect * /settings: opened \(pause\)/ within 190s'
+  - 'expect * /settings: test swap jump -> circle/ within 190s'
+  - 'expect * /settings: closed/ within 190s'
+  - 'expect * /glyph test: message window 2 up/ within 190s'
+  - 'order * /glyph test: message window 1 up/ before * /settings: test swap jump -> circle/'
+  - 'order * /settings: closed/ before * /glyph test: message window 2 up/'

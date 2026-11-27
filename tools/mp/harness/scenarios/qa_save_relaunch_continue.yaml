@@ -1,0 +1,52 @@
+# (13 Nov, integ: host2 now has PETARI_STAGE: the guest applies the snapshot it got at session start when the scene is loaded; without a move session 2 stayed in the Observatory and the rule 'snapshot applied' could never match: wrong guess.)
+# QA-FUNC 12/15. MULTIPLAYER SAVE -> RELAUNCH -> CONTINUE. Session 1: host copies SP file 2 into co-op file 1 and plays, the guest earns a star, the
+# host leaves (SMG_MP_TEST_LEAVE) and answers "Keep this progress in a co-op file" = co-op file 1 (SMG_MP_AUTO_LEAVE=coop:1). Session 2 (the same
+# console restarts: HARNESS_AFTER + HARNESS_CONTINUE): the host plays on the co-op file (SMG_MP_AUTO_SAVE=coop), a new guest joins, and the snapshot
+# the guest gets is the one session 1 ended with. Today only savelife_test.cpp (fake game) and sv_* (single-player file) cover this chain; no
+# scenario relaunches into an existing co-op file. Hooks: all exist (savefix). The crc comparison is soft: the snapshot may differ from the file
+# by the guest-specific fields (not documented either way).
+name: qa_save_relaunch_continue
+description: "co-op file 1 made from SP file 2, a star, leave+keep; relaunch continues co-op file 1 and the guest receives the same progress"
+seconds: 700
+min_speed: 0.4
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_LEAVE: 90, SMG_MP_AUTO_LEAVE: "coop:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15, SMG_MP_AUTO_LEAVE: discard}
+  - name: host2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: coop, SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", HARNESS_AFTER: host, HARNESS_CONTINUE: host,
+          SMG_MP_TEST_LEAVE: 60, SMG_MP_AUTO_LEAVE: discard}
+  - name: guest2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_AFTER: host, SMG_MP_AUTO_LEAVE: discard}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect host /\[mp\] save auto choice copy:2 ready/'
+  - 'expect guest /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/'
+  - 'expect host /\[mp\] star delivered id=\d+ path=native/'
+  - 'expect host /\[mp\] save test: leaving the session/'
+  - 'expect host /\[mp\] (save test: leave decision coop|ui: progress saved choice=1 slot=1 ok)/'
+  - 'absent host /\[mp\] (save leave sp=|ui: progress (NOT saved|not saved))/'
+  - 'mp_save host'
+  - 'expect host2 /\[mp\] save auto choice coop ready/'
+  - 'absent host2 /\[mp\] save auto choice (copy|mine)/'
+  - 'expect host2 /\[mp\] slot 1 joined name=\S+ /'
+  - 'expect host2 /\[mp\] snapshot sent slot=1 bytes=\d+ crc=[0-9a-f]+/'
+  - 'expect guest2 /\[mp\] save snapshot applied slot=/'
+  - '?same host,host2 /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ last'
+  - 'mp_save host2'
+  - 'absent host2 /\[mp\] (flow test star|star delivered)/'
+  - 'absent guest2 /\[mp\] save autoconfirm/'
+  - 'expect host /\[mp\] save write file=GameData\.bin ok=1/'
+  - 'absent * /\[mp\] save write file=\S+ ok=0/'
+  - 'absent * /\[mp\] (save refused|save write failed|ui: launch refused|rejected by host|hello rejected|bad message from slot)/'

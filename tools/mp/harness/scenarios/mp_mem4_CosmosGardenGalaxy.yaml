@@ -1,0 +1,26 @@
+# memfix: 4 players (host Mario, guest Luigi, bots Cosmic Mario and Cosmic Luigi) in a heavy stage; reads the "mem scene" / "puppet heap" /
+# "mem archive" lines (pools at play start). Needs /tmp/harness_core_tests/mp_bot (MP_TEST_OUT=/tmp/harness_core_tests tests/mp/build.sh build).
+name: mp_mem4_CosmosGardenGalaxy
+description: "4 players in CosmosGardenGalaxy:1 for the memory pools"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE], files: [/tmp/harness_core_tests/mp_bot]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4, PETARI_STAGE: "CosmosGardenGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+bots:
+  - name: bot1
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot1 --look 3 --duration 240 --radius 0 --data-hash aa3ddccb --scan-for 150"
+  - name: bot2
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot2 --look 5 --duration 240 --radius 0 --data-hash aa3ddccb --scan-for 150"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard host,guest'
+  - 'expect host /\[mp\] slot \d joined name=\S+ rejoin=0 .*players=4/ within 250s'
+  - 'absent * /\[mp\] mem ui layouts REFUSED/'
+  - 'absent * /OSPanic|FATAL|cannot alloc/'

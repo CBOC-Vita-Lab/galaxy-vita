@@ -8,10 +8,11 @@
 #   tools/test_vgx_j3d_lists.sh [frames] [seeds]      (CXX: host compiler, default g++; build in $OUT, default /tmp/vgx_j3d_lists)
 # Instruction counts (callgrind, the player's thread):  JL_PROFILE=1 JL_MODE=base|all GXV_SPLIT=1 valgrind --tool=callgrind $OUT/jl 200 1
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-120}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_j3d_lists}
+out=${OUT:-$MP_TMP/vgx_j3d_lists}
 mkdir -p "$out"
 cxx=${CXX:-g++}
 srcs=(tests/vgx_j3d_lists.cpp platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp

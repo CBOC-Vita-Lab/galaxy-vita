@@ -8,6 +8,9 @@
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util.hpp"
 #include "Game/Util/JointController.hpp"
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 void KoteBug_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -131,6 +134,9 @@ void KoteBug::init(const JMapInfoIter& rIter) {
     } else {
         makeActorAppeared();
     }
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 3);  // (GXV_ALOD, actorlod23: family 3, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void KoteBug::appear() {

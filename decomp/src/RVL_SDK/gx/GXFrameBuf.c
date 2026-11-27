@@ -4,8 +4,16 @@
 #include "revolution/gx/GXFDLShortcut.h"
 #include "revolution/gx/GXRegs.h"
 #include "revolution/gx/shortcut_pe_reg.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
+#if defined(TARGET_PC)
+#include "port/stream_census.h"  // (GXV_STREAM_CENSUS: GXCopyDisp)
+#include "port/array_skip.h"     // (GXV_ARRAYSKIP: a new picture forgets the array bases)
+#include "port/gx_dedup.h"       // (GXV_GX_DEDUP: and so does the register-write gate)
+#endif
 
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    PORT_GXCAP(GXSetDispCopySrc, (left, top, wd, ht));
     gx->cpDispSrc = 0;
     SC_PE_COPY_SRC_ADDR_SET_X(gx->cpDispSrc, left);
     SC_PE_COPY_SRC_ADDR_SET_Y(gx->cpDispSrc, top);
@@ -18,6 +26,7 @@ void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+    PORT_GXCAP(GXSetTexCopySrc, (left, top, wd, ht));
     gx->cpTexSrc = 0;
     SC_PE_COPY_SRC_ADDR_SET_X(gx->cpTexSrc, left);
     SC_PE_COPY_SRC_ADDR_SET_Y(gx->cpTexSrc, top);
@@ -30,6 +39,7 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+    PORT_GXCAP(GXSetDispCopyDst, (wd, ht));
     u16 stride;
 
     stride = (u16)(wd * VI_DISPLAY_PIX_SZ);
@@ -39,6 +49,7 @@ void GXSetDispCopyDst(u16 wd, u16 ht) {
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+    PORT_GXCAP(GXSetTexCopyDst, (wd, ht, fmt, mipmap));
     u32 rowTiles, colTiles, cmpTiles;
     u32 peTexFmt;
     u32 peTexFmtH;
@@ -78,10 +89,12 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 }
 
 void GXSetDispCopyFrame2Field(GXCopyMode mode) {
+    PORT_GXCAP(GXSetDispCopyFrame2Field, (mode));
     SC_PE_COPY_CMD_SET_INTERLACED(gx->cpDisp, mode);
     SC_PE_COPY_CMD_SET_INTERLACED(gx->cpTex, GX_COPY_PROGRESSIVE);
 }
 void GXSetCopyClamp(GXFBClamp clamp) {
+    PORT_GXCAP(GXSetCopyClamp, (clamp));
     GXBool clmpB, clmpT;
 
     clmpT = ((clamp & GX_CLAMP_TOP) == GX_CLAMP_TOP);
@@ -153,6 +166,7 @@ f32 GXGetYScaleFactor(u16 efbHeight, u16 xfbHeight) {
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
+    PORT_GXCAP_ABANDON(GXSetDispCopyYScale);
     GXBool enable;
     u32 iScale;
     u32 ht;
@@ -174,6 +188,7 @@ u32 GXSetDispCopyYScale(f32 vscale) {
 }
 
 void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
+    PORT_GXCAP(GXSetCopyClear, (clear_clr, clear_z));
     u32 reg;
     reg = 0;
     SC_PE_COPY_CLEAR_COLOR_AR_SET_RED(reg, clear_clr.r);
@@ -195,6 +210,7 @@ void GXSetCopyClear(GXColor clear_clr, u32 clear_z) {
 }
 
 void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const u8 vfilter[7]) {
+    PORT_GXCAP(GXSetCopyFilter, (aa, sample_pattern, vf, vfilter));
     u32 msLoc[4];
     u32 coeff0, coeff1;
 
@@ -275,16 +291,26 @@ void GXSetCopyFilter(GXBool aa, const u8 sample_pattern[12][2], GXBool vf, const
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
+    PORT_GXCAP(GXSetDispCopyGamma, (gamma));
     SC_PE_COPY_CMD_SET_GAMMA(gx->cpDisp, gamma);
 }
 
 #define __GXVerifCopy(a, b) (void)0
 
+#if defined(TARGET_PC)
+__attribute__((weak)) u32 __PortGXDrawSerial = 0;  // (PETARI_BLOOM_SKIP, GXGeometry.c; weak: one counter for the GX units linked)
+#endif
+
 void GXCopyDisp(void* dest, GXBool clear) {
+    PORT_GXCAP(GXCopyDisp, (dest, clear));
     u32 reg;
     u32 tempPeCtrl;
     u32 phyAddr;
     GXBool changePeCtrl;
+
+#if defined(TARGET_PC)
+    ++__PortGXDrawSerial;  // (PETARI_BLOOM_SKIP, GXGeometry.c: a copy may clear the EFB)
+#endif
 
     __GXVerifCopy(dest, clear);
 
@@ -323,6 +349,11 @@ void GXCopyDisp(void* dest, GXBool clear) {
     SC_PE_COPY_CMD_SET_OPCODE(gx->cpDisp, 1);
     SC_PE_COPY_CMD_SET_RID(gx->cpDisp, 0x52);
     GX_WRITE_RA_REG(gx->cpDisp);
+#if defined(TARGET_PC)
+    port_stream_census_copy();  // (GXV_STREAM_CENSUS: the picture after this copy may be counted; its BEGIN marker goes right here)
+    __PortArrValid = 0;         // (GXV_ARRAYSKIP)
+    __PortGXDedupBump(PORT_GXDD_BUMP_ALL, PORT_GXDD_CAUSE_PICTURE);  // (GXV_GX_DEDUP: a new picture starts from nothing known)
+#endif
 
     if (clear) {
         GX_WRITE_RA_REG(gx->zmode);
@@ -337,10 +368,15 @@ void GXCopyDisp(void* dest, GXBool clear) {
 }
 
 void GXCopyTex(void* dest, GXBool clear) {
+    PORT_GXCAP(GXCopyTex, (dest, clear));
     u32 reg;
     u32 tempPeCtrl;
     u32 phyAddr;
     GXBool changePeCtrl;
+
+#if defined(TARGET_PC)
+    ++__PortGXDrawSerial;  // (PETARI_BLOOM_SKIP, GXGeometry.c: a copy may clear the EFB)
+#endif
 
     __GXVerifCopy(dest, clear);
 
@@ -403,6 +439,7 @@ void GXCopyTex(void* dest, GXBool clear) {
 }
 
 void GXClearBoundingBox(void) {
+    PORT_GXCAP(GXClearBoundingBox, ());
     u32 reg;
 
     reg = PE_XBOUND(1023, 0, 0x55);

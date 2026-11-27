@@ -11,8 +11,8 @@ out=${1:-$(mktemp -d)}
 mkdir -p "$out/obj"
 src="$root/platform/vgx/src"
 khr=${KHR_INCLUDE:-/usr/include}
-sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_shadergen vgx_texcache vgx_texdecode vgx_stats vgx_backend_gl vgx_autoq)
-flags=(-std=c++20 -O1 -g0 ${SF_CXXFLAGS:-} -I"$src" -I"$root/platform/vgx/third_party" -I"$khr")
+sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_shadergen vgx_texcache vgx_texdecode vgx_texcomp vgx_stats vgx_backend_gl vgx_autoq)
+flags=(-std=c++20 -O1 -g0 ${SF_CXXFLAGS:-} -I"$src" -I"$root/platform/include" -I"$root/platform/vgx/third_party" -I"$khr")
 if [[ "${SF_SKIP_BUILD:-0}" != 1 ]]; then
   objs=()
   for unit in "${sources[@]}"; do
@@ -38,17 +38,68 @@ for profile in plain vita; do
   for size in "128 128" "160 120" "96 96"; do
     set -- $size
     ref=""
-    for sw in 0 1; do
+    # (GXV_SHADOW_RECT, shadowpx23: =1 alone and with the fill bounds, =2 (logged only), =1 with GXV_VGL_VALIDREGION (the desktop counts it))
+    for sw in 0 1 r1 b1r1 r2 r1v; do
       tag="$profile-$1x$2-$sw"
+      case $sw in
+        0|1) senv="GXV_SHADOWFILL_BOUNDS=$sw" ;;
+        r1) senv="GXV_SHADOWFILL_BOUNDS=0 GXV_SHADOW_RECT=1" ;;
+        b1r1) senv="GXV_SHADOWFILL_BOUNDS=1 GXV_SHADOW_RECT=1" ;;
+        r2) senv="GXV_SHADOWFILL_BOUNDS=0 GXV_SHADOW_RECT=2" ;;
+        r1v) senv="GXV_SHADOWFILL_BOUNDS=0 GXV_SHADOW_RECT=1 GXV_VGL_VALIDREGION=1" ;;
+      esac
       env LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_SPLIT=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_PASSCHECK=1 $penv \
-        SF_RW=$1 SF_RH=$2 GXV_SHADOWFILL_BOUNDS=$sw "$out/vgx_shadowfill_gl" > "$out/sf-$tag.log" 2>&1 || fail=1
-      grep -v "^libunwind" "$out/sf-$tag.log" | grep -E "FAIL|^cuts|PASSCHECK" | sort -u | sed "s/^/$tag: /" || true
+        SF_RW=$1 SF_RH=$2 $senv "$out/vgx_shadowfill_gl" > "$out/sf-$tag.log" 2>&1 || fail=1
+      grep -v "^libunwind" "$out/sf-$tag.log" | grep -E "FAIL|^cuts|^rect|PASSCHECK" | sort -u | sed "s/^/$tag: /" || true
       h=$(grep -E '^frame[0-9]+ hash' "$out/sf-$tag.log" | tr '\n' ' ')
       if [[ -z "$ref" ]]; then ref="$h"; echo "$tag: $h"
       elif [[ "$h" != "$ref" ]]; then echo "FAILED: $tag pictures differ from the switch off:"; echo "$h"; fail=1; fi
     done
   done
 done
+# gpuab23: the game's real frame (SF_TRIPLE=1: three XFBs, the display copy does not clear, each picture begins with clearEfb's
+# GX_CULL_BACK screen quad). With GXV_SHADOW_CULLCOVER=1 (default) the quad empties N and the cuts are made; pictures identical to the
+# switch off in every case. Controls: the quad culled (SF_CLEARCULL=2, the EFB is not cleared) and GXV_SHADOW_CULLCOVER=0 must cut nothing.
+for profile in vita plain; do
+  penv="GXV_SOFTXFORM=0"
+  [[ $profile == vita ]] && penv=$vita
+  for size in "128 128" "160 120"; do
+    set -- $size
+    for variant in "" "SF_CLEARCULL=2" "GXV_SHADOW_CULLCOVER=0"; do
+      ref=""
+      for sw in 0 1 r1 b1r1 r1v; do
+        vtag=${variant:-cullback}; vtag=${vtag//=/}
+        tag="tri-$profile-$1x$2-$vtag-$sw"
+        case $sw in
+          0|1) senv="GXV_SHADOWFILL_BOUNDS=$sw" ;;
+          r1) senv="GXV_SHADOWFILL_BOUNDS=0 GXV_SHADOW_RECT=1" ;;
+          b1r1) senv="GXV_SHADOWFILL_BOUNDS=1 GXV_SHADOW_RECT=1" ;;
+          r1v) senv="GXV_SHADOWFILL_BOUNDS=0 GXV_SHADOW_RECT=1 GXV_VGL_VALIDREGION=1" ;;
+        esac
+        env LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_SPLIT=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_PASSCHECK=1 $penv \
+          SF_TRIPLE=1 $variant SF_RW=$1 SF_RH=$2 $senv "$out/vgx_shadowfill_gl" > "$out/sf-$tag.log" 2>&1 || fail=1
+        grep -v "^libunwind" "$out/sf-$tag.log" | grep -E "FAIL|^cuts|^rect|^triple|PASSCHECK" | sort -u | sed "s/^/$tag: /" || true
+        h=$(grep -E '^frame[0-9]+ hash' "$out/sf-$tag.log" | tr '\n' ' ')
+        if [[ -z "$ref" ]]; then ref="$h"
+        elif [[ "$h" != "$ref" ]]; then echo "FAILED: $tag pictures differ from the switch off:"; echo "$h"; fail=1; fi
+      done
+    done
+  done
+done
 grep -l -E "FAIL|PASSCHECK FAILED" "$out"/sf-*.log && fail=1
+# Controls (GXV_SHADOW_RECT_BREAK, the back end's copy deliberately wrong): 1 the record not united (the last capture's texels other than
+# 0 left in place), 2 the box cut 8 pixels short: the alpha capture's texture must differ from the switch off in some frame.
+for brk in 1 2; do
+  for size in "128 128" "160 120"; do
+    set -- $size
+    tag="brk$brk-$1x$2"
+    env LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_SPLIT=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_SOFTXFORM=0 \
+      SF_RW=$1 SF_RH=$2 GXV_SHADOWFILL_BOUNDS=1 GXV_SHADOW_RECT=1 GXV_SHADOW_RECT_BREAK=$brk "$out/vgx_shadowfill_gl" > "$out/sfb-$tag.log" 2>&1 || true
+    a=$(grep -oE 'alpha=[0-9a-f]+' "$out/sfb-$tag.log" | tr '\n' ' ')
+    r=$(grep -oE 'alpha=[0-9a-f]+' "$out/sf-plain-$1x$2-0.log" | tr '\n' ' ')
+    if [[ "$a" == "$r" ]]; then echo "FAILED: control $tag (GXV_SHADOW_RECT_BREAK=$brk) not caught: alpha captures unchanged"; fail=1
+    else echo "$tag: control caught (alpha capture differs in $(diff <(echo "$a" | tr ' ' '\n') <(echo "$r" | tr ' ' '\n') | grep -c '^<') frames)"; fi
+  done
+done
 [[ $fail -eq 0 ]] || { echo "FAILED"; exit 1; }
-echo "PASS: identical pictures and alpha captures with GXV_SHADOWFILL_BOUNDS on and off, cuts made"
+echo "PASS: identical pictures and alpha captures with GXV_SHADOWFILL_BOUNDS on and off and GXV_SHADOW_RECT 1 / 2, cuts made, controls caught"

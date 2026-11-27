@@ -47,9 +47,13 @@ public:
     void load() const {
         J3DFifoLoadCPCmd(0x30, mMtxIdxRegA);
         J3DFifoLoadCPCmd(0x40, mMtxIdxRegB);
+#if defined(TARGET_PC) && defined(PORT_GX_DEDUP_BUILD) && PORT_GX_DEDUP_BUILD
+        __PortGXWriteXF2(0x1018, mMtxIdxRegA, mMtxIdxRegB);  // (the same 13 bytes; behind GXV_GX_DEDUP's gate, port/gx_dedup.h)
+#else
         J3DFifoLoadXFCmdHdr(0x1018, 2);
         GXCmd1u32(mMtxIdxRegA);
         GXCmd1u32(mMtxIdxRegB);
+#endif
     }
 
     inline void setCurrentTexMtx(u8 param_1, u8 param_2, u8 param_3, u8 param_4, u8 param_5, u8 param_6, u8 param_7, u8 param_8) {

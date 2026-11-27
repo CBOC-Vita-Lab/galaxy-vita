@@ -23,6 +23,10 @@
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+#include <stdint.h>
+#include <stdlib.h>
+#endif
 
 void MiniatureGalaxy_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -65,6 +69,9 @@ namespace {
     void initGalaxyPart(ModelObj* pObj) {
         pObj->initWithoutIter();
         MR::invalidateClipping(pObj);
+#ifdef TARGET_PC
+        pObj->mPortNoCut = true;  // (dome31: a part follows the miniature's matrices; no port pose cut)
+#endif
         pObj->kill();
     }
 };  // namespace
@@ -101,7 +108,19 @@ void MiniatureGalaxy::init(const JMapInfoIter& rIter) {
     initEffectKeeper(0, nullptr, false);
     MR::connectToSceneNoShadowedMapObj(this);
 
+#ifdef TARGET_PC
+    // The visible model (also the parent of the unknown icon) is the picking anchor. Its published
+    // pose may lag actor movement on a reduced-pose turn.
+    if (MtxPtr base = getBaseMtx())
+        MR::initStarPointerTargetAtMtx(this, ::cPointingRadius, base, TVec3f(0.0f, 0.0f, 0.0f));
+    else
+        MR::initStarPointerTarget(this, ::cPointingRadius, TVec3f(0.0f, 0.0f, 0.0f));
+#else
     MR::initStarPointerTarget(this, ::cPointingRadius, TVec3f(0.0f, 0.0f, 0.0f));
+#endif
+#if defined(TARGET_PC)
+    mPortNoCut = true;  // (dome31: the pointer's target is this pose; posed every turn, see LiveActor::calcAnim)
+#endif
     MR::invalidateClipping(this);
 
     initPartsModel();
@@ -155,6 +174,10 @@ void MiniatureGalaxy::appear() {
         mState = MiniatureGalaxyState_Unknown;
     }
 
+#ifdef TARGET_PC
+    // LiveActor::appear poses the model immediately, before our first control().
+    mOrbit->calcGalaxyPos(&mPosition);
+#endif
     LiveActor::appear();
 
     MR::tryStartAllAnim(this, mObjectName);
@@ -257,6 +280,35 @@ void MiniatureGalaxy::makeArchiveList(NameObjArchiveListCollector* pCollector, c
     pCollector->addArchive("GalaxyNamePlate");
 }
 
+#ifdef TARGET_PC
+// PETARI_DOMEMAP_LOG=1 (galmap23, diagnostic, default off; logging builds): every 5 s (300 turns) while the dome's galaxy-select map
+// is open, one line per miniature galaxy: its orbit index (from the stars it needs, MiniatureGalaxyHolder::calcIndex), orbit radius
+// and angle, its position, where that lands on the screen, and the field of view in force. The game places them with no port code
+// (AstroDomeOrbit, MiniatureGalaxy, SphereSelector are the decompiled originals): every galaxy's (angle - 230 x index) is the same
+// value (the shared orbit phase), the outermost index is the Koopa galaxy on the tilted ring, and fovy is 60 (zoom 1.0).
+extern "C" void port_log(const char* fmt, ...);
+extern "C" void port_log_summary(const char* fmt, ...);  // (dome33: port_log does not reach log.txt)
+extern uint32_t gPortAlodTurn;  // (ActorTurnLod.cpp: counts every turn)
+static void portLogDomeMap(const MiniatureGalaxy* pGalaxy, const AstroDomeOrbit* pOrbit) {
+    static int sOn = -1;
+    if (sOn < 0) {
+        const char* e = getenv("PETARI_DOMEMAP_LOG");
+        sOn = e != nullptr && *e != 0 && *e != '0' ? 1 : 0;
+    }
+    if (sOn == 0 || gPortAlodTurn % 300u != 0u) {
+        return;
+    }
+    const s32 index = MiniatureGalaxyFunction::calcMiniatureGalaxyIndex(pGalaxy);
+    TVec3f screen;
+    MR::calcScreenPosition(&screen, pGalaxy->mPosition);
+    port_log_summary("[domemap] %-24s idx %d of %d stars %2d r %6.0f angle %6.2f phase %6.2f pos (%7.0f %7.0f %7.0f) screen (%5.1f %5.1f) fovy %.2f",
+             pGalaxy->mGalaxyName, static_cast< int >(index), static_cast< int >(MiniatureGalaxyFunction::getMiniatureGalaxyNum()),
+             static_cast< int >(MR::getPowerStarNumToOpenGalaxy(pGalaxy->mGalaxyName)), pOrbit->mOrbitRadius, pOrbit->mAngle,
+             MR::repeatDegree(pOrbit->mAngle - 230.0f * index), pGalaxy->mPosition.x, pGalaxy->mPosition.y, pGalaxy->mPosition.z, screen.x,
+             screen.y, MR::getFovy());
+}
+#endif
+
 void MiniatureGalaxy::control() {
     updateZoomInOut();
     mOrbit->calcGalaxyPos(&mPosition);
@@ -265,6 +317,9 @@ void MiniatureGalaxy::control() {
     mRotation.y = MR::repeatDegree(mRotation.y);
 
     updateNamePlate();
+#ifdef TARGET_PC
+    portLogDomeMap(this, mOrbit);
+#endif
 }
 
 void MiniatureGalaxy::calcAndSetBaseMtx() {
@@ -285,6 +340,11 @@ void MiniatureGalaxy::calcAndSetBaseMtx() {
 
     if (!MR::normalizeOrZero(&frontVec) && !MR::isSameDirection(frontVec, upVec)) {
         MR::makeMtxFrontUpPos(&mPosMtx, frontVec, upVec, mPosition);
+#ifdef TARGET_PC
+    } else {
+        // A degenerate billboard keeps its previous rotation, never its previous position.
+        mPosMtx.setTrans(mPosition);
+#endif
     }
 
     TVec3f vec44;

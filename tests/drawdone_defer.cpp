@@ -251,7 +251,8 @@ int main() {
     // The switch: only 1 and 2 turn it on.
     Require(ParseMode(nullptr) == 0 && ParseMode("") == 0, "unset and empty are off");
     Require(ParseMode("0") == 0 && ParseMode("1") == 1 && ParseMode("2") == 2, "0, 1, 2");
-    Require(ParseMode("3") == 3 && ParseMode("4") == 0 && ParseMode("-1") == 0 && ParseMode("garbage") == 0 && ParseMode("1x") == 0,
+    // (1.3 added modes 3 and 4, so 1..4 are the valid values and 5 is the first one that is off; the test pinned 3 as the last)
+    Require(ParseMode("3") == 3 && ParseMode("4") == 4 && ParseMode("5") == 0 && ParseMode("-1") == 0 && ParseMode("garbage") == 0 && ParseMode("1x") == 0,
             "other values are off");
     Require(ParseMode("0x1") == 1 && ParseMode("01") == 1, "numbers in the forms strtol reads (the port's other switches do the same)");
 

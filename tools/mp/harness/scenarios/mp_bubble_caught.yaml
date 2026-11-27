@@ -1,0 +1,47 @@
+# Bubbles, everyone caught: both players fall (damage) 25 s after the Good Egg scene starts (SMG_MP_TEST_DIE on both, about
+# the same moment). When both are in bubbles (BUBBLE and the pose flag agree for 1 s) the host sends RESTART: both close the
+# miss wipe and run their own miss reload (local move type 5) of the same scene serial; play goes on (the scene starts again,
+# the session stays). Screenshots: the two bubbles; the "Everyone was caught!" toast; the reloaded scene.
+name: mp_bubble_caught
+description: both players in bubbles -> host RESTART -> both reload the checkpoint, session goes on
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, SMG_MP_TEST_DIE: "25"}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect host /\[mp\] bubble on slot=0 lives=\d+->\d+ out=0 .*serial=1/'
+  - 'expect guest /\[mp\] bubble on slot=1 lives=\d+->\d+ out=0 .*serial=1/'
+  - 'expect host /\[mp\] bubble msg from=1 on=1 /'
+  - 'expect guest /\[mp\] bubble msg from=0 on=1 /'
+  # one RESTART, from the host, after both are caught (debounce 1 s), never before the second bubble
+  - 'count host /\[mp\] bubble restart sent serial=1/ == 1'
+  - 'absent guest /\[mp\] bubble restart sent/'
+  - 'absent host /\[mp\] bubble restart sent/ before host /\[mp\] bubble msg from=1 on=1 /'
+  - 'absent host /\[mp\] bubble restart sent/ before host /\[mp\] bubble on slot=0 /'
+  - 'order host /\[mp\] bubble restart sent serial=(\d+)/ before guest /\[mp\] bubble restart start serial=$1 why=message/ within 5s'
+  - 'expect host /\[mp\] bubble restart start serial=1 why=host/'
+  - 'absent * /\[mp\] bubble restart start .*why=alone/'
+  - 'expect host /\[mp\] ui: toast "Everyone was caught! Back to the checkpoint."/'
+  - 'expect guest /\[mp\] ui: toast "Everyone was caught! Back to the checkpoint."/'
+  # each console reloads the same scene itself (local move type 5), then the scene inits again and play goes on
+  - 'expect host /\[mp\] bubble restart reload serial=1/ within 10s after host /\[mp\] bubble restart start/'
+  - 'expect guest /\[mp\] bubble restart reload serial=1/ within 10s after guest /\[mp\] bubble restart start/'
+  - 'expect host /\[mp\] flow local move type=5 galaxy=EggStarGalaxy/ within 10s after host /\[mp\] bubble restart reload/'
+  - 'expect guest /\[mp\] flow own move type=5 galaxy=EggStarGalaxy/ within 10s after guest /\[mp\] bubble restart reload/'
+  - 'expect * /\[mp\] bubble scene init holder=1/ within 20s after host /\[mp\] bubble restart reload/'
+  - 'expect guest /\[mp\] puppet slot=0 appear/ within 40s after guest /\[mp\] bubble restart reload/'
+  - 'absent * /\[mp\] (session ended|slot \d left)/ before * /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'absent * /\[mp\] bubble drop/'
+  - 'exit * == 0'

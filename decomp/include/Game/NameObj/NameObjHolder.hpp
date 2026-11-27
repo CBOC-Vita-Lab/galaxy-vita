@@ -19,6 +19,8 @@ public:
     void callMethodAllObj(NameObjMethod pMethod);
     void clearArray();
     NameObj* find(const char* pName);
+    int getObjCount() const { return mObjArray1.size(); }       // MP3: fix2: read-only, to keep multiplayer's objects inside the fixed capacity
+    int getObjCapacity() const { return mObjArray1.capacity(); }  // MP3
 
 private:
     /* 0x00 */ MR::Vector< MR::AssignableArray< NameObj* > > mObjArray1;

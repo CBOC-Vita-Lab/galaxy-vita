@@ -19,6 +19,9 @@ void gd_checked_u32(u32);
 void gd_raw_float(f32);
 void gd_checked_float(f32);
 void gd_raw_bp(u32);
+void gd_raw_cp(u8, u32);
+void gd_raw_xf(u16, u32);
+void gd_raw_xf_header(u16, u8);
 void gd_raw_u8(u8);
 }
 
@@ -88,6 +91,38 @@ static void verify_bytes() {
         assert(list.ptr == output + alignment + 4 && output[alignment + 4] == 0xa5);
         if (alignment) assert(output[alignment - 1] == 0xa5);
     }
+}
+
+static void verify_commands() {
+    alignas(64) u8 output[256], expected[256];
+    uint32_t state = 0x8934abcd;
+    for (unsigned i = 0; i < 20000; ++i) {
+        state = state * 1664525 + 1013904223;
+        const unsigned alignment = i % 64;
+        const u16 address = static_cast<u16>(state >> 8);
+        const u8 count = static_cast<u8>(i);
+        std::memset(output, 0xa5, sizeof(output));
+        std::memset(expected, 0xa5, sizeof(expected));
+        GDLObj list{output, sizeof(output), output + alignment, output + sizeof(output)};
+        __GDCurrentDL = &list;
+        unsigned offset = alignment;
+        auto byte = [&](unsigned value) { expected[offset++] = static_cast<u8>(value); };
+        auto word = [&](unsigned value) { byte(value >> 24); byte(value >> 16); byte(value >> 8); byte(value); };
+        gd_raw_bp(state);
+        byte(0x61); word(state);
+        gd_raw_cp(count, state);
+        byte(8); byte(count); word(state);
+        gd_raw_xf(address, state);
+        byte(0x10); byte(0); byte(0); byte(address >> 8); byte(address); word(state);
+        gd_raw_xf_header(address, count);
+        const u16 encoded = static_cast<u16>(int(count) - 1);
+        byte(0x10); byte(encoded >> 8); byte(encoded); byte(address >> 8); byte(address);
+        assert(list.ptr == output + offset);
+        assert(__GDCurrentDL == &list && list.start == output && list.length == sizeof(output));
+        assert(list.top == output + sizeof(output));
+        assert(!std::memcmp(output, expected, sizeof(output)));
+    }
+    assert(overflows == 0);
 }
 
 static void verify_overflow() {
@@ -171,6 +206,7 @@ static void verify_mixed_streams() {
 
 int main() {
     verify_bytes();
+    verify_commands();
     verify_overflow();
     verify_mixed_streams();
     static u8 bytes[40008];

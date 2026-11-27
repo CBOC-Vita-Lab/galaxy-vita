@@ -557,6 +557,7 @@ void SpinDriver::exeShootStart() {
         startCamera();
 #ifdef TARGET_PC
         port_vr_transit_begin(this);
+        port_anticipate_event(2, 21 * 1000 / 60, static_cast< int >(_124) * 1000 / 60);  // (anticip32: the shot is 21 turns away (tryShoot), the flight lasts _124 turns; drawing only)
 #endif
     }
 

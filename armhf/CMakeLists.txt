@@ -86,14 +86,17 @@ target_compile_definitions(decomp PRIVATE TARGET_PC=1 NDEBUG=1 VERSION=0 __vita_
 target_compile_options(decomp PRIVATE ${ARCH_FLAGS} ${GAME_FLAGS} $<$<COMPILE_LANGUAGE:C>:${PORT_C_FLAGS}>)
 
 add_library(platform OBJECT ${PLATFORM_SRCS} ${HARNESS_SRCS} "${ROOT}/platform/desktop/main.cpp")
-target_include_directories(platform PRIVATE ${INCLUDES} "${ROOT}/platform/vgx/src")
+# MP3: net/include on the platform layer: platform/src/mp/ finds vlink.h by __has_include (without it: "this build has no VLink")
+target_include_directories(platform PRIVATE ${INCLUDES} "${ROOT}/platform/vgx/src" "${ROOT}/net/include")
 target_compile_definitions(platform PRIVATE TARGET_PC=1 NDEBUG=1 VERSION=0 PORT_ARMHF_HARNESS=1 PORT_PLATFORM_CODE=1
   PORT_GX_VGX=1 PORT_GX_VGX_ONLY=1 PORT_WORKLOAD_GAME_BRIDGES=1 _GNU_SOURCE=1)
 target_compile_options(platform PRIVATE ${ARCH_FLAGS} ${GAME_FLAGS} $<$<COMPILE_LANGUAGE:C>:${PORT_C_FLAGS}>)
 
 # vgx front end (parser, vertex/texture decode, command buffers): same code generation, but not the game's compat.h.
 add_library(vgx OBJECT ${VGX_SRCS})
-target_include_directories(vgx PRIVATE "${ROOT}/platform/vgx/src" "${ROOT}/platform/vgx/third_party")
+# platform/include first, as the Vita runtime stage has it (vita_runtime_gen_vgx.py: -I platform/include before platform/vgx/src): since
+# stagepreset25 the back end, the texture cache and the HD reader include port/*.h (pgotool31, 18 Nov 2026: the harness did not build without it)
+target_include_directories(vgx PRIVATE "${ROOT}/platform/include" "${ROOT}/platform/vgx/src" "${ROOT}/platform/vgx/third_party")
 target_compile_definitions(vgx PRIVATE NDEBUG=1 PORT_ARMHF_HARNESS=1)
 target_compile_options(vgx PRIVATE ${ARCH_FLAGS} -w -O2 -fno-exceptions -fno-rtti)
 if(ARMHF_VGX_BACKEND STREQUAL "gl-stub")
@@ -106,6 +109,35 @@ endif()
 option(ARMHF_VITA_RUNTIME_FLAGS "compile the platform layer and the vgx units with the Vita runtime stage's flags" OFF)
 if(ARMHF_VITA_RUNTIME_FLAGS)
   set(RUNTIME_DEFS PORT_RUNTIME_DIAGNOSTICS=0 PORT_LOGGING=1 GXV_ABSIDX_DEFAULT=0 GXV_STRICT_DRAW_PROFILE=1 NOMINMAX)
+  # ARMHF_VITA_MATCH (pgotool31, 18 Nov 2026; default ON): the rest of what the console build's compile commands have and the harness
+  # lacked, each of which changes the control flow a profile is keyed on (found by comparing the CFG hashes of both compiles):
+  #  -Xclang -no-enable-noundef-analysis (vita/clang-vita-toolchain.cmake since LESSONS 21: without it InstCombine folds an i1 select
+  #  into an and, one counter less), the Vita's integer types (clang-vita-toolchain.cmake redefines int_fast8/16 and wint_t), the Vita
+  #  SDK's libstdc++ headers for the game units too, and for the renderer -fno-builtin-wcslen and TARGET_PC / VERSION as the runtime
+  #  stage passes them.  (Not -O3 for the game or platform/src/gx units: their Vita commands carry -O3 first and -O2 after it, so
+  #  they are -O2, as here; at -O3 the pre-inliner decides differently, e.g. HzBegin into ClippingActorHolder::movement.)
+  #  OFF: the harness as before.
+  option(ARMHF_VITA_MATCH "the console build's remaining code-generation flags (with ARMHF_VITA_RUNTIME_FLAGS)" ON)
+  if(ARMHF_VITA_MATCH)
+    set(VITA_MATCH_FLAGS "SHELL:-Xclang -no-enable-noundef-analysis" -U__WINT_TYPE__ "-D__WINT_TYPE__=unsigned int"
+      -U__INT_FAST8_TYPE__ "-D__INT_FAST8_TYPE__=int" -U__INT_FAST16_TYPE__ "-D__INT_FAST16_TYPE__=int"
+      -U__UINT_FAST8_TYPE__ "-D__UINT_FAST8_TYPE__=unsigned int" -U__UINT_FAST16_TYPE__ "-D__UINT_FAST16_TYPE__=unsigned int"
+      -Wno-builtin-macro-redefined)
+    target_compile_options(decomp PRIVATE ${VITA_MATCH_FLAGS})
+    target_compile_options(vgx PRIVATE ${VITA_MATCH_FLAGS} -fno-builtin-wcslen)
+    target_compile_definitions(vgx PRIVATE TARGET_PC=1 VERSION=0)
+    # The console's branches of NowMs (vgx_backend_gl.cpp), BeginVertices (vgx_draw.cpp) and NapUs (port/wait_bound.h), inlined into
+    # ExecuteFrame, StageNote, BeginVertices, AsyncBatch::Ensure, JpaPoolLock: PORT_ARMHF_VITA_SHIM selects them, glue/vita_shim.* gives
+    # the two kernel calls, VGX_ARENA_MIN the arena floor (0: the host's heap is below the console's 0x80000000, but the compare stays
+    # a runtime compare against a global the compiler cannot fold, as on the console).  (pgomatch31)
+    set(VITA_SHIM_DEFS PORT_ARMHF_VITA_SHIM=1 "VGX_ARENA_MIN=g_vgx_arena_min")
+    set(VITA_SHIM_INC "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/glue/vita_shim.h")
+    target_compile_definitions(decomp PRIVATE PORT_ARMHF_VITA_SHIM=1)
+    target_compile_options(decomp PRIVATE ${VITA_SHIM_INC})
+    target_compile_definitions(vgx PRIVATE ${VITA_SHIM_DEFS})
+    target_compile_options(vgx PRIVATE ${VITA_SHIM_INC})
+    message(STATUS "ARMHF_VITA_MATCH: noundef analysis off, the Vita's integer types, the game units with the Vita's libstdc++ headers")
+  endif()
   target_compile_definitions(vgx PRIVATE ${RUNTIME_DEFS})
   target_compile_definitions(platform PRIVATE ${RUNTIME_DEFS})
   target_compile_options(vgx PRIVATE -O3 -fshort-wchar -fno-strict-aliasing -fwrapv -ffp-contract=on -fno-fast-math
@@ -131,6 +163,19 @@ if(ARMHF_VITA_RUNTIME_FLAGS)
     set_source_files_properties("${ROOT}/platform/vgx/src/vgx_backend_gl.cpp" "${ROOT}/platform/vgx/src/vgx_draw.cpp"
       "${ROOT}/platform/vgx/src/vgx_fesplit.cpp" "${ROOT}/platform/vgx/src/vgx_hdtex.cpp" PROPERTIES COMPILE_DEFINITIONS __VGX_VITA__=1)
     target_sources(platform PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/glue/vgl_stub.cpp")
+    # Since vram30 the back end's __VGX_VITA__ part includes <psp2/gxm.h> (the GPU finish of GXV_VRAM_GUARD, GXV_MIDFLUSH): the Vita SDK's own
+    # psp2 headers, and nothing else of its include directory (newlib's headers would shadow glibc's), through an overlay of three links.
+    # The gxm functions it calls are stubs in glue/vgl_stub.cpp.  (pgotool31, 18 Nov 2026)
+    if(DEFINED ENV{VITASDK} AND EXISTS "$ENV{VITASDK}/arm-vita-eabi/include/psp2/gxm.h")
+      set(PSP2_OVERLAY "${CMAKE_BINARY_DIR}/psp2-overlay")
+      file(MAKE_DIRECTORY "${PSP2_OVERLAY}")
+      foreach(d IN ITEMS psp2 psp2common vitasdk)
+        file(CREATE_LINK "$ENV{VITASDK}/arm-vita-eabi/include/${d}" "${PSP2_OVERLAY}/${d}" SYMBOLIC)
+      endforeach()
+      set_property(SOURCE "${ROOT}/platform/vgx/src/vgx_backend_gl.cpp" APPEND PROPERTY COMPILE_OPTIONS -idirafter "${PSP2_OVERLAY}")
+    else()
+      message(FATAL_ERROR "ARMHF_VGX_BACKEND=gl-stub with ARMHF_VITA_RUNTIME_FLAGS needs VITASDK (the back end includes <psp2/gxm.h>)")
+    endif()
   endif()
   if(ARMHF_VITA_CXXINC AND _cross_bits)
     list(GET _cross_bits -1 _cross_bits_dir)
@@ -150,6 +195,12 @@ if(ARMHF_VITA_RUNTIME_FLAGS)
         "SHELL:-isystem ${ARMHF_VITA_CXXINC}/arm-vita-eabi" "SHELL:-isystem ${ARMHF_VITA_CXXINC}/backward")
     target_compile_options(vgx PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${VITA_CXX_FLAGS}>")
     message(STATUS "renderer units use the Vita SDK's libstdc++ headers: ${ARMHF_VITA_CXXINC}")
+    # The game units too (pgotool31, 18 Nov 2026): since 3.0 their port code uses std:: templates in hot functions (std::find in
+    # KCollisionServer::checkSphereWalk: the cross GCC 13's __find_if is unrolled and not pre-inlined, GCC 15's is), so those
+    # functions' control flow differed and a harness profile lost their counts on the console.
+    if(ARMHF_VITA_MATCH)
+      target_compile_options(decomp PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${VITA_CXX_FLAGS}>")
+    endif()
   else()
     message(WARNING "ARMHF_VITA_RUNTIME_FLAGS: no Vita SDK libstdc++ headers (set VITASDK or ARMHF_VITA_CXXINC): "
                     "a profile of the renderer will match the Vita build less well")
@@ -204,6 +255,12 @@ if(ARMHF_VITA_RUNTIME_FLAGS AND VITA_CXX_FLAGS)
   set_property(SOURCE ${PLATFORM_GX_SRCS} APPEND PROPERTY COMPILE_OPTIONS -nostdinc++ "-isystem${CXX_OVERLAY}"
     "-isystem${ARMHF_VITA_CXXINC}" "-isystem${ARMHF_VITA_CXXINC}/arm-vita-eabi" "-isystem${ARMHF_VITA_CXXINC}/backward")
 endif()
+if(ARMHF_VITA_RUNTIME_FLAGS AND ARMHF_VITA_MATCH)
+  set_property(SOURCE ${PLATFORM_GX_SRCS} APPEND PROPERTY COMPILE_OPTIONS -Xclang -no-enable-noundef-analysis -U__WINT_TYPE__
+    "-D__WINT_TYPE__=unsigned int" -U__INT_FAST8_TYPE__ "-D__INT_FAST8_TYPE__=int" -U__INT_FAST16_TYPE__ "-D__INT_FAST16_TYPE__=int"
+    -U__UINT_FAST8_TYPE__ "-D__UINT_FAST8_TYPE__=unsigned int" -U__UINT_FAST16_TYPE__ "-D__UINT_FAST16_TYPE__=unsigned int"
+    -Wno-builtin-macro-redefined)
+endif()
 if(ARMHF_PGO_GEN_RENDERER)
   if(NOT ARMHF_PGO_GEN)
     message(FATAL_ERROR "ARMHF_PGO_GEN_RENDERER needs ARMHF_PGO_GEN")
@@ -231,7 +288,24 @@ if(ARMHF_DECOMP_BITCODE)
   set(GAME_UNITS "${LTO_OBJ}")
 endif()
 
-add_executable(game ${GAME_UNITS} $<TARGET_OBJECTS:platform> $<TARGET_OBJECTS:vgx>)
+# MP3: net/ = the vendored Strikers online stack, as the desktop build's smg_net (CMakeLists.txt): the platform layer's mp/ code
+# calls NpKeyboard*, VLink and NpNet.  The Vita-only files (vlink_vita*, np_keyboard_vita, np_online_ime_vita, mbedtls TLS) are left
+# out: the POSIX UDP transport and the host keyboard stand in, so that the multiplayer code runs 32-bit under qemu-arm.
+set(SMG_NET_SRC "${ROOT}/net/src")
+add_library(smg_net OBJECT
+  ${SMG_NET_SRC}/vlink.cpp ${SMG_NET_SRC}/vlink_udp.cpp ${SMG_NET_SRC}/vlink_online.cpp ${SMG_NET_SRC}/np_glue.cpp
+  ${SMG_NET_SRC}/np_keyboard_host.cpp ${SMG_NET_SRC}/np_https.cpp ${SMG_NET_SRC}/np_https_sys.cpp
+  ${SMG_NET_SRC}/online/np_net.cpp ${SMG_NET_SRC}/online/np_crypto.cpp ${SMG_NET_SRC}/online/np_hash.cpp ${SMG_NET_SRC}/online/np_turn.cpp
+  ${SMG_NET_SRC}/online/np_stun.cpp ${SMG_NET_SRC}/online/np_peer.cpp ${SMG_NET_SRC}/online/np_online.cpp ${SMG_NET_SRC}/online/np_fault.cpp
+  ${SMG_NET_SRC}/online/np_signal_fake.cpp ${SMG_NET_SRC}/online/np_signal_http.cpp ${SMG_NET_SRC}/online/np_http.cpp
+  ${SMG_NET_SRC}/online/np_http_plain.cpp ${SMG_NET_SRC}/online/np_udp_posix.cpp ${SMG_NET_SRC}/online/np_upnp.cpp ${SMG_NET_SRC}/online/np_natpmp.cpp
+  ${SMG_NET_SRC}/online/third_party/monocypher/monocypher.c)
+target_include_directories(smg_net PUBLIC "${ROOT}/net/include")
+target_compile_definitions(smg_net PRIVATE PORT_ARMHF_HARNESS=1)
+target_compile_options(smg_net PRIVATE ${ARCH_FLAGS} -O2 -fno-strict-aliasing -fwrapv
+  "$<$<COMPILE_LANGUAGE:CXX>:-std=c++20;-fno-exceptions;-fno-rtti;-Wno-unused-function>" "$<$<COMPILE_LANGUAGE:C>:-w>")
+
+add_executable(game ${GAME_UNITS} $<TARGET_OBJECTS:platform> $<TARGET_OBJECTS:vgx> $<TARGET_OBJECTS:smg_net>)
 set_target_properties(game PROPERTIES LINKER_LANGUAGE CXX)
 # Non-PIE at 0x80000000, like the Vita's fixed image address range (>= 0x40000000: os_mem.cpp requires it).
 target_link_options(game PRIVATE -static-libgcc -no-pie -Wl,-Ttext-segment=0x80000000 -Wl,--no-undefined

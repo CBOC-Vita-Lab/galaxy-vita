@@ -260,6 +260,14 @@ struct CbHost {
         MR::preScaleMtx(pPos->toMtxPtr(), scale);
         return true;
     }
+    // (gamecpu23, "cb2": KoteBug::calcJoint's body, GXV_PAR_ANIM_CB2's kind 2)
+    TQuat4f posture;
+    bool calcJointPosture(TPos3f* pMtx, const JointControllerInfo&) {
+        TPos3f rotation;
+        rotation.makeQuat(posture);
+        pMtx->concat(*pMtx, rotation);
+        return true;
+    }
 };
 
 struct Model {
@@ -285,6 +293,7 @@ struct Model {
 };
 bool gBlend = false;    // (an argument "blend")
 bool gCb = false;       // (an argument "cb")
+bool gCb2 = false;      // (an argument "cb2": the callback is KoteBug::calcJoint's body, kind 2)
 bool gReverse = false;  // (an argument "reverse")
 u32 gJobCount = 0;
 
@@ -326,6 +335,19 @@ void Randomize(Model& m) {
     if (m.hasCb && Chance(30)) {
         m.cbHost[0].scale.set(Chance(30) ? 1.0f : RandF(0.7f, 1.3f), RandF(0.7f, 1.3f), Chance(30) ? 1.0f : RandF(0.7f, 1.3f));
         m.cbHost[1].scale = m.cbHost[0].scale;
+    }
+    if (m.hasCb && gCb2 && Chance(50)) {
+        // (a KoteBug turns its posture most turns: a unit quaternion)
+        f32 q[4] = {RandF(-1, 1), RandF(-1, 1), RandF(-1, 1), RandF(-1, 1)};
+        f32 n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (n < 1e-3f) {
+            q[3] = n = 1.0f;
+        }
+        m.cbHost[0].posture.x = q[0] / n;
+        m.cbHost[0].posture.y = q[1] / n;
+        m.cbHost[0].posture.z = q[2] / n;
+        m.cbHost[0].posture.w = q[3] / n;
+        m.cbHost[1].posture = m.cbHost[0].posture;
     }
     if (gBlend) {
         // (an interpolation now and then, as after a change of animation; the freeze copy at its first computation)
@@ -425,7 +447,17 @@ void BuildJob(Job& j, Model& m) {
     in.fixJoint = m.fixJoint;
     in.jointNum = m.d->tree().getJointNum();
     in.doEnv = m.d->tree().getWEvlpMtxNum() != 0 && !(m.flags & J3DMdlFlag_EnableLOD);
-    if (m.hasCb) {
+    if (m.hasCb && gCb2) {
+        in.cbKind = 2;
+        in.cbJoint = m.cbJoint;
+        in.cbQuat[0] = m.cbHost[0].posture.x;
+        in.cbQuat[1] = m.cbHost[0].posture.y;
+        in.cbQuat[2] = m.cbHost[0].posture.z;
+        in.cbQuat[3] = m.cbHost[0].posture.w;
+#ifdef NEG_CB2
+        in.cbQuat[1] = nextafterf(in.cbQuat[1], 1e9f);
+#endif
+    } else if (m.hasCb) {
         in.cbKind = 1;
         in.cbJoint = m.cbJoint;
         in.cbScale = m.cbHost[0].scale;
@@ -493,9 +525,17 @@ bool KeyMatch(const Job& j, const Model& m) {
         return false;
     }
 #ifndef NEG_CB
-    if ((j.in.cbKind != 0) != m.hasCb || (m.hasCb && (j.in.cbJoint != m.cbJoint || memcmp(&j.in.cbScale, &m.cbHost[0].scale, sizeof(Vec)) != 0))) {
+    if ((j.in.cbKind != 0) != m.hasCb || (m.hasCb && !gCb2 && (j.in.cbJoint != m.cbJoint || memcmp(&j.in.cbScale, &m.cbHost[0].scale, sizeof(Vec)) != 0))) {
         return false;  // (ModelManager.cpp: the callback's joint, controller and scale are key words)
     }
+#ifndef NEG_CB2
+    if (m.hasCb && gCb2) {
+        const f32 q[4] = {m.cbHost[0].posture.x, m.cbHost[0].posture.y, m.cbHost[0].posture.z, m.cbHost[0].posture.w};
+        if (j.in.cbJoint != m.cbJoint || memcmp(j.in.cbQuat, q, sizeof(q)) != 0) {
+            return false;  // (GXV_PAR_ANIM_CB2: the posture is a key word)
+        }
+    }
+#endif
 #endif
     if (gBlend) {
         // (ModelManager.cpp: _1C, _20 and _29 are key words, a track's resource is; the core's joint state is compared with the copy)
@@ -616,7 +656,8 @@ int main(int argc, char** argv) {
     for (int a = 3; a < argc; a++) {
         gBlend = gBlend || strcmp(argv[a], "blend") == 0;
         gReverse = gReverse || strcmp(argv[a], "reverse") == 0;
-        gCb = gCb || strcmp(argv[a], "cb") == 0;
+        gCb = gCb || strcmp(argv[a], "cb") == 0 || strcmp(argv[a], "cb2") == 0;
+        gCb2 = gCb2 || strcmp(argv[a], "cb2") == 0;
     }
     port::par::SpecWorker& worker = *new port::par::SpecWorker;  // (never destroyed: its thread waits on it)
     if (!worker.Start(1, 0)) {
@@ -664,7 +705,9 @@ int main(int argc, char** argv) {
             m->cbJoint = static_cast< u16 >(Rand() % m->d->tree().getJointNum());
             for (int w = 0; w < 2; w++) {
                 m->cbHost[w].scale.set(1.0f, 1.0f, 1.0f);
-                m->cbCtl[w] = new JointControlDelegator< CbHost >(&m->cbHost[w], &CbHost::calcJointScale, nullptr);
+                m->cbHost[w].posture.x = m->cbHost[w].posture.y = m->cbHost[w].posture.z = 0.0f;
+                m->cbHost[w].posture.w = 1.0f;
+                m->cbCtl[w] = new JointControlDelegator< CbHost >(&m->cbHost[w], gCb2 ? &CbHost::calcJointPosture : &CbHost::calcJointScale, nullptr);
                 m->cbCtl[w]->mModel = m->model;
                 m->cbCtl[w]->mJoint = m->d->tree().getJointNodePointer(m->cbJoint);
             }

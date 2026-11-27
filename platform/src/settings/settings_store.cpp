@@ -30,6 +30,10 @@ StoreResult LoadDocument(const char* path,const controls::ControlApi& api,const 
 }
 StoreResult SaveDocument(const char* path,const Document& original,const Config& config,const controls::ControlApi& api,const FileOps& f,Document& saved) {
     std::string text;auto r=SerializeDocument(original,config,api,text);if(r.status!=StoreStatus::Ok)return r;
+    return ReplaceDocumentText(path,text,config,api,f,saved);
+}
+// (settings guard: the second half of SaveDocument, unchanged, so the stale-settings guard replaces the file with the same temporary, verification and backup rotation)
+StoreResult ReplaceDocumentText(const char* path,const std::string& text,const Config& config,const controls::ControlApi& api,const FileOps& f,Document& saved) {
     Document current;auto primary=Read(path,api,f,current);
     if(primary.status==StoreStatus::UnsupportedVersion)return primary;
     // Never replace an unreadable file: it may be a valid newer document.

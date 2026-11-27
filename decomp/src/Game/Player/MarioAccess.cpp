@@ -15,6 +15,10 @@
 #include "Game/Player/MarioSwim.hpp"
 #include "Game/Player/RushEndInfo.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "port/player_assets.h"
+extern "C" void port_log_summary(const char* fmt, ...);
+#endif
 
 namespace MarioAccess {
     void getTakePos(TVec3f* pOut) {
@@ -729,6 +733,30 @@ namespace MarioAccess {
         }
 
         return getPlayerActor()->isAnimationRun("\x90\x85\x89\x6a\x83\x57\x83\x46\x83\x62\x83\x67");
+    }
+
+    // relfix24 (10 Nov): would changeItemStatus(item) change the form? The mushroom / flower / star ask this before they use themselves up:
+    // setPlayerMode refuses a form whose models are not loaded, and an item that was consumed by a refused change is lost for nothing.
+    // Items that are not a form change (tornado, life-up, unknown codes) are always accepted.
+    bool canChangeItemStatus(s32 item) {
+#ifdef TARGET_PC
+        const int mode = portPlayerItemMode(item);
+        if (mode < 0) {
+            return true;
+        }
+        if (getPlayerActor()->canEnterPlayerMode((u16)mode)) {
+            return true;
+        }
+        // the player touches the item every turn while standing on it: say it once, then now and then
+        static u32 sRefused;
+        if (sRefused++ % 300 == 0) {
+            port_log_summary("player-assets: item %d (mode %d) left in the world, the form's models are not loaded (touch %u)", (int)item, mode,
+                             (unsigned)sRefused);
+        }
+        return false;
+#else
+        return true;
+#endif
     }
 
     void changeItemStatus(s32 a1) {

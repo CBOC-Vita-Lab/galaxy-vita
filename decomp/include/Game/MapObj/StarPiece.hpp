@@ -140,5 +140,8 @@ public:
     // Shot from the VR pointing controller (StarPieceShooter::shoot), not
     // from beside the game camera.
     bool mThrownFromVr;
+    // MP3 costar: another player's pointer swept this Star Bit; it flies to the local player and is not counted again
+    // (the sweeper counted its own copy of the bit; MpStarBits)
+    bool mMpRemoteSweep;
 #endif
 };

@@ -1,0 +1,26 @@
+# flow (one door, 12 Nov): guest side (MARKS). Play Together ~64 s after the Multiplayer menu (the host is gathering by then): the
+# character once, then the gathering screen "Waiting for Alex to start...", then the game; the pause screen once in play.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark chars /ui: screen chars/ ~90
+mark play /ui: session playing/ ~112
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+64-64.2:A            # Play Together (first row; the host is gathering by then)
+chars+4-4.2:A              # Luigi (SMG_MP_LOOK=1, preselected): the gathering screen
+
+play+4-4.2:A              # (the story cards)
+play+8-8.2:A              # (the story cards)
+play+12-12.2:A              # (the story cards)
+play+16-16.2:A              # (the story cards)
+play+20-20.2:A              # (the story cards)
+play+24-24.2:A              # (the story cards)
+play+28-28.2:A              # (the story cards)
+play+32-32.2:A              # (the story cards)
+play+36-36.2:A              # (the story cards)
+play+40-40.2:A              # (the story cards)
+play+44-44.2:A              # (the story cards)
+play+62-62.2:PLUS           # the pause screen (a player who joined)
+play+70-70.2:B

@@ -24,6 +24,9 @@
 #include <JSystem/JKernel/JKRExpHeap.hpp>
 #include <JSystem/JUtility/JUTVideo.hpp>
 #include <revolution/vi.h>
+#ifdef TARGET_PC
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF=3, game24: update's parts timed every turn)
+#endif
 
 GameSystemObjHolder::GameSystemObjHolder()
     : mObjHolder(), mParticleResHolder(), mRenderModeObj(), mCaptureScreenDirector(), mScreenPreserver(), mAudioSystem(), mWPadHolder(),
@@ -79,10 +82,29 @@ void GameSystemObjHolder::createAudioSystem() {
 }
 
 void GameSystemObjHolder::update() {
+#ifdef TARGET_PC
+    {  // (GXV_LOGIC_PROF=3, game24: the four parts timed every turn)
+        PORT_LOGIC_COARSE(PORT_LS_U_OH_RHYTHM);
+        mAudioSystem->updateRhythm();
+    }
+    {
+        PORT_LOGIC_COARSE(PORT_LS_U_OH_WPAD);
+        mWPadHolder->update();
+    }
+    {
+        PORT_LOGIC_COARSE(PORT_LS_U_OH_ASYNC);
+        mFunctionAsyncExecutor->update();
+    }
+    {
+        PORT_LOGIC_COARSE(PORT_LS_U_OH_STARPTR);
+        mStarPointerDirector->update();
+    }
+#else
     mAudioSystem->updateRhythm();
     mWPadHolder->update();
     mFunctionAsyncExecutor->update();
     mStarPointerDirector->update();
+#endif
 }
 
 void GameSystemObjHolder::updateAudioSystem() {

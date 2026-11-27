@@ -1,0 +1,34 @@
+# QA-FUNC 2/15 (runs agent, 13 Nov: rewritten for the 75 s rejoin core). A guest's Wi-Fi is cut for 90 s MID-PLAY (longer than the 75 s rejoin window): the relay event fires 25 s after the guest logs
+# "session started" (a mark AFTER the session starts; yesterday's outage window fell before the session and proved nothing). Expected with the
+# corefix: the guest suspects its own link after ~5 s of silence ("connection lost", "ui: reconnecting"), the link is back at 12 s, the rejoin works
+# ("reconnected after=..ms"), the host takes it back on the same slot and never drops it, nobody is removed.
+# Pictures: the guest takes a 960x544 frame every 2 s (the reconnecting notice is in one of them).
+name: qa_guest_wifi_90s
+description: "guest cut off 90 s: gives up with connection lost (NOT host left) and offers the way back in; host drops the guest"
+seconds: 400
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_HANDHELD_UI: 1}
+link:
+  profile: home_wifi
+  events:
+    - {'on': 'guest /\[mp\] session started/', delay: 25, outage_s: 90, who: guest}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, PETARI_SHOT_MS: 2000}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 /'
+  - 'expect guest /\[mp\] connection lost reason=\S+/'
+  - 'expect guest /\[mp\] ui: reconnecting/'
+  - 'expect guest /\[mp\] reconnect: gave up \(no-wifi\)/ within 100s after guest /\[mp\] connection lost/'
+  - 'expect guest /\[mp\] ui: session ended by=them err=\d+/'
+  - 'expect guest /\[mp\] ui: rejoin offered/'
+  - 'absent guest /\[mp\] reconnected after=/'
+  - 'absent guest /\[mp\] session ended reason=host-left/'

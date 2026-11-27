@@ -14,7 +14,10 @@ tar_file=${SRC_TARBALL:-$out/compiler-rt.tar.xz}
 echo "$sha  $tar_file" | sha256sum -c -
 tar -xJf "$tar_file" -C "$out/src" --strip-components=1 compiler-rt-18.1.3.src/lib/profile compiler-rt-18.1.3.src/include/profile
 P=$out/src/lib/profile
-CF=(--target=arm-linux-gnueabihf -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb -O2 -fPIC -fno-exceptions
+# SYSROOT=<dir> (optional): an armhf sysroot that is not at /usr/arm-linux-gnueabihf (e.g. the debs of libc6-dev-armhf-cross unpacked
+# with dpkg -x into <prefix>; then SYSROOT=<prefix>/usr/arm-linux-gnueabihf), so no system-wide install is needed.
+SR=(); [ -z "${SYSROOT:-}" ] || SR=(--sysroot="$SYSROOT" -isystem "$SYSROOT/include")
+CF=("${SR[@]}" --target=arm-linux-gnueabihf -mcpu=cortex-a9 -mfpu=neon -mfloat-abi=hard -mthumb -O2 -fPIC -fno-exceptions
     -DCOMPILER_RT_HAS_UNAME=1 -I"$out/src/include" -I"$P" -fvisibility=hidden -Wno-unused-function)
 objs=()
 for f in InstrProfiling InstrProfilingBuffer InstrProfilingFile InstrProfilingInternal InstrProfilingMerge \

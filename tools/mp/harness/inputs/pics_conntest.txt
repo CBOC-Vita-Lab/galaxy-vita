@@ -1,0 +1,17 @@
+# integ pictures (13 Nov): the Connection Test screen. Play Together -> character -> the gathering screen alone -> Play with Anyone (the service address is
+# a dead local port: "Something went wrong..." with the offer "Run a Connection Test?") -> Yes -> the screen runs to the end (shots every few seconds).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark chars /ui: screen chars/ ~60
+mark gather /ui: screen gather/ ~70
+mark err /ui: error shown/ ~90
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+6-6.2:A
+chars+6-6.2:A
+gather+8-8.2:DOWN       # Invite from Far Away -> Play with Anyone
+gather+10-10.2:A
+err+4-4.2:A             # close the error window
+err+9-9.2:A             # Yes: run a connection test

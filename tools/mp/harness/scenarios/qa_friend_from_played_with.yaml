@@ -1,0 +1,40 @@
+# QA-FUNC 11/15. FRIEND ADDED FROM PLAYED WITH / A PLAYER'S PAGE, against the local fake online service. MULTIPLAYER.md says this "does not work yet in
+# this build (the screen does not read the friend code the game receives)"; MpMenuFriends.cpp:165-260 (SlotCode, playedCode in the flow store) says
+# it does. No test settles it: ui_menu/friends_test.cpp drives the screen with a fake; no scenario has two real consoles and a service.
+# SETUP (a wrapper, as wt/flow-scratch/menus2-friends.sh does for friends_shots): start the fake service
+#   (cd server && GAME=smg REGISTER_POW_BITS=0 node fake/server.mjs --no-https --http-port 18797) and mkdir -p the two SMG_ONLINE_DIR folders below.
+#   The consoles register themselves (service sign-up) on first use. UNRUN: the line "ui: screen player" (the page) and the Add Friend key are
+#   from door_host.txt / a guess (inputs/qa_friend_in_play.txt, one line marked GUESS).
+# friendscn (14 Nov): the GUEST's account is made by run_with_fake_service.sh before the run (seed_online_account.py): the Add Friend row exists only once the
+# other console has announced a code, and an account is made only from that press, so two fresh consoles can never start. The guest's own input stops after the
+# entry screen. The host makes ITS account from its Add Friend press (service register ok), then adds: the fake refuses an add of one's own code, so
+# 'service friend op ok' proves the code that arrived through the room was the guest's. A one-player page opens at once (no "screen players").
+name: qa_friend_from_played_with
+description: "two consoles, fake service: the host adds the guest from the player's page; the service logs the add; the guest signs up first (own input) and also adds"
+seconds: 600
+min_speed: 0.4
+requires: {strings: [SMG_ONLINE_URL], files: ['{HARNESS}/../../../server/fake/server.mjs']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_HANDHELD_UI: 1, SMG_ONLINE_URL: "http://127.0.0.1:18797"}
+processes:
+  - name: host
+    input: "@qa_friend_in_play"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Alex, SMG_ONLINE_DIR: /home/claude/g3/hruns/qa-online/host, HARNESS_END: '\[mp\] service friend add code=\S+|40'}
+  - name: guest
+    input: "@qa_friend_guest_signup"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_NAME: Luigi, SMG_ONLINE_DIR: /home/claude/g3/hruns/qa-online/guest}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] service (register ok|signin ok) code=\S+/'
+  - 'expect host /\[mp\] slot 1 joined name=Luigi /'
+  - 'expect host /\[mp\] ui: played with Luigi/'
+  - 'expect host /\[mp\] ui: screen player/ after host /\[mp\] ui: screen session/'
+  - 'expect host /\[mp\] service friend add code=\S+/ within 30s after host /\[mp\] ui: screen player/'
+  - 'expect host /\[mp\] service friend op ok/ within 20s after host /\[mp\] service friend add/'
+  - 'absent host /\[mp\] (service friend refused|service error op=friend|service op=\S+ needs an account|ui: request blocked)/'
+  - 'absent * /\[mp\] (service transport error|session ended reason=(?!none \(shutdown\)|host-left))/'

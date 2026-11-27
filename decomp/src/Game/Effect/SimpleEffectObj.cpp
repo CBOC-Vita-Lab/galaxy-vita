@@ -8,6 +8,10 @@
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+#include "port/farfix.h"  // (farfix35, GXV_FARANIM_FIX)
+#include "port/diagnostics.h"
+#endif
 
 namespace NrvSimpleEffectObj {
     NEW_NERVE(HostTypeWait, SimpleEffectObj, Wait);
@@ -68,9 +72,22 @@ void SimpleEffectObj::init(const JMapInfoIter& rIter) {
     }
 
     _90.set(mPosition + *getClippingCenterOffset());
+#ifdef TARGET_PC
+    // farfix35 (GXV_FARANIM_FIX, port/farfix.h): a scenery waterfall's sphere x1.5 and far clip 50 -> 100 m (the game's own clip freezes and hides its emitters)
+    const bool fixOn = port::farfix::On();
+    MR::setClippingTypeSphere(this, port::farfix::Radius(getClippingRadius(), _8C, fixOn), &_90);
+    MR::setGroupClipping(this, rIter, 0x40);
+    MR::setClippingFar(this, static_cast< f32 >(port::farfix::FarMeters(static_cast< int >(getFarClipDistance()), _8C, fixOn)));
+    if (fixOn && port::farfix::IsWaterfall(_8C)) {
+        port_log_summary("farfix: %s clipping sphere %.0f -> %.0f, far clip %d -> %d m (the game's own clip stops and hides its emitters)", _8C, getClippingRadius(),
+                         port::farfix::Radius(getClippingRadius(), _8C, true), static_cast< int >(getFarClipDistance()),
+                         port::farfix::FarMeters(static_cast< int >(getFarClipDistance()), _8C, true));
+    }
+#else
     MR::setClippingTypeSphere(this, getClippingRadius(), &_90);
     MR::setGroupClipping(this, rIter, 0x40);
     MR::setClippingFar(this, getFarClipDistance());
+#endif
     MR::joinToGroupArray(this, rIter, nullptr, 0x20);
     makeActorAppeared();
 }

@@ -165,6 +165,12 @@ s32 SpinDriverPathStorageScenario::deserialize(const u8* pData, u32 dataSize) {
             return 0;
         }
 
+        // MP3: the token (and an interrupted driver's range byte) inside the data, at most mOneStorage's 16 drivers (push_back
+        // does not check: a 17th wrote past the array). The game's own data never has more (setup fills the same vector).
+        if (static_cast< u32 >(readOffset + 2) >= dataSize) {
+            return 0;
+        }
+
         u8 val = *(pData + readOffset + 2);
         if (val != SpinDriverScenarioDataFlag_EndOfData) {
             if ((val & SpinDriverScenarioDataFlag_ZoneDataStart) == SpinDriverScenarioDataFlag_ZoneDataStart) {
@@ -174,6 +180,12 @@ s32 SpinDriverPathStorageScenario::deserialize(const u8* pData, u32 dataSize) {
             }
 
             if (zoneId < 0) {
+                return 0;
+            }
+
+            // MP3: see above
+            if (((val & SpinDriverDataFlag_Interrupted) != 0 && static_cast< u32 >(readOffset + 3) >= dataSize) ||
+                mOneStorage.size() >= mOneStorage.capacity()) {
                 return 0;
             }
 
@@ -251,6 +263,7 @@ s32 SpinDriverPathStorageGalaxy::serialize(u8* pData, u32 maxBufferSize) const {
 }
 
 s32 SpinDriverPathStorageGalaxy::deserialize(const u8* pData, u32 maxBufferSize) {
+    // (MP3: SpinDriverPathStorage::deserialize only calls this with the 6-byte galaxy header inside the data)
     if (*(u16*)(pData + 0) != (u16)MR::getHashCode(mGalaxyName)) {
         return *(u16*)(pData + 2);
     }
@@ -262,6 +275,11 @@ s32 SpinDriverPathStorageGalaxy::deserialize(const u8* pData, u32 maxBufferSize)
 
     s32 size = 0;
     for (s32 idx = 0; idx < mNumScenarios; idx++) {
+        // MP3: a scenario's data starts inside the buffer (each one checks its own reads against the size it is given)
+        if (static_cast< u32 >(size) + 6 >= maxBufferSize) {
+            break;
+        }
+
         size += mScenarioStorage[idx].deserialize((u8*)(pData + size + 6), maxBufferSize - size - 6);
     }
     return *(u16*)(pData + 2);
@@ -314,9 +332,19 @@ s32 SpinDriverPathStorage::deserialize(const u8* pData, u32 maxBufferSize) {
     s32 readError = 0;
 
     JSUMemoryInputStream stream(pData, maxBufferSize);
+    // MP3: an empty chunk left numEntries unread (indeterminate); 2 = a failed chunk
+    if (maxBufferSize == 0) {
+        return 2;
+    }
+
     u8 numEntries = stream.readU8();
 
     for (s32 idx = 0; idx < numEntries; idx++) {
+        // MP3: the galaxy header (u16 hash, u16 block size, u8 scenario count, u8 0) is read through raw pointers: inside the data
+        if (stream.getAvailable() < 6) {
+            return 2;
+        }
+
         u8* readPtr = (u8*)stream.mBuffer + stream.mPosition;
         SpinDriverPathStorageGalaxy* storage = findFromHashCode(*(u16*)readPtr);
         if (storage != nullptr) {

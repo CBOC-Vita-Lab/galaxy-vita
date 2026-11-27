@@ -6,6 +6,9 @@ extern "C" {
 unsigned vgx_stub_name_ = 0;
 unsigned glCreateShader(unsigned) { return ++vgx_stub_name_; }
 unsigned glCreateProgram(void) { return ++vgx_stub_name_; }
+// No-GPU harness only: keep this result opaque to the backend compiler, like
+// the native API. Finite driver occupancy is exercised by the residency tests.
+unsigned vglGetFreeProgramSlots(void) { return 1024; }
 int glGetUniformLocation(unsigned, const char*) { return 1; }
 unsigned glCheckFramebufferStatus(unsigned) { return 0x8CD5; }       // GL_FRAMEBUFFER_COMPLETE
 unsigned glGetError(void) { return 0; }
@@ -14,13 +17,20 @@ const unsigned char* glGetString(unsigned name) {
 }
 unsigned vglMemFree(int) { return 64u << 20; }     // plenty of video memory
 unsigned vglMemTotal(int) { return 128u << 20; }
-const void* vglGetTexDataPointer(unsigned) { return reinterpret_cast<const void*>(1); }
+void* vglGetTexDataPointer(unsigned) { return reinterpret_cast<void*>(1); }
 }
 
 extern "C" {
 void vglSetNextSceneDepthModes(unsigned char, unsigned char) {}
 void vglUseLowPrecisionFragmentOnly(unsigned char) {}
 int vglFramebufferDepthTexture(unsigned) { return 0; }
+}
+
+// <psp2/gxm.h> functions the back end's __VGX_VITA__ part calls (GXV_VRAM_GUARD's GPU finish, GXV_MIDFLUSH, which needs vitaGL's weak
+// gxm_context and so never runs here); nothing to wait for without a GPU.  (pgotool31, 18 Nov 2026)
+extern "C" {
+void sceGxmFinish(void*) {}
+int sceGxmMidSceneFlush(void*, unsigned, void*, const void*) { return 0; }
 }
 
 // (the console host's: platform/vgx/vita/vgx_host_vita.cpp; the mask guard is off)

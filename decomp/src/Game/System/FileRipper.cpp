@@ -2,6 +2,13 @@
 #include "Game/Util/FileUtil.hpp"
 #include "Game/Util/MemoryUtil.hpp"
 #include <JSystem/JKernel/JKRHeap.hpp>
+#ifdef TARGET_PC
+#include <cstdlib>
+#include <cstring>
+extern "C" void port_log_summary(const char* fmt, ...);
+extern "C" int64_t port_host_time_ns(void);
+extern "C" void port_load_note_decomp(uint32_t bytes, int64_t ns) __attribute__((weak));  // (cook24: the load-split census, platform/src/dvd/dvd.cpp)
+#endif
 
 namespace {
     OSMutex sDecompMutex;
@@ -12,6 +19,24 @@ namespace {
     s32 sReadDvdOffset;
     u32 sReadDvdLeftSize;
     DVDFileInfo* sSrcFileInfo;
+#ifdef TARGET_PC
+    // The ripper already owns a 128 KiB decompression window. Borrow it only
+    // when idle, for small reads where another trip to the drive costs more than a copy.
+    struct SmallArchiveRead {
+        bool held;
+        SmallArchiveRead(bool decompress, u32 bytes) : held(false) {
+            static const bool enabled = [] {
+                const char* e = std::getenv("GXV_ARCHIVE_BATCH");
+                return !e || *e != '0';
+            }();
+            if (enabled && decompress && bytes && bytes <= 32 * 1024 && sReadBuffer &&
+                static_cast<size_t>(sReadBufferEnd - sReadBuffer) >= bytes)
+                held = OSTryLockMutex(&sDecompMutex) != 0;
+        }
+        void release() { if (held) { OSUnlockMutex(&sDecompMutex); held = false; } }
+        ~SmallArchiveRead() { release(); }
+    };
+#endif
 };  // namespace
 
 void FileRipper::setup(u32 size, JKRHeap* pHeap) {
@@ -40,25 +65,35 @@ void* FileRipper::loadToMainRAM(const char* fpath, u8* dest, bool decompress, JK
     u8* copySrc = 0;
     u32 decompressedSize;
 
-    if (!MR::isFileExist(fpath, false)) {
+    const s32 entry = DVDConvertPathToEntrynum(fpath);
+    if (entry < 0) {
 #ifdef TARGET_PC
         OSReport("FileRipper: the disc has no file %s\n", fpath);
+        port_log_summary("file-missing: FileRipper: the disc has no file %s (the game stops here)", fpath);  // (luigi24: named in the basic log)
 #endif
         OSPanic(__FILE__, 0x70, "File isn't exist.");
     }
 
-    u32 fsize = (MR::getFileSize(fpath, false) + 0x1f) / 0x20 * 0x20;
-
     DVDFileInfo fileInfo;
-    if (!DVDOpen(fpath, &fileInfo)) {
+    if (!DVDFastOpen(entry, &fileInfo)) {
         OSPanic(__FILE__, 0x77, "DVDOpen() failed");
     }
+    if ((decompress && !fileInfo.length) || fileInfo.length > 0x7fffffe0u) return nullptr;
+    const u32 fsize = (fileInfo.length + 31u) & ~31u;
+    alignas(64) u8 header[32];
+    u32 prefixSize = sizeof(header);
+#ifdef TARGET_PC
+    SmallArchiveRead window(decompress, fsize);
+    if (window.held) prefixSize = fsize;
+#endif
 
     if (decompress) {
-        u8 buf[0x60];
-        copySrc = (u8*)((u32)(buf + 0x3f) / 0x40 * 0x40);
+        copySrc = header;
+#ifdef TARGET_PC
+        if (window.held) copySrc = ::sReadBuffer;
+#endif
         while (true) {
-            s32 result = DVDReadPrio(&fileInfo, copySrc, 0x20, 0, 2);
+            s32 result = DVDReadPrio(&fileInfo, copySrc, prefixSize, 0, 2);
             if (result >= 0) {
                 break;
             } else if (result == -3) {
@@ -66,9 +101,19 @@ void* FileRipper::loadToMainRAM(const char* fpath, u8* dest, bool decompress, JK
             }
             VIWaitForRetrace();
         }
-        DCInvalidateRange(copySrc, 0x20);
+        DCInvalidateRange(copySrc, prefixSize);
         compression = checkCompressed(copySrc);
-        decompressedSize = (copySrc[4] << 24) | (copySrc[5] << 16) | (copySrc[6] << 8) | copySrc[7];
+        decompressedSize = (u32(copySrc[4]) << 24) | (u32(copySrc[5]) << 16) | (u32(copySrc[6]) << 8) | copySrc[7];
+#ifdef TARGET_PC
+        if (compression && window.held) {
+            // Alternate game data may still be compressed. Keep the streaming
+            // decoder and its own lock, including its cancellation/retry rules.
+            std::memcpy(header, copySrc, sizeof(header));
+            window.release();
+            copySrc = header;
+            prefixSize = sizeof(header);
+        }
+#endif
     }
 
     if (decompress && compression) {
@@ -78,6 +123,9 @@ void* FileRipper::loadToMainRAM(const char* fpath, u8* dest, bool decompress, JK
             alloced = true;
         }
         if (!dest) {
+#ifdef TARGET_PC
+            port_log_summary("file-missing: FileRipper: no heap room for %s (%u bytes unpacked): the archive will not be there", fpath, (unsigned)decompressedSize);
+#endif
             return 0;
         }
     } else {
@@ -87,11 +135,21 @@ void* FileRipper::loadToMainRAM(const char* fpath, u8* dest, bool decompress, JK
             alloced = true;
         }
         if (!dest) {
+#ifdef TARGET_PC
+            port_log_summary("file-missing: FileRipper: no heap room for %s (%u bytes): the archive will not be there", fpath, (unsigned)fsize);
+#endif
             return 0;
         }
     }
 
     if (!compression) {
+#ifdef TARGET_PC
+        if (copySrc && prefixSize == fsize) {
+            std::memcpy(dest, copySrc, fsize);
+            DCStoreRangeNoSync(dest, fsize);
+            return dest;
+        }
+#endif
         u8* readDest;
         s32 readOffset;
         u32 readSize;
@@ -155,7 +213,13 @@ bool FileRipper::decompressFromDVD(DVDFileInfo* fileInfo, void* dest, u32 readSi
 
     bool result;
     if (buf) {
+#ifdef TARGET_PC
+        const int64_t lsT0 = port_host_time_ns();
+#endif
         result = decompressSzsSub(buf, (u8*)dest);
+#ifdef TARGET_PC
+        if (port_load_note_decomp) port_load_note_decomp(destSize, port_host_time_ns() - lsT0);
+#endif
     } else {
         result = false;
     }

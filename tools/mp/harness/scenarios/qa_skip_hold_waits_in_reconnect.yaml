@@ -1,0 +1,45 @@
+# final run (14 Nov), reconnect case f (lodgate: cutscene_skip.cpp SkipHoldWaits). The guest's Wi-Fi is cut 1 s after the Good Egg intro starts, for 9 s (a mark of its own
+# log: "skip: ... playing"). ~5 s later the guest says "connection lost" / "ui: reconnecting"; the session is held but not active. The guest holds A then
+# (inputs/skip_reconnect_guest.txt): the full hold must WAIT, no local skip ("skip: intro camera" without "playing" / "players voted" / "following" must not appear before
+# "reconnected after="); once the session is back and the host holds A too (inputs/skip_reconnect_host.txt, 1 s after the rejoin) both consoles skip together.
+# TIMING RISK (not run yet): the intro must still be playing about 15 s after it started (the guest's wait + the rejoin + the host's second vote). If the intro is shorter the
+# 'expect ... after reconnected' rules fail: that is the finding, not a reason to weaken the rule (same exposure as skip_vote_two_consoles).
+name: qa_skip_hold_waits_in_reconnect
+description: "guest cut off during the intro: its skip hold waits through the reconnect, then both consoles skip together once it is back"
+seconds: 300
+shot_size: 960x544
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_BACKEND: vgx}
+link:
+  profile: home_wifi
+  events:
+    - {'on': 'guest /skip: (intro camera|fly-in) playing/', delay: 1, outage_s: 9, who: guest}
+processes:
+  - name: host
+    input: "@skip_reconnect_host"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+  - name: guest
+    input: "@skip_reconnect_guest"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect * /\[mp\] flow barrier release serial=1/'
+  - 'expect guest /skip: (intro camera|fly-in) playing/'
+  - 'expect guest /\[mp\] connection lost reason=\S+/'
+  - 'expect guest /\[mp\] ui: reconnecting/'
+  - 'expect guest /\[mp\] reconnected after=\d+ms/'
+  - 'absent guest /\[mp\] reconnect: gave up/'
+  - 'absent host /\[mp\] slot 1 left /'
+  # the hold waited: no skip of the intro on the guest before the session was back
+  - 'absent guest /skip: (intro camera|fly-in)(?! playing| following| \(players voted\))/ before guest /\[mp\] reconnected after=/'
+  # ... and then both consoles skipped it, together
+  - 'expect guest /skip: (intro camera|fly-in)(?! playing| following)/ after guest /\[mp\] reconnected after=/'
+  - 'expect host /skip: (intro camera|fly-in)(?! playing| following)/ after guest /\[mp\] reconnected after=/'
+  - 'expect * /\[mp\] flow skip decided kind=[23] votes=\d+\/2/'
+  - 'order guest /skip: (intro camera|fly-in)(?! playing| following)/ near host /skip: (intro camera|fly-in)(?! playing| following)/ within 6s'
+  - 'expect * /skip: fast-forward ended after \d+ updates/'

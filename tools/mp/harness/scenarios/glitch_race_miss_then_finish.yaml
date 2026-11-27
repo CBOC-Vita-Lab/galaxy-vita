@@ -1,0 +1,26 @@
+# UNRUN (rules checked against the code's log lines by tests/mp/scenario_regex_test.py; the game has not played it). G6: Star Race, the guest falls into the abyss at 18 s (a normal miss reload, no bubble in a race) and still finishes at 40 s,
+# the host finishes at 30 s. Expected: the guest's timer goes on across the reload (MpRace.cpp "a new scene after a miss: the timer goes on"),
+# its frames > 40 s worth, results list the host first, exactly one FINISH per slot, no second countdown.
+name: glitch_race_miss_then_finish
+description: "race: a miss reload in the middle must not restart the countdown or lose the finish"
+seconds: 360
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 15000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 30}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_DIE: "18:1:abyss", SMG_MP_TEST_STAR: 40}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'count guest /\[mp\] race countdown serial=/ == 1'
+  - 'count guest /\[mp\] race go serial=/ == 1'
+  - 'absent guest /\[mp\] bubble on/'
+  - 'count * /\[mp\] race finish slot=\d+ frames=\d+ star=/ == 1'
+  - 'expect host /\[mp\] race finish slot=1 frames=\d+$/'
+  - 'expect host /\[mp\] race results serial=\d+ n=2 first=0 /'
+  - 'absent * /\[mp\] (race hold timeout|race drop|race head start)/'

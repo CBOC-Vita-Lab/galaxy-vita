@@ -14,17 +14,18 @@
 # Instruction counts (callgrind, the player's thread):  FEW_PROFILE=1 FEW_ODD=0 GXV_SPLIT=1 valgrind --tool=callgrind $OUT/few 200 1
 # (FEW_JPA=<n>: n particles a picture in JParticle's command order; FEW_LOG=1: the front end's log lines, e.g. GXV_SPLIT=2's verify summary)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-120}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_fe_work}
+out=${OUT:-$MP_TMP/vgx_fe_work}
 mkdir -p "$out"
 cxx=${CXX:-g++}
 srcs=(tests/vgx_fe_work.cpp platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp
       platform/vgx/src/vgx_dlcache.cpp platform/vgx/src/vgx_guestmem.cpp platform/vgx/src/vgx_bpsync.cpp platform/vgx/src/vgx_shadergen.cpp
-      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp platform/vgx/src/vgx_backend_null.cpp)
+      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp platform/vgx/src/vgx_backend_null.cpp platform/vgx/src/vgx_texcomp.cpp)
 cd "$root"
-common=(-std=c++17 -g -Iplatform/vgx/src -Iplatform/vgx/third_party -pthread)
+common=(-std=c++17 -g -Iplatform/vgx/src -Iplatform/include -Iplatform/vgx/third_party -pthread)
 $cxx "${common[@]}" -O2 "${srcs[@]}" -o "$out/few"
 $cxx "${common[@]}" -O1 -fsanitize=address,undefined -fno-omit-frame-pointer "${srcs[@]}" -o "$out/few-asan"
 ${TSAN_CXX:-g++} "${common[@]}" -O1 -fsanitize=thread "${srcs[@]}" -o "$out/few-tsan"

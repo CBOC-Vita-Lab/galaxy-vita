@@ -32,6 +32,14 @@ public:
     /* 0xA8 */ TVec3f mHintRotation;
     /* 0xB4 */ s32 mHintTimer;
     /* 0xB8 */ s32 mHintIndex;
+#ifdef TARGET_PC
+    f32 mPortHrRadius = 0.0f;  // (GXV_HR_PLANTMOVE, gamepar: the touch sensor's radius, set in initAfterPlacement)
+    u8 mPortHrTick = 0;        // (which half of the idle members moves this turn)
+    bool mPortSplitNeutral = false;
+    u8 mPortFloorKept = 0;     // (popin31b: the decor floor kept this group at its last budget judgement (ClippingActorInfo.cpp): its control is timed for the census)
+    void portSplitDecorReveal(const TVec3f& camera, u32 picture);
+    void portPayOwed();
+#endif
 };
 
 class PlantMember : public CutBushModelObj {
@@ -59,4 +67,9 @@ public:
     /* 0x98 */ s32 mTouchType;
     /* 0x9C */ bool _9C;
     /* 0x9D */ bool mHasItem;
+#ifdef TARGET_PC
+    u8 mPortOwed = 0;  // (GXV_HR_PLANTMOVE, gamepar: 1 = the last turn's movement was left out; its clock step is still owed)
+    bool portCanRest() const;
+    void portPayOwed();
+#endif
 };

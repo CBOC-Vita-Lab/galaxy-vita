@@ -29,6 +29,11 @@ public:
     MarioEffect(MarioActor*);
 
     virtual void execute(JPABaseEmitter*);
+#ifdef TARGET_PC
+    virtual int portCalcKind() const {
+        return 2;  // (GXV_PAR_PTCL: execute edits MarioEffect's own follow table, shared by all its emitters: stays on the game thread)
+    }
+#endif
 
     virtual ~MarioEffect();
 

@@ -1,0 +1,27 @@
+# PREPARED. After the join the guest walks a square in the Observatory; both keep sending and receiving states.
+name: mp_puppet
+description: puppets appear on both sides and keep receiving states while the guest walks (PETARI_POSLOG for positions)
+seconds: 230
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2}
+  - name: guest
+    input: "@file2_observatory,180-186:SY=1,186-192:SX=1,192-198:SY=-1,198-204:SX=-1"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect * /\[mp\] puppet send first serial=\d+ bytes=\d+/ within 30s after host /\[mp\] flow barrier release serial=1 /'
+  - 'expect host /\[mp\] puppet slot=1 state first serial=\d+/ within 30s after host /\[mp\] flow barrier release serial=1 /'
+  - 'expect guest /\[mp\] puppet slot=0 state first serial=\d+/ within 30s after host /\[mp\] flow barrier release serial=1 /'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 5s after host /\[mp\] puppet slot=1 state first/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/ within 5s after guest /\[mp\] puppet slot=0 state first/'
+  - 'absent * /\[mp\] puppet slot=\d+ (hide reason|joints missing|model fallback|other scene)/'
+  - '?count * /\[mp\] puppet slot=\d+ anim miss/ <= 3'
+  - 'shots * >= 10'

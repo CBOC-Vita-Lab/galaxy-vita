@@ -15,6 +15,9 @@ public:
     void requestPauseMenuOff();
     void exeNormal();
     bool tryStartPauseMenu();
+#ifdef TARGET_PC
+    bool tryStartPauseMenuMp();  // MP3: the session menu in front of tryStartPauseMenu
+#endif
 
     GameScene* mScene;                        // 0x08
     PauseButtonCheckerInGame* mPauseChecker;  // 0x0C

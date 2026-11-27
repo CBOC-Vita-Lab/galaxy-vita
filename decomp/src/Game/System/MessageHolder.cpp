@@ -1,4 +1,5 @@
 #include "Game/System/MessageHolder.hpp"
+#include "Game/MP/MpUi.hpp"
 #include "Game/NPC/TalkMessageInfo.hpp"
 #include "Game/NPC/TalkNodeCtrl.hpp"
 #include "Game/System/GameSystemObjHolder.hpp"
@@ -34,12 +35,26 @@ namespace {
 };  // namespace
 
 bool MessageData::getMessageDirect(TalkMessageInfo* pMessageInfo, const char* pMessage) const {
+    // MP3: the file select's 2P button opens the Multiplayer menu: its pointing balloon says so (SMG_MP_MENU=0: the game's text)
+    if (pMessage != nullptr && pMessage[0] == '2' && strcmp(pMessage, "2PGuidanceIcon") == 0 && MpUi::featureEnabled()) {
+        pMessageInfo->_0 = reinterpret_cast< u8* >(const_cast< wchar_t* >(MpUi::balloonText()));
+        return true;
+    }
+
     s32 messageIndex = findMessageIndex(pMessage);
 
     if (messageIndex >= 0 && messageIndex < mInfoBlock->mItemCount) {
         getMessage(pMessageInfo, 0, messageIndex);
 
         return true;
+    }
+
+    // MP3: the multiplayer texts ("MP_*" ids, not in the game's tables) for its message windows
+    if (pMessage != nullptr && pMessage[0] == 'M' && pMessage[1] == 'P' && pMessage[2] == '_') {
+        if (const wchar_t* pText = MpUi::findMessage(pMessage)) {
+            pMessageInfo->_0 = reinterpret_cast< u8* >(const_cast< wchar_t* >(pText));
+            return true;
+        }
     }
 
     return false;

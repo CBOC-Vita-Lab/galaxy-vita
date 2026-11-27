@@ -23,6 +23,7 @@
 #include "Game/Camera/CameraInwardTower.hpp"
 #include "Game/Camera/CameraMedianPlanet.hpp"
 #include "Game/Camera/CameraMedianTower.hpp"
+#include "Game/Camera/CameraMpWatch.hpp"   // MP3 spectate
 #include "Game/Camera/CameraMtxRegParallel.hpp"
 #include "Game/Camera/CameraObjParallel.hpp"
 #include "Game/Camera/CameraParallel.hpp"
@@ -45,6 +46,7 @@
 #include "Game/Camera/CameraWaterPlanet.hpp"
 #include "Game/Camera/CameraWaterPlanetBoss.hpp"
 #include "Game/Camera/CameraWonderPlanet.hpp"
+#include "port/mp_bridge.h"   // MP3 spectate: the watch camera exists only in a session
 #include <cstring>
 
 struct CameraTableEntry {
@@ -106,11 +108,14 @@ namespace {
         {"CAM_TYPE_WATER_PLANET_BOSS", "\x90\x85\x92\x86\x83\x76\x83\x89\x83\x6c\x83\x62\x83\x67\x83\x7b\x83\x58", createCamera< CameraWaterPlanetBoss >, true},
         {"CAM_TYPE_RAIL_WATCH", "\x83\x8c\x81\x5b\x83\x8b\x92\x8d\x96\xda", createCamera< CameraRailWatch >, true},
         {"CAM_TYPE_SUBJECTIVE", "\x8e\xe5\x8a\xcf", createCamera< CameraSubjective >, true},
+        {"CAM_TYPE_MP_WATCH", "MP3 watch", createCamera< CameraMpWatch >, false},   // MP3 spectate: last; hidden (not created) without a session
     };
+    static s32 sHiddenCameras = 0;
     static const char* sDefaultCamera = "CAM_TYPE_XZ_PARA";
 };  // namespace
 
 CameraHolder::CameraHolder(const char* pName) : NameObj(pName) {
+    ::sHiddenCameras = mp_active() ? 0 : 1;   // MP3 spectate: single player has exactly the game's cameras
     createCameras();
 
     mDefaultCameraIndex = getIndexOf(getNameStrOfDefault());
@@ -118,7 +123,7 @@ CameraHolder::CameraHolder(const char* pName) : NameObj(pName) {
 }
 
 s32 CameraHolder::getNum() const {
-    return ARRAY_SIZE(::sCameraTable);
+    return ARRAY_SIZE(::sCameraTable) - ::sHiddenCameras;
 }
 
 CamTranslatorBase* CameraHolder::getTranslator(s32 index) {

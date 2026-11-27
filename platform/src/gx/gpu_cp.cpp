@@ -255,7 +255,7 @@ static void trace(size_t pos, u8 op, u32 a, u32 b) {
 static void dumpTrace(const u8* data, size_t start) {
     for (unsigned i = 0; i < 16; i++) {
         const TraceEntry& t = sTrace[(sTraceHead + i) & 15];
-        port_log("gpu:   +0x%zx op %02x %08x %08x", t.pos, t.op, t.a, t.b);
+        port_log("gpu:   +0x%x op %02x %08x %08x", (unsigned)t.pos, t.op, t.a, t.b);
     }
     const CPState& cp = g.cp;
     port_log("gpu:   vcd %08x %08x vat0 %08x %08x %08x", cp.vcdLo, cp.vcdHi, cp.vatA[0], cp.vatB[0], cp.vatC[0]);
@@ -383,7 +383,7 @@ size_t process(const u8* data, size_t len, bool isDisplayList) {
             } else {
                 static int warned = 0;
                 if (warned++ < 16) {
-                    port_log("gpu: unknown opcode 0x%02x at +0x%zx (%s)", op, start, isDisplayList ? "DL" : "FIFO");
+                    port_log("gpu: unknown opcode 0x%02x at +0x%x (%s)", op, (unsigned)start, isDisplayList ? "DL" : "FIFO");
                     if (warned == 1) {
                         dumpTrace(data, start);
                     }

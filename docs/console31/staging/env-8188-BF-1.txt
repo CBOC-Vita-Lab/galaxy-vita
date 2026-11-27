@@ -1,0 +1,8 @@
+# 8188 BF-1: blendfix timing B: GXV_POSE_BLENDFIX=1 (the default), census off; same route as BF-0. Expected: no difference beyond noise
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HeavenlyBeachGalaxy:1,AstroGalaxy:1
+PETARI_STAGE_HOLD=5400
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1

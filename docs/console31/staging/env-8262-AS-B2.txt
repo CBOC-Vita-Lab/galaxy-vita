@@ -1,0 +1,16 @@
+# 8262 AS-B2: asyncsh31 B, worker on (tag c31b2, fresh cache): GXV_ASYNC_SHADERS=1, run 2 (a new tag); pass: no crash, threads: smg_shaders mask 0x60000, async-shaders-5s refused 0 / pooled reallocs 0 / longest wait well under 15 s, no skippable compile on the render thread in play; report the hitch33-standin: counts
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=3600
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_SHADER_CACHE_TAG=c31b2
+GXV_STAGEWARM_FILE=ux0:data/smg/c31b2-stagewarm.bin
+GXV_SHADERLIST=ux0:data/smg/c31b2-shaderlist.bin
+GXV_PACK_MISSLOG=1
+GXV_HITCH25_LOG=1
+GXV_UBERSHADER=1
+GXV_LOG_LEVEL=2
+GXV_ASYNC_SHADERS=1

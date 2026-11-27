@@ -23,6 +23,9 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SequenceUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
+#ifdef TARGET_PC
+#include "port/xskip.h"  // (xskip27)
+#endif
 
 void ScenarioStarter_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -127,13 +130,27 @@ void ScenarioStarter::exeRailMove() {
 
     _EC = MR::pi() * MR::normalize(getNerveStep(), _F8, mFallMotionStartStep);
     if (trySkipTrigger()) {
+#ifdef TARGET_PC
+        if (!_124) {
+            port_xskip_accept(PORT_XSKIP_STARTER);  // (xskip27: the marker and the calm window; a second press while the skip runs is not a second skip)
+        }
+#endif
         MR::tryFrameToBlankCinemaFrame();
         _124 = true;
     }
 
     if (_124 && MR::isStopCinemaFrame()) {
-        setNerve(GET_NERVE(ScenarioStarter, ScenarioStarterRailMoveCanceled));
-        return;
+#ifdef TARGET_PC
+        // (xskip27, GXV_XSKIP) the frame is fully black: the cut waits (at most GXV_XSKIP_HOLD_MS) while the stage's own programs / the plan are not done, and the renderer
+        // drains them with the closed-screen budget. The flight's own clock goes on under the black; the welcome layout, the camera cut and the BGM keep their order.
+        if (port_xskip_cover_hold()) {
+            // (held: no cut yet)
+        } else
+#endif
+        {
+            setNerve(GET_NERVE(ScenarioStarter, ScenarioStarterRailMoveCanceled));
+            return;
+        }
     }
 
     s32 bgmStartTime = 0;
@@ -160,13 +177,22 @@ void ScenarioStarter::exeRailMove() {
 
 void ScenarioStarter::exeRailMoveCanceled() {
     if (MR::isFirstStep(this)) {
+#ifdef TARGET_PC
+        port_xskip_cut(PORT_XSKIP_STARTER);  // (xskip27: the marker)
+#endif
         MR::endBindAndPlayerWait(this);
         _8C = nullptr;
         mSpinDriverCamera->cancel();
         mTitle->kill();
         if (isStartBgmOnWelcome()) {
+#ifdef TARGET_PC
+            const s64 xsBgm0 = port_host_time_ns();
+#endif
             MR::stopStageBGM(0);
             MR::startStageBGMFromStageName("Game", MR::getCurrentStageName(), MR::getCurrentScenarioNo());
+#ifdef TARGET_PC
+            port_xskip_bgm((port_host_time_ns() - xsBgm0) / 1e6);  // (xskip27: what the game thread spent in the BGM start, for the "xskip:" summary)
+#endif
         }
 
         setNerve(GET_NERVE(ScenarioStarter, ScenarioStarterShowWelcomeLayout));

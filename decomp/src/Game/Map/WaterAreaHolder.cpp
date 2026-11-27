@@ -12,6 +12,14 @@
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/Player/MarioActor.hpp"
+#include "Game/Player/MarioHolder.hpp"
+#include "Game/Util/PlayerUtil.hpp"
+// dive27: the edges of "wet" for the console's first-use ledger (platform/vgx/src/vgx_backend_gl.cpp, "dive27:" lines): 1 camera wet, 2 camera dry, 3 Mario swimming, 4 Mario out of the
+// water. The front end opens a 3 s window of counters (programs linked, targets made, textures uploaded, longest picture gap) at each. No effect on the game.
+extern "C" void port_dive27_edge(unsigned kind) __attribute__((weak));
+#endif
 
 namespace {
     static const s32 sAreaNumMax = 8;
@@ -77,8 +85,26 @@ void WaterAreaHolder::entryWhirlPoolAccelerator(WhirlPoolAccelerator* pWhirlPool
 }
 
 void WaterAreaHolder::movement() {
+#ifdef TARGET_PC
+    if (port_dive27_edge) {
+        static bool sMarioWet = false;
+        MarioHolder* pHolder = MR::isExistSceneObj(SceneObj_MarioHolder) ? MR::getMarioHolder() : nullptr;
+        if (pHolder != nullptr && pHolder->getMarioActor() != nullptr && pHolder->getMarioActor()->getMario() != nullptr) {
+            const bool wet = MR::isPlayerInWaterMode();
+            if (wet != sMarioWet) {
+                sMarioWet = wet;
+                port_dive27_edge(wet ? 3u : 4u);
+            }
+        }
+    }
+#endif
     if (MR::getWaterAreaObj(&mWaterInfo, MR::getCamPos())) {
         if (!mCamInWater) {
+#ifdef TARGET_PC
+            if (port_dive27_edge) {
+                port_dive27_edge(1u);
+            }
+#endif
             if (mUseBloom) {
                 MR::turnOnNormalBloom();
                 MR::setNormalBloomIntensity(255);
@@ -95,6 +121,11 @@ void WaterAreaHolder::movement() {
                 MR::setImageEffectControlAuto();
             }
             mCamInWater = false;
+#ifdef TARGET_PC
+            if (port_dive27_edge) {
+                port_dive27_edge(2u);
+            }
+#endif
         }
     }
 }
@@ -187,6 +218,13 @@ bool WaterAreaFunction::isCameraInWaterForCameraUtil() {
 
     return false;
 }
+
+#ifdef TARGET_PC
+// dive27: this stage's normal bloom is the underwater one (WaterAreaHolder::mUseBloom): on only while the camera is wet.
+bool WaterAreaFunction::isBloomForWater() {
+    return MR::isExistSceneObj(SceneObj_WaterAreaHolder) && ::getWaterAreaHolder()->mUseBloom;
+}
+#endif
 
 f32 WaterAreaFunction::getCameraWaterDepth() {
     if (MR::isExistSceneObj(SceneObj_WaterAreaHolder)) {

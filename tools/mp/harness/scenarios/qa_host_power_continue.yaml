@@ -1,0 +1,53 @@
+# (13 Nov, integ: the kill now waits for g2 to be IN (g2 boots after g1 has joined and needs about 100 s to reach play: the old trigger, the first barrier, killed the host 90 s before g2 could join: wrong guess).
+# QA-FUNC 3/15. (g2 starts when g1 has joined, so g1 is slot 1 and g2 slot 2 on every run: the rules name slots.) The host loses power (kill -9, no BYE) 15 s into the level; the group CONTINUES and plays on: takeover once, the new host (g1) gets
+# a star that g2 earns afterwards, delivers it natively, and both follow the new host's after-clear move. mp_migrate3 / emu_host_power_loss stop at
+# "flow host now"; mp_migrate3_star/_loaded/_switch claim more in their descriptions than their rules check (REPORT.md). Hooks: all exist. READY.
+# The star comes 45 s after the scene start, i.e. well after the takeover (kill at +15 s, takeover about +5..8 s later).
+name: qa_host_power_continue
+description: "kill -9 the host mid-level; takeover; then a guest's star is credited, delivered by the NEW host and both follow its move"
+seconds: 420
+min_speed: 0.3
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_KILL: 'slot 2 joined name=g2 |15|9'}
+  - name: g1
+    may_end_early: true
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=host|40'}
+  - name: g2
+    may_end_early: true
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, SMG_MP_TEST_STAR: 45, HARNESS_START_ON: 'g1|\[mp\] joined slot=1 |0', HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|40'}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall g1,g2'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit g1,g2 == 0'
+  - 'expect host /\[mp\] slot [12] joined name=g[12] .*players=3/'
+  - 'expect host /harness: kill signal=9/'
+  - 'expect g1,g2 /\[mp\] (following new host slot=\d epoch=1|host lost: slot \d takes over epoch=1)/ within 40s after host /harness: kill signal=9/'
+  - 'expect g1 /\[mp\] host lost: slot 1 takes over epoch=1 \(old host 0\)/ within 40s after host /harness: kill signal=9/'
+  - 'expect g1 /\[mp\] flow host now slot=1 epoch=1/ within 40s after host /harness: kill signal=9/'
+  - 'expect g2 /\[mp\] flow host changed to=1 epoch=1/ within 40s after host /harness: kill signal=9/'
+  - 'count g1,g2 /\[mp\] host lost: slot \d takes over/ <= 1'
+  - 'expect g2 /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/ after g1 /\[mp\] flow host now slot=1/'
+  - 'same g1,g2 /\[mp\] flow star got id=(\d+) grand=\d by=(\d)/ first'
+  - 'order g2 /\[mp\] flow star got id=(\d+) grand=\d by=2/ before g1 /\[mp\] flow star got id=$1 grand=\d by=2/ within 5s tol 250ms'
+  - 'order g1 /\[mp\] flow star got id=(\d+) grand=\d by=2/ before g1 /\[mp\] star delivered id=$1 path=(native|synthetic)/ within 20s'
+  - 'expect g1 /\[mp\] star delivered id=\d+ path=native/'
+  - 'count g1,g2 /\[mp\] star delivered id=/ <= 1'
+  - 'absent g1,g2 /\[mp\] (star delivered .*path=record|flow star dup|flow star delivery dropped|flow drop STAR|flow clear hold timeout)/'
+  - 'order g1 /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before g2 /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 15s tol 250ms'
+  - 'expect g1,g2 /\[mp\] flow barrier release serial=\d+ / within 90s after g1 /\[mp\] flow move type=4/'
+  - 'expect g1 /\[mp\] puppet slot=2 appear model=\w+ self=0/'
+  - 'expect g2 /\[mp\] puppet slot=1 appear model=\w+ self=0/'
+  - 'absent g1,g2 /\[mp\] session ended reason=(?!none \(shutdown\))/ before g1,g2 /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'absent g1,g2 /\[mp\] (slot \d left reason=(?!leave \(bye\)|timeout)|bad message from slot|events lost)/'
+  - '?metric g1,g2 fps >= 3'

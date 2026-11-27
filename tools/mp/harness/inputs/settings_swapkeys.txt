@@ -1,0 +1,32 @@
+# settingsnative round 4: the key-driven swap route, every press waits on the menu's own log line (no absolute times past the title).
+# Entry screen -> Settings -> Controls -> Change Buttons -> Jump -> pick list -> Circle -> the conflict question -> Yes -> saved swap.
+# Run with PETARI_GAME_CLOCK=1 PETARI_SHOT_MS=1000 GXV_REMAP=1 PETARI_HANDHELD=1 (no test hooks). Pick-list rows and the question's default cursor are looked up in the first run.
+mark title /boot: the title screen has appeared/ ~31
+mark entry /entry: screen shown/ ~38
+mark set /ui: screen settings$/ ~50
+mark ctl /ui: screen settings_controls/ ~60
+mark btn /ui: screen settings_buttons/ ~70
+mark pick /ui: screen settings_pick/ ~80
+mark conf /ui: window MP_SET_CONFLICT/ ~90
+mark swapped /settings: jump -> circle \(swapped\)/ ~100
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+4.5-4.7:DOWN
+entry+6-6.2:A
+set+2-2.2:DOWN             # 60 Assist (setnat31: the second row while Picture is Smooth Motion)
+set+3.5-3.7:DOWN           # Camera
+set+5-5.2:DOWN             # Controls
+set+6.5-6.7:A
+ctl+2-2.2:DOWN
+ctl+3.5-3.7:DOWN
+ctl+5-5.2:DOWN
+ctl+6.5-6.7:DOWN
+ctl+8-8.2:DOWN
+ctl+9.5-9.7:A
+btn+2-2.2:A
+pick+2-2.2:DOWN
+pick+4-4.2:A
+conf+2-2.2:RIGHT
+conf+4-4.2:A
+swapped+4-4.2:B
+swapped+7-7.2:B

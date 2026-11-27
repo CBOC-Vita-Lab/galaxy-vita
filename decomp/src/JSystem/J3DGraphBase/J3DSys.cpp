@@ -274,7 +274,22 @@ void J3DSys::reinitTexture() {
     GXLoadTexObj(&texObj, GX_TEXMAP7);
 }
 
+#ifdef TARGET_PC
+// GXV_HOTPROF_REINITGX (hotprof25 round 2; decomp/src/RVL_SDK/gx/GXTev.c, GXBump.c): the reset of the 16 TEV stages below (16 GXSetTevOrder
+// calls, the loop's 112, reinitIndStages' 16 GXSetTevDirect) as one pass of the GX library when it can make it (1: it did).
+extern "C" int port_gx_reinit_tev(void) __attribute__((weak));
+extern "C" int port_gx_reinit_tevdirect(void) __attribute__((weak));
+extern "C" void port_gx_reinit_tev_verify(int end) __attribute__((weak));
+#endif
+
 void J3DSys::reinitTevStages() {
+#ifdef TARGET_PC
+    if (port_gx_reinit_tev_verify) {
+        port_gx_reinit_tev_verify(0);
+    }
+    const bool portOnePass = port_gx_reinit_tev && port_gx_reinit_tev() != 0;
+    if (!portOnePass) {
+#endif
     GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
     GXSetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
     GXSetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
@@ -291,6 +306,9 @@ void J3DSys::reinitTevStages() {
     GXSetTevOrder(GX_TEVSTAGE13, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
     GXSetTevOrder(GX_TEVSTAGE14, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
     GXSetTevOrder(GX_TEVSTAGE15, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+#ifdef TARGET_PC
+    }
+#endif
 
     GXSetTevColor(GX_TEVREG0, ColorWhite);
     GXSetTevColor(GX_TEVREG1, ColorWhite);
@@ -302,6 +320,11 @@ void J3DSys::reinitTevStages() {
 
     u32 i;
     u32 numStages = GX_MAX_TEVSTAGE;
+#ifdef TARGET_PC
+    if (portOnePass) {
+        numStages = 0;  // (GXV_HOTPROF_REINITGX: the stages are reset already)
+    }
+#endif
     for (i = 0; i < numStages; i++) {
         GXSetTevColorIn((GXTevStageID)i, GX_CC_RASC, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO);
         GXSetTevColorOp((GXTevStageID)i, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
@@ -311,6 +334,11 @@ void J3DSys::reinitTevStages() {
         GXSetTevKAlphaSel((GXTevStageID)i, GX_TEV_KASEL_1);
         GXSetTevSwapMode((GXTevStageID)i, GX_TEV_SWAP0, GX_TEV_SWAP0);
     }
+#ifdef TARGET_PC
+    if (port_gx_reinit_tev_verify) {
+        port_gx_reinit_tev_verify(1);
+    }
+#endif
 
     GXSetTevSwapModeTable(GX_TEV_SWAP0, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_ALPHA);
     GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_RED, GX_CH_RED, GX_CH_ALPHA);
@@ -321,6 +349,9 @@ void J3DSys::reinitTevStages() {
 
 void J3DSys::reinitIndStages() {
     u32 i;
+#ifdef TARGET_PC
+    if (!(port_gx_reinit_tevdirect && port_gx_reinit_tevdirect() != 0))
+#endif
     for (i = 0; i < GX_MAX_TEVSTAGE; i++) {
         GXSetTevDirect((GXTevStageID)i);
     }

@@ -5,6 +5,9 @@
 
 #ifdef TARGET_PC
 #include "port/reduced_motion.h"
+#include "Game/Camera/CameraDirector.hpp"
+#include "Game/Camera/CameraHolder.hpp"
+#include "Game/Camera/CameraManGame.hpp"
 #include "Game/Demo/DemoDirector.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/System/GameSystem.hpp"
@@ -13,7 +16,9 @@
 #include "Game/Util/DemoUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/SingletonHolder.hpp"
+#include "port/hot_knob.h"
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 extern "C" float port_camera_zoom(void);
 extern "C" void port_log(const char* fmt, ...);  // (platform/src/port/perf.cpp) PETARI_ZOOM: handhelds look a little closer
@@ -31,7 +36,8 @@ static bool inGameScene() {
     if (pSystem == nullptr || pSystem->mSceneController == nullptr) {
         return false;
     }
-    // GXV_ASTRO_DOME_ZOOM_GUARD=1 preserves the dome's Pull Star framing; default off, read once.
+    // GXV_ASTRO_DOME_ZOOM_GUARD=1 keeps the original view in the whole AstroDome stage (its fixed room cameras, the Pull Star lecture,
+    // the galaxy-select map); read once. Off when unset here, but the Vita sets it to 1 (vita/vgx-game/entry.cpp, since 2.0).
     static const bool domeZoomGuard = EnvInt("GXV_ASTRO_DOME_ZOOM_GUARD", 0) == 1;
     return MR::isEqualSceneName("Game") && !MR::isStageFileSelect() &&
            !(domeZoomGuard && MR::isEqualStageName("AstroDome"));
@@ -42,6 +48,85 @@ static bool inCutscene() {
         return true;
     }
     return MR::isEventCameraActive();
+}
+
+// GXV_ZOOM_PULLSTAR (zoomclip23, 8 Nov; default 1; a MINOR CHANGE: the zoom the player chose is set aside for a moment). A Pull Star is
+// grabbed by pointing at it, and the pointer can only reach what is in the picture. The game's cameras frame a Pull Star chain so the
+// next star is in the picture at the original field of view; zoomed in, it often lies just past the edge and cannot be pointed at
+// ("issues reaching stars when they're a bit out of screen"). While a Pull Star is pointable (Mario within its range), pointed at,
+// pulling, or Mario is held by one (GCaptureTarget.cpp / GCapture.cpp call port_zoom_relax_request every turn), the zoom eases to 1.0
+// as in a cutscene, and back to the chosen zoom 45 turns (0.75 s) after the last request. 0: the zoom stays.
+extern uint32_t gPortAlodTurn;  // (ActorTurnLod.cpp: counts every turn, also a stopped one; SceneExecutor.cpp)
+static uint32_t sRelaxUntilTurn = 0;
+static bool sRelaxRequested = false;
+static bool zoomRelaxOn() {
+    return PORT_HOT_KNOB(bool, EnvInt("GXV_ZOOM_PULLSTAR", 1) != 0);
+}
+extern "C" void port_zoom_relax_request(void) {
+    if (!zoomRelaxOn()) {
+        return;
+    }
+    sRelaxUntilTurn = gPortAlodTurn + 45u;
+    sRelaxRequested = true;
+}
+static bool inZoomRelax() {
+    return sRelaxRequested && static_cast< int32_t >(sRelaxUntilTurn - gPortAlodTurn) > 0;
+}
+
+// GXV_ZOOM_FIXEDCAM (galmap23, 8 Nov; default 1 on the Vita, vita/vgx-game/entry.cpp; a MINOR CHANGE: the zoom the player chose is set
+// aside while the stage holds the camera still). A game camera whose eye and target the stage sets (CAM_TYPE_POINT_FIX, the
+// "complete fixed" shot) is a composed picture like a cutscene: the zoom crops it and Mario can walk out of the picture while the
+// original keeps him in it. While the game camera man runs such a camera, the zoom eases to 1.0 over the same 24 updates as for a
+// cutscene, and back when the stage hands over to a moving camera. 2: also the fixed-eye cameras that turn to follow Mario
+// (CAM_TYPE_EYEPOS_FIX, CAM_TYPE_EYEPOS_FIX_THERE). 0: the zoom stays (2.2.1).
+// Not needed for the menus, maps and cutscenes, which already keep the original view: the dome's galaxy-select map
+// (AstroDomeCameraController) and the Launch Star flight (SpinDriverCamera, MultiEventCamera) are event cameras (inCutscene); the
+// whole AstroDome stage is at 1.0 with GXV_ASTRO_DOME_ZOOM_GUARD (Vita default 1 since 2.0); the star-select screen has its own
+// camera context made at boot, outside the game scene (1.0, never set again); file select and the non-game scenes are excluded;
+// the pause-menu galaxy map is 2D.
+static int fixedCamMode() {
+    return PORT_HOT_KNOB(int, static_cast< int >(EnvInt("GXV_ZOOM_FIXEDCAM", 1)));
+}
+static bool inFramedGameCamera() {
+    const int mode = fixedCamMode();
+    if (mode <= 0 || !MR::isExistSceneObj(SceneObj_CameraDirector)) {
+        return false;
+    }
+    const CameraDirector* pDirector = MR::getCameraDirector();
+    if (pDirector == nullptr || pDirector->mCameraManGame == nullptr ||
+        pDirector->getCurrentCameraMan() != static_cast< CameraMan* >(pDirector->mCameraManGame)) {
+        return false;
+    }
+    const CameraManGame* pMan = pDirector->mCameraManGame;
+    if (pMan->mCamera == nullptr || pMan->mHolder == nullptr) {
+        return false;
+    }
+    // (the holder makes one camera per type, in its table's order: the indices are the same in every scene)
+    static s32 sPointFix = -2, sEyeFix = -2, sEyeFixThere = -2;
+    if (sPointFix == -2) {
+        sPointFix = pMan->mHolder->getIndexOf("CAM_TYPE_POINT_FIX");
+        sEyeFix = pMan->mHolder->getIndexOf("CAM_TYPE_EYEPOS_FIX");
+        sEyeFixThere = pMan->mHolder->getIndexOf("CAM_TYPE_EYEPOS_FIX_THERE");
+    }
+    const s32 type = pMan->mHolder->getIndexOf(pMan->mCamera);
+    if (type < 0) {
+        return false;
+    }
+    return type == sPointFix || (mode >= 2 && (type == sEyeFix || type == sEyeFixThere));
+}
+
+// Why the zoom is set aside now (nullptr: it is not). Every reason eases (24 camera updates), none jumps.
+static const char* zoomSetAsideReason() {
+    if (inCutscene()) {
+        return "cutscene / event camera";
+    }
+    if (inZoomRelax()) {
+        return "Pull Star in reach";  // (GXV_ZOOM_PULLSTAR, see above)
+    }
+    if (inFramedGameCamera()) {
+        return "fixed camera";  // (GXV_ZOOM_FIXEDCAM, see above)
+    }
+    return nullptr;
 }
 
 // The zoom in force: Z in play, 1.0 in a cutscene, and in between for the 24 camera updates (0.4 s) after either begins, so the
@@ -63,11 +148,13 @@ static f32 zoomedFovy(f32 fovy, bool init) {
     }
     f32 target = zoom;
     bool jump = init || !sZoomKnown;
+    const char* reason = nullptr;
     if (!inGameScene()) {
         target = 1.0f;
         jump = true;
-    } else if (!init && inCutscene()) {
-        target = 1.0f;
+        reason = "non-game scene / file select / dome";
+    } else if (!init && (reason = zoomSetAsideReason()) != nullptr) {
+        target = 1.0f;  // (a cutscene; GXV_ZOOM_PULLSTAR: a Pull Star is in reach; GXV_ZOOM_FIXEDCAM: a fixed camera; see above)
     }
     if (jump) {
         sZoomNow = target;
@@ -87,7 +174,8 @@ static f32 zoomedFovy(f32 fovy, bool init) {
     static f32 sLogTarget = 0.0f;
     if (logZoom && sLogTarget != target) {
         sLogTarget = target;
-        port_log("[zoom] target %.2f (%s), now %.2f", target, target > 1.0f ? "play" : "cutscene / non-game scene", sZoomNow);
+        port_log("[zoom] target %.2f (%s), now %.2f", target, target > 1.0f ? "play" : (reason != nullptr ? reason : "camera init"),
+                 sZoomNow);
     }
     if (sZoomNow > 1.0f) {
         return static_cast< f32 >(2.0 * atan(tan(fovy * (M_PI / 360.0)) / sZoomNow) * (180.0 / M_PI));
@@ -120,6 +208,9 @@ void CameraContext::initParams() {
     mViewInv.invert(mViewInv);
 
     mFovy = zoomedFovy(45.0f, true);
+#ifdef TARGET_PC
+    mPortFovyGame = 45.0f;
+#endif
     const f32 height = MR::getScreenHeight();
     const f32 width = MR::getScreenWidth();
     mAspectRatio = width / height;
@@ -164,6 +255,9 @@ void CameraContext::setFarZ(f32 far) {
 
 void CameraContext::setFovy(f32 fovy) {
     mFovy = zoomedFovy(fovy, false);
+#ifdef TARGET_PC
+    mPortFovyGame = fovy;
+#endif
     updateProjectionMtx();
 }
 

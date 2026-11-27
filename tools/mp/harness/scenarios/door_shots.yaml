@@ -1,0 +1,24 @@
+# flow (one door, 12 Nov): the owner's screenshot set of the new multiplayer screens, two consoles, Vita button pictures (the harness
+# sets PETARI_HANDHELD_UI=1 + PETARI_BACKEND=vgx), 960x544. Inputs: inputs/door_host.txt, inputs/door_guest.txt.
+name: door_shots
+description: one door screenshots (the main menu, characters, gathering with two heads and the 5-character code, falls, Which File?, Safe Copies, my files, pause, Players, a player); needs the fake service (SMG_ONLINE_URL)
+seconds: 340
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@door_host"
+    env: {SMG_MP_NAME: Alex, SMG_KEYBOARD_NAME: Alex, SMG_MP_LOOK: 0}
+  - name: guest
+    input: "@door_guest"
+    env: {SMG_MP_NAME: Luigi64, SMG_KEYBOARD_NAME: Luigi64, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] ui: screen keep/'
+  - 'expect host /\[mp\] ui: screen gather/'
+  - 'expect host /\[mp\] ui: screen falls/'
+  - 'expect host /\[mp\] ui: screen save/'
+  - 'expect guest /\[mp\] ui: screen gather/'
+  - 'expect host /\[mp\] ui: far-away code shown/'

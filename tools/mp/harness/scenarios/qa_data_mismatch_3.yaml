@@ -1,0 +1,43 @@
+# QA-FUNC 15/15. GAME DATA MISMATCH REFUSAL WITH A THIRD CONSOLE PRESENT. mp_version has two consoles (host and a console with other data):
+# nothing shows that a refused console leaves a RUNNING session with a good guest untouched. Here a good guest plays with the host while a console
+# with different cooked data (HARNESS_DATA=cooked_alt, hash differs from aa3ddccb) scans, sees the room as incompatible (compatible=0) and is refused
+# on the client side ("join refused: room N is a different version"); the host never sees a HELLO from it. Needs the alternative data:
+# tools/mp/harness/make_alt_data.py -> /home/claude/g3/hruns/.cache/cooked_alt (not present in this container). READY once it exists.
+name: qa_data_mismatch_3
+description: "a console with other game data is refused (client side, error 6) while host and good guest keep playing; host never admits it"
+seconds: 300
+requires: {files: [/home/claude/g3/hruns/.cache/cooked_alt]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: good
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+  - name: other
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_AUTO_JOIN_ANY: 1, SMG_MP_LOOK: 2, HARNESS_DATA: /home/claude/g3/hruns/.cache/cooked_alt}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit host,good,other == 0'
+  - 'expect host /\[mp\] core data hash=aa3ddccb /'
+  - 'expect good /\[mp\] core data hash=aa3ddccb /'
+  - 'absent other /\[mp\] core data hash=aa3ddccb /'
+  - 'expect host /\[mp\] slot 1 joined name=good rejoin=0 .*players=2/'
+  - 'expect good /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/'
+  - 'expect other /\[mp\] scan: room host=\S+ mode=1 players=\d+ compatible=0/'
+  - 'expect other /\[mp\] join refused: room \d+ is a different version/'
+  - 'expect other /\[mp\] auto: tried incompatible room \S+: refused error=6/'
+  - 'absent other /\[mp\] (joined slot=|hello sent|snapshot received|puppet slot=\d appear)/'
+  - 'absent host /\[mp\] slot 2 joined/'
+  - 'absent host /\[mp\] hello rejected reason=version/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/'
+  - 'expect good /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before good /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30s'
+  - 'absent host,good /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|bad message from slot|events lost)/'

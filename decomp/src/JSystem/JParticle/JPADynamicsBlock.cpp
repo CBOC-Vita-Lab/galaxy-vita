@@ -1,6 +1,9 @@
 #include "JSystem/JParticle/JPADynamicsBlock.hpp"
 #include "JSystem/JMath/JMATrigonometric.hpp"
 #include "JSystem/JParticle/JPAEmitter.hpp"
+#ifdef TARGET_PC
+#include "JSystem/JParticle/JPAParticle.hpp"  // (boss23 round 2: the new particles' size)
+#endif
 
 namespace {
     inline f32 JPASinShort(s16 v) {
@@ -11,6 +14,17 @@ namespace {
         return reinterpret_cast< const f32* >(&JMath::sSinCosTable.table[static_cast< u16 >(v) >> 2])[1];
     }
 }
+
+#ifdef TARGET_PC
+// GXV_PB_PTCL (Performance-mode visual budget, decomp/src/Game/LiveActor/LodCtrl.cpp): the emission of an emitter far from the camera
+// and the player is thinned by a factor (the fraction stays in mEmitCount, so a rate of 1 a turn emits every second turn).
+// (flow23: the factor of THIS calc, decided at JPAEmitterManager::calcNormal's start: 1 outside the stage's own particle calc)
+extern "C" float port_pb_ptcl_turn_factor(void);
+extern "C" float port_pb_ptcl_scale_at(float x, float y, float z);
+extern "C" float g_port_boss_ptcl_grow;   // (boss23 round 2, PETARI_BOSS_PTCL_GROW: > 1 while thinned emitters make larger particles)
+extern "C" float g_port_boss_ptcl_scale;  // (boss23, PETARI_BOSS_PTCL: < 1 while a boss storm is thinned; decomp/src/Game/Scene/GameScene.cpp)
+extern "C" void port_logic_count(int what, unsigned n);
+#endif
 
 void JPAVolumePoint(JPAEmitterWorkData* work) {
     work->mVolumeCalcData.mVolumePos.zero();
@@ -68,8 +82,17 @@ void JPAVolumeCube(JPAEmitterWorkData* work) {
 static void JPAVolumeSphere(JPAEmitterWorkData* work) {
     s16 phi, theta;
     if (work->mpEmtr->checkFlag(JPADynFlag_FixedInterval)) {
+#if defined(TARGET_PC) && !defined(__arm__)   // (merge of 3.0 on c181: not on the Vita (ARM): its division by zero already gives 0 as the Wii's, and c181's code, with its PGO profile, stays there)
+        // PORT: the first ring of a fixed-interval sphere has mVolumeAngleMax == 1 (and a one-division sphere mDivNumber == 1):
+        // an integer division by zero. The Wii's divw and the Vita's sdiv give 0 there; x86's idiv traps (SIGFPE on the desktop
+        // build, seen when a spin hit a multiplayer puppet). Same result as the consoles: a zero divisor gives 0.
+        const s32 divPhi = work->mDivNumber - 1, divAngle = work->mVolumeAngleMax - 1;
+        phi = (u16)((divPhi != 0 ? work->mVolumeX * 0x8000 / divPhi : 0) + 0x4000);
+        u16 angle = (u16)(divAngle != 0 ? work->mVolumeAngleNum * 0x10000 / divAngle : 0);
+#else
         phi = (u16)(work->mVolumeX * 0x8000 / (work->mDivNumber - 1) + 0x4000);
         u16 angle = (u16)(work->mVolumeAngleNum * 0x10000 / (work->mVolumeAngleMax - 1));
+#endif
         theta = (f32)angle * work->mVolumeSweep + 0x8000;
         work->mVolumeAngleNum++;
         if (work->mVolumeAngleNum == work->mVolumeAngleMax) {
@@ -164,6 +187,9 @@ void JPADynamicsBlock::create(JPAEmitterWorkData* work) {
     if (work->mpEmtr->checkStatus(JPAEmtrStts_RateStepEmit)) {
         s32 emitCount;
         s32 createCount;
+#ifdef TARGET_PC
+        f32 portGrow = 1.0f;  // (boss23 round 2: the size factor of this turn's new particles, PETARI_BOSS_PTCL_GROW)
+#endif
 
         // Probably an inlined function.
         if (work->mpEmtr->checkFlag(JPADynFlag_FixedInterval)) {
@@ -180,6 +206,19 @@ void JPADynamicsBlock::create(JPAEmitterWorkData* work) {
             f32 rateRndm = getRateRndm();
             JPABaseEmitter* emtr = work->mpEmtr;
             f32 newPtclCount = emtr->mRate * (rateRndm * emtr->get_r_zp() + 1.0f);
+#ifdef TARGET_PC
+            if (port_pb_ptcl_turn_factor() < 1.0f) {
+                const f32 pbScale = port_pb_ptcl_scale_at(emtr->mGlobalTrs.x, emtr->mGlobalTrs.y, emtr->mGlobalTrs.z);
+                if (pbScale < 1.0f) {
+                    newPtclCount *= pbScale;
+                    port_logic_count(13, 1);
+                }
+            }
+            if (g_port_boss_ptcl_scale < 1.0f) {
+                newPtclCount *= g_port_boss_ptcl_scale;
+                portGrow = g_port_boss_ptcl_grow;
+            }
+#endif
             f32 newEmitCount = emtr->mEmitCount + newPtclCount;
             emtr->mEmitCount = newEmitCount;
             emitCount = (s32)newEmitCount;
@@ -200,6 +239,14 @@ void JPADynamicsBlock::create(JPAEmitterWorkData* work) {
             JPABaseParticle* ptcl = work->mpEmtr->createParticle();
             if (ptcl == NULL)
                 break;
+#ifdef TARGET_PC
+            if (portGrow != 1.0f) {
+                // fewer, larger particles (the base size: the scale animations and the children start from it)
+                ptcl->mScaleOut *= portGrow;
+                ptcl->mParticleScaleX *= portGrow;
+                ptcl->mParticleScaleY *= portGrow;
+            }
+#endif
             createCount--;
         }
     }

@@ -1,0 +1,3 @@
+# tools/run_host_tests.sh skips (SKIP, not FAIL) the test names listed here, one per line: tests that need a Vita, an emulator,
+# network, or an argument the runner cannot supply.  Tests that need docker are skipped automatically when no daemon answers.
+test_boot_data_park   # needs --production-root <checkout with WP-T>

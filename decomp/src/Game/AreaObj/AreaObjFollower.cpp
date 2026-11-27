@@ -10,11 +10,19 @@ AreaObjFollower::AreaObjFollower(AreaObj* pObj, const JMapInfoIter& rIter) : Bas
 
 void AreaObjFollower::update() {
     if (MR::isDead(static_cast< LiveActor* >(getFollowTargetActor())) || !isValid()) {
+#ifdef TARGET_PC
+        PortAreaSet(mObj->_15, false);  // (GXV_OC_LIGHTFIND: a change moves port_area_gen)
+#else
         mObj->_15 = false;
+#endif
     } else {
         calcFollowMatrix(&mFollowMtx);
 
+#ifdef TARGET_PC
+        PortAreaSet(mObj->_15, true);
+#else
         mObj->_15 = true;
+#endif
     }
 }
 

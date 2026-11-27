@@ -1,0 +1,54 @@
+# starfix review 14 Nov: the slow-load variant of star_after_host_move. SMG_MP_TEST_STALL_MS (desktop hook, MpGame.cpp, compiled out of the Vita objects) models the host's
+# scene load: armed ONLY by the dome hook (right after the host's MOVE, "dome test:"), for 20 s NOTHING of the host's multiplayer pump runs (no drain, no MpFlow::update,
+# no flow clock tick), as a Vita loading a big galaxy does; the first pump afterwards gives the flow clock one capped 500 ms step. The guest's STAR (old serial, sent ~1 s after the move) is therefore first handled
+# >= 20 s later and must still be credited: the late window counts the host's pumping time (FlowClock), not the wall time of the stall.
+# starfix (DESIGN-star revision 4; fails on mp-next and on worldsync, passes with the starfix code): a guest takes a star AFTER the host already moved on.
+# The host returns to the Observatory 12 s into Good Egg 1 (SMG_MP_TEST_DOME); the guest is held in its old scene for 8 s after the MOVE arrived
+# (SMG_MP_TEST_MOVE_DELAY_MS, desktop hook) and gets the scenario star 1 s after the host's move ARRIVES (SMG_MP_TEST_STAR_AFTER_MOVE_MS: the order is guaranteed; a fixed 13 s raced the host's 12 s dome hook): its STAR carries the OLD serial, 1 s after the
+# host's MOVE (the window counts the host's own pumping time, wall clock at worst; at min_speed 0.4 that is 2.5 s, well inside 5 s; the claimer still in that serial).
+# Before: the host's serial was already the next one, so the STAR was dropped at the host ("flow drop STAR"), the guest kept it in RAM only and the next
+# after-clear snapshot overwrote it: the star was lost on both consoles.
+# Now: the host judged it from the scene it LEFT ("flow left scene", "flow star late"), credited it once, sent the verdict to everyone ("flow star verdict ...
+# verdict=1", STARV) and offered a snapshot; the guest set its flag again on the verdict. No order of STAR / MOVE / snapshot changes that.
+name: star_after_host_move_slowload
+description: "same, with a host that reads no message for 20 s after its move (a slow Vita load): the claim still credits (the 5 s window counts pumping time)"
+seconds: 480
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR_AFTER_MOVE_MS, SMG_MP_TEST_DOME, SMG_MP_TEST_MOVE_DELAY_MS, SMG_MP_TEST_STALL_MS]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_DOME: 12, SMG_MP_TEST_STALL_MS: 20000}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR_AFTER_MOVE_MS: 1000, SMG_MP_TEST_MOVE_DELAY_MS: 8000}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed|Assertion|OSPanic|FATAL/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 1 joined name=guest/'
+  - 'expect host /\[mp\] flow move type=\d+ galaxy=\w+ scen=-?\d+ serial=(\d+) role=host/ after host /\[mp\] flow test menu: dome/'
+  - 'expect guest /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/'
+  # the scenario's point: the guest's star happened under the OLD serial after the host's move
+  - 'expect guest /\[mp\] flow star got id=\d+ grand=\d by=1/ after host /\[mp\] flow move type=\d+ galaxy=\w+ .*role=host/ within 30s'
+  # target behaviour
+  - 'absent host /\[mp\] flow drop STAR/'
+  - 'expect host /\[mp\] flow left scene serial=(\d+) galaxy=EggStarGalaxy scen=1 /'
+  - 'expect host /\[mp\] flow star late id=(\d+) by=1 serial=(\d+)\/(\d+)/ after host /\[mp\] flow move type=\d+ galaxy=\w+ .*role=host/'
+  - 'count host /\[mp\] flow star late id=\d+ by=1 / == 1'   # credited once, whichever order
+  - 'expect host /\[mp\] flow star verdict id=\d+ by=1 serial=\d+ verdict=1/ after host /\[mp\] flow star late id=/'
+  - 'expect guest /\[mp\] flow star final id=\d+ by=1 serial=\d+ verdict=credited \(own, flag set again\)/'   # the claimer sets its flag again on the host's verdict
+  - 'absent * /\[mp\] flow star final .*verdict=(refused|vetoed)/'
+  - 'absent * /\[mp\] flow drop STARV/'
+  - 'absent * /\[mp\] (flow star dup|flow refused STAR|star delivered .*path=record)/'
+  - 'expect host /\[mp\] snapshot sent slot=1 bytes=\d+ crc=[0-9a-f]+/ after host /\[mp\] flow star late id=/'
+  # the stall is armed by the dome hook only (after "flow test menu: dome" announced it, at "dome test:"), once, and the late judgement comes AFTER it ends
+  - 'expect host /\[mp\] game test stall: no messages read for 20000 ms/ after host /\[mp\] dome test: serial=\d+/'
+  - 'count host /\[mp\] game test stall: no messages read/ == 1'
+  - 'expect host /\[mp\] game test stall: reading messages again/ after host /\[mp\] game test stall: no messages read for 20000 ms/'
+  - 'expect host /\[mp\] flow star late id=\d+ by=1 / after host /\[mp\] game test stall: reading messages again/'   # judged >= 20 s after the move, on one capped clock step
+  - 'mp_save host'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

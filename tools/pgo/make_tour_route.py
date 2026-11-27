@@ -23,10 +23,15 @@ if len(sys.argv) > 2:
 out = ["# PGO tour route (tools/pgo/make_tour_route.py): menu path of opening.txt, storybook skipped by a hold of A,",
        "# then each galaxy of PETARI_STAGE for %d s of gameplay with a wandering pad script." % hold,
        "#!env PETARI_STAGE=" + ",".join(STAGES), "#!env PETARI_STAGE_HOLD=%d" % (hold * 60),
-       "27-27.4:A|B", "31-36.8:PX=-0.25|PY=0.30", "34-34.2:A", "37-44.5:PX=0.29|PY=0.61", "40-40.2:A",
-       "45-51.5:PX=-0.56|PY=-0.40", "48-48.2:A", "52-61.8:PX=0.29|PY=0.60", "55-55.2:A", "62-66:PX=0.52|PY=0.78",
-       "65-65.2:A", "70-73:A"]
-t0 = 76.0
+       "27-27.4:A|B",
+       # 3.0: the entry screen (Single Player / Multiplayer / Settings) comes between the title and the file select (shown ~28.6 s):
+       # A on Single Player, the cursor's start; everything after it 5 s later than before (pgotool31, 18 Nov 2026)
+       "# --- 3.0 entry screen (Single Player / Multiplayer / Settings; shown ~28.6 s): A on Single Player, the cursor's start (pgotool31)",
+       "30-30.2:A",
+       "36-41.8:PX=-0.25|PY=0.30", "39-39.2:A", "42-49.5:PX=0.29|PY=0.61", "45-45.2:A",
+       "50-56.5:PX=-0.56|PY=-0.40", "53-53.2:A", "57-66.8:PX=0.29|PY=0.60", "60-60.2:A", "67-71:PX=0.52|PY=0.78",
+       "70-70.2:A", "75-78:A"]
+t0 = 81.0
 end = t0 + 20 + len(STAGES) * (hold + 25)
 t = t0
 n = 0

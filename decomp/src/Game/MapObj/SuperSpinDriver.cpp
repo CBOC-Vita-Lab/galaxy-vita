@@ -714,6 +714,7 @@ void SuperSpinDriver::exeShootStart() {
         updateBindActorPoseToShoot(1.0f);
 #ifdef TARGET_PC
         port_vr_transit_begin(this);
+        port_anticipate_event(1, 46 * 1000 / 60, mFlightTime * 1000 / 60);  // (anticip32: the launch is 46 turns away (tryShoot), the flight lasts mFlightTime turns; drawing only)
 #endif
     }
 

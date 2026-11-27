@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+extern "C" void port_log_summary(const char*, ...) {}
+
 namespace {
 using vgx::vita::ShaderPack;
 struct Record { uint32_t stage; uint64_t hash; std::vector<uint8_t> bytes; };
@@ -19,7 +21,7 @@ bool Build(const char* root, const char* identity, const char* output) {
     uint32_t key = 2166136261u;
     for (const auto* c = reinterpret_cast<const uint8_t*>(identity); *c; ++c) key = (key ^ *c) * 16777619u;
     char expected[16]; std::snprintf(expected, sizeof expected, "%08x", key);
-    if (fs::path(root).filename() != "v2" || fs::path(root).parent_path().filename() != expected)
+    if (fs::path(root).filename() != "v3" || fs::path(root).parent_path().filename() != expected)
         return Error("full ABI identity does not match the cache folder key/version");
     const uint64_t abi = XXH3_64bits(identity, std::strlen(identity));
     if (fs::exists(output, ec) || ec) return Error("refuse to overwrite an existing pack");
@@ -88,6 +90,6 @@ bool Build(const char* root, const char* identity, const char* output) {
 }
 }
 int main(int argc, char** argv) {
-    if (argc != 4) return Error("usage: vita_shader_pack cache-root-v2 full-ABI-identity new-output") ? 0 : 1;
+    if (argc != 4) return Error("usage: vita_shader_pack cache-root-v3 full-ABI-identity new-output") ? 0 : 1;
     return Build(argv[1], argv[2], argv[3]) ? 0 : 1;
 }

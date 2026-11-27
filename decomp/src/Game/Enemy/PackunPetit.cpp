@@ -1,3 +1,4 @@
+#include "Game/LiveActor/Spine.hpp"
 #include "Game/Enemy/PackunPetit.hpp"
 #include "Game/Enemy/AnimScaleController.hpp"
 #include "Game/Enemy/WalkerStateBindStarPointer.hpp"
@@ -22,6 +23,9 @@
 #include "Game/Util/StarPointerUtil.hpp"
 #include "JSystem/JGeometry/TVec.hpp"
 #include "JSystem/JMath/JMath.hpp"
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 namespace NrvPackunPetit {
     NEW_NERVE_ONEND(PackunPetitNrvNonActive, PackunPetit, NonActive, NonActive);
@@ -84,6 +88,9 @@ void PackunPetit::init(const JMapInfoIter& rIter) {
     initBlowModel();
     initNerve(GET_NERVE(PackunPetit, PackunPetitNrvWait));
     makeActorAppeared();
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 5);  // (GXV_ALOD, actorlod23: family 5, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void PackunPetit::initAfterPlacement() {
@@ -544,3 +551,12 @@ bool PackunPetit::tryDPDSwoon() {
     setNerve(GET_NERVE(PackunPetit, PackunPetitNrvDPDSwoon));
     return true;
 }
+
+#ifdef TARGET_PC
+// GXV_IDLE25 (ActorTurnLod.cpp): 1 when the petit piranha is in NonActive (asleep: sensors off, not posed) with no change pending; 0 otherwise.
+extern "C" int port_idle25_petit_nerve(const void* pActor) {
+    const PackunPetit* p = static_cast< const PackunPetit* >(pActor);
+    const Spine* s = p->mSpine;
+    return s != nullptr && s->mNextNerve == nullptr && s->mCurrNerve == GET_NERVE(PackunPetit, PackunPetitNrvNonActive) ? 1 : 0;
+}
+#endif

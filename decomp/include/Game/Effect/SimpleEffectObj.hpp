@@ -20,9 +20,8 @@ public:
     };
 
     virtual TVec3f* getClippingCenterOffset() const {
-        TVec3f vec;
-        vec.set(0.0f, 0.0f, 0.0f);
-        return &vec;
+        static TVec3f offset(0.0f, 0.0f, 0.0f);
+        return &offset;
     };
 
     virtual bool isSyncClipping() const {

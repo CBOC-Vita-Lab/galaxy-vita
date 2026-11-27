@@ -151,4 +151,10 @@ public:
     /* 0x1E0 */ s32 _1E0;
     /* 0x1E4 */ u8 _1E4;
     /* 0x1E5 */ u8 _1E5;
+#ifdef TARGET_PC
+    // reflfur25 (GXV_MIRROR25 = 2): a display list of one command, ZMode(TRUE, ALWAYS, TRUE), called after the flag lists of drawIn while mPortZAlwaysOn
+    u8* mPortZAlways = nullptr;
+    u32 mPortZAlwaysSize = 0;
+    bool mPortZAlwaysOn = false;
+#endif
 };

@@ -31,7 +31,7 @@ void loadTexCoordGens(u32 texGenNum, J3DTexCoord* texCoords) {
     var_r28 = 61;
     J3DGDWriteXFCmdHdr(0x1050, texGenNum);
 
-    if (j3dSys.checkFlag(0x40000000)) {
+    if (J3D_MSYS.checkFlag(0x40000000)) {  // (GXV_PAR_DL: the material path's J3DSys, J3DSys.hpp)
         for (int i = 0; i < texGenNum; i++) {
             if (texCoords[i].getTexGenMtx() != 60) {
                 var_r28 = i * 3;
@@ -48,7 +48,7 @@ void loadTexCoordGens(u32 texGenNum, J3DTexCoord* texCoords) {
 }
 
 void J3DTexMtx::load(u32 mtxIdx) const {
-    if (j3dSys.checkFlag(J3DSysFlag_PostTexMtx)) {
+    if (J3D_MSYS.checkFlag(J3DSysFlag_PostTexMtx)) {
         loadPostTexMtx(mtxIdx);
     } else {
         loadTexMtx(mtxIdx);
@@ -272,7 +272,7 @@ u16 getTexNoReg(void* pDL) {
 }
 
 void loadTexNo(u32 param_0, const u16& texNo) {
-    ResTIMG* resTIMG = j3dSys.getTexture()->getResTIMG(texNo);
+    ResTIMG* resTIMG = J3D_MSYS.getTexture()->getResTIMG(texNo);
     J3DSys::sTexCoordScaleTable[param_0].field_0x00 = (u16)resTIMG->mWidth;
     J3DSys::sTexCoordScaleTable[param_0].field_0x02 = (u16)resTIMG->mHeight;
 
@@ -292,7 +292,7 @@ void loadTexNo(u32 param_0, const u16& texNo) {
 }
 
 void patchTexNo_PtrToIdx(u32 texID, const u16& idx) {
-    ResTIMG* timg = j3dSys.getTexture()->getResTIMG(idx);
+    ResTIMG* timg = J3D_MSYS.getTexture()->getResTIMG(idx);
     J3DGDSetTexImgPtrRaw(GXTexMapID(texID), idx);
 }
 

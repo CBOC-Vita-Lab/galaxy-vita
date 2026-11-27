@@ -1,0 +1,31 @@
+# name<TAB>ok|filtered|reserved. Both implementations (server/src/core/names.js, platform/src/mp/mp_name_filter.h) must agree on every line.
+Alex	ok
+AlexDev	ok
+Grape	ok
+Dickson	ok
+Badminton	ok
+Torpedo	ok
+Analog	ok
+Assassin	ok
+Therapist	ok
+Mario Fan	ok
+Sky_9	ok
+Luigi-2	ok
+Yuki	ok
+Fvck	filtered
+Phuck	filtered
+Shiit	filtered
+Fuuuck	filtered
+F.u.c.k	filtered
+Nigg3r	filtered
+Niqqer	filtered
+Raper	filtered
+Ass_Ass	filtered
+P3do	filtered
+Sh1t	filtered
+Admin	reserved
+Admin1	reserved
+CBOC_Staff	reserved
+CBOC Mod	reserved
+Moderator	reserved
+Official	reserved

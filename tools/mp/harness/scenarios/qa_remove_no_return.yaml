@@ -1,0 +1,44 @@
+# QA-FUNC 8/15. The host REMOVES a player; that console cannot come back. Chain: g1 is removed 20 s into the level (SMG_MP_TEST_KICK="20:1" on the
+# host: MpFlow.cpp testMenuHostStep calls mp_ui_kick(1), the call the Remove button's confirmation makes; log "kick test: slot 1", then the
+# core's "kick slot=0 target=1" and "kicked slot=1 reason=host"); g1 ends (HARNESS_END on its error line), then the SAME console restarts
+# (HARNESS_AFTER + HARNESS_CONTINUE: same console id and secret, same saves) and tries to join again by its autopilot: the host must answer
+# "hello rejected reason=kicked". The document says a removal "is not a lock" (MULTIPLAYER.md, Playing with strangers): a different console is not
+# refused. SKIPs until the binary has SMG_MP_TEST_KICK.
+name: qa_remove_no_return
+description: "host removes g1; the same console is refused when it tries again; a fresh console can still join (the documented limit)"
+seconds: 420
+min_speed: 0.3
+requires: {strings: [SMG_MP_TEST_KICK]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    may_end_early: true   # ends by its HARNESS_END mark (the early-exit preflight would call the run INVALID)
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_KICK: "20:1", HARNESS_END: '\[mp\] hello rejected reason=kicked name=g1.*|60'}
+  - name: g1
+    may_end_early: true   # ends by its HARNESS_END mark (the early-exit preflight would call the run INVALID)
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_NAME: g1, HARNESS_END: '\[mp\] session ended reason=kicked|3'}
+  - name: g1again
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_NAME: g1, HARNESS_AFTER: g1, HARNESS_CONTINUE: g1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] slot 1 joined name=g1 rejoin=0 /'
+  - 'expect host /\[mp\] kick test: slot 1/'
+  - 'expect host /\[mp\] kick slot=0 target=1/ within 3s after host /\[mp\] kick test: slot 1/'
+  - 'expect host /\[mp\] kicked slot=1 reason=host/'
+  - 'absent g1,g1again /\[mp\] kick /'
+  - 'order host /\[mp\] kick test: slot 1/ before g1 /\[mp\] session ended reason=kicked/ within 10s'
+  - 'expect host /\[mp\] slot 1 left reason=\S+ .*players=1/ within 10s after host /\[mp\] kick test: slot 1/'
+  - 'expect host /\[mp\] hello rejected reason=kicked name=g1/ within 120s after g1again /\[mp\] auto: joining/'
+  - 'expect g1again /\[mp\] rejected by host reason=4/'
+  - 'absent g1again /\[mp\] joined slot=/'
+  # (removed: `absent ... after` does not exist in the rules language, it ignored "after" and matched g1's first join; the count rule below proves no rejoin)
+  - 'absent host /\[mp\] (session ended reason=(?!none \(shutdown\))|bad message from slot)/'
+  - 'absent g1again /\[mp\] (puppet slot=\d appear|flow barrier release)/'
+  - 'count host /\[mp\] slot \d joined name=g1 / == 1'

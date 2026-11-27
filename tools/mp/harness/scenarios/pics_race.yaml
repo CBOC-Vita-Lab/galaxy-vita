@@ -1,0 +1,38 @@
+# Star Race in Good Egg 1: armed, countdown, GO on both, both finish (SMG_MP_TEST_STAR: guest 15 s, host 25 s after the
+# scene start), the same results on both (guest first), race over, the host moves on.
+# Shots every 15 s only: a capture stalls that process's game thread (mp-int 5aff9c5+: ~0.35 s avg, up to 3.7 s), and one
+# inside the 3 s countdown skews the wall-clock GO rule below (harness2, mp_race-202457: host GO 2 s after the guest's).
+name: pics_race
+description: Star Race go / finish / results, then the host's next MOVE
+seconds: 300
+shot_size: 960x544
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 25}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 15}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow session start role=host slot=0 mode=2/'
+  - 'order host /\[mp\] race armed serial=(\d+) galaxy=EggStarGalaxy/ before guest /\[mp\] race armed serial=$1 galaxy=EggStarGalaxy/ within 10s'
+  # GO is sent when the host's countdown starts (with the start turn); both reach "race go" (the start) together
+  - 'order host /\[mp\] race countdown serial=(\d+)/ before guest /\[mp\] race go received serial=$1/ within 3s'
+  # each console times from its own GO (by design, accepted 8 Nov): the starts may differ by a capture stall (<= 3.7 s seen)
+  # on the desktop; 1 s is the goal (soft), 4.5 s the hard limit (a lost or late GO is still caught)
+  - 'order host /\[mp\] race go serial=(\d+)/ near guest /\[mp\] race go serial=$1/ within 4500ms'
+  - '?order host /\[mp\] race go serial=(\d+)/ near guest /\[mp\] race go serial=$1/ within 1s'
+  - 'order guest /\[mp\] race go received serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s'
+  - 'expect guest /\[mp\] race finish slot=1 frames=\d+ star=\d+/ within 90s after guest /\[mp\] race go received/'
+  - 'expect host /\[mp\] race finish slot=0 frames=\d+ star=\d+/ within 90s after host /\[mp\] race go serial/'
+  - 'expect host /\[mp\] race finish slot=1 frames=\d+$/ within 5s after guest /\[mp\] race finish slot=1/'
+  - 'order host /\[mp\] race results serial=(\d+) n=2 first=1 frames=(\d+)/ before guest /\[mp\] race results serial=$1 n=2 first=1 frames=$2/ within 3s'
+  - 'expect host /\[mp\] race over serial=\d+/ within 90s after host /\[mp\] race results/'
+  - 'absent * /\[mp\] (race hold timeout|race drop|star delivered)/'

@@ -17,9 +17,10 @@ Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
 - `libshacccg.suprx` in `ur0:data/` (the shader compiler most vitaGL games need).
 - About 2.5 GB free on the Vita (about 3.5 GB if you keep the movies full size; see
   [Prepare Your Game](MANUAL-PREPARE-GAME.md)).
-- Python 3 on your computer, for the game preparation, and a C++ compiler with
-  libjpeg for shrinking the movies (the guide shows how to get them on Mac,
-  Windows and Linux).
+- Python 3 on your computer, for the game preparation, and, only if you shrink
+  the movies, a C++ compiler with libjpeg (the guide shows how to get them on
+  Mac, Windows and Linux).
+- **Recommended for best 60 FPS performance (optional):** **CapUnlocker** (unlocks the Vita's 4th CPU core) and **PSVshell / PSVshellPlus** (overclock to **500 MHz CPU / 222 MHz GPU / 222 MHz BUS**; the game automatically keeps your 500 MHz overclock profile).
 
 ## Installation
 
@@ -28,8 +29,8 @@ Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
    for the VPK plus guides, tools and source. **Don't unzip the VPK.**
    [Download checks](docs/CHECK-DOWNLOAD.md) are optional.
 2. Prepare your game files on your computer with [Prepare Your Game](MANUAL-PREPARE-GAME.md):
-   extract your disc, convert it, and **shrink the movies** so they play smoothly
-   ([step 3](MANUAL-PREPARE-GAME.md#3-shrink-the-movies-recommended)). You end up with a
+   extract your disc and convert it. Shrinking the movies is optional, to save
+   card space ([step 3](MANUAL-PREPARE-GAME.md#3-shrink-the-movies-optional-saves-about-1-gb)). You end up with a
    `prepared-game` folder holding `sys/` and `files/`.
 3. Use one of the transfer methods below. Copy `sys/` and `files/` into
    `ux0:data/smg/game/`, and copy `Galaxy-Vita.vpk` into `ux0:VPK/`. Create
@@ -39,7 +40,9 @@ Use `Galaxy-Vita.vpk`, title ID `SMGV00001`.
    file in `ux0:VPK/` first, then in VitaShell use **Triangle > Copy**, open
    `ur0:data/` and use **Triangle > Paste**.
 5. In VitaShell, open `ux0:VPK/Galaxy-Vita.vpk`, press Cross and confirm.
-   Launch the Super Mario Galaxy bubble. [Controls](CONTROLS.md) has the layout.
+   Launch the Super Mario Galaxy bubble. [Controls](CONTROLS.md) has the layout, including how surfing and
+   the Star Ball steer by tilt, and what to do if your Vita's motion sensor doesn't work: the left stick
+   can steer them ([Tilt](CONTROLS.md#tilt)).
 
 The first launch takes a little longer while the graphics are prepared.
 
@@ -102,6 +105,16 @@ settings and compiled graphics stay where they are.
 - **Missing game files:** check that `ux0:data/smg/game/sys/fst.bin` exists and
   that you copied the *prepared* files, not the raw extraction.
 - **Shader compiler error:** check `ur0:data/libshacccg.suprx`.
+- **An error with `C2-12828-1` when the bubble starts:** this one error code has several causes, so
+  check them in turn: `ur0:data/libshacccg.suprx` exists (it is set up once per Vita); the app installed
+  is the one with title ID `SMGV00001`; and your disc image is the USA one (`RMGE01`), since other regions
+  aren't supported. If it still happens, report it with `ux0:data/smg/log.txt`, the title ID and your
+  disc's region.
+- **The FTP or Linux file transfer fails or stalls:** use USB mode instead (it is also much faster), or the
+  [installer](EASY-INSTALL.md). Problems with the installer itself belong on the
+  [installer's issue page](https://github.com/CBOC-Vita-Lab/vita-installer/issues).
+- **Surfing or the Star Ball won't steer:** your Vita's motion sensor may not work. See
+  [Tilt](CONTROLS.md#tilt): the game switches those levels to the left stick by itself, or you can choose it in Settings.
 - **Stuck on the first loading screen:** give the first launch a minute. If it
   never finishes, see [Known Issues](KNOWN-ISSUES.md).
 

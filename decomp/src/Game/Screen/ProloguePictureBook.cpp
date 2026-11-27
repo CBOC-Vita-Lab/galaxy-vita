@@ -19,6 +19,9 @@ namespace NrvProloguePictureBook {
 }  // namespace NrvProloguePictureBook
 
 ProloguePictureBook::ProloguePictureBook() : LayoutActor("\x83\x76\x83\x8d\x83\x8d\x81\x5b\x83\x4f\x82\xcc\x8a\x47\x96\x7b", true), mIconAButton(), mPage() {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 void ProloguePictureBook::init(const JMapInfoIter& rIter) {

@@ -5,6 +5,9 @@
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpStarBits.hpp"  // MP3 costar: 1-Up at each 50 of the team count
+#endif
 
 #define COIN_NUM_MIN 0
 #define COIN_NUM_MAX 999
@@ -56,8 +59,14 @@ void ScenePlayingResult::incStarPiece(int num) {
     }
 
     if (prevNum / STAR_PIECE_STEP_NUM < currNum / STAR_PIECE_STEP_NUM) {
-        MR::incPlayerLeft();
-        MR::requestOneUp();
+#ifdef TARGET_PC
+        // MP3 costar: Play Together's team count gives the 1-Up to everyone with lives on (Bubbles), nobody with Infinite lives
+        if (!mp_active() || MpStarBits::oneUpAllowed())
+#endif
+        {
+            MR::incPlayerLeft();
+            MR::requestOneUp();
+        }
     }
 
     GameDataFunction::setLast1upStarPieceNum(last1upNum + STAR_PIECE_STEP_NUM);

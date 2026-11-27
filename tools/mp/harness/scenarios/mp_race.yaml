@@ -1,0 +1,47 @@
+# Star Race in Good Egg 1: armed, READY / GO, countdown, GO on both, both finish (SMG_MP_TEST_STAR: guest 15 s, host 25 s after the
+# scene start), the same results on both (guest first), race over, the host moves on.
+# Shots every 15 s only: a capture stalls that process's game thread (mp-int 5aff9c5+: ~0.35 s avg, up to 3.7 s), and one
+# inside the 3 s countdown skews the wall-clock GO rule below (harness2, mp_race-202457: host GO 2 s after the guest's).
+name: mp_race
+description: Star Race go / finish / results, then the host's next MOVE
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 15000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 25}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 15}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow session start role=host slot=0 mode=2/'
+  - 'order host /\[mp\] race armed serial=(\d+) galaxy=EggStarGalaxy/ before guest /\[mp\] race armed serial=$1 galaxy=EggStarGalaxy/ within 10s'
+  # racefix: the host sends GO when every present racer reported READY (its scene reached Action); every console starts its countdown on GO, so
+  # the two starts differ only by the link and a capture stall (shots are every 15 s: none inside a countdown). Hard limit 1 s.
+  - 'order host /\[mp\] race countdown serial=(\d+)/ before guest /\[mp\] race go received serial=$1/ within 3s'
+  - 'order host /\[mp\] race go serial=(\d+)/ near guest /\[mp\] race go serial=$1/ within 1s'
+  # racefix: the synchronized start. READY before the host's note of it, one GO with every present racer ready, one countdown per console and
+  # race, no countdown before GO, both countdowns close together, and no message the core refuses
+  - 'order guest /\[mp\] race ready sent serial=(\d+)/ before host /\[mp\] race ready from slot=1 serial=$1/ within 2s tol 300ms'
+  - 'expect host /\[mp\] race go sent serial=\d+ ready=3 present=3 waited=\d+ ms/'
+  - 'count host /\[mp\] race go sent serial=\d+/ == 1'
+  - 'count host /\[mp\] race countdown serial=\d+/ == 1'
+  - 'count guest /\[mp\] race countdown serial=\d+/ == 1'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before host /\[mp\] race countdown serial=$1/ within 1s'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s tol 300ms'
+  - 'order host /\[mp\] race countdown serial=(\d+)/ near guest /\[mp\] race countdown serial=$1/ within 1s'
+  - 'absent * /\[mp\] bad message from slot/'
+  - 'order guest /\[mp\] race go received serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s'
+  - 'expect guest /\[mp\] race finish slot=1 frames=\d+ star=\d+/ within 90s after guest /\[mp\] race go received/'
+  - 'expect host /\[mp\] race finish slot=0 frames=\d+ star=\d+/ within 90s after host /\[mp\] race go serial/'
+  - 'expect host /\[mp\] race finish slot=1 frames=\d+$/ within 5s after guest /\[mp\] race finish slot=1/'
+  - 'order host /\[mp\] race results serial=(\d+) n=2 first=1 frames=(\d+)/ before guest /\[mp\] race results serial=$1 n=2 first=1 frames=$2/ within 3s'
+  # 13 Nov: the results card now waits for the leader's choice (owner decision: after 90 s without it the game chooses Race Again by itself); no MOVE follows on its own
+  - 'expect host /\[mp\] race host chose 1 next=0 serial=\d+/ within 120s after host /\[mp\] race results/'
+  - 'absent * /\[mp\] (race hold timeout|race drop|star delivered)/'

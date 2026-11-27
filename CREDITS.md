@@ -24,8 +24,11 @@
   of automatic quality, the deferred CPU clock request; Mario hurt again when
   an enemy lets him go, hidden-star launch stars, the second render size, the
   warm-up list after an update, rear touch aiming after the Settings menu, the
-  render-target pool, CMPR weights in the HD texture builder, and the Star Bit
-  reach setting.
+  render-target pool, CMPR weights in the HD texture builder, the Star Bit
+  reach setting; in 2.3 also the movie sound's frames in hand (no silent
+  blocks in the opening cutscenes), an option to ask for the clocks again after a sleep,
+  the profiling harness's load hang, and two host tests (the state-list cache
+  and the material display-list writers).
 
 Nintendo and the original developers keep their rights to the game, its
 artwork and its trademarks. This is an unofficial fan project, not affiliated

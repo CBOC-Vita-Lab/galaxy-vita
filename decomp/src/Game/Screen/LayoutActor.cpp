@@ -9,10 +9,18 @@
 LayoutActor::LayoutActor(const char* pName, bool) : NameObj(pName), mLayoutManager(), mSpine(), mEffectKeeper(), mPointingTarget() {
 }
 
+#ifdef TARGET_PC
+extern "C" void port_hrw_menu_turn(void);   // (vgx_galaxy.cpp)
+#endif
 void LayoutActor::movement() {
     if (MR::isDead(this)) {
         return;
     }
+#ifdef TARGET_PC
+    if (mPortMenu && !mFlag.mIsHidden) {
+        port_hrw_menu_turn();   // (14 Nov, owner: the galaxy map flickers on the buttons; the Game Over prompt's bottom strip) menus: no in-between pictures
+    }
+#endif
 
     updateSpine();
 
@@ -27,7 +35,26 @@ void LayoutActor::movement() {
     }
 }
 
+#ifdef TARGET_PC
+// cpu34g (14 Nov 2026), GXV_PAIR_LAYOUT (platform/src/port/perf.cpp PairTurnBegin): in the drawn turn of a drawn + undrawn pair the layout made here (pane animation
+// frames applied, pane matrices, follow positions, matrix references) is made again by the undrawn turn before the next picture; movement() advances the frames as always.
+// Only the calls of the calc-anim lists 0x0D Layout and 0x0E LayoutDecoration: appear() and every direct call lay out at once.
+extern "C" int port_pair_skip_turn;
+extern "C" int port_pair_layout_mode(void);
+extern "C" int port_anim_lod_raw_category(void);
+extern "C" void port_pair_count(int what, unsigned n);
+#endif
+
 void LayoutActor::calcAnim() {
+#ifdef TARGET_PC
+    if (__builtin_expect(port_pair_skip_turn != 0, 0) && port_pair_layout_mode() != 0) {
+        const int raw = port_anim_lod_raw_category();
+        if (raw == 0x0D || raw == 0x0E) {
+            port_pair_count(10, 1);
+            return;
+        }
+    }
+#endif
     if (MR::isExecuteCalcAnimLayout(this)) {
         mLayoutManager->calcAnim();
     }

@@ -1,5 +1,8 @@
 #include "Game/System/DrawBufferGroup.hpp"
 #include "Game/System/DrawBufferExecuter.hpp"
+#ifdef TARGET_PC
+#include "Game/System/DrawBuffer.hpp"  // (gPortDrawPipeEpoch)
+#endif
 #include "Game/Util/LightUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/ModelUtil.hpp"
@@ -65,6 +68,9 @@ void DrawBufferGroup::deactive(LiveActor* pActor, s32 index) {
 }
 
 void DrawBufferGroup::findLightInfo(LiveActor* pActor, s32 index) {
+#ifdef TARGET_PC
+    ++gPortDrawPipeEpoch;  // (GXV_DRAWPIPE: the models' light types below are part of what a frozen frame holds)
+#endif
     MR::initActorLightInfoLightType(pActor, mLightType);
     mExecutors[index]->findLightInfo(pActor);
 
@@ -90,7 +96,7 @@ void DrawBufferGroup::drawOpa() const {
 #ifdef TARGET_PC
         const int lightScope = port_light_scope_enter(1);
 #endif
-        j3dSys.mDrawMode = 3;
+        J3D_DSYS.mDrawMode = 3;  // (GXV_DRAWPIPE: the draw path's J3DSys, J3DSys.hpp)
         if (mLightLoadType != -1) {
             MR::loadLight(mLightLoadType);
         }
@@ -106,7 +112,7 @@ void DrawBufferGroup::drawXlu() const {
 #ifdef TARGET_PC
         const int lightScope = port_light_scope_enter(1);
 #endif
-        j3dSys.mDrawMode = 4;
+        J3D_DSYS.mDrawMode = 4;
         if (mLightLoadType != -1) {
             MR::loadLight(mLightLoadType);
         }
@@ -116,6 +122,24 @@ void DrawBufferGroup::drawXlu() const {
 #endif
     }
 }
+
+#ifdef TARGET_PC
+void DrawBufferGroup::portHrwDrawOne(const DrawBufferExecuter* pExecuter, bool xlu, const J3DModel* pOnly) const {
+    const int lightScope = port_light_scope_enter(1);
+    J3D_DSYS.mDrawMode = xlu ? 4 : 3;
+    if (mLightLoadType != -1) {
+        MR::loadLight(mLightLoadType);
+    }
+    gPortHrwOnly = pOnly;
+    if (xlu) {
+        pExecuter->drawXlu();
+    } else {
+        pExecuter->drawOpa();
+    }
+    gPortHrwOnly = nullptr;
+    port_light_scope_exit(lightScope);
+}
+#endif
 
 void DrawBufferGroup::setDrawCameraType(s32 type) {
     mDrawCameraType = type;

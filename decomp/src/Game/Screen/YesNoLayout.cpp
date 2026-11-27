@@ -11,6 +11,9 @@ namespace NrvYesNoLayout {
 };  // namespace NrvYesNoLayout
 
 YesNoLayout::YesNoLayout() : SimpleLayout("Yes/No\x83\x8c\x83\x43\x83\x41\x83\x45\x83\x67", "SelectButton", 1, 68), mController(nullptr), _24(false) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 void YesNoLayout::init(const JMapInfoIter& rIter) {

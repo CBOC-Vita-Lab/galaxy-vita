@@ -26,6 +26,7 @@ QUIET_FLAGS = "-DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=1"
 # The renderer is compiled at -O3 (3 % fewer instructions per picture than -O2 in the ARM harness).
 VGX_FLAGS = "-O3"
 DEFAULT_LABEL = "1.2"
+DEFAULT_ONLINE_URL = "https://galaxy.psvita.dev"   # the Galaxy service (Worker custom domain); keep in step with cmake/MpBuildDefs.cmake
 ARTIFACTS = {
     "gameArchive": "vita-source/libgalaxy_vita_sources.a",
     "gameArchiveLto": "vita-source-lto/libgalaxy_vita_sources.a",
@@ -91,6 +92,23 @@ def run(args, env, log=None, cwd=None):
     print(f"Completed: {log.name}", flush=True)
 
 
+def link_check(build, env, log):
+    """After the link (linkfix31): every symbol of tools/vita_must_define.txt is defined strongly in the ELF, and no weak-only reference names
+    code that a link input has but the link left out (a weak reference never pulls an archive member: integ-3.1's first Vita build lost the
+    native Settings' pause hint this way). tools/check_weak_links.py; the allow list (tools/weak_links.allow) names the optional hooks."""
+    args = [sys.executable, "-I", ROOT / "tools/check_weak_links.py", build / ARTIFACTS["elf"], "--build-dir", build,
+            "--allow", ROOT / "tools/weak_links.allow", "--must-define", ROOT / "tools/vita_must_define.txt"]
+    with log.open("w") as stream:
+        result = subprocess.run(list(map(str, args)), env=env, stdout=stream, stderr=subprocess.STDOUT)
+    lines = log.read_text(errors="replace").splitlines()
+    if result.returncode:
+        for line in lines:
+            if line.startswith("FAIL "):
+                print(line, file=sys.stderr)
+        raise ValueError(f"Link check failed (the ELF lacks code it must have); see {log}")
+    print(f"Completed: {log.name} ({lines[-1] if lines else 'no output'})", flush=True)
+
+
 def profile_path_prefix(data):
     """The checkout path the profile was recorded in (from the names of its internal-linkage functions), or None."""
     found = PROFILE_PATH_RX.search(data)
@@ -137,6 +155,25 @@ def prepare_profile(profile, root, directory, env):
     out.write_bytes(data)
     print(f"PGO profile {out.name} ({len(data)} bytes, {note})", flush=True)
     return out
+
+
+def cmake_source_root(build_dir):
+    """The path the source stage's compile commands really use for this checkout.
+
+    CMake keeps the source directory of an existing build directory's cache even when it is given the same directory under another
+    name (a symlink such as /source/source -> the checkout), so a build directory first configured through the link keeps compiling
+    through it, and Clang keys a profile's internal-linkage functions by that path, not by the resolved one (696 functions of the game
+    never matched because the profile was rewritten to ROOT).  A fresh build directory uses ROOT."""
+    cache = build_dir / "vita-source" / "CMakeCache.txt"
+    try:
+        for line in cache.read_text().splitlines():
+            if line.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
+                home = Path(line.split("=", 1)[1])
+                if home.name == "vita" and home.parent.resolve() == ROOT:
+                    return home.parent
+    except OSError:
+        pass
+    return ROOT
 
 
 def input_root(name):
@@ -237,7 +274,29 @@ def main():
                              ".profdata or .profdata.gz (-fprofile-use; tools/pgo/README.md); "
                              "default none: the plain build")
     parser.add_argument("--label", default=DEFAULT_LABEL, help="the build label the renderer logs (default 1.2)")
+    # MP3: the TLS library of the multiplayer HTTPS client (net/); without it net/ is linked without TLS (Same Wi-Fi / Nearby only, no https service)
+    parser.add_argument("--mbedtls", type=Path, default=Path(os.environ["SMG_MBEDTLS"]) if os.environ.get("SMG_MBEDTLS") else None,
+                        metavar="PREFIX", help="mbedTLS prefix from tools/mp/build-mbedtls.py --target vita (default: $SMG_MBEDTLS, else none)")
+    # core2: the multiplayer build choices (cmake/MpBuildDefs.cmake): the online service compiled in (default none: the build contacts
+    # nothing by itself) and the build id of the multiplayer fingerprint (default dev)
+    parser.add_argument("--online-url", default=os.environ.get("NP_ONLINE_URL", DEFAULT_ONLINE_URL), metavar="https://HOST[:PORT]|none",
+                        help="online service compiled into the build (default: $NP_ONLINE_URL, else https://galaxy.psvita.dev; "
+                             "'none' compiles no service in; there is no fallback to the old workers.dev address)")
+    parser.add_argument("--build-id", default=os.environ.get("MP_BUILD_ID", "dev"),
+                        help="multiplayer build id: consoles with different ids never play together (default: $MP_BUILD_ID, else dev)")
+    parser.add_argument("--seed", type=Path, default=None, metavar="VPK|SHADERCACHE",
+                        help="(fix31) link stage: also make the release VPK <build-dir>/Galaxy-Vita.vpk = the CMake smg-vgx.vpk plus this seed's shadercache/ (a VPK, "
+                             "or a folder that is or holds shadercache/), its stage list tagged by tools/seedrun/stagetags.py; fails when the packaged list has no stamp")
     args = parser.parse_args()
+    if args.seed is not None and not args.seed.exists():
+        raise ValueError(f"--seed {args.seed}: not found")
+    if args.online_url == "none":
+        args.online_url = ""
+    if args.online_url and not re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]+)?", args.online_url):
+        raise ValueError("--online-url must be https://host[:port] (or none)")
+    if not re.fullmatch(r"[A-Za-z0-9._+-]{1,40}", args.build_id):
+        raise ValueError("--build-id may only use letters, digits and . _ + -")
+    mp_defs = [f"-DNP_ONLINE_URL={args.online_url}", f"-DMP_BUILD_ID={args.build_id}"]
     if not 1 <= args.jobs <= 32:
         raise ValueError("--jobs must be between 1 and 32")
     if not re.fullmatch(r"[A-Za-z0-9.+_-]{1,40}", args.label):
@@ -246,6 +305,10 @@ def main():
     inputs = json.loads((HERE / "inputs.json").read_text())
     require_files(sdk, inputs["sdk"], "VITASDK")
     require_files(deps, inputs["dependencies"], "VGL_DEPS")
+    mbedtls = None
+    if args.mbedtls is not None:   # MP3
+        mbedtls = args.mbedtls.resolve()
+        require_files(mbedtls, inputs["mbedtls"], "SMG_MBEDTLS")
     source = json.loads((ROOT / "docs/SOURCE-MANIFEST.json").read_text())
     verify_files(ROOT, {row["path"]: row["sha256"] for row in source["files"]}, "Source")
     if args.stage == "check":
@@ -283,13 +346,24 @@ def main():
         run([sys.executable, "-I", HERE / "make_case_shim.py", ROOT, shim], env, logs / "case-shim.log")
     source_build, lto, runtime, game = (build / name for name in
                                         ("vita-source", "vita-source-lto", "vita-vgx-runtime", "vita-vgx-game"))
-    pgo = None
-    if args.pgo_profile is not None:
+    pgo = pgo_runtime = None
+    # The path the game units are compiled through (see cmake_source_root); the renderer's units (the runtime stage) are always
+    # generated from the resolved ROOT, so a profile for each stage names its own path.
+    game_root = cmake_source_root(build)
+    # VITA_PGO_GENERATE=1 (environment): the instrumented build that records a profile on the console (tools/pgo/README.md,
+    # "Record on the console"); CMake and the runtime generator read the variable, a profile is not used with it.
+    pgo_generate = env.get("VITA_PGO_GENERATE") == "1"
+    if pgo_generate:
+        print("VITA_PGO_GENERATE=1: instrumented build (-fprofile-generate, the dump thread, the profile runtime)"
+              + ("; --pgo-profile is ignored" if args.pgo_profile is not None else ""), flush=True)
+    elif args.pgo_profile is not None:
         if not args.pgo_profile.is_file():
             raise ValueError(f"--pgo-profile: no such file {args.pgo_profile}")
-        if args.stage in ("source", "runtime", "all"):
-            pgo = prepare_profile(args.pgo_profile.resolve(), ROOT, build / "pgo", env)
-        elif args.stage == "lto":
+        if args.stage in ("source", "all"):
+            pgo = prepare_profile(args.pgo_profile.resolve(), game_root, build / "pgo", env)
+        if args.stage in ("runtime", "all"):
+            pgo_runtime = pgo if game_root == ROOT and pgo else prepare_profile(args.pgo_profile.resolve(), ROOT, build / "pgo", env)
+        if args.stage == "lto":
             print("Note: --pgo-profile applies when the source stage is configured; the lto stage reuses its commands",
                   file=sys.stderr)
     if args.stage == "all":
@@ -302,7 +376,7 @@ def main():
             run(["cmake", "-U", "CMAKE_C_FLAGS", "-U", "CMAKE_CXX_FLAGS", "-G", "Ninja",
                  "-S", ROOT / "vita", "-B", source_build,
                  f"-DCMAKE_TOOLCHAIN_FILE={ROOT}/vita/clang-vita-toolchain.cmake",
-                 f"-DVITASDK={sdk}", "-DCMAKE_BUILD_TYPE=Release", f"-DVITA_PGO_PROFILE={pgo or ''}"], env, logs / "source-configure.log")
+                 f"-DVITASDK={sdk}", "-DCMAKE_BUILD_TYPE=Release", f"-DVITA_PGO_PROFILE={pgo or ''}"] + mp_defs, env, logs / "source-configure.log")
             run(["ninja", "-C", source_build, f"-j{args.jobs}", "galaxy_vita_sources"], env, logs / "source.log")
         elif stage == "lto":
             database = json.loads((source_build / "compile_commands.json").read_text())
@@ -317,15 +391,21 @@ def main():
             lto_opt = os.environ.get("GAME_LTO_OPT", "3")
             if lto_opt not in ("2", "3"):
                 raise ValueError("GAME_LTO_OPT must be 2 or 3")
+            # GAME_LTO_MLLVM: extra code-generation options for the ThinLTO back end, space separated (each is passed as
+            # -mllvm <opt>). Empty by default. (-enable-ipra=false was tried on 11 Nov against the crash of the console-profile
+            # builds and changed nothing: the cause was an uninitialised array in JASChannel.cpp, fixed there.)
+            lto_mllvm = []
+            for opt in os.environ.get("GAME_LTO_MLLVM", "").split():
+                lto_mllvm += ["-mllvm", opt]
             run(["ld.lld", "-r", "-o", lto / "galaxy_lto.o", f"--thinlto-jobs={args.jobs}", f"--lto-O{lto_opt}",
-                 "-mllvm", "-emulated-tls", f"@{lto / 'objects.txt'}"], env, logs / "lto-link.log")
+                 "-mllvm", "-emulated-tls", *lto_mllvm, f"@{lto / 'objects.txt'}"], env, logs / "lto-link.log")
             (lto / "libgalaxy_vita_sources.a").unlink(missing_ok=True)
             run(["llvm-ar", "rcs", lto / "libgalaxy_vita_sources.a", lto / "galaxy_lto.o"], env, logs / "lto-archive.log")
         elif stage == "runtime":
             database = json.loads((source_build / "compile_commands.json").read_text())
-            if not database or any(not Path(row["file"]).is_relative_to(ROOT) for row in database):
+            if not database or any(not Path(row["file"]).is_relative_to(game_root) for row in database):
                 raise ValueError("Compile database belongs to a different source checkout")
-            runtime_env = dict(env, VITA_PGO_PROFILE=str(pgo)) if pgo else env
+            runtime_env = dict(env, VITA_PGO_PROFILE=str(pgo_runtime)) if pgo_runtime else env
             run([sys.executable, "-I", HERE / "vita_runtime_gen_vgx.py", ROOT, source_build,
                  runtime, deps, args.label], runtime_env, logs / "runtime-configure.log")
             run(["ninja", "-C", runtime, f"-j{args.jobs}"], env, logs / "runtime.log")
@@ -337,12 +417,25 @@ def main():
                  f"-DCMAKE_TOOLCHAIN_FILE={sdk}/share/vita.toolchain.cmake", "-DCMAKE_BUILD_TYPE=Release",
                  "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", f"-DPORT_SILENT_STDIO={'OFF' if args.logging else 'ON'}",
                  f"-DRUNTIME_ARCHIVE={build / ARTIFACTS['runtimeArchive']}",
-                 f"-DGAME_ARCHIVE={build / game_archive}", f"-DVGL_DEPS={deps}",
-                 f"-DCMAKE_CXX_FLAGS={cxx_flags}"], env, logs / "link-configure.log")
+                 f"-DGAME_ARCHIVE={build / game_archive}", f"-DVGL_DEPS={deps}", f"-DSMG_MBEDTLS={mbedtls or ''}",
+                 f"-DCMAKE_CXX_FLAGS={cxx_flags}"] + mp_defs, env, logs / "link-configure.log")
             run(["cmake", "--build", game, "--target", "eboot.bin", "--parallel", args.jobs], env, logs / "link.log")
+            link_check(build, env, logs / "link-check.log")
             print(f"eboot.bin: {digest(build / ARTIFACTS['runtime'])}")
-            print("No VPK created and no device changed. Package it with the CBOC release VPK's sce_sys and"
-                  " shadercache (docs/BUILDING.md).")
+            stagetags = ROOT / "tools/seedrun/stagetags.py"
+            if args.seed is not None:
+                # (fix31) the packaging step that tags the stage list cannot be missed: the release VPK is made here and checked; a list without the
+                # stamp fails the build (the game would run without the first-visit priorities and the old player seed: a regression against C183)
+                run(["cmake", "--build", game, "--target", "smg-vgx.vpk", "--parallel", args.jobs], env, logs / "vpk.log")
+                vpk = build / "Galaxy-Vita.vpk"
+                vpk.unlink(missing_ok=True)
+                run([sys.executable, "-I", stagetags, "package", game / "smg-vgx.vpk", args.seed.resolve(), vpk], env, logs / "package.log")
+                run([sys.executable, "-I", stagetags, "checkvpk", vpk], env, logs / "package-check.log")
+                print(f"Galaxy-Vita.vpk: {digest(vpk)} (compact seed, stage list tagged and stamped: stagetags.py checkvpk passed)")
+            else:
+                print("No VPK created and no device changed. Release VPK: build.py link --seed <seed VPK or shadercache folder> makes and checks it; by hand,"
+                      " `python3 -I tools/seedrun/stagetags.py package <smg-vgx.vpk> <seed> <out.vpk>` (docs/BUILDING.md), then"
+                      " `stagetags.py checkvpk <out.vpk>` must pass (an untagged stage list loses the first-visit priorities).")
 
 
 if __name__ == "__main__":

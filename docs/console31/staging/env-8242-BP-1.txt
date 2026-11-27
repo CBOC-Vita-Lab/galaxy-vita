@@ -1,0 +1,12 @@
+# 8242 BP-1: bowl31 BP-1, Quality: GXV_BOWL_POSE=1 (the fish pose made only on the drawn turn: 'LATE reads' 0, 'stale at draw' 0); Beach Bowl 180 s (the bay with the fish schools), scripted
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=10800
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_PICTURE_MODE=30
+GXV_TURN_PROF=1
+GXV_POSE_PHASE_CENSUS=1
+GXV_BOWL_POSE=1

@@ -537,6 +537,12 @@ bool MorphItemObjNeo::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pR
     }
 
     if (MR::isMsgItemGet(msg)) {
+        // port (relfix24): when the form change would be refused (the form's models are not loaded) the item is not touched at all: no bubble
+        // pop, no sound, no kick, no change, no kill. The player keeps touching it and asks again each turn; it works once the models are there.
+        if (mMorphType > 0 && !MR::canChangePlayerItemStatus(mMorphType)) {
+            return false;
+        }
+
         if (isNerve(GET_NERVE(MorphItemObjNeo, MorphItemObjNeoNrvWait))) {
             if (mContainerType == 1) {
                 MR::startSound(this, "SE_OJ_ITEM_BUBBLE_BREAK");

@@ -1,0 +1,16 @@
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -1022,6 +1022,13 @@
+ 			if (sceGxmColorSurfaceGetData(&active_write_fb->colorbuffer) != active_write_fb->tex->data) {
+ 				_glFramebufferTexture2D(active_write_fb, GL_COLOR_ATTACHMENT0, active_write_fb->tex, 1);
+ 			}
++#if defined(VP24_RT_LASTFRAME) && !defined(TEXTURES_SPEEDHACK)
++			// (patch 0026, obscrash: drawing into a texture is a use. Without this a render target never sampled keeps last_frame =
++			// OBJ_NOT_USED and gpu_free_texture_data frees its storage at once on glDeleteTextures / glTexImage2D, while the GPU,
++			// one to two frames behind, may still write it: a use-after-free of the colour storage)
++			if (active_write_fb->tex)
++				active_write_fb->tex->last_frame = vgl_framecount;
++#endif
+ 			
+ 			// If the depthbuffer is dirty, we re-gen it
+ 			if (!(active_write_fb->depthbuffer_state & DEPTHBUFFER_READY)) {

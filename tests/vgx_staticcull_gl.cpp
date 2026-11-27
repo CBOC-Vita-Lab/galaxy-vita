@@ -25,12 +25,17 @@
 namespace vgx {
 bool LogEnabled() { return false; }
 void StaticCullCounters(uint64_t out[3]); // (vgx_state.h; declared here too, so that the test also builds against a tree without the switch)
+#ifndef VGX_NO_CULL23
+void CullCounters23(uint64_t out[8]); // (ta23: GXV_STATICCULL_PAL / GXV_DYNCULL totals; -DVGX_NO_CULL23 for a tree without them)
+void VcacheDrawCounters(uint64_t out[4]); // (ta23: GXV_DLVCACHE)
+void ClusterCounters(uint64_t out[8]);    // (vertex25: GXV_CLUSTERCULL; -DVGX_NO_CLUSTER25 for a tree without it)
+#endif
 }
 namespace {
 using namespace vgx;
 constexpr int W = 128, H = 96;
 alignas(32) unsigned char destinations[4][32];
-alignas(4096) uint8_t ram[1 << 16];
+alignas(4096) uint8_t ram[1 << 21]; // (vertex25: 64 KiB before the big terrain sheets)
 unsigned failures = 0;
 void Check(bool ok, const char* label) {
     std::printf("%s: %s\n", ok ? "PASS" : "FAIL", label);
@@ -119,7 +124,17 @@ void Light() {
     w[7] = f2u(1.0f);
     w[10] = f2u(0.3f); w[11] = f2u(0.4f); w[12] = f2u(3.0f);
     WriteXF(0x600, 16, w);
+    // (vertex25, GXV_VS_LTSKIP) STATICCULL_LIGHTS=1..3: a second light (1) next to light 0 in the channels' masks: 1 black, 2 rgb black with alpha 0x80, 3 live
+    if (const char* e = std::getenv("STATICCULL_LIGHTS")) {
+        const int k = std::atoi(e);
+        uint32_t w1[16] = {};
+        w1[3] = k == 1 ? 0u : k == 2 ? 0x00000080u : 0xC0A0FFFFu;
+        w1[4] = f2u(1.0f); w1[7] = f2u(1.0f);
+        w1[10] = f2u(-0.5f); w1[11] = f2u(0.2f); w1[12] = f2u(2.0f);
+        WriteXF(0x610, 16, w1);
+    }
 }
+bool LightsOn() { const char* e = std::getenv("STATICCULL_LIGHTS"); return e && *e && *e != '0'; }
 void Material(char m) {
     const bool tex = m == 'C';
     BP(0, (tex ? 1u : 0u) | (1u << 4));
@@ -127,8 +142,8 @@ void Material(char m) {
     XF(0x103F, tex ? 1u : 0u);
     XF(0x1040, 1u << 7);
     XF(0x100C, m == 'B' ? 0xE0A0FF90u : m == 'D' ? 0x40C0FFFFu : 0xFFFFFFFFu);
-    XF(0x100E, m == 'D' ? 0u : ((1u << 1) | (1u << 2) | (2u << 7)));
-    XF(0x1010, 0);
+    XF(0x100E, m == 'D' ? 0u : ((1u << 1) | (1u << 2) | (2u << 7) | (LightsOn() ? (1u << 3) : 0u)));
+    XF(0x1010, LightsOn() && m != 'D' && std::atoi(std::getenv("STATICCULL_LIGHTS")) >= 2 ? ((1u << 1) | (1u << 2) | (2u << 7) | (1u << 3)) : 0u);
     BP(0x28, tex ? (1u << 6) : 0u);
     if (tex) BP(0xC0, (15u << 12) | (8u << 8) | (10u << 4) | 15u | (1u << 19));
     else BP(0xC0, (10u << 12) | (15u << 8) | (15u << 4) | 15u | (1u << 19));
@@ -209,6 +224,73 @@ void MakeMesh(Mesh& m, int tris) {
             *p++ = static_cast<uint8_t>(ix >> 8); *p++ = static_cast<uint8_t>(ix); // normal
         }
 }
+// (ta23, GXV_STATICCULL_PAL) the same disc with a direct position-matrix index per vertex: the centre and the odd rim vertices name
+// rows 0..2 (PNMTX0), the even rim vertices rows 3..5 (PNMTX1): a "skinned" shape of two joints.
+void MakeSkinMesh(Mesh& m, const Mesh& from) {
+    m = from;
+    m.listBytes = 3 + static_cast<uint32_t>(m.tris) * 3 * 5;
+    m.list = Take(m.listBytes);
+    uint8_t* p = m.list;
+    *p++ = 0x90;
+    *p++ = static_cast<uint8_t>(m.tris * 3 >> 8);
+    *p++ = static_cast<uint8_t>(m.tris * 3);
+    for (int i = 0; i < m.tris; ++i)
+        for (int k = 0; k < 3; ++k) {
+            const unsigned ix = k == 0 ? 0u : static_cast<unsigned>(1 + (i + k - 1) % m.tris);
+            *p++ = static_cast<uint8_t>(ix == 0 || (ix & 1) ? 0 : 3); // PNMTXIDX
+            *p++ = static_cast<uint8_t>(ix >> 8); *p++ = static_cast<uint8_t>(ix);
+            *p++ = static_cast<uint8_t>(ix >> 8); *p++ = static_cast<uint8_t>(ix);
+        }
+}
+Mesh g_skin[3];
+// (ta23, GXV_DLVCACHE) a bumpy w x h grid drawn as GX triangle strips of 3..8 vertices along its rows, as J3D's exporter writes a
+// shape: with GXV_DLWELD the strips share their vertices and the triangle order decides the vertex-cache hits
+Mesh g_grid, g_big;
+void MakeGrid(Mesh& m, int w, int h, bool coherent = false) {
+    m.pos = Take(static_cast<uint32_t>(w * h) * 12);
+    m.nrm = Take(static_cast<uint32_t>(w * h) * 12);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            // (the upper half folded back over the lower one, a little above it and lit differently: where the two layers overlap
+            // on the screen the depth test decides, or, without one, the order of the triangles)
+            const bool fold = y >= h / 2;
+            const float fx = -1.0f + 2.0f * x / (w - 1), fy0 = -1.0f + 2.0f * y / (h - 1), fy = fold ? -fy0 + 0.1f : fy0;
+            const float z = 0.15f * std::sin(3.0f * fx) * std::cos(2.0f * fy) + (fold ? 0.12f + 0.3f * (fy0 - fy) * 0.2f : 0.0f);
+            uint8_t* p = m.pos + (y * w + x) * 12;
+            Put32(p, f2u(fx)); Put32(p + 4, f2u(fy)); Put32(p + 8, f2u(z));
+            uint8_t* n = m.nrm + (y * w + x) * 12;
+            Put32(n, f2u(fold ? 0.0f : -0.3f * fx)); Put32(n + 4, f2u(fold ? 0.0f : 0.2f * fy)); Put32(n + 8, f2u(fold ? -1.0f : 0.9f));
+        }
+    std::vector<uint8_t> l;
+    unsigned r = 99;
+    m.tris = 0;
+    for (int yy = 0; yy + 1 < h; ++yy) {
+        // (rows from the two layers in turn: the list's order and a vertex-cache order put them differently over each other)
+        const int y = coherent ? yy : ((yy & 1) ? h - 2 - yy / 2 : yy / 2);
+        std::vector<unsigned> row;
+        for (int x = 0; x < w; ++x) { row.push_back(static_cast<unsigned>(y * w + x)); row.push_back(static_cast<unsigned>((y + 1) * w + x)); }
+        for (size_t st = 0; st + 2 < row.size();) {
+            r = r * 1103515245u + 12345u;
+            size_t len = 3 + (r >> 8) % 6;
+            if (st + len > row.size()) len = row.size() - st;
+            l.push_back(0x98);
+            l.push_back(0);
+            l.push_back(static_cast<uint8_t>(len));
+            for (size_t k = 0; k < len; ++k) {
+                const unsigned ix = row[st + k];
+                l.push_back(static_cast<uint8_t>(ix >> 8)); l.push_back(static_cast<uint8_t>(ix));
+                l.push_back(static_cast<uint8_t>(ix >> 8)); l.push_back(static_cast<uint8_t>(ix));
+            }
+            m.tris += static_cast<int>(len) - 2;
+            st += len - 2;
+        }
+    }
+    m.listBytes = static_cast<uint32_t>((l.size() + 31) & ~size_t(31));
+    m.list = Take(m.listBytes);
+    std::memset(m.list, 0, m.listBytes);
+    std::memcpy(m.list, l.data(), l.size());
+    m.tris = w * h - 1; // (DrawList: the arrays' size is (tris + 1) * 12 bytes)
+}
 void DrawList(const Mesh& m) {
     const uint32_t bytes = static_cast<uint32_t>(m.tris + 1) * 12;
     g.arrays[9] = {m.pos, bytes, 12, false};
@@ -267,6 +349,11 @@ int main(int argc, char** argv) {
     MakeMesh(g_mesh[1], 70);
     MakeMesh(g_mesh[2], 400);
     MakeMesh(g_mesh[3], 8);
+    MakeSkinMesh(g_skin[0], g_mesh[0]);
+    MakeSkinMesh(g_skin[1], g_mesh[1]);
+    MakeSkinMesh(g_skin[2], g_mesh[2]);
+    MakeGrid(g_grid, 16, 12);
+    MakeGrid(g_big, 70, 50, true); // (vertex25: 4 700 triangles in strip order along the rows: 14 000 indices, one run, about 73 clusters)
     hle::RegisterGuestRam(ram, sizeof ram);
     // a first picture with big overlapping shapes: the texture of the textured material
     const Cam still{0, 0, 0, 0, 0};
@@ -308,6 +395,30 @@ int main(int argc, char** argv) {
             LoadMatrix(1 - o.slot, o.id + 1000, Placement{o.pl.cx * 0.8f, o.pl.cy, o.pl.cz * 0.8f, o.pl.scale * 0.7f}, cam);
             DrawList(g_mesh[o.kind]);
         }
+        // (ta23) two-joint shapes (a matrix index per vertex): the second joint's place a little off the first's, so that some
+        // are wholly outside a plane, some straddle it with one joint, some are in view
+        SetVcd(0, 1);
+        for (size_t i = 0; i < scene.size(); i += 2) {
+            const Obj& o = scene[i];
+            Material(o.mat == 'C' ? 'B' : o.mat);
+            const Placement b{o.pl.cx + (i % 6 == 0 ? 2.5f : 0.4f), o.pl.cy - 0.3f, o.pl.cz + 0.2f, o.pl.scale * 0.8f};
+            LoadMatrix(0, o.id + 2000, Placement{o.pl.cx, o.pl.cy + 0.2f, o.pl.cz, o.pl.scale}, cam);
+            LoadMatrix(1, o.id + 3000, b, cam);
+            DrawList(g_skin[i % 3]);
+        }
+        SetVcd(0, 0);
+        // (ta23) terrain patches of strips: depth-writing ('A'), depth-tested without writes ('B'), blended-like without a test ('D')
+        for (int i = 0; i < 9; ++i) {
+            Material(i % 3 == 0 ? 'A' : i % 3 == 1 ? 'B' : 'D');
+            LoadMatrix(i & 1, 4000 + i, Placement{-1.5f + 0.4f * i, -0.5f + 0.1f * i, -2.5f - 0.3f * i, 0.9f}, cam);
+            DrawList(g_grid);
+        }
+        // (vertex25, GXV_CLUSTERCULL) big terrain sheets, drawn in strip order, partly in view, in the three material classes
+        for (int i = 0; i < 4; ++i) {
+            Material(i % 3 == 0 ? 'A' : i % 3 == 1 ? 'B' : 'D');
+            LoadMatrix(i & 1, 5000 + i, Placement{-2.5f + 1.7f * i, -0.2f * i, -2.0f - 1.1f * i, 3.2f - 0.4f * i}, cam);
+            DrawList(g_big);
+        }
         const uint32_t id = Copy(1, true);
         FrontPresent(false, nullptr);
         int pw = 0, ph = 0;
@@ -330,10 +441,32 @@ int main(int argc, char** argv) {
     uint64_t c[3] = {};
     StaticCullCounters(c);
     std::printf("static runs tested %llu culled %llu (vertices %llu)\n", (unsigned long long)c[0], (unsigned long long)c[1], (unsigned long long)c[2]);
+    uint64_t c23[8] = {}, vc[4] = {};
+#ifndef VGX_NO_CULL23
+    CullCounters23(c23);
+    VcacheDrawCounters(vc);
+#endif
+    std::printf("vcache runs drawn reordered %llu of %llu (indices %llu of %llu)\n", (unsigned long long)vc[0], (unsigned long long)vc[1],
+                (unsigned long long)vc[2], (unsigned long long)vc[3]);
+    uint64_t cl[8] = {};
+#if !defined(VGX_NO_CULL23) && !defined(VGX_NO_CLUSTER25)
+    ClusterCounters(cl);
+#endif
+    std::printf("cluster runs: indices %llu, in culled clusters %llu, left out %llu (%llu runs), draws added %llu, no cluster in view %llu, range bad %llu, box bad %llu\n",
+                (unsigned long long)cl[0], (unsigned long long)cl[1], (unsigned long long)cl[2], (unsigned long long)cl[7], (unsigned long long)cl[3], (unsigned long long)cl[6],
+                (unsigned long long)cl[4], (unsigned long long)cl[5]);
+    std::printf("pal runs tested %llu culled %llu (indices %llu); dynamic draws tested %llu culled %llu (indices %llu), not decoded %llu\n",
+                (unsigned long long)c23[0], (unsigned long long)c23[1], (unsigned long long)c23[2], (unsigned long long)c23[3],
+                (unsigned long long)c23[4], (unsigned long long)c23[5], (unsigned long long)c23[6]);
     Check(detailed * 2 >= frames, "most pictures have detail");
     Check(glGetError() == GL_NO_ERROR, "no GL error");
     std::printf("picture %dx%d hash %016llx\n", W, H, static_cast<unsigned long long>(hash));
     std::printf("records %llu\n", (unsigned long long)g_recordSum);
     std::printf("culled %llu\n", (unsigned long long)c[1]);
+    std::printf("palculled %llu\n", (unsigned long long)c23[1]);
+    std::printf("dynculled %llu\n", (unsigned long long)c23[4]);
+    std::printf("vcachetook %llu\n", (unsigned long long)vc[0]);
+    std::printf("clleft %llu\n", (unsigned long long)cl[2]);
+    std::printf("clbad %llu\n", (unsigned long long)(cl[4] + cl[5]));
     return failures ? 1 : 0;
 }

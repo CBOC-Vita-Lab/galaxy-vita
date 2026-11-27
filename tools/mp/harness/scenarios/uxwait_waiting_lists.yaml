@@ -1,0 +1,42 @@
+# uxwait (14 Nov): pictures of the two player-facing polish items, one boot of two consoles (the mp_smoke path, so the inputs are the proven marker-based ones).
+#  1. The Same Wi-Fi gathering list updates by itself: the host sits on the gathering screen and presses NOTHING until the guest's head has appeared
+#     ("slot 1 joined" is logged before the host's first press after the room opened); the shots (every 4 s, 960x544, Vita button pictures) show the
+#     host's screen with no head, then with the guest's head.
+#  2. The "Waiting for <name>..." banner: the guest wins the scenario star (SMG_MP_TEST_STAR); after its star celebration it is held behind the closed
+#     screen until the host's next move; when that lasts 2 s or more the guest's screen shows the banner ("ui: wait banner on slot 0"). The host's
+#     move decides how long the wait is, so the banner rule is soft (WARN): a fast host move means no banner, which is also correct.
+# Needs a binary with MpWaitLogic (branch uxwait). Judge the pictures by eye: guest frames from the clear hold, host frames of the gathering screen.
+name: uxwait_waiting_lists
+description: "self-updating Same Wi-Fi gathering list (host, no presses) and the Waiting for <host> banner (guest, after its own star)"
+seconds: 700
+min_speed: 0.4
+shot_size: 960x544
+requires: {strings: ["entry: chose %s", SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000, PETARI_POSLOG: 1, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    may_end_early: true
+    input: "@entry_host"
+    env: {SMG_MP_NAME: host, SMG_KEYBOARD_NAME: host, SMG_MP_LOOK: 0, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=host|60'}
+  - name: guest
+    may_end_early: true
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: guest, SMG_KEYBOARD_NAME: guest, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15,
+          HARNESS_START_ON: 'host|\[mp\] hosting session|0',
+          HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|60'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  # the list: the host's gathering screen is up, then the guest's head arrives (nobody pressed anything on the host in between: its inputs wait for "joined")
+  - 'expect host /\[mp\] ui: gathering mode=1/'
+  - 'expect host /\[mp\] slot 1 joined name=guest/ after host /\[mp\] ui: gathering mode=1/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/'
+  # the banner: it goes on only with a known host, it always goes off again, and a short wait never shows it
+  - '?expect guest /\[mp\] ui: wait banner on slot 0/ after guest /\[mp\] flow star got id=/'
+  - 'absent host /\[mp\] ui: wait banner on/'
+  - 'order guest /\[mp\] ui: wait banner on slot 0/ before guest /\[mp\] ui: wait banner off/ within 70gs'
+  - 'absent * /\[mp\] (rejected by host|hello rejected|bad message from slot|events lost)/'
+  - '?metric * rss_mib <= 2500'

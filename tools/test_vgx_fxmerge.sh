@@ -15,10 +15,11 @@
 # commands (FEW_FXMERGE=0: it does not know the command).
 #   tools/test_vgx_fxmerge.sh [frames] [seeds]      (build in $OUT, default /tmp/vgx_fxmerge)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-40}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_fxmerge}
+out=${OUT:-$MP_TMP/vgx_fxmerge}
 mkdir -p "$out"
 cxx=${CXX:-g++}
 fe=(platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp platform/vgx/src/vgx_dlcache.cpp

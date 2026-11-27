@@ -234,7 +234,10 @@ int port_vswprintf(wchar_t* dstW, size_t n, const wchar_t* fmtW, va_list args) {
             char nb[128];
             char f2[16];
             snprintf(f2, sizeof(f2), "%%.%d%c", prec < 0 ? 6 : prec, (char)conv);
-            snprintf(nb, sizeof(nb), f2, d < 0 ? -d : d);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+            snprintf(nb, sizeof(nb), f2, d < 0 ? -d : d);   // (fmt1131: f2 is built two lines up from a number and one letter of the conversion)
+#pragma GCC diagnostic pop
             negative = d < 0;
             for (int i = 0; nb[i] && len < 511; i++) buf[len++] = (wch)nb[i];
             break;

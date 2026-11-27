@@ -1,6 +1,7 @@
 #include "JSystem/JAudio2/JAISeMgr.hpp"
 #ifdef TARGET_PC
 #include "port/audio_cpu1.h"
+#include "port/firstuse.h"
 #else
 #define PORT_AUDIO_TOUCH() ((void)0)
 #endif
@@ -296,6 +297,9 @@ int JAISeMgr::getNumActiveSe() const {
 
 bool JAISeMgr::startSound(JAISoundID id, JAISoundHandle* handle, const TVec3f* posPtr) {
     PORT_AUDIO_TOUCH();
+#ifdef TARGET_PC
+    PortFirstUseScope firstUse("sound", id.mID.mComposite, "se");  // (firstuse24, GXV_FIRSTUSE_LOG: the first start of each sound id is timed)
+#endif
     if (handle != nullptr && handle->isSoundAttached()) {
         (*handle)->stop();
     }

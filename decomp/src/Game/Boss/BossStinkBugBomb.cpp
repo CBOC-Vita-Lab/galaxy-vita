@@ -36,6 +36,9 @@ void BossStinkBugBomb::init(const JMapInfoIter& rIter) {
     initEffectKeeper(0, nullptr, false);
     initSound(5, false);
     MR::initShadowVolumeSphere(this, 60.0f);
+#ifdef TARGET_PC
+    MR::portMarkProjectileShadow(this);  // (boss23, PETARI_BOSS_PSHADOW)
+#endif
 
     initNerve(GET_NERVE(BossStinkBugBomb, BossStinkBugBombNrvWait));
     MR::invalidateClipping(this);

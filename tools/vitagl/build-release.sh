@@ -41,4 +41,10 @@ for p in "$here"/patches/*.patch; do
 done
 python3 -I "$here/gpu_timers.py" "$work"
 python3 -I "$here/fbo_msaa.py" "$work"
+if [ -d "$here/patches-post" ]; then
+  for p in "$here"/patches-post/*.patch; do
+    [ -e "$p" ] || continue
+    (cd "$work" && git apply "$p") || { echo "post-patch did not apply: $p"; exit 1; }
+  done
+fi
 VGL_SRC="$work/source" "$here/build-vitagl.sh" "$name" "$options"

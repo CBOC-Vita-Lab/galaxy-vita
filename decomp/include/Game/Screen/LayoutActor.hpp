@@ -48,4 +48,7 @@ public:
     /* 0x14 */ PaneEffectKeeper* mEffectKeeper;
     /* 0x18 */ StarPointerLayoutTargetKeeper* mPointingTarget;
     /* 0x1C */ LayoutActorFlag mFlag;
+#ifdef TARGET_PC
+    bool mPortMenu = false;   // (14 Nov) a menu drawn over a live scene: port_hrw_menu_turn() while it is shown (LayoutActor::movement)
+#endif
 };

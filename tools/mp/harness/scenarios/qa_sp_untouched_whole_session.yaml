@@ -1,0 +1,51 @@
+# QA-FUNC 13/15. THE SINGLE-PLAYER FILE IS BYTE-IDENTICAL AFTER A WHOLE MULTIPLAYER SESSION, not only after a short one. 'save_guard *' (sha256 of every
+# *.bin under saves/ before and after) is in nearly every scenario but each process is judged alone and the sessions are 1-3 minutes without the risky
+# paths. This one chains the risky paths over FIVE processes: copy of SP file 2 into co-op 1 + a star + leave-and-keep (host/guest), the same console
+# restarting into co-op 1 (host2), a guest killed -9 right after a recovery checkpoint (guest2) and its restart keeping the recovery into co-op file 3
+# (guest3). After the run:   python3 tools/mp/harness/bin/fingerprint_chain.py <pair folder>
+# which proves ONE hash for the single-player GameData.bin across every process's before AND after, equal to the fixture's (/data/saves0).
+# Hooks: all exist. READY.
+name: qa_sp_untouched_whole_session
+description: "5-process chain: copy, star, keep, relaunch, crash, recovery keep: the SP GameData.bin never changes (and fingerprint_chain.py)"
+seconds: 900
+min_speed: 0.4
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_LEAVE: 90, SMG_MP_AUTO_LEAVE: "coop:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15, SMG_MP_AUTO_LEAVE: discard}
+  - name: host2
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: coop, SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_AFTER: host, HARNESS_CONTINUE: host, SMG_MP_TEST_LEAVE: 120, SMG_MP_AUTO_LEAVE: discard}
+  - name: guest2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_AFTER: host, HARNESS_KILL: 'save recovery written index=\d+ .*ok=1|1|9'}
+  - name: guest3
+    input: "@file2_charselect"
+    env: {HARNESS_AFTER: guest2, HARNESS_CONTINUE: guest2, SMG_MP_AUTO_RECOVERY: "keep:3"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect host /\[mp\] save auto choice copy:2 ready/'
+  - 'expect host /\[mp\] save test: leaving the session/'
+  - 'absent host,host2,guest,guest2,guest3 /\[mp\] (save backup sp path=|save session on single-player file|save leave sp=)/'
+  - 'absent host,host2,guest,guest2,guest3 /\[mp\] save auto choice mine/'
+  - 'mp_save host'
+  - 'expect guest2 /\[mp\] save recovery written index=\d+ bytes=\d+ ms=\d+ ok=1/'
+  - 'expect guest2 /harness: kill signal=9/'
+  - 'expect guest3 /\[mp\] ui: recovery offered stars=\d+/'
+  - 'expect guest3 /\[mp\] save recovery kept index=\d+ mp=3/'
+  - 'absent guest3 /\[mp\] save recovery kept index=\d+ sp=/'
+  - 'mp_save guest3'
+  - 'absent * /save refused: the save image is not verified/'
+  - 'absent * /\[mp\] save write failed/'
+  - 'absent * /\[mp\] save write file=\S+ ok=0/'
+  - 'expect host /\[mp\] save write file=GameData\.bin ok=1/'

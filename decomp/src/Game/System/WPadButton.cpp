@@ -1,5 +1,9 @@
 #include "Game/System/WPadButton.hpp"
 #include "Game/System/WPad.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpChat.hpp"   // MP3 chat: the quick ring borrows Select (and the D-pad while it is open)
+#include "port/mp_bridge.h"
+#endif
 
 WPadButton::WPadButton(const WPad* pPad)
     : mPad(pPad), mHold(0), mTrigger(0), mRelease(0), mRepeat(0), mDelaySec(1.0f / 2.4f), mPulseSec(1.0f / 6.0f) {
@@ -30,6 +34,16 @@ void WPadButton::update() {
         mRepeat |= mHold;
     }
 }
+
+#ifdef TARGET_PC
+// MP3 chat: in a session, in play, Select opens the quick-message ring and the directions pick from it while it is open.
+// (merge of 3.0 on c181: this was the tail of update(); it is its own function, called by WPad::update right after update(), so that update() keeps c181's control flow and its PGO profile)
+void WPadButton::portMpFilter() {
+    if (mp_active() && mPad->mChannel == 0) {
+        MpChat::filterPad(&mHold, &mTrigger, &mRelease, &mRepeat);
+    }
+}
+#endif
 
 bool WPadButton::testButtonUp() const {
     return (mHold & WPAD_BUTTON_UP) != 0;

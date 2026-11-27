@@ -1,0 +1,22 @@
+# checks83 (14 Nov): the guest holds A through the galaxy's intro (the intro camera or the fly-in; both play on every console of a session, so
+# both are voted). One full hold (1 s) is this console's vote; the host holds A 4 s later (skip_vote_host.txt): one of two is not enough. The vote has to pass and both consoles leave the intro.
+# intro = the game's own line when the intro starts (cutscene_skip.cpp "skip: <kind> playing"); the fallback is a guess for a binary without marks.
+# scnfix (14 Nov): NAV = the first lines below are file2_observatory.txt's menu path (title -> Single Player -> file 2 -> Play This File -> the Observatory); an SMG_MP_AUTO console only opens its session once it is IN PLAY, so a script that starts at the barrier mark never got there (final run: the guest never joined, no barrier).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+8-8.5:A|B
+entry+3-3.2:A
+single+15-23:PX=0.25|PY=0.3
+single+18-18.2:A
+single+31-39:PX=0.52|PY=0.78
+single+34-34.2:A
+# scnfix (14 Nov, second finding): on a galaxy the save has visited, ONE tap of A skips the intro camera natively (GameSceneScenarioOpeningCameraState::trySkipTrigger:
+# testSystemPadTriggerDecide, a single-player rule that holds in a session too). The old script held A from the camera on: that first press tapped the camera away on its console only,
+# the console was then in the fly-in (a different skip kind) with A still held (a hold from before a scene does not count), and the other console voted for the camera: no vote ever matched.
+# So: both consoles TAP A once in the camera (alone, no vote), then each HOLDS A in the fly-in (kind "fly-in", the vote of skip_vote). Votes per kind; guest first, host 1.5 s later.
+mark play /flow barrier release serial=1 / ~150
+mark intro /skip: intro camera playing/ ~155
+mark flyin /skip: fly-in playing/ ~158
+intro+1-1.2:A
+flyin+1-10:A

@@ -1,0 +1,33 @@
+# final run (14 Nov), save case a, variant: the same session as qa_save_playfile_clean_exit but with Safe saves ON (SMG_ATOMIC_SAVES=1 on the host, the
+# setting's launch variable). Every single-player save then goes through the safe writer by the player's own choice, so GameData.bin.mpbak is the player's
+# copy of the save before and the session must NOT remove it: finishSession skips the removal (port_nand_all_atomic) and logs neither "save removed" nor "save kept".
+# save_files judges the folder after the run: GameData.bin and GameData.bin.mpbak both there, no .mptmp.
+name: qa_save_playfile_atomic_keeps_bak
+description: "Play This File with Safe saves ON (SMG_ATOMIC_SAVES=1): clean leave with save; the .mpbak is NOT removed (no 'save removed' line)"
+# seconds: the host's console only reaches the game at about 160 s of game time (the +30 stagger and two loads on 2 cores), THEN the session plays
+# SMG_MP_TEST_LEAVE seconds and decides; 200 ended the run before the leave decision (final run 14 Nov: no 'leave decision' line). 330 = 160 + 70 + margin.
+seconds: 330
+requires: {strings: [SMG_MP_TEST_SAVE, SMG_MP_TEST_LEAVE, SMG_ATOMIC_SAVES]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_ATOMIC_SAVES: 1, SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "mine:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_TEST_SAVE: 20,
+          SMG_MP_TEST_LEAVE: 70, SMG_MP_AUTO_LEAVE: single}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_AUTO_LEAVE: discard}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard guest'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect host /\[mp\] save auto choice mine:2 ready/'
+  - 'expect host /\[mp\] save write file=GameData\.bin ok=1/'
+  - 'absent host /\[mp\] save write file=GameData\.bin ok=0/'
+  - 'expect host /\[mp\] save test: leave decision single ok/'
+  - 'absent host /\[mp\] save (removed|kept) \S*\.mpbak/'
+  - 'save_valid host'
+  - 'save_mine host 2'
+  - 'save_files host present GameData.bin GameData.bin.mpbak'
+  - 'save_files host absent GameData.bin.mptmp'

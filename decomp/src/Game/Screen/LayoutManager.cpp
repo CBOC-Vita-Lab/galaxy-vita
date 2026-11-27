@@ -27,6 +27,15 @@
 #include <nw4r/ut/RuntimeTypeInfo.h>
 #include <revolution/mtx.h>
 #include <revolution/types.h>
+#ifdef TARGET_PC
+#include <revolution/gx.h>
+#include <atomic>
+#include <cstdlib>
+// layoutwarm24 (GXV_LAYOUTWARM, GXV_LAYOUTWARM_LOG): the registry of the layouts a scene made, the warm-up and the census; at the end of this file.
+static void PortLayoutRegister(LayoutManager* pManager);
+static unsigned PortLayoutCensusBegin(const LayoutManager* pManager);
+static void PortLayoutCensusEnd(unsigned id);
+#endif
 
 namespace {
     namespace Local {
@@ -173,6 +182,9 @@ LayoutManager::LayoutManager(const char* pLayoutName, bool useArchiveNamePrefix,
 
     mLayout->Animate(0);
     mLayout->CalculateMtx(mDrawInfo);
+#ifdef TARGET_PC
+    PortLayoutRegister(this);
+#endif
 }
 
 void LayoutManager::movement() {
@@ -211,7 +223,15 @@ void LayoutManager::draw() const {
     }
 
     MR::setupDrawForNW4RLayout(1.0f, true);
+#ifdef TARGET_PC
+    const unsigned censusId = PortLayoutCensusBegin(this);  // (GXV_LAYOUTWARM_LOG: 0 and nothing else without it)
     mLayout->Draw(mDrawInfo);
+    if (censusId != 0) {
+        PortLayoutCensusEnd(censusId);
+    }
+#else
+    mLayout->Draw(mDrawInfo);
+#endif
 }
 
 void LayoutManager::addPaneCtrl(LayoutPaneCtrl* pPaneCtrl) {
@@ -771,3 +791,318 @@ namespace {
         }
     }  // namespace Local
 }  // namespace
+
+#ifdef TARGET_PC
+// ---------------------------------------------------------------------------------------------------------------------------------
+// layoutwarm24 (GXV_LAYOUTWARM, default 0; GXV_LAYOUTWARM_LOG, default 0): the 2D layouts a stage can show are made known to the renderer behind its
+// closed screen, not at their first appearance in play (the pause menu, the star-get and miss sequences, the HUD's counters and meters, message and
+// information windows, the wipes: each first draw otherwise links its program variants and uploads its textures in the picture that shows it).
+//   Registry: every LayoutManager registers itself at the end of its constructor (PortLayoutRegister) with the scene serial it was made under
+//   (port_scene_serial: counts the scenes the game has begun to build). A scene's layouts die with its heap, so an entry of another serial than the
+//   current one is dropped (never dereferenced); entries made before the first scene (serial 0: the system wipes) stay.
+//   Warm-up (GXV_LAYOUTWARM=1, and the renderer honours the scope: port_layoutwarm_mode): SceneFunction::executeDrawList2DNormal calls
+//   port_layoutwarm_frame right after the 2D pass's GX re-initialisation (MR::drawInitFor2DModel: the state every layout's first draw starts from).
+//   Only in frames whose screen is closed (port_screen_quiet() == 2, as the effects' warm-up: never in play, never in the pause menu), at most
+//   GXV_LAYOUTWARM_FRAME_MS (4) of game time a frame, each layout once a scene. A layout is drawn inside a scope (PORT_GX_MARK_WARM_BEGIN / _END): the
+//   layout draw's own preparation (MR::setupDrawForNW4RLayout), then the real DrawSelf of EVERY pane of it - shown or not, whatever its animation frame -
+//   in two passes (nw4r::lyt::detail::gPortWarmPass): pass 1 Material::SetupGX(modulate false, alpha 255), pass 2 (true, alpha 128), which are the two ends of
+//   what a pane's alpha and vertex colours do to a material's TEV set-up; a text box draws one glyph of its font through its writer's own set-up (pass 1).
+//   Nothing is changed that the game can see: the panes are not animated, shown, hidden or moved (DrawSelf reads them), no text is formatted, no
+//   message / tag processing runs, the layout's own draw() / the actor's overrides are not called; the GX library's state (GXData) and the draw counter are put
+//   back as the effects' warm-up does, the front end puts its own back at the end marker. Pictures stay byte for byte (tests/vgx_layoutwarm*.cpp).
+//   Census (GXV_LAYOUTWARM_LOG=1): once a scene, at its first picture with the screen open, one line per eight layouts it loaded (name, panes / materials /
+//   textures); and each layout's draw in play is bracketed by PORT_GX_MARK_LAYOUT_BEGIN / _END (kinds 19 / 20), which makes the front end log the layout's first
+//   draw with draws: its program variants, those the warm-up list did not know, the shaders and textures it made (vgx_draw.cpp LayoutCensusMarker).
+// ---------------------------------------------------------------------------------------------------------------------------------
+extern "C" {
+void port_gx_marker(unsigned int kind);
+int port_screen_quiet(void) __attribute__((weak));
+int port_layoutwarm_mode(void) __attribute__((weak));
+uint32_t port_scene_serial(void) __attribute__((weak));
+uint32_t port_scene_key(void) __attribute__((weak));
+uint64_t port_gx_recording_frame(void) __attribute__((weak));
+unsigned long long port_par_ptcl_now(void);
+void port_log_summary(const char* fmt, ...);
+extern u32 __PortGXDrawSerial;
+}
+
+namespace {
+constexpr int kLwMax = 320;
+enum { kLwWarmed = 1, kLwSkipped = 2 };
+struct LwEntry {
+    LayoutManager* mManager;
+    u32 mSerial;
+    u32 mFlags;
+    char mName[32];
+};
+LwEntry sLwEntries[kLwMax];
+int sLwCount = 0;
+u32 sLwSerial = 0;                    // the scene serial the entries were last synced to
+unsigned sLwDropped = 0;              // layouts that did not fit in the registry
+int sLwWarmMode = -1;                 // port_layoutwarm_mode(), read at the first frame hook (-1: not yet)
+int sLwCensus = -1;                   // GXV_LAYOUTWARM_LOG (-1: not yet)
+unsigned long long sLwFrameUs = 4000; // GXV_LAYOUTWARM_FRAME_MS
+std::atomic< unsigned > sLwPending{0};  // (the back end's closed-screen hold reads it) layouts not drawn in a scope yet, once the warm-up has started
+bool sLwStarted = false;
+bool sLwDoneLogged = false;
+u32 sLwCensusLogged = ~0u;
+unsigned long long sLwFrame = ~0ull, sLwFrameSpentUs = 0;
+struct LwCtr {
+    unsigned warmed, skipped, paneDraws, frames;
+    unsigned long long us;
+} sLwCtr;
+
+bool LwCensusOn() {
+    if (sLwCensus < 0) {
+        const char* e = getenv("GXV_LAYOUTWARM_LOG");
+        sLwCensus = e != nullptr && atoi(e) != 0 ? 1 : 0;
+    }
+    return sLwCensus == 1;
+}
+
+// A new scene: the entries of the scenes before it are gone with their heaps (drop them, do not look at them); what stays is drawn in a scope again.
+void LwSync() {
+    const u32 serial = port_scene_serial != nullptr ? port_scene_serial() : 0;
+    if (serial == sLwSerial) {
+        return;
+    }
+
+    int kept = 0;
+    for (int i = 0; i < sLwCount; i++) {
+        if (sLwEntries[i].mSerial == 0 || sLwEntries[i].mSerial == serial) {
+            sLwEntries[i].mFlags = 0;
+            sLwEntries[kept++] = sLwEntries[i];
+        }
+    }
+    sLwCount = kept;
+    sLwSerial = serial;
+    sLwDropped = 0;
+    sLwStarted = false;
+    sLwDoneLogged = false;
+    sLwFrame = ~0ull;
+    sLwFrameSpentUs = 0;
+    sLwCtr = LwCtr();
+    sLwPending.store(0, std::memory_order_relaxed);
+}
+
+unsigned LwUnwarmed() {
+    unsigned n = 0;
+    for (int i = 0; i < sLwCount; i++) {
+        if ((sLwEntries[i].mFlags & (kLwWarmed | kLwSkipped)) == 0) {
+            n++;
+        }
+    }
+    return n;
+}
+
+void LwWalk(nw4r::lyt::Pane* pPane, const nw4r::lyt::DrawInfo& rInfo, unsigned& rDraws) {
+    pPane->DrawSelf(rInfo);
+    rDraws++;
+    for (nw4r::lyt::PaneList::Iterator it = pPane->mChildList.GetBeginIter(); it != pPane->mChildList.GetEndIter(); ++it) {
+        LwWalk(&*it, rInfo, rDraws);
+    }
+}
+
+void LwCount(nw4r::lyt::Pane* pPane, unsigned& rPanes, unsigned& rMaterials, unsigned& rTextures) {
+    rPanes++;
+    const nw4r::lyt::Material* pMaterial = pPane->GetMaterial();
+    if (pMaterial != nullptr) {
+        rMaterials++;
+        rTextures += pMaterial->GetTextureNum();
+    }
+
+    for (nw4r::lyt::PaneList::Iterator it = pPane->mChildList.GetBeginIter(); it != pPane->mChildList.GetEndIter(); ++it) {
+        LwCount(&*it, rPanes, rMaterials, rTextures);
+    }
+}
+
+// One layout, once, in a warm-up scope. Returns the number of pane draws made.
+unsigned LwWarmOne(LayoutManager* pManager) {
+    static GXData sSavedGx;
+    memcpy(&sSavedGx, gx, sizeof sSavedGx);
+    const u32 serial0 = __PortGXDrawSerial;
+    unsigned draws = 0;
+    port_gx_marker(PORT_GX_MARK_WARM_BEGIN);
+    MR::setupDrawForNW4RLayout(1.0f, true);  // (LayoutManager::draw's own preparation)
+    for (int pass = 1; pass <= 2; pass++) {
+        nw4r::lyt::detail::gPortWarmPass = pass;
+        LwWalk(pManager->mLayout->mpRootPane, pManager->mDrawInfo, draws);
+    }
+    nw4r::lyt::detail::gPortWarmPass = 0;
+    port_gx_marker(PORT_GX_MARK_WARM_END);
+    memcpy(gx, &sSavedGx, sizeof sSavedGx);
+    __PortGXDrawSerial = serial0;
+    return draws;
+}
+
+void LwCensusLoadLog() {
+    unsigned totalPanes = 0, totalMaterials = 0, totalTextures = 0;
+    char line[420];
+    int len = 0;
+    line[0] = '\0';
+    int inLine = 0;
+    const u32 stage = port_scene_key != nullptr ? port_scene_key() : 0;
+    // (a first pass for the totals: the header names them)
+    for (int i = 0; i < sLwCount; i++) {
+        if (sLwEntries[i].mManager->mLayout == nullptr || sLwEntries[i].mManager->mLayout->mpRootPane == nullptr) {
+            continue;
+        }
+        LwCount(sLwEntries[i].mManager->mLayout->mpRootPane, totalPanes, totalMaterials, totalTextures);
+    }
+    port_log_summary("layoutwarm census: stage %08x: %d layouts loaded (%u not registered: table full), %u panes, %u materials, %u texture maps; "
+                     "name (panes/materials/textures), eight a line:",
+                     stage, sLwCount, sLwDropped, totalPanes, totalMaterials, totalTextures);
+    for (int i = 0; i < sLwCount; i++) {
+        LayoutManager* pManager = sLwEntries[i].mManager;
+        unsigned panes = 0, materials = 0, textures = 0;
+        if (pManager->mLayout != nullptr && pManager->mLayout->mpRootPane != nullptr) {
+            LwCount(pManager->mLayout->mpRootPane, panes, materials, textures);
+        }
+        len += snprintf(line + len, sizeof(line) - len, "#%d %s%s (%u/%u/%u)  ", i + 1, sLwEntries[i].mName, sLwEntries[i].mSerial == 0 ? "*" : "", panes,
+                        materials, textures);
+        if (++inLine == 8 || i + 1 == sLwCount || len > static_cast< int >(sizeof(line)) - 90) {
+            port_log_summary("layoutwarm census: %s", line);
+            len = 0;
+            inLine = 0;
+            line[0] = '\0';
+        }
+    }
+}
+}  // namespace
+
+static void PortLayoutRegister(LayoutManager* pManager) {
+    LwSync();
+    if (sLwCount >= kLwMax) {
+        sLwDropped++;
+        return;
+    }
+
+    LwEntry& rEntry = sLwEntries[sLwCount++];
+    rEntry.mManager = pManager;
+    rEntry.mSerial = sLwSerial;
+    rEntry.mFlags = 0;
+    snprintf(rEntry.mName, sizeof(rEntry.mName), "%s", pManager->mLayoutName != nullptr ? pManager->mLayoutName : "?");
+    if (sLwStarted) {
+        sLwPending.store(LwUnwarmed(), std::memory_order_relaxed);
+    }
+}
+
+// (the front end's census line: the name of layout #id)
+extern "C" const char* port_layoutwarm_name(unsigned id) {
+    return id >= 1 && id <= static_cast< unsigned >(sLwCount) ? sLwEntries[id - 1].mName : nullptr;
+}
+
+// (the back end's closed-screen hold) layouts the game has not drawn in a scope yet, once the warm-up has begun in this scene.
+extern "C" unsigned port_layoutwarm_pending(void) {
+    return sLwPending.load(std::memory_order_relaxed);
+}
+
+static unsigned PortLayoutCensusBegin(const LayoutManager* pManager) {
+    if (!LwCensusOn() || port_screen_quiet == nullptr || port_screen_quiet() == 2) {
+        return 0;  // (a closed screen: not a draw in play)
+    }
+
+    for (int i = 0; i < sLwCount; i++) {
+        if (sLwEntries[i].mManager == pManager) {
+            const unsigned id = static_cast< unsigned >(i + 1);
+            port_gx_marker(PORT_GX_MARK_LAYOUT_BEGIN | (id << 8));
+            return id;
+        }
+    }
+
+    return 0;
+}
+
+static void PortLayoutCensusEnd(unsigned id) {
+    port_gx_marker(PORT_GX_MARK_LAYOUT_END | (id << 8));
+}
+
+// SceneFunction::executeDrawList2DNormal, right after MR::drawInitFor2DModel (every frame of a game scene's 2D pass).
+extern "C" void port_layoutwarm_frame(void) {
+    if (sLwWarmMode < 0) {
+        sLwWarmMode = port_layoutwarm_mode != nullptr && port_layoutwarm_mode() != 0 ? 1 : 0;
+        const char* e = getenv("GXV_LAYOUTWARM_FRAME_MS");
+        const int ms = e != nullptr ? atoi(e) : 4;
+        sLwFrameUs = static_cast< unsigned long long >(ms < 1 ? 1 : ms > 200 ? 200 : ms) * 1000ull;
+    }
+
+    if (sLwWarmMode == 0 && !LwCensusOn()) {
+        return;
+    }
+
+    LwSync();
+    if (port_screen_quiet == nullptr) {
+        return;
+    }
+
+    const int quiet = port_screen_quiet();
+    if (quiet == 0 && LwCensusOn() && sLwCensusLogged != sLwSerial && sLwCount > 0) {
+        sLwCensusLogged = sLwSerial;
+        LwCensusLoadLog();
+    }
+
+    if (sLwWarmMode == 0 || quiet != 2) {
+        return;
+    }
+
+    if (!sLwStarted) {
+        sLwStarted = true;
+        sLwPending.store(LwUnwarmed(), std::memory_order_relaxed);
+    }
+
+    const unsigned long long t0 = port_par_ptcl_now();
+    const unsigned long long frame = port_gx_recording_frame != nullptr ? port_gx_recording_frame() : 0;
+    if (frame != sLwFrame) {
+        sLwFrame = frame;
+        sLwFrameSpentUs = 0;
+    }
+
+    if (sLwFrameSpentUs >= sLwFrameUs) {
+        return;
+    }
+
+    bool any = false;
+    for (int i = 0; i < sLwCount; i++) {
+        LwEntry& rEntry = sLwEntries[i];
+        if ((rEntry.mFlags & (kLwWarmed | kLwSkipped)) != 0) {
+            continue;
+        }
+
+        LayoutManager* pManager = rEntry.mManager;
+        if (pManager->mLayout == nullptr || pManager->mLayout->mpRootPane == nullptr) {
+            rEntry.mFlags |= kLwSkipped;
+            sLwCtr.skipped++;
+            continue;
+        }
+
+        sLwCtr.paneDraws += LwWarmOne(pManager);
+        rEntry.mFlags |= kLwWarmed;
+        sLwCtr.warmed++;
+        any = true;
+        if (sLwFrameSpentUs + (port_par_ptcl_now() - t0) >= sLwFrameUs) {
+            break;
+        }
+    }
+
+    if (any) {
+        const unsigned long long us = port_par_ptcl_now() - t0;
+        if (sLwFrameSpentUs == 0) {
+            sLwCtr.frames++;
+        }
+
+        sLwFrameSpentUs += us;
+        sLwCtr.us += us;
+    }
+
+    const unsigned left = LwUnwarmed();
+    sLwPending.store(left, std::memory_order_relaxed);
+    if (left == 0 && !sLwDoneLogged) {
+        sLwDoneLogged = true;
+        port_log_summary("layoutwarm: stage %08x: %d layouts (%u not registered), %u drawn in a scope (%u pane draws in 2 passes), %u skipped, %.1f ms of the "
+                         "game thread in %u frames; the variants and textures they made are in the back end's 'prewarm:' line (GXV_PREWARM_LOG=1) and the "
+                         "layouts' first draws in play in 'layoutwarm: first draw:' lines (GXV_LAYOUTWARM_LOG=1)",
+                         port_scene_key != nullptr ? port_scene_key() : 0u, sLwCount, sLwDropped, sLwCtr.warmed, sLwCtr.paneDraws, sLwCtr.skipped,
+                         static_cast< double >(sLwCtr.us) / 1000.0, sLwCtr.frames);
+    }
+}
+#endif

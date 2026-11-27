@@ -1,0 +1,32 @@
+# Star Race is unaffected by Bubbles: in a race the guest falls (SMG_MP_TEST_DIE runs in every mode) and gets the game's own
+# miss and reload; no bubble, no BUBBLE / RESTART traffic. The race still runs: the host finishes with SMG_MP_TEST_STAR.
+name: mp_bubble_race
+description: Star Race fall = the game's own miss (no bubble); the race goes on and the host finishes
+seconds: 280
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 45}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "20:1"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow session start role=host slot=0 mode=2/'
+  - 'expect guest /\[mp\] race go received serial=\d+/'
+  - 'expect guest /\[mp\] bubble test die: slot 1 serial=1 damage lives=\d+/'
+  - 'absent * /\[mp\] bubble (on|msg|remote on|restart)/'
+  - 'expect guest /\[mp\] flow dead slot=1 serial=1/ within 2s after guest /\[mp\] bubble test die: slot 1/'
+  - 'expect guest /\[mp\] flow own move type=5 galaxy=EggStarGalaxy serial=1 role=guest/ within 20s after guest /\[mp\] flow dead slot=1/'
+  - 'absent guest /\[mp\] flow own move type=7/'
+  # the race itself goes on: the host finishes; the race does not break over the guest's miss
+  - 'expect host /\[mp\] race finish slot=0 frames=\d+ star=\d+/'
+  - 'expect guest /\[mp\] race finish slot=0 frames=\d+/ within 5s after host /\[mp\] race finish slot=0/'
+  - 'absent * /\[mp\] (race drop|race hold timeout)/'
+  - 'exit * == 0'

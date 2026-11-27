@@ -45,7 +45,7 @@ double Now() { return double(clockUs) / 1e6; }
 extern "C" unsigned int _newlib_heap_size_user = 96u * 1024u * 1024u;
 extern "C" int port_boot_title_is_visible(void) { return world::Now() >= world::visibleAt; }
 extern "C" int port_vgx_vita_splash_active(void) { return world::Now() < world::splashEnds; }
-extern "C" void port_log_summary(const char* fmt, ...) {
+extern "C" __attribute__((format(printf, 1, 2))) void port_log_summary(const char* fmt, ...) {
     char text[300];
     va_list args;
     va_start(args, fmt);
@@ -90,6 +90,7 @@ extern "C" int sceDisplayGetFrameBuf(SceDisplayFrameBuf* fb, SceDisplaySetBufSyn
 extern "C" int sceIoMkdir(const char* path, SceMode) { world::directories.insert(path); ++world::mkdirs; return 0; }
 extern "C" int sceIoGetstat(const char* path, SceIoStat* st) {
     std::memset(st, 0, sizeof *st);
+    if (world::directories.count(path)) { st->st_mode = SCE_S_IFDIR; return 0; }
     auto it = world::files.find(path);
     if (it == world::files.end()) return int(0x80010002u);
     st->st_mode = SCE_S_IFREG;
@@ -185,6 +186,17 @@ int main(int argc, char** argv) {
     Check(argc == 2, "one mode");
     const std::string mode = argv[1];
     Setup();
+    if (mode == "contributor-default") {
+        unsetenv("GXV_TITLEART_REPLACE_SHELL");
+        const auto before = world::files;
+        Main(0, nullptr);
+        ExpectCapture(world::frameA);
+        for (const auto& file : before) Check(world::files[file.first] == file.second, "preinstalled bytes preserved");
+        Check(world::files.size() == before.size() + 1, "only the in-game capture is new");
+        std::puts("PASS: contributor-default");
+        return 0;
+    }
+    setenv("GXV_TITLEART_REPLACE_SHELL", "1", 1); // legacy player-requested generation
     if (mode == "disabled" || mode == "enabled-start") {
         setenv("GXV_TITLEART", mode == "disabled" ? "0" : "1", 1);
         port_title_art_start();
@@ -218,7 +230,27 @@ int main(int argc, char** argv) {
         return 0;
     }
     setenv("GXV_TITLEART", "1", 1);
-    if (mode == "first-run" || mode == "write-once" || mode == "package-update" || mode == "old-bubble-version") {
+    // 2.3 (issue 7): with the shell's LiveArea copy installed, bg.png / startup.png go there too (GXV_TITLEART_LIVEAREA, default 1)
+    if (mode == "livearea-meta" || mode == "livearea-meta-off") {
+        world::directories.insert("ur0:appmeta/SMGV00001/livearea/contents");
+        if (mode == "livearea-meta-off") setenv("GXV_TITLEART_LIVEAREA", "0", 1);
+        Main(0, nullptr);
+        ExpectCapture(world::frameA);
+        ExpectEverything("first start makes the pictures");
+        const std::string la = "ur0:appmeta/SMGV00001/livearea/contents/", app = "ux0:app/SMGV00001/sce_sys/livearea/contents/";
+        if (mode == "livearea-meta") {
+            Check(Logged("8 of 8 picture files written"), "the two LiveArea pictures are written to the shell's copy as well");
+            Check(world::files[la + "bg.png"] == world::files[app + "bg.png"] && world::files[la + "startup.png"] == world::files[app + "startup.png"],
+                  "the shell's LiveArea copy gets the same pictures as the app folder");
+        } else {
+            Check(Logged("6 of 6 picture files written") && !world::files.count(la + "bg.png") && !world::files.count(la + "startup.png"),
+                  "GXV_TITLEART_LIVEAREA=0: the app folder only, as 2.2");
+        }
+        std::puts(("PASS: " + mode).c_str());
+        return 0;
+    }
+    if (mode == "first-run" || mode == "write-once" || mode == "package-update" || mode == "old-bubble-version" || mode == "same-size-update" ||
+        mode == "old-stamp") {
         Main(0, nullptr);
         ExpectCapture(world::frameA);
         ExpectEverything("first start makes the pictures");
@@ -232,6 +264,14 @@ int main(int argc, char** argv) {
         Stamp stamp;
         Check(ParseStamp(std::string(world::files[kStampPath].begin(), world::files[kStampPath].end()).c_str(), stamp) && stamp.capture == kCaptureVersion &&
               stamp.bubble == kBubbleVersion && stamp.icon == long(world::files["ux0:app/SMGV00001/sce_sys/icon0.png"].size()), "the stamp records the versions and the icon size");
+        {
+            BubbleSum expect;
+            const auto& app = world::files["ux0:app/SMGV00001/sce_sys/icon0.png"];
+            const auto& meta = world::files["ur0:appmeta/SMGV00001/icon0.png"];
+            expect.File(app.data(), long(app.size()));
+            expect.File(meta.data(), long(meta.size()));
+            Check(stamp.hasSum && stamp.sum == expect.crc, "the stamp records the checksum of the two icons as written");
+        }
         if (mode == "first-run") { std::puts("PASS: first-run"); return 0; }
         const auto snapshot = world::files;
         world::log.clear();
@@ -251,6 +291,27 @@ int main(int argc, char** argv) {
             ExpectEverything("the pictures are rebuilt after a package update");
             Check(world::files["ux0:app/SMGV00001/sce_sys/icon0.png"] == snapshot.at("ux0:app/SMGV00001/sce_sys/icon0.png"), "same capture, same picture (deterministic)");
             Check(world::clockUs / 1e6 >= 8.5 && world::clockUs / 1e6 < 10, "a few seconds after the title");
+        } else if (mode == "same-size-update") {  // a package icon of exactly the generated icon's size: the checksum notices it
+            auto& icon = world::files["ux0:app/SMGV00001/sce_sys/icon0.png"];
+            const size_t size = icon.size();
+            icon.assign(size, 7);
+            auto& meta = world::files["ur0:appmeta/SMGV00001/icon0.png"];
+            meta.assign(size, 7);
+            Main(0, nullptr);
+            Check(world::displayQueries == 0, "rebuilt from title.rgba without reading the display");
+            Check(Logged("not the ones made last time"), "one line says why");
+            Check(world::files.at("ux0:app/SMGV00001/sce_sys/icon0.png") == snapshot.at("ux0:app/SMGV00001/sce_sys/icon0.png") &&
+                  world::files.at("ur0:appmeta/SMGV00001/icon0.png") == snapshot.at("ur0:appmeta/SMGV00001/icon0.png"),
+                  "the generated icon is back in both places");
+        } else if (mode == "old-stamp") {  // a 2.x stamp without a checksum and with picture version 1: rebuilt, then a stamp with a sum
+            char text[96];
+            const int n = std::snprintf(text, sizeof text, "SMGART capture=%d bubble=1 icon=%ld\n", kCaptureVersion,
+                                        long(snapshot.at("ux0:app/SMGV00001/sce_sys/icon0.png").size()));
+            world::files[kStampPath] = std::vector<uint8_t>(text, text + n);
+            Main(0, nullptr);
+            Stamp now;
+            Check(world::displayQueries == 0 && ParseStamp(std::string(world::files[kStampPath].begin(), world::files[kStampPath].end()).c_str(), now) &&
+                  now.hasSum && now.bubble == kBubbleVersion, "an old stamp: the pictures are remade from the capture and the new stamp has a sum");
         } else {
             Stamp old{kCaptureVersion, kBubbleVersion - 1, long(snapshot.at("ux0:app/SMGV00001/sce_sys/icon0.png").size())};
             char text[96];

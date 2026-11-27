@@ -1,0 +1,21 @@
+# BASELINE. Two game processes at once on the 2-core box, both to the Observatory (no session: the MP code stays inert).
+# Reports each one's peak RSS, CPU and wall time (pair.json, assert_log metric lines).
+name: c_two_observatory
+description: two processes at once both reach the Observatory; CPU / memory / time on 2 cores; save guard on both
+seconds: 110
+env: {PETARI_GAME_CLOCK: 1, PETARI_POSLOG: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: p1
+    input: "@file2_observatory"
+  - name: p2
+    input: "@file2_observatory"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'save_guard *'
+  - 'expect * /port: player at 2825\.0 787\.3 -3750\.0 \(on the ground\)/ within 100s'
+  - 'absent * /\[mp\] (session|hosting|joined)/'
+  - '?metric * wall_s <= 400'
+  - '?metric * rss_mib <= 1200'
+  - '?metric * cpu_s <= 200'

@@ -3,7 +3,7 @@
 
 namespace {
 unsigned clockReads = 0, warmReads = 0, logs = 0, censusLogs = 0, clockStarts = 0, affinityChanges = 0;
-unsigned coldtraceBoundaries = 0;
+unsigned coldtraceBoundaries = 0, classCalls = 0;
 SceUInt64 testUs = 1000000;
 int masks[] = {kCoreGame, kCoreAux, kCoreGame};
 void Require(bool ok, const char* why) {
@@ -23,6 +23,7 @@ extern "C" int sceDisplayWaitVblankStart() { return 0; }
 extern "C" void port_vi_retrace() {}
 extern "C" void port_vgx_coldtrace_render_boundary() { ++coldtraceBoundaries; }
 extern "C" SceKernelIdListType sceKernelGetThreadmgrUIDClass(SceUID id) {
+    ++classCalls;
     return id >= 0x40010001 && id <= 0x40010003 ? SCE_KERNEL_TMID_Thread : static_cast<SceKernelIdListType>(0);
 }
 extern "C" int sceKernelGetThreadInfo(SceUID id, SceKernelThreadInfo* info) {
@@ -53,6 +54,23 @@ int main() {
     Require(censusLogs == (PORT_RUNTIME_DIAGNOSTICS ? 3u : 0u), "thread census work follows the diagnostics flag");
     PinLibraryThreads(false, false);
     Require(affinityChanges == 2, "already-correct library threads are not moved again");
+    // stut600: the repeat scans start only at a multiple of 600 presents and never take more than one slice of ids in a present
+    masks[0] = kCoreGame; masks[1] = kCoreGame;
+    classCalls = 0;
+    PinLibraryThreadsStep(599);
+    PinLibraryThreadsStep(601);
+    Require(classCalls == 0 && affinityChanges == 2, "no repeat scan between the multiples of 600 presents");
+    PinLibraryThreadsStep(600);
+    Require(classCalls > 0 && classCalls <= static_cast<unsigned>(kPinSliceIds), "a repeat scan takes at most one slice of ids in a present");
+    for (unsigned before = classCalls - 1; classCalls != before && classCalls < 100000;) {   // (run the sliced scan to its end)
+        before = classCalls;
+        PinLibraryThreadsStep(601);
+        Require(classCalls - before <= static_cast<unsigned>(kPinSliceIds), "each present takes at most one slice of ids");
+    }
+    Require(affinityChanges == 4 && masks[0] == kCoreAux && masks[1] == kCoreRender, "the sliced repeat scan repairs the same threads");
+    classCalls = 0;
+    PinLibraryThreadsStep(602);
+    Require(classCalls == 0, "a finished repeat scan waits for the next multiple of 600 presents");
     splash::g_phase.store(splash::kGl);
     splash::g_stage.store(splash::kGame);
     splash::g_stageStartUs.store(testUs - 1000);

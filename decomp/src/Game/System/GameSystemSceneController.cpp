@@ -24,12 +24,18 @@
 #include "Game/Util/SystemUtil.hpp"
 #include <JSystem/JKernel/JKRSolidHeap.hpp>
 #include <cstdio>
+#ifdef TARGET_PC
+#include "Game/MP/MpGame.hpp"  // MP3: scene start barrier
+#include "Game/MP/MpStartHold.hpp"
+#endif
 
 #if defined(__vita__)
 extern "C" void port_debug_dump_threads(void);
 // (platform/src/port/perf.cpp) the stage being loaded, for the renderer's stage warm-up (GXV_STAGEWARM)
 extern "C" void port_scene_load_begin(const char* stage);
+extern "C" void port_scene_load_scenario(int scenario);  // (stagepreset25: the stage's scenario for the renderer's preset table)
 extern "C" void port_scene_load_end(void);
+extern "C" int port_stage_warm_hold(void) __attribute__((weak));
 #endif
 
 namespace {
@@ -146,6 +152,7 @@ void GameSystemSceneController::initializeScene() {
     SingletonHolder< HeapMemoryWatcher >::get()->setCurrentHeapToSceneHeap();
     updateSceneControlInfo();
 #if defined(__vita__)
+    port_scene_load_scenario(mCurrSceneControlInfo.mScenarioNo);
     port_scene_load_begin(mCurrSceneControlInfo.mStage);
 #endif
     MR::setRandomSeedFromStageName();
@@ -170,7 +177,18 @@ void GameSystemSceneController::initializeScene() {
 #endif
 }
 
+#ifdef TARGET_PC
+extern "C" int port_drawpipe_join(void);  // (GXV_DRAWPIPE=4, dpengine: SceneFunction.cpp)
+class LayoutActor;
+void portPostGuidanceKeep(LayoutActor* pActor);   // (Game/Screen/StarPointerDirector.cpp)
+#endif
 void GameSystemSceneController::destroyScene() {
+#ifdef TARGET_PC
+    // (no draw of the scene may be out on the draw thread when its heaps go: the scene's nerves leave no drawn turn between the
+    // request and this, so there is none; the join makes that a fact instead of an argument. Nothing to do when none is out.)
+    port_drawpipe_join();
+    portPostGuidanceKeep(nullptr);   // pillz32: the file select's Back pill lives in this scene: never drawn by the pointer director once it goes
+#endif
     bool stopSound = isStopSound();
 
     Scene* pScene = mScene;
@@ -228,9 +246,60 @@ bool GameSystemSceneController::isStopSound() const {
     return true;
 }
 
+#ifdef TARGET_PC
+// MP3: isReadyToStartScene in a session: the renderer's closed-screen warm-up hold (Vita) and the start barrier (MpFlow::holdSceneStart)
+// share the closed screen. The decision is MpStartHold::decide (tests/mp/starthold_test.cpp); this gathers its inputs and acts on it.
+static bool isReadyToStartSceneInSession(bool ready) {
+    static s64 sWarmSinceMs = -1;
+    if (!ready) {
+        sWarmSinceMs = -1;
+        return false;
+    }
+    bool warm = false;
+#if defined(__vita__)
+    // (polled on every ready frame, also while the barrier holds the screen: the queue then runs in whole slices)
+    warm = port_stage_warm_hold && port_stage_warm_hold();
+#endif
+    const s64 nowMs = OSTicksToMilliseconds(OSGetTime());
+    if (warm && sWarmSinceMs < 0) {
+        sWarmSinceMs = nowMs;
+    }
+    MpStartHold::In in = {true, true, warm, 0, false};
+    if (sWarmSinceMs >= 0) {
+        const s64 held = nowMs - sWarmSinceMs;
+        in.heldMs = held < 0 ? 0 : held > 1000000 ? 1000000 : static_cast< int >(held);
+    }
+    const MpStartHold::Out plan = MpStartHold::decide(in);
+    if (plan.pump) {
+        in.barrierHolding = MpFlow::holdSceneStart(plan.sendLoaded);
+    }
+    return MpStartHold::decide(in).ready;
+}
+#endif
+
+#ifdef TARGET_PC
+// MP3: in a session the warm-up hold and the scene start barrier are handled together (the session is pumped on every frame, LOADED
+// goes out when this console is ready to open its screen, the warm-up hold counts for 5 s at most). No session: isReadyToStartScene, c181's code below.
+// (merge of 3.0 on c181: a wrapper that GameSequenceFunction asks, so that isReadyToStartScene keeps c181's text, control flow and PGO profile)
+bool GameSystemSceneController::isReadyToStartSceneMp() const {
+    if (mp_active()) {
+        const bool ready = isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene)) &&
+                           !mScenarioSelectScene->isScenarioSelecting();
+        return isReadyToStartSceneInSession(ready);
+    }
+    return isReadyToStartScene();
+}
+#endif
+
 bool GameSystemSceneController::isReadyToStartScene() const {
-    return isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene)) &&
-           !mScenarioSelectScene->isScenarioSelecting();
+    const bool ready = isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene)) &&
+                       !mScenarioSelectScene->isScenarioSelecting();
+#if defined(__vita__)
+    // (GXV_STAGEWARM_HOLD_MS, platform/vgx/src/vgx_backend_gl.cpp) the closed screen opens only after this: the renderer asks to wait
+    // while the stage's program queue is not finished (capped), so the first frames of play link nothing
+    if (ready && port_stage_warm_hold && port_stage_warm_hold()) return false;
+#endif
+    return ready;
 }
 
 bool GameSystemSceneController::isFirstUpdateSceneNerveNormal() const {
@@ -369,13 +438,34 @@ void GameSystemSceneController::exeWaitDrawDoneScene() {
 
 #ifdef TARGET_PC
 extern "C" void port_view_flush(int drop);
+extern "C" void port_hrw_scene_drop(void);  // (crash1114, GameScene.cpp: the fresh player's partial draw never reaches a scene that is going)
 extern "C" void port_gx_drawdone_settle(int point);
 extern "C" void port_dl_flush_stale(int drop);
+extern "C" void port_shapecull_reset(void);  // (GXV_SHAPECULL: DrawBuffer.cpp)
+extern "C" void port_live_set_forget(void);  // (GXV_UPD_PREFETCH2 / GXV_UPD_LIVESET: decomp/src/Game/LiveActor/LiveActor.cpp)
+// (polish23, GXV_COPY_DROP: platform/src/gx/vgx_galaxy.cpp) the scene heaps about to go: the renderer's EFB-copy textures made into them
+extern "C" void port_vgx_scene_heaps_gone(const void* lo0, const void* hi0, const void* lo1, const void* hi1) __attribute__((weak));
 extern "C" void port_anim_flush_stale(int drop);
 extern "C" void port_anim_memo_drop(void);  // (GXV_ANIM_MEMO: decomp/src/Game/LiveActor/ModelManager.cpp)
 extern "C" void port_anim_prof_drop(void);  // (GXV_ANIM_PROF: platform/src/port/perf.cpp)
 extern "C" void port_raster_image_drop(void);  // (MarioActorSpecialDraw.cpp: its scene copy of the picture)
 extern "C" void port_heap_guard_check(const char* when);  // (GXV_HEAP_GUARD: platform/src/os/os_thread.cpp)
+extern "C" unsigned port_jpa_par_drop(int (*dies)(const void* manager));  // (GXV_PAR_PTCL: JPAEmitterManager.cpp)
+// (heap23: platform/src/os/os_thread.cpp) the C heap and the blocks outside it once the scene is gone, with the change since the last
+// scene destroyed; arms GXV_HEAP_BIG=1
+extern "C" void port_heap_scene_destroyed(const char* scene, const char* stage) __attribute__((weak));
+namespace {
+// (alodfix23) true when p lies in one of the scene heaps about to be destroyed
+int PortInSceneHeap(const void* p) {
+    const JKRHeap* heaps[2] = {MR::getSceneHeapNapa(), MR::getSceneHeapGDDR3()};
+    for (const JKRHeap* h : heaps) {
+        if (h != nullptr && p >= h->getStartAddr() && p < h->getEndAddr()) {
+            return 1;
+        }
+    }
+    return 0;
+}
+}  // namespace
 #endif
 
 void GameSystemSceneController::exeDestroyScene() {
@@ -385,18 +475,36 @@ void GameSystemSceneController::exeDestroyScene() {
         // (GXV_DRAWDONE_DEFER: the front end may still be on the scene's last picture, and its draw-sync callbacks reach scene
         // objects (TalkPeekZ: a crash at a stage entry with mode 4 on 3 Nov): it finishes before anything of the scene goes)
         port_gx_drawdone_settle(0);
+        portPostGuidanceKeep(nullptr);  // rev32 F2: on the game thread too, before the scene goes (destroyScene's call runs on the async thread)
+        port_hrw_scene_drop();  // (crash1114: GXV_HRW's late partial draw follows the update this destroy runs in; it must find no scene, not this one)
         port_anim_flush_stale(1);  // (GXV_ANIM_LOD, GXV_DL_LAZY) the scene's actors and models go with its heap: forget them
         port_dl_flush_stale(1);
+        port_shapecull_reset();  // (GXV_SHAPECULL: the boxes of the scene's shapes go with them)
+        port_live_set_forget();  // (GXV_UPD_PREFETCH2 / GXV_UPD_LIVESET: the table of the scene's actors goes with them)
+        if (port_vgx_scene_heaps_gone) {
+            // (polish23: after the settle above the front end has drawn the scene's last picture; the textures of the copies made into
+            // the scene heaps are counted - and with GXV_COPY_DROP=1 freed - before the next scene publishes anything)
+            const JKRHeap* napa = MR::getSceneHeapNapa();
+            const JKRHeap* gddr = MR::getSceneHeapGDDR3();
+            port_vgx_scene_heaps_gone(napa ? napa->getStartAddr() : nullptr, napa ? napa->getEndAddr() : nullptr, gddr ? gddr->getStartAddr() : nullptr,
+                                      gddr ? gddr->getEndAddr() : nullptr);
+        }
         port_view_flush(1);
         port_anim_memo_drop();  // (the scene's models go: their joint copies with them)
         port_anim_prof_drop();
         port_raster_image_drop();  // (its buffer is in the scene's heap)
+        port_jpa_par_drop(&PortInSceneHeap);  // (alodfix23: GXV_PAR_PTCL's host storage of the scene's particle manager goes with it)
         port_heap_guard_check("scene destroy");  // (GXV_HEAP_GUARD: port-side storage that would outlive the heap about to go)
 #endif
         MR::startFunctionAsyncExecute(MR::Functor(this, &GameSystemSceneController::destroyScene), 17, "\x83\x56\x81\x5b\x83\x93\x94\x6a\x8a\xfc");
     }
 
     if (MR::tryEndFunctionAsyncExecute("\x83\x56\x81\x5b\x83\x93\x94\x6a\x8a\xfc")) {
+#ifdef TARGET_PC
+        if (port_heap_scene_destroyed) {
+            port_heap_scene_destroyed(mCurrSceneControlInfo.mScene, mCurrSceneControlInfo.mStage);
+        }
+#endif
         const Nerve* pNerve = GET_NERVE(GameSystemSceneController, GameSystemSceneControllerChangeWaveBank);
 
         if (isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerDestroySceneForDestroy))) {
@@ -510,6 +618,29 @@ bool GameSystemSceneController::isExistRequest() const {
 #ifdef TARGET_PC
 bool GameSystemSceneController::isChangingScene() const {
     return mNextNerve != nullptr || !isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerNormal));
+}
+#endif
+
+#ifdef TARGET_PC
+// flow23 (PETARI_FLOW_LOG, decomp/src/Game/Scene/GameScene.cpp port_flow_beat): the controller's phase for the "flow:" lines (game thread).
+extern "C" const char* port_scene_ctrl_phase(void) {
+    GameSystem* pSystem = SingletonHolder< GameSystem >::get();
+    const GameSystemSceneController* c = pSystem != nullptr ? pSystem->mSceneController : nullptr;
+    if (c == nullptr || c->mSpine == nullptr) {
+        return "none";
+    }
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerNormal))) return "normal";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerNotInitialized))) return "not initialized";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerWaitDrawDoneScene))) return "wait draw";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerDestroyScene))) return "destroy";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerChangeWaveBank))) return "wave bank";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerInitializeScene))) return "initialize";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerInvalidateSystemWipe))) return "wipe";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerReadyToStartScene))) return "ready";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerWaitDrawDoneSceneForDestroy))) return "wait draw (destroy)";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerDestroySceneForDestroy))) return "destroy (reset)";
+    if (c->isCurrentNerve(GET_NERVE(GameSystemSceneController, GameSystemSceneControllerDestroyed))) return "destroyed";
+    return "?";
 }
 #endif
 

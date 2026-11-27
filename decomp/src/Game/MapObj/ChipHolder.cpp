@@ -1,5 +1,6 @@
 #include "Game/MapObj/ChipHolder.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/MP/MpGame.hpp"  // MP3: shared star chips
 #include "Game/MapObj/ChipBase.hpp"
 #include "Game/MapObj/ChipCounter.hpp"
 #include "Game/MapObj/ChipGroup.hpp"
@@ -59,6 +60,9 @@ void MR::registerChip(s32 chipType, ChipBase* pChip, s32 groupId) {
 }
 
 void MR::noticeGetChip(s32 chipType, ChipBase* pChip, s32 groupId) {
+    if (mp_active()) {  // MP3: shared world: tell the others (no-op while a remote get is applied)
+        MpWorldSync::onChip(pChip);
+    }
     ChipHolder* holder = getChipHolder(chipType);
     ChipGroup* group = holder->findChipGroup(groupId);
     group->noticeGet(pChip);

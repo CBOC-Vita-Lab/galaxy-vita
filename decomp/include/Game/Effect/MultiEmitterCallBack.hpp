@@ -34,6 +34,11 @@ public:
     MultiEmitterCallBack(const MultiEmitter*, MtxPtr, const TVec3f*, const TVec3f&);
 
     void execute(JPABaseEmitter*);
+#ifdef TARGET_PC
+    virtual int portCalcKind() const {
+        return 1;  // (GXV_PAR_PTCL: execute = followSRT + effectLight + setColor: reads the host matrix / SRT and its own fields, writes the emitter)
+    }
+#endif
     void setHostSRT(const TVec3f*, const TVec3f*, const TVec3f*);
     void setHostMtx(MtxPtr);
     void setBaseScale(f32);

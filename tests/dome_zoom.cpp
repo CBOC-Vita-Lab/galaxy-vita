@@ -70,9 +70,15 @@ public:
     TVec3f position;
     void calcPosition(TVec3f* out) const { *out = position; }
     bool isPointing(const TVec2f&, f32, f32) const;
+    bool isPointingEdge(const TVec2f&, f32, f32) const;
     f32 calcRadius2d(f32, f32, f32) const;
-    bool calcScreenPositionFromView(TVec2f*, const TVec3f&) const;
+    bool calcScreenPositionFromView(TVec2f*, const TVec3f&, bool allowOffscreen = false) const;
 };
+// (zoomclip23 / galmap23) the other reasons the zoom is set aside: a Pull Star in reach, a fixed game camera. Their own inputs
+// (the turn counter, the camera director) are not part of this fixture; the easing they share with a cutscene is.
+static bool pullStarRelax = false, fixedCamera = false;
+static bool inZoomRelax() { return pullStarRelax; }
+static bool inFramedGameCamera() { return fixedCamera; }
 #define getenv observedGetenv
 #include "dome_zoom_camera_actual.inc"
 #undef getenv
@@ -118,6 +124,25 @@ int main(int argc, char** argv) {
         }
     }
     assert(guarded ? clipped==0 : clipped>0);
+    // The dome map's edge pick (Bowser's planet): a big planet whose centre is past the picture's edge is pointable where its disc is on the
+    // picture, and one wholly off the picture is not. (isPointing rejects the off-picture centre, as the game does.)
+    {
+        updateProjection(45, 16.0f/9);
+        screenWidth=832; const f32 h=std::tan(45*PI_180/2)*1500;   // view-space half height at 1500 units
+        const f32 w=h*16.0f/9;
+        StarPointerTarget big; big.mRadius3d=2500; big.position=TVec3f(w*1.15f, 0, -1500);   // centre 15 % past the right edge, disc reaching in
+        TVec2f p; p.x=830; p.y=272;   // the pointer at the right edge
+        assert(!big.isPointing(p,99999,16));
+        assert(big.isPointingEdge(p,99999,16));
+        big.mRadius3d=100; big.position=TVec3f(w*2.0f, 0, -1500);   // wholly off the picture
+        assert(!big.isPointingEdge(p,99999,16));
+        big.position=TVec3f(w*0.5f, 0, -1500);   // on the picture: both agree
+        TVec2f c; assert(big.calcScreenPositionFromView(&c,big.position));
+        assert(big.isPointing(c,99999,16) && big.isPointingEdge(c,99999,16));
+        big.position=TVec3f(w*1.15f, 0, 1500);   // behind the eye
+        big.mRadius3d=2500; assert(!big.isPointingEdge(p,99999,16));
+        std::printf("edge pick ok\n");
+    }
     // Reading once also means an in-process environment edit cannot change it.
     setenv("GXV_ASTRO_DOME_ZOOM_GUARD",guarded ? "0" : "1",1);
     resetZoom(); requestedZoom=2;
@@ -148,6 +173,26 @@ int main(int argc, char** argv) {
         assert(close(fovy,45));
     }
     demo=eventCamera=false;
+    // A fixed game camera (GXV_ZOOM_FIXEDCAM) and a Pull Star in reach (GXV_ZOOM_PULLSTAR) ease to 1.0 like a cutscene, outside the
+    // dome: no jump on the first update, 1.0 within 24 updates, and back to the chosen zoom within 24 updates after.
+    dome=false; requestedZoom=2;
+    for (int reason=0;reason<2;++reason) {
+        resetZoom(); fovy=zoomedFovy(45,true);
+        assert(close(fovy,originalZoom(45,2)));
+        fixedCamera=reason==0; pullStarRelax=reason==1;
+        fovy=zoomedFovy(45,false);
+        assert(fovy>originalZoom(45,2) && fovy<45 && sZoomNow<2 && sZoomNow>1);
+        for (int i=1;i<24;++i) fovy=zoomedFovy(45,false);
+        assert(close(fovy,45) && close(sZoomNow,1));
+        fixedCamera=pullStarRelax=false;
+        fovy=zoomedFovy(45,false);
+        assert(fovy<45 && fovy>originalZoom(45,2));
+        for (int i=1;i<24;++i) fovy=zoomedFovy(45,false);
+        assert(close(fovy,originalZoom(45,2)));
+    }
+    // At camera creation (init) the set-aside reasons are not asked: the zoom starts as chosen, as before.
+    fixedCamera=true; resetZoom(); assert(close(zoomedFovy(45,true),originalZoom(45,2))); fixedCamera=false;
+    dome=true;
     for (int mode=0;mode<3;++mode) {
         game=mode!=0; fileSelect=mode==1;
         systemState.mSceneController=mode==2 ? nullptr : &controller;
@@ -155,5 +200,5 @@ int main(int argc, char** argv) {
     }
     assert(zoomedFovy(0,false)==0 && zoomedFovy(170,false)==170);
     assert(guardReads==1);
-    std::puts("PASS: dome zoom, target visibility, OFF/ON, read-once, other scenes and transitions");
+    std::puts("PASS: dome zoom, target visibility, OFF/ON, read-once, other scenes and transitions, fixed-camera / Pull Star easing");
 }

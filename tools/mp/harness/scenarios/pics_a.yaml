@@ -1,0 +1,13 @@
+# integ (13 Nov): pictures of the single-console menus (inputs/pics_a.txt). Not a test: nocrash only.
+name: pics_a
+description: pictures - main menu, How to Play, Safe Copies, Play Together alone, Enter a Friend's Code
+seconds: 300
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@pics_a"
+    env: {SMG_MP_NAME: Alex, SMG_KEYBOARD_NAME: Alex, SMG_KEYBOARD_CODE: ZZZZZ, SMG_MP_LOOK: 0}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'

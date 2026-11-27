@@ -9,6 +9,16 @@
 #include "Game/Util/StringUtil.hpp"
 #include "Game/Util/SystemUtil.hpp"
 #include <revolution/gd/GDBase.h>
+#ifdef TARGET_PC
+#include <atomic>
+// (xcheck31) the number of holders whose array element is completely stored; never above the array's own size (a removal publishes the smaller size).
+static std::atomic< u32 > sPortHolderPublished{0};
+u32 ResourceHolderManager::portHolderCount() const {
+    const u32 n = sPortHolderPublished.load(std::memory_order_acquire);
+    const u32 s = static_cast< u32 >(mResourceArray.size());
+    return n < s ? n : s;
+}
+#endif
 
 namespace {
     class GDCurrentRestorer {
@@ -83,6 +93,9 @@ void ResourceHolderManager::removeIfIsEqualHeap(JKRHeap* pHeap) {
             pIter++;
         }
     }
+#ifdef TARGET_PC
+    sPortHolderPublished.store(static_cast< u32 >(mResourceArray.size()), std::memory_order_release);
+#endif
 }
 
 void ResourceHolderManager::startCreateResourceHolderOnMainThread(const char* pParam1, CreateResourceHolderArgs* pArgs) {
@@ -107,6 +120,9 @@ ResourceHolderManagerName2Resource* ResourceHolderManager::createAndAddInner(con
     (*pMakeArchiveFileNameFunc)(archivePath, sizeof(archivePath), pArcName);
 
     if (MR::receiveArchive(archivePath) == nullptr) {
+#ifdef TARGET_PC
+        port_log("archive: %s was not requested in the archive phase: mounted now (init thread: a null archive here is a crash)", archivePath);   // MP3 integ: finds a missing request
+#endif
         MR::mountArchive(archivePath, MR::getCurrentHeap());
     }
 
@@ -156,6 +172,9 @@ ResourceHolderManagerName2Resource* ResourceHolderManager::add(const char* pPara
     name2Resource.mHeap = rArgs.mHeap;
 
     mResourceArray.push_back(name2Resource);
+#ifdef TARGET_PC
+    sPortHolderPublished.store(static_cast< u32 >(mResourceArray.size()), std::memory_order_release);   // (the element is stored: the walkers may see it)
+#endif
 
     return &mResourceArray[mResourceArray.size() - 1];
 }

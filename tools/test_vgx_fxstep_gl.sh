@@ -14,13 +14,21 @@ wraps=(glUseProgram glEnable glDisable glViewport glScissor glClear glClearColor
   glReadPixels glFinish)
 link=()
 for symbol in "${wraps[@]}"; do link+=("-Wl,--wrap=$symbol"); done
-nice -n 10 "${CXX:-g++}" -std=gnu++20 -O1 -g -DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=0 \
+sanitizer=(-fsanitize=address,undefined -fno-omit-frame-pointer)
+sanitizer_link=()
+if [[ $(uname -s) == Linux ]] && "${CXX:-g++}" --version | grep -qi clang; then
+  sanitizer+=(-fno-sanitize-link-runtime)
+  sanitizer_link=(-l:libasan.so.8 -l:libubsan.so.1)
+fi
+nice -n 10 "${CXX:-g++}" -std=gnu++20 -O1 -g \
+  "${sanitizer[@]}" -DPORT_RUNTIME_DIAGNOSTICS=0 -DPORT_LOGGING=0 \
   -I"$src" -I"$root/platform/vgx/third_party" \
   "$root/tests/vgx_fxstep_gl_test.cpp" "$src/vgx_backend_gl.cpp" "$src/vgx_autoq.cpp" "$src/vgx_shadergen.cpp" \
-  "$root/platform/vgx/host/vgx_host_egl.cpp" "${link[@]}" -lEGL -lGLESv2 -lpthread -o "$out/vgx_fxstep_gl_test"
+  "$root/platform/vgx/host/vgx_host_egl.cpp" "${link[@]}" "${sanitizer_link[@]}" -lEGL -lGLESv2 -lpthread -o "$out/vgx_fxstep_gl_test"
 run() { # <name> <fx|bg> <schedule> [env assignment...]
   local name=$1 what=$2 schedule=$3; shift 3
   env -i PATH="$PATH" HOME="${HOME:-/tmp}" LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 \
+    ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
     GXV_LOG=0 GXV_FXHALF_MIN=0 GXV_WORKLOAD_PROBE=0 GXV_AUTOQ=0 GXV_KEEP_RT=0 "$@" \
     "$out/vgx_fxstep_gl_test" "$what" "$out/$name" "$schedule" > "$out/$name.log" 2>&1 || { cat "$out/$name.log"; exit 1; }
   grep -E '^(frame|PASS|FAIL)' "$out/$name.log"
@@ -84,3 +92,10 @@ run bg-mid bg b-b
 run bg-other bg -b-
 same bg-base bg-mid 3; same bg-base bg-other 2 4; same bg-all bg-mid 2 4; same bg-all bg-other 3
 printf 'PASS: cheaper background: off is the base picture, on takes the nearest mip level for the ordinary texture only, the character keeps its filter\n'
+for kind in ortho nodepth mixed nomip nearest unused missing short range nonfinite; do
+  run "bg-$kind-base" "bg-$kind" ---
+  run "bg-$kind-all" "bg-$kind" bbb
+  same_ops "bg-$kind-base" "bg-$kind-all"
+  same "bg-$kind-base" "bg-$kind-all" 2 3 4
+done
+printf 'PASS: background filtering protects orthographic/depth-disabled UI, mixed character draws, ordinary filters and unknown projection metadata (trace and pictures)\n'

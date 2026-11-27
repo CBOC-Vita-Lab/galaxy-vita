@@ -36,11 +36,13 @@ The release VPK (`Galaxy-Vita.vpk`, title ID `SMGV00001`) holds:
 | --- | --- |
 | `eboot.bin` | the build above |
 | `sce_sys/param.sfo`, `sce_sys/livearea/contents/template.xml` | `vita/vgx-game` (CMake, `vita_create_vpk`) |
-| `sce_sys/icon0.png`, `pic0.png`, `livearea/contents/bg.png`, `startup.png` | `vita/vgx-game/sce_sys/`, drawn by `tools/handheld/make_livearea.py` (original art; the package carries no game artwork, the game makes its own pictures on the console, see [ASSETS.md](ASSETS.md)) |
-| `shadercache/` | the compiled-shader seed: the shaders the port generates, compiled once with the Vita's own compiler, so the first launch has less to do. Its top folder also holds the two learned lists, copied from a console that has played the game: `shadercache/vgx_shaderlist.bin` (the programs linked behind the title) and `shadercache/vgx_stagewarm.bin` (per galaxy, the programs it draws; copy it from `ux0:data/smg/shadercache/` of the same console and build, so it matches the seed's `<key>`). The stage list is optional: without it the first visit to each galaxy has no load-time warm-up; the console merges it with its own (`GXV_STAGEWARM_PKG=0` ignores it) |
+| `sce_sys/icon0.png`, `pic0.png`, `livearea/contents/bg.png`, `startup.png`, `settings.png` | C182: use the five chosen contributor PNGs directly from `vita/vgx-game/sce_sys/`. Do not regenerate them; see [ASSETS.md](ASSETS.md). |
+| `shadercache/` | the compiled-shader seed: the shaders the port generates, compiled once with the Vita's own compiler, so the first launch has less to do. Its top folder also holds the two learned lists, copied from a console that has played the game: `shadercache/vgx_shaderlist.bin` (the programs linked behind the title) and `shadercache/vgx_stagewarm.bin` (per galaxy, the programs it draws; copy it from `ux0:data/smg/shadercache/` of the same console and build, so it matches the seed's `<key>`). The stage list is optional: without it the first visit to each galaxy has no load-time warm-up; the console merges it with its own (`GXV_STAGEWARM_PKG=0` ignores it). seedrun31/31b: the first-visit priorities and the old player seed are data in this file now, not code. `tools/pack24/refill_pack.py` puts them in every list it writes (with a stamp record); for a list or VPK made before, run `python3 -I tools/seedrun/stagetags.py vpk <in.vpk> <out.vpk>` (or `legacy <in> <out>` on the file). `stagetags.py check <file>` fails an untagged list, and the game logs `WARNING: the package's ... has no stagetags stamp` at start-up |
 
 `cmake --build /build/vita-vgx-game` makes `smg-vgx.vpk` from the first three. The release adds
-the seed to it. A VPK without the seed works too; the console then compiles the shaders as the game
+the seed to it, always through the tagging step (fix31): `python3 -I tools/vgx_build/build.py link --seed <seed VPK or
+shadercache folder>` makes `<build-dir>/Galaxy-Vita.vpk` and fails unless `tools/seedrun/stagetags.py checkvpk` passes on it
+(by hand: `stagetags.py package <smg-vgx.vpk> <seed> <out.vpk>`, then `stagetags.py checkvpk <out.vpk>`). A VPK without the seed works too; the console then compiles the shaders as the game
 meets them and keeps them in `ux0:data/smg/shadercache/`.
 
 ## Developer Checks

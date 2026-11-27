@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Game/System/NerveExecutor.hpp"
+#ifdef TARGET_PC
+#include "port/yesno_pad.h"
+#endif
 
 class ButtonPaneController;
 class LayoutActor;
@@ -35,4 +38,11 @@ public:
     /* 0x18 */ const char* mCursorSE;
     /* 0x1C */ const char* mYesSE;
     /* 0x20 */ const char* mNoSE;
+#ifdef TARGET_PC
+    // setfix31: the pad answers too (port/yesno_pad.h): Left / Right move the focus (it starts on No), Cross answers it, Circle is No; the pointer
+    // still answers as before. Off unless the owner of the window turns it on (MpUiSystem: the multiplayer menus' and the in-game Settings' windows).
+    void setPortPad(bool on);
+    bool mPortPadOn = false;
+    port::yesno::PadState mPortPad;
+#endif
 };

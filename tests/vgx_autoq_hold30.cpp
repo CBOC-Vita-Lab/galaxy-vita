@@ -445,6 +445,29 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::printf("7. crisp31: the Settings' Quality frame of 3.x (960x544 pinned, GXV_AUTOQ_FXSTEP=0) in a severe overload (GXV_Q30_FULLFX)\n");
+    {
+        // The back end's config for Settings Quality today: GXV_AUTOQ_MIN = MAX = 6, no load steps (fxStep = bgStep = false), anisotropic filtering held by
+        // GXV_ANISO (not the controller's), hold30 off (its floor rule needs a floor below 960x544), GXV_AUTOQ_OVERLOAD=2 (overloadFx). GXV_Q30_FULLFX=1 clears
+        // overloadFx for the 30 mode in AutoQualityInit. A GPU at 55 ms a picture (165 % of the budget) for 20 s.
+        auto frame = [](bool fx) {
+            Config c = Quality(false);
+            c.minRung = c.maxRung = c.startRung = kTopSingle;
+            c.bgStep = false;
+            c.aniso = false;
+            c.overloadFx = fx;
+            return c;
+        };
+        const SceneFn heavy = [](int, double, bool) { Shot s = Steady(55.0, 0.0); s.physical = true; return s; };
+        Sim today(frame(true)), crisp(frame(false));
+        today.Run(heavy, 20.0);
+        crisp.Run(heavy, 20.0);
+        if (verbose) { today.Print("overload=2 (today)"); crisp.Print("GXV_Q30_FULLFX=1"); }
+        Check(today.ctl.FxStepOn() && today.ctl.Current() == kTopSingle, "today (=2): Quality takes half-size effects and blur at 960x544 (the b5q emulator log's line)");
+        Check(!crisp.ctl.FxStepOn() && !crisp.ctl.BgStepOn() && crisp.ctl.Current() == kTopSingle && crisp.ev.empty(),
+              "GXV_Q30_FULLFX=1 (overloadFx false): full-size effects, full background, 960x544, no change at all");
+    }
+
     if (g_failures) {
         std::printf("%d check(s) FAILED\n", g_failures);
         return 1;

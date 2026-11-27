@@ -1,0 +1,48 @@
+# (13 Nov, integ: g1 types at +90 and +100 s, not +30 and +40: g2 joins about 90 s after g1 and mutes at +8 s of its own scene, so the old times sent both messages BEFORE the mute: wrong guess.)
+# QA-FUNC 7/15. A typed message is hidden for ONE receiver only: three consoles; g2 mutes g1 (its own console only), g1 types a message. The host shows
+# it, g2 hides it ("hidden ... (muted)"), and the mute does not spread: the host never logs "hidden", g2 never logs "shown from=1 kind=text".
+# The hiding is logged by the core of the menu's Mute button, MpChat::setMuted: "ui: chat mute slot=1 on=1" and "chat hide slot=<own> target=1 on=1".
+# mp_chat checks the mute on the host only (2 consoles), so nothing proves the mute stays local. Hooks: SMG_MP_TEST_CHAT exists
+# ("<s>@<serial>:mute:<slot>" and "<s>@<serial>:text:<words>"). READY. g2 starts when g1 has joined so g1 is slot 1.
+name: qa_typed_hidden_one
+description: "3 consoles: g2 mutes g1, g1 types: shown on the host, hidden only on g2"
+seconds: 380
+min_speed: 0.3
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    may_end_early: true   # ends by its HARNESS_END mark (harness: the early-exit preflight made a PASS INVALID)
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_END: '\[mp\] ui: chat shown from=1 kind=text chars=\d+|60'}
+  - name: g1
+    may_end_early: true   # ends by its HARNESS_END mark (harness: the early-exit preflight made a PASS INVALID)
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_CHAT: '90@1:text:Meet me by the big tree,100@1:text:Second one here',
+          HARNESS_END: '\[mp\] ui: chat sent id=text chars=15 |45'}
+  - name: g2
+    may_end_early: true   # ends by its HARNESS_END mark (harness: the early-exit preflight made a PASS INVALID)
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, HARNESS_START_ON: 'g1|\[mp\] joined slot=1 |0', SMG_MP_TEST_CHAT: '8@1:mute:1',
+          HARNESS_END: '\[mp\] ui: chat hidden from=1 kind=text \(muted\)|60'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 2 joined name=g2 .*players=3/'
+  - 'expect g2 /\[mp\] ui: chat mute slot=1 on=1/ within 60s after g2 /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'expect g1 /\[mp\] chat test: \d+ events/'
+  - 'order g2 /\[mp\] ui: chat mute slot=1 on=1/ before g1 /\[mp\] ui: chat sent id=text chars=23 /'
+  - 'order g1 /\[mp\] ui: chat sent id=text chars=23 / before host /\[mp\] ui: chat shown from=1 kind=text chars=23/ within 5s'
+  - 'order g1 /\[mp\] ui: chat sent id=text chars=23 / before g2 /\[mp\] ui: chat hidden from=1 kind=text \(muted\)/ within 5s'
+  - 'absent g2 /\[mp\] ui: chat shown from=1 kind=text/'
+  - 'absent host /\[mp\] ui: chat (hidden|mute)/'
+  - 'absent g1 /\[mp\] ui: chat (hidden|mute|shown from=1)/'
+  - 'absent * /\[mp\] (ui: chat (dropped|NOT sent|not sent)|chat drop )/'
+  - 'expect g2 /\[mp\] chat hide slot=2 target=1 on=1/'
+  - 'absent host,g1 /\[mp\] chat hide /'
+  - 'absent g2 /\[mp\] chat hide slot=\d target=(?!1 )/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left))/ before shutdown'

@@ -1,0 +1,73 @@
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -588,6 +588,21 @@
+ 	DEPTHBUFFER_READY
+ };
+ 
++// VP23_DS_LEAKFIX (Galaxy vp23, patch 0024 = upstream fbb190f "Fix memory leak on depthstencil with stencil destruction"): a hidden
++// depth buffer that has a stencil surface gives both to the garbage collector, not the depth data only. (Galaxy never asks for stencil,
++// so for it the stencil pointer is always NULL and nothing changes.)
++#if defined(VP23_DS_LEAKFIX) && !defined(DEPTH_STENCIL_HACK)
++static inline __attribute__((always_inline)) void mark_depth_stencil_as_dirty(SceGxmDepthStencilSurface *surface) {
++	mark_as_dirty(surface->depthData);
++	if (surface->stencilData) {
++		mark_as_dirty(surface->stencilData);
++	}
++}
++#define VGL_MARK_DS_DIRTY(s) mark_depth_stencil_as_dirty(s)
++#else
++#define VGL_MARK_DS_DIRTY(s) mark_as_dirty((s)->depthData)
++#endif
++
+ // Framebuffer struct
+ typedef struct {
+ 	GLboolean active;
+@@ -1399,7 +1414,7 @@
+ 			}
+ 			if (fb->depthbuffer_ptr) {
+ #ifndef DEPTH_STENCIL_HACK
+-				mark_as_dirty(fb->depthbuffer_ptr->depthData);
++				VGL_MARK_DS_DIRTY(fb->depthbuffer_ptr);
+ #endif
+ 				fb->depthbuffer_ptr = NULL;
+ 				fb->depthbuffer_state &= ~DEPTHBUFFER_READY;
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -284,7 +284,7 @@
+ 			}
+ #ifndef DEPTH_STENCIL_HACK
+ 			if (fb->depthbuffer_ptr) {
+-				mark_as_dirty(fb->depthbuffer_ptr->depthData);
++				VGL_MARK_DS_DIRTY(fb->depthbuffer_ptr);
+ 			}
+ #endif
+ 		}
+@@ -368,7 +368,7 @@
+ 	// Discarding any previously bound hidden depth buffers
+ 	if (fb->depthbuffer_ptr) {
+ #ifndef DEPTH_STENCIL_HACK
+-		mark_as_dirty(fb->depthbuffer_ptr->depthData);
++		VGL_MARK_DS_DIRTY(fb->depthbuffer_ptr);
+ #endif
+ 	}
+ 	fb->depthbuffer_ptr = NULL;
+@@ -400,7 +400,7 @@
+ 	// Discarding any previously bound hidden depth buffers
+ 	if (fb->depthbuffer_ptr) {
+ #ifndef DEPTH_STENCIL_HACK
+-		mark_as_dirty(fb->depthbuffer_ptr->depthData);
++		VGL_MARK_DS_DIRTY(fb->depthbuffer_ptr);
+ #endif
+ 		fb->depthbuffer_ptr = NULL;
+ 	}
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -1831,7 +1831,7 @@
+ 						if (fb) {
+ 							gpu_free_texture(&texture_slots[i]);
+ 							if (fb->depthbuffer_ptr) {
+-								mark_as_dirty(fb->depthbuffer_ptr->depthData);
++								VGL_MARK_DS_DIRTY(fb->depthbuffer_ptr);
+ 								fb->depthbuffer_ptr = NULL;
+ 								fb->depthbuffer_state = DEPTHBUFFER_MISSING;
+ 							}

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "ttlSec": 86400,
+  "servers": [
+    { "url": "https://msc-online-example.example.workers.dev", "priority": 0 }
+  ],
+  "stun": ["stun.cloudflare.com:3478"],
+  "app": { "min": null, "latest": null }
+}

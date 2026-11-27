@@ -15,7 +15,7 @@ namespace {
 struct WorkerFinished {};
 unsigned callbacks;
 s32 lastResult;
-std::atomic<unsigned> resumeGeneration{0};
+std::atomic<unsigned> resumeGeneration{0}, appResumeGeneration{0};
 
 void require(bool ok, const char* why) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -62,6 +62,7 @@ extern "C" void port_irq_raise(int irq) {
     throw WorkerFinished{};
 }
 extern "C" unsigned port_resume_generation(void) { return resumeGeneration.load(); }
+extern "C" unsigned port_resume_app_generation(void) { return appResumeGeneration.load(); }
 
 int main(int argc, char** argv) {
     require(argc == 2, "expected on or off");
@@ -129,17 +130,98 @@ int main(int argc, char** argv) {
     bool cached = false;
     for (auto& slot : sOpenFiles) cached |= slot.fd >= 0;
     require(cached, "a descriptor is cached");
-    sReadAhead.entry = 1;
+    sRa.Set(0, 1, 0, 1);
     resumeGeneration = 1;
     noteResume();
     cached = false;
     for (auto& slot : sOpenFiles) cached |= slot.fd >= 0;
-    require(!cached && sReadAhead.entry == ~0u && sMovieWin.entry == ~0u, "a resume drops descriptors and windows");
+    require(!cached && sRa.slot[0].entry == ~0u && sMovieWin.entry == ~0u, "a resume drops descriptors and windows");
     noteResume();
     require(readBlock(1, block, kBlock, 8 * kBlock) == (s32)kBlock && blockMatches(block, kBlock, 8 * kBlock), "reads work after the resume");
     require(sReopenRecovered == recoveredBefore + 1, "the dropped files were opened afresh, not 'recovered'");
 
+    // (3.0) A descriptor the system took away may answer with an error a missing file would also give (here EISDIR: the cached
+    // number now names a directory).  The first reopen is made anyway.
+    {
+        require(readBlock(1, block, kBlock, 0) == (s32)kBlock, "cached again");
+        int dirFd = open("/", O_RDONLY);
+        require(dirFd >= 0, "a directory descriptor");
+        for (auto& slot : sOpenFiles) if (slot.fd >= 0 && slot.entry == 1) { dup2(dirFd, slot.fd); }
+        close(dirFd);
+        memset(block, 0xCC, sizeof block);
+        require(readBlock(1, block, kBlock, 3 * kBlock) == (s32)kBlock && blockMatches(block, kBlock, 3 * kBlock),
+                "a descriptor failing with a non-retriable error is reopened once");
+    }
+
+    // (3.0) The card comes back late after a resume: the open is refused for longer than the short ladder; within the resume
+    // window the long steps are taken, outside it they are not.
+    {
+        writeStream(sFst[4].hostPath, kBlock);
+        for (auto& slot : sOpenFiles) if (slot.fd >= 0) { close(slot.fd); slot.fd = -1; }
+        for (unsigned i = 0; i < sizeof sReopenDelayMs / sizeof sReopenDelayMs[0]; ++i) sReopenDelayMs[i] = i < kReopenShortSteps ? 0 : 150;
+        resumeGeneration = 0; sResumeSeen = 0; sResumeNs = 0;
+        std::vector<int> jam;
+        for (;;) { int fd = open("/dev/null", O_RDONLY); if (fd < 0) break; jam.push_back(fd); if (jam.size() > 70000) break; }
+        std::thread card2([&jam] { std::this_thread::sleep_for(std::chrono::milliseconds(200)); for (int fd : jam) close(fd); jam.clear(); });
+        const s32 outside = readBlock(4, block, kBlock, 0);
+        card2.join();
+        require(outside == -1, "no resume reported: the short ladder gives up");
+        jam.clear();
+        for (;;) { int fd = open("/dev/null", O_RDONLY); if (fd < 0) break; jam.push_back(fd); if (jam.size() > 70000) break; }
+        resumeGeneration = 7;  // (a resume was just reported)
+        std::thread card3([&jam] { std::this_thread::sleep_for(std::chrono::milliseconds(200)); for (int fd : jam) close(fd); jam.clear(); });
+        const s32 inside = readBlock(4, block, kBlock, 0);
+        card3.join();
+        require(inside == (s32)kBlock && blockMatches(block, kBlock, 0), "a resume was reported: the long ladder waits for the card");
+        for (auto& d : sReopenDelayMs) d = 0;
+    }
+
+    // (fix33 A1) the window starts at the resume (noteResume), not at the first failing read: a failure long after it gets the short ladder.
+    {
+        sResumeNs = port_host_time_ns() - 25000000000ll;   // the resume was 25 s ago
+        require(!recentResume(), "a resume 25 s ago is outside the window");
+        sResumeNs = port_host_time_ns() - 1000000000ll;
+        require(recentResume(), "a resume 1 s ago is inside it");
+        sResumeNs = 0;
+    }
+
+    // (fix33 A2) A plain PS-button return (app resume, no system resume): nothing is dropped up front; the caches are closed once when
+    // a read fails inside the window.
+    {
+        require(readBlock(1, block, kBlock, 0) == (s32)kBlock, "cached before the app resume");
+        bool had = false;
+        for (auto& slot : sOpenFiles) had |= slot.fd >= 0;
+        require(had, "a descriptor is cached");
+        appResumeGeneration = 1;
+        noteResume();
+        bool kept = false;
+        for (auto& slot : sOpenFiles) kept |= slot.fd >= 0;
+        require(kept, "an app resume keeps the cached descriptors");
+        require(recentResume(), "an app resume opens the window at once");
+        // a second cached file, then both descriptors die; the read of one fails and the reread closes the other one as well
+        writeStream(sFst[2].hostPath, kBlock * 2);
+        require(readBlock(2, block, kBlock, 0) == (s32)kBlock, "second file cached");
+        takeDescriptorsAway();
+        const unsigned rec = sReopenRecovered;
+        require(readBlock(1, block, kBlock, kBlock) == (s32)kBlock, "the failing read recovers");
+        require(sReopenRecovered == rec + 1, "one recovery");
+        bool other = false;
+        for (auto& slot : sOpenFiles) if (slot.fd >= 0 && slot.entry == 2) other = true;
+        require(!other, "the first failure after the app resume closed the other cached descriptors too");
+        require(!sLazyDropPending, "the lazy drop is made once");
+        // no app resume, no failure: nothing is closed
+        require(readBlock(2, block, kBlock, 0) == (s32)kBlock, "second file again");
+        appResumeGeneration = 2;
+        noteResume();
+        require(readBlock(2, block, kBlock, 0) == (s32)kBlock, "reads after a second app resume");
+        bool still = false;
+        for (auto& slot : sOpenFiles) if (slot.fd >= 0 && slot.entry == 2) still = true;
+        require(still, "no failure: the descriptor was never closed");
+        unlink(sFst[2].hostPath.c_str());
+    }
+
     for (auto& slot : sOpenFiles) if (slot.fd >= 0) { close(slot.fd); slot.fd = -1; }
+    unlink(sFst[4].hostPath.c_str());
     for (unsigned i = 1; i <= 3; ++i) unlink(sFst[i].hostPath.c_str());
     rmdir(root);
     std::printf("PASS: stream continues after taken-away descriptors; late open retried; vanished file not retried; resume drops caches (%u recoveries)\n", sReopenRecovered);

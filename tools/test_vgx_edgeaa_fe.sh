@@ -11,7 +11,7 @@ khr=${KHR_INCLUDE:-/work/khr/include}
 sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_shadergen vgx_texcache vgx_texdecode vgx_stats vgx_backend_gl vgx_autoq)
 args=()
 for unit in "${sources[@]}"; do args+=("$src/$unit.cpp"); done
-nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/vgx/third_party" -I"$khr" \
+nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/include" -I"$root/platform/vgx/third_party" -I"$khr" \
   "$root/tests/vgx_edgeaa_fe_test.cpp" "${args[@]}" "$root/platform/vgx/host/vgx_host_egl.cpp" -lEGL -lGLESv2 -pthread -o "$out/vgx_edgeaa_fe"
 common=(LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_AUTOQ=0)
 env "${common[@]}" GXV_EDGE_AA=1 "$out/vgx_edgeaa_fe"

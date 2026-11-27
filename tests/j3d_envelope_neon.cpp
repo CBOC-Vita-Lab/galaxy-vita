@@ -12,16 +12,22 @@
 #include "neon_shim_f32.h"
 #endif
 typedef float f32; typedef uint8_t u8; typedef uint16_t u16; typedef f32 Mtx[3][4];
+static bool sCount = false;
+static unsigned sProducts = 0;
 struct J3DJointTree {
     u16 mWEvlpMtxNum; u8* mMixNum; u16* mIdx; f32* mW; Mtx* mInv;
     u16* getWEvlpMixMtxIndex() const { return mIdx; } f32* getWEvlpMixWeight() const { return mW; }
     u16 getWEvlpMtxNum() const { return mWEvlpMtxNum; } u8 getWEvlpMixMtxNum(u16 i) const { return mMixNum[i]; }
-    Mtx& getInvJointMtx(int i) { return mInv[i]; }
+    Mtx& getInvJointMtx(int i) {
+#ifndef C184_SKIN_BENCH
+        if (sCount) ++sProducts;
+#endif
+        return mInv[i];
+    }
 };
 // --- copy of the production function (J3DMtxBuffer.cpp) ---
-static void J3DCalcWeightEnvelopeNeon(J3DJointTree* pTree, Mtx* pAnmMtx, Mtx* pOut, const u8* pScaleFlag, u8* pEnvScaleFlag) {
+static bool J3DEnvelopeReuseOn() { return true; }
 #include "body.inc"
-}
 // --- the portable reference: mtx.c's scalar C_MTXConcat order (== its NEON form) + the loop of J3DMtxBuffer.cpp ---
 static void concatRef(const Mtx a, const Mtx b, Mtx ab) {
     Mtx t;
@@ -44,8 +50,25 @@ static void ref(J3DJointTree* t, Mtx* anm, Mtx* out, const u8* sf, u8* esf) {
 static uint32_t rng = 12345; static uint32_t rnd() { rng = rng * 1664525u + 1013904223u; return rng; }
 static f32 rf() { uint32_t k = rnd() % 10; if (k == 0) return 0.0f; if (k == 1) return -0.0f; if (k == 2) return 1.0f;
     return ((int32_t)rnd() / 2147483648.0f) * (float)(1 << (rnd() % 12)); }
+#ifdef C184_SKIN_BENCH
+#include "c184_skin_bench.inc"
+#else
 int main() {
     long checked = 0, bad = 0;
+    {
+        Mtx anm[18] = {}, inv[18] = {}, o1[16], o2[16];
+        u8 sf[18] = {}, e1[16], e2[16], mix[16];
+        u16 idx[32]; f32 w[32];
+        for (int i = 0; i < 32; ++i) {
+            idx[i] = (i & 1) ? 16 : 2; w[i] = (i & 1) ? 0.33f : 0.67f; mix[i/2] = 2;
+        }
+        J3DJointTree t{16, mix, idx, w, inv};
+        sCount = true; J3DCalcWeightEnvelopeNeon(&t, anm, o1, sf, e1); sCount = false;
+        if (sProducts != 2) { printf("FAIL: one model, 32 influences, expected 2 products not %u\n", sProducts); ++bad; }
+        anm[2][0][1] = 7; inv[2][1][2] = 4; sf[2] = sf[16] = 1;
+        J3DCalcWeightEnvelopeNeon(&t, anm, o1, sf, e1); ref(&t, anm, o2, sf, e2);
+        if (memcmp(o1, o2, sizeof(o1)) || memcmp(e1, e2, sizeof(e1))) ++bad;
+    }
     for (int it = 0; it < 20000; it++) {
         const int J = 1 + rnd() % 40, E = 1 + rnd() % 30;
         static Mtx anm[64], inv[64], o1[64], o2[64]; static u8 sf[64], e1[64], e2[64], mix[64]; static u16 idx[64 * 8]; static f32 w[64 * 8];
@@ -57,3 +80,4 @@ int main() {
     }
     printf("envelope: %ld cases, %ld mismatches\n", checked, bad); return bad != 0;
 }
+#endif

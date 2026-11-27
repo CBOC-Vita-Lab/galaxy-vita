@@ -1,0 +1,31 @@
+# final run (14 Nov), save case d: a deleted save stays deleted (smallfix). Scratch save folders only (HARNESS_SAVE_SETUP edits the run's own copy).
+#   console "first": ops mpbak,rm = GameData.bin deleted by hand, its .mpbak left. Boot: "only GameData.bin.mpbak exists (no .mptmp): not restored". Then a new game on a file
+#                    (inputs/newgame_file2.txt) makes the game create GameData.bin: the lone .mpbak is moved aside as GameData.bin.mpbak.old, never restored, never deleted.
+#   console "second": the SAME console boots again from first's folder (HARNESS_AFTER + HARNESS_CONTINUE) after op tear: the new file is torn. No .mpbak is beside it any more
+#                    (only .mpbak.old, which nothing reads), so the boot repair has nothing to restore from: the old save must NOT come back. The torn new file is not "repaired".
+# Not verified by a run: the new-game input (coordinates of file2_observatory on an empty file select). If the game creates GameData.bin on its own at boot the .old line
+# still appears and only the input is superfluous; if the file never gets created the second console's setup (tear needs a GameData.bin) stops the run: that is the finding.
+name: qa_save_deleted_stays_deleted
+description: "GameData.bin deleted, .mpbak left: new game moves it to .mpbak.old; a torn new file at the next boot does not bring the old save back"
+seconds: 140
+link: false
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: first
+    input: "@newgame_file2"
+    env: {HARNESS_SAVE_SETUP: "mpbak,rm"}
+  - name: second
+    seconds: 50
+    env: {HARNESS_AFTER: first, HARNESS_CONTINUE: first, HARNESS_SAVE_SETUP: "tear"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect first /nand: GameData\.bin is missing and only GameData\.bin\.mpbak exists \(no \.mptmp\): not restored, left as it is/'
+  - 'expect first /nand: GameData\.bin is being created and only a \.mpbak was beside it \(a deleted save, or a failed restore\): kept aside as \S+/'
+  - 'order first /nand: GameData\.bin is missing and only/ before first /nand: GameData\.bin is being created/ within 120s'
+  - 'save_files first present GameData.bin GameData.bin.mpbak.old'
+  - 'save_files first absent GameData.bin.mpbak GameData.bin.mptmp'
+  - 'absent * /restored from it: yes|an interrupted save\) was beside it; restored: yes/'
+  - 'save_files second present GameData.bin GameData.bin.mpbak.old'
+  - 'save_files second absent GameData.bin.mpbak GameData.bin.mptmp'

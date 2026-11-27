@@ -186,9 +186,37 @@ public:
     /* 0x88 */ ActorPadAndCameraCtrl* mCameraCtrl;
 #ifdef TARGET_PC
     bool mStaleAnim = false;  // (GXV_ANIM_LOD) joints not computed since a far turn without a picture; listed for the next drawn turn
+    bool mPortNoCut = false;  // (dome31) never left out of a pose: every port pose / animation cut (pb_*, FARANIM, CHARPOSE, FAMPOSE, MATLOD, pair pose, ALOD pose, bowl, star-bit far, POSE_PHASE) skips it; the galaxy map's miniatures (their pose is what the pointer is aimed at)
     bool mStaleXLatch = false;  // (GXV_ANIM_LOD) the XanimePlayer's _88 as the last left-out calcAnim found it (LiveActor.cpp)
+    LiveActor* mPortHrwHost = nullptr;  // (GXV_HRW, hrw28) the actor this one is a part of (PartsModel's host), else null: a unit of the half-rate world's set is a root and its parts
+    u16 mDetailIdx = 0xFFFF;  // (detail25, GXV_DETAIL_PLANT) a plant member's index in its group (0xFFFF: not one)
+    u8 mDetailThin = 0;       // the thinning state applied (0 full, 1 every 2nd member, 2 every 4th)
+    u8 mDetailTgt = 0;        // the state the distance asks for (hysteresis)
+    u8 mDetailWait = 0;       // pictures the change has waited for an unseen moment
+    u8 mCrKindA = 0xFF;         // (GXV_CLIPCENSUS, cliprange25) port::cliprange::Kind as of the last census pass (0xFF: none yet)
+    u8 mFarProt = 0;            // (far49, GXV_FAR_PROTECT) 0 not read yet, 1 no, 2 protected: mPortNoCut was set from the actor's own parts (LiveActor.cpp PortFarProtRead)
+    u8 mCrSkip = 0xFF;          // (GXV_FARANIM, cliprange25) poses left out since the last one made (0xFF: not far / fresh)
+    u8 mPbHalf = 0;             // (GXV_PB_ANIM, the Performance-mode visual budget) 0 none, 1: the next far calcAnim is left out, 2: it is made
+    u8 mCrPosed = 0;            // (GXV_FARDRAW_FLUSH, cpucuts25) 1: its joints were computed at least once (a model never posed is never left out of the flush)
     u8 mLogicFreeJoints = 0;    // (GXV_ANIM_LOD_FREE) 1: nothing but the picture reads this model's joints (set by the class; in the
                                 // padding before mLodRadius: the size is unchanged)
+    u8 mPairSkip = 0;           // (GXV_PAIRPOSE, cpu34g) 1: the last calcAnim left the joints out as the drawn turn of a pair; the next one poses (in the same padding)
+    u8 mBowlPose = 0;           // (GXV_BOWL_POSE, bowl31; port/bowl_pose.h) the class (set by Fish / the penguins) and the skip turn's window state (the last padding byte)
     f32 mLodRadius = -1.0f;     // (GXV_ANIM_LOD_OFFSCREEN) the model's bounding radius at scale 1 (<0: not known yet; 0: never off-screen)
+    // GXV_ALOD (actorlod23: the update LOD of far, off-screen actors; decomp/src/Game/LiveActor/ActorTurnLod.cpp, port/actor_lod.h)
+    u8 mAlodOwed = 0;            // movements left out and not yet replayed (at most the rate - 1)
+    u8 mAlodRate = 0;            // the rate of the last decision (0 / 1: every turn, 2: half, 4: quarter)
+    u8 mAlodFamily = 0;          // the family (MR::portMarkActorLod; 0: never left out)
+    u8 mAlodCulled = 0;          // the model is stamped not to be drawn in a picture (GXV_ALOD_DRAWCULL)
+    // GXV_FARLOGIC (farlogic25: the far-logic level; ActorTurnLod.cpp, port/farlogic.h)
+    u8 mFlClass = 0xFF;          // port::farlogic::Class | Why << 2 as of the last read of the actor's parts (0xFF: not read yet)
+    u8 mFlFam = 0;               // the family of its marked class (MR::portMarkActorLod records it whatever GXV_ALOD says; 0: none)
+    u8 mFlState = 0;             // far state bits: 1 the level in force, 2 / 4 the dry mode's levels 1 / 2 (hysteresis), 8 timed this turn
+    u8 mFlAge = 0;               // turns since the class was read (mod 32)
+    u32 mAlodSkipTurn = 0;       // the turn (gPortAlodTurn) whose movement was left out: its calcAnim is left out too
+    const void* mAlodNerve = nullptr;  // the nerve after its last movement (census: changed from outside while it stood behind)
+    f32 mAlodReach = -1.0f;      // its sensors' reach (farthest offset + radius; <0: not known yet)
+    void portMovementLite();     // a left-out turn's movement, replayed (LiveActor.cpp)
+    void portMovementPhased();   // (GXV_LOGIC_PROF=2, logic23) movement() with each phase timed (LiveActor.cpp)
 #endif
 };

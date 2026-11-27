@@ -171,7 +171,15 @@ namespace MR {
 
     /// @brief Returns the container for global scene objects.
     /// @return A pointer to the container for global scene objects.
+#if defined(TARGET_PC) && !defined(GXV_KEEP_NOINLINE_SOH)
+    // cpu24: NO_INLINE is a Wii-build matching attribute (the retail binary emits this as its own function). The port has no such constraint: the
+    // body is three dependent pointer loads (GameSystem instance -> scene controller -> scene -> holder), no side effect, the same null
+    // dereference behaviour wherever it is inlined. With it gone ThinLTO may inline it into the ~577 calls a turn. Compile-time opt-out:
+    // -DGXV_KEEP_NOINLINE_SOH.
+    SceneObjHolder* getSceneObjHolder();
+#else
     SceneObjHolder* getSceneObjHolder() NO_INLINE;
+#endif
 
     /// @brief Determines if the requested global scene object has been created.
     /// @param id The index of the object.

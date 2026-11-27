@@ -1732,10 +1732,10 @@ void J3DTexGenBlockPatched::calc(const Mtx modelMtx) {
             case J3DTexMtxMode_EnvmapOld:
             case J3DTexMtxMode_Envmap:
 
-                if (j3dSys.checkFlag(8) == 0) {
-                    PSMTXConcat(j3dSys.getViewMtx(), modelMtx, viewMtx);
+                if (J3D_MSYS.checkFlag(8) == 0) {
+                    PSMTXConcat(J3D_MSYS.getViewMtx(), modelMtx, viewMtx);
                 } else {
-                    PSMTXCopy(j3dSys.getViewMtx(), viewMtx);
+                    PSMTXCopy(J3D_MSYS.getViewMtx(), viewMtx);
                 }
                 viewMtx[0][3] = 0.0f;
                 viewMtx[1][3] = 0.0f;
@@ -1744,7 +1744,7 @@ void J3DTexGenBlockPatched::calc(const Mtx modelMtx) {
                 break;
             case J3DTexMtxMode_ProjmapBasic:
             case J3DTexMtxMode_Projmap:
-                if (j3dSys.checkFlag(4) == 0) {
+                if (J3D_MSYS.checkFlag(4) == 0) {
                     mTexMtx[i]->calc(modelMtx);
                 } else {
                     mTexMtx[i]->calc(j3dDefaultMtx);
@@ -1752,17 +1752,17 @@ void J3DTexGenBlockPatched::calc(const Mtx modelMtx) {
                 break;
             case J3DTexMtxMode_ViewProjmapBasic:
             case J3DTexMtxMode_ViewProjmap:
-                if (j3dSys.checkFlag(4) == 0) {
-                    PSMTXConcat(j3dSys.getViewMtx(), modelMtx, viewMtx);
+                if (J3D_MSYS.checkFlag(4) == 0) {
+                    PSMTXConcat(J3D_MSYS.getViewMtx(), modelMtx, viewMtx);
                     mTexMtx[i]->calc(viewMtx);
                 } else {
-                    mTexMtx[i]->calc(j3dSys.getViewMtx());
+                    mTexMtx[i]->calc(J3D_MSYS.getViewMtx());
                 }
                 break;
             case J3DTexMtxMode_Unknown5:
             case J3DTexMtxMode_EnvmapOldEffectMtx:
             case J3DTexMtxMode_EnvmapEffectMtx:
-                if (j3dSys.checkFlag(8) == 0) {
+                if (J3D_MSYS.checkFlag(8) == 0) {
                     PSMTXCopy(modelMtx, viewMtx);
                     viewMtx[0][3] = 0.0f;
                     viewMtx[1][3] = 0.0f;
@@ -1795,7 +1795,7 @@ void J3DTexGenBlockPatched::calcWithoutViewMtx(const Mtx modelMtx) {
                 break;
             case J3DTexMtxMode_ProjmapBasic:
             case J3DTexMtxMode_Projmap:
-                if (j3dSys.checkFlag(4) == 0) {
+                if (J3D_MSYS.checkFlag(4) == 0) {
                     mTexMtx[i]->calc(modelMtx);
                 } else {
                     mTexMtx[i]->calc(j3dDefaultMtx);
@@ -1808,7 +1808,7 @@ void J3DTexGenBlockPatched::calcWithoutViewMtx(const Mtx modelMtx) {
             case J3DTexMtxMode_Unknown5:
             case J3DTexMtxMode_EnvmapOldEffectMtx:
             case J3DTexMtxMode_EnvmapEffectMtx:
-                if (j3dSys.checkFlag(8) == 0) {
+                if (J3D_MSYS.checkFlag(8) == 0) {
                     PSMTXCopy(modelMtx, mtx);
                     mtx[0][3] = 0.0f;
                     mtx[1][3] = 0.0f;
@@ -1828,6 +1828,19 @@ void J3DTexGenBlockPatched::calcWithoutViewMtx(const Mtx modelMtx) {
 
 void J3DTexGenBlockPatched::calcPostTexMtx(const Mtx modelMtx) {
     Mtx mtx1, mtx2;
+#ifdef TARGET_PC
+    Mtx inverseView;
+    bool haveInverseView = false;
+    // The nonvirtual texture-matrix calculations below do not change the view matrix.
+    auto calcInverseView = [&](Mtx dst) {
+        if (haveInverseView) {
+            PSMTXCopy(inverseView, dst);
+        } else if (PSMTXInverse(J3D_MSYS.getViewMtx(), dst)) {
+            PSMTXCopy(dst, inverseView);
+            haveInverseView = true;
+        }
+    };
+#endif
 
     for (s32 i = 0; i < ARRAY_SIZE(mTexMtx); i++) {
         if (mTexMtx[i] != NULL) {
@@ -1842,7 +1855,11 @@ void J3DTexGenBlockPatched::calcPostTexMtx(const Mtx modelMtx) {
                 break;
             case J3DTexMtxMode_ProjmapBasic:
             case J3DTexMtxMode_Projmap:
-                PSMTXInverse(j3dSys.getViewMtx(), mtx1);
+#ifdef TARGET_PC
+                calcInverseView(mtx1);
+#else
+                PSMTXInverse(J3D_MSYS.getViewMtx(), mtx1);
+#endif
                 mTexCoord[i].setTexMtxReg(0);
                 mTexMtx[i]->calcPostTexMtx(mtx1);
                 break;
@@ -1854,7 +1871,11 @@ void J3DTexGenBlockPatched::calcPostTexMtx(const Mtx modelMtx) {
             case J3DTexMtxMode_Unknown5:
             case J3DTexMtxMode_EnvmapOldEffectMtx:
             case J3DTexMtxMode_EnvmapEffectMtx:
-                PSMTXInverse(j3dSys.getViewMtx(), mtx2);
+#ifdef TARGET_PC
+                calcInverseView(mtx2);
+#else
+                PSMTXInverse(J3D_MSYS.getViewMtx(), mtx2);
+#endif
                 mtx2[0][3] = 0.0f;
                 mtx2[1][3] = 0.0f;
                 mtx2[2][3] = 0.0f;

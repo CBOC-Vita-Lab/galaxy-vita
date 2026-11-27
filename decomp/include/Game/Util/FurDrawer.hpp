@@ -25,7 +25,13 @@ public:
 
     void update() NO_INLINE;
     void setupMaterial(DynamicFurParam*) const;
-    void setupLayerMaterial(s32) const;
+    void setupLayerMaterial(s32, f32 weight = 1.0f) const;
+#ifdef TARGET_PC
+    // reflfur25 (GXV_FUR25, port/fur25.h): a shell's three constants (K3_R brightness, K3_G strand alpha, K3_B skin alpha, 0..255) as setupLayerMaterial
+    // computes them, and the same setup with the constants of a MERGED group of shells (the layer's own indirect scale)
+    void calcLayerKonst(s32 layer, f32* pR, f32* pG, f32* pB) const;
+    void setupLayerMaterialKonst(s32 layer, f32 r, f32 g, f32 b) const;
+#endif
     void createFurMap();
 
     /* 0x00 */ JUTTexture* mBodyTexture;

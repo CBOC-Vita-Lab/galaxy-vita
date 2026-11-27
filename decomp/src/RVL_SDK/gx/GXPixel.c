@@ -1,8 +1,11 @@
 #include "revolution/gx.h"
 #include "revolution/gx/GXRegs.h"
 #include "revolution/gx/GXTypes.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
+    PORT_GXCAP(GXSetFog, (type, startz, endz, nearz, farz, color));
     u32 fogclr = 0, fog0 = 0, fog1 = 0, fog2 = 0, fog3 = 0;
     f32 A, B, B_mant, C, a, c;
     u32 B_expn, b_m, b_s, a_hex, c_hex;
@@ -83,6 +86,7 @@ void GXSetFog(GXFogType type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor
 }
 
 void GXSetFogRangeAdj(GXBool enable, u16 center, const GXFogAdjTable* table) {
+    PORT_GXCAP(GXSetFogRangeAdj, (enable, center, table));
     u32 i;
     u32 range_adj, range_c;
 
@@ -105,6 +109,7 @@ void GXSetFogRangeAdj(GXBool enable, u16 center, const GXFogAdjTable* table) {
 }
 
 void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor dst_factor, GXLogicOp op) {
+    PORT_GXCAP(GXSetBlendMode, (type, src_factor, dst_factor, op));
     u32 reg;
     u32 blend_en;
 
@@ -124,6 +129,7 @@ void GXSetBlendMode(GXBlendMode type, GXBlendFactor src_factor, GXBlendFactor ds
 }
 
 void GXSetColorUpdate(GXBool update_enable) {
+    PORT_GXCAP(GXSetColorUpdate, (update_enable));
     u32 reg;
     reg = gx->cmode0;
     SC_PE_CMODE0_SET_COLOR_MASK(reg, update_enable);
@@ -133,6 +139,7 @@ void GXSetColorUpdate(GXBool update_enable) {
 }
 
 void GXSetAlphaUpdate(GXBool update_enable) {
+    PORT_GXCAP(GXSetAlphaUpdate, (update_enable));
     u32 reg;
     reg = gx->cmode0;
     SC_PE_CMODE0_SET_ALPHA_MASK(reg, update_enable);
@@ -142,6 +149,7 @@ void GXSetAlphaUpdate(GXBool update_enable) {
 }
 
 void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
+    PORT_GXCAP(GXSetZMode, (compare_enable, func, update_enable));
     u32 reg;
     reg = gx->zmode;
     SC_PE_ZMODE_SET_ENABLE(reg, compare_enable);
@@ -153,12 +161,14 @@ void GXSetZMode(GXBool compare_enable, GXCompare func, GXBool update_enable) {
 }
 
 void GXSetZCompLoc(GXBool before_tex) {
+    PORT_GXCAP(GXSetZCompLoc, (before_tex));
     SC_PE_CONTROL_SET_ZTOP(gx->peCtrl, before_tex);
     GX_WRITE_RA_REG(gx->peCtrl);
     BP_SENT();
 }
 
 void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
+    PORT_GXCAP(GXSetPixelFmt, (pix_fmt, z_fmt));
     u32 oldPeCtrl;
     GXBool aa;
     static u32 p2f[] = {0, 1, 2, 3, 4,4,4, 5};
@@ -185,6 +195,7 @@ void GXSetPixelFmt(GXPixelFmt pix_fmt, GXZFmt16 z_fmt) {
 }
 
 void GXSetDither(GXBool dither) {
+    PORT_GXCAP(GXSetDither, (dither));
     u32 reg;
     reg = gx->cmode0;
     SC_PE_CMODE0_SET_DITHER_ENABLE(reg, dither);
@@ -194,6 +205,7 @@ void GXSetDither(GXBool dither) {
 }
 
 void GXSetDstAlpha(GXBool enable, u8 alpha) {
+    PORT_GXCAP(GXSetDstAlpha, (enable, alpha));
     u32 reg;
     reg = gx->cmode1;
 
@@ -205,6 +217,7 @@ void GXSetDstAlpha(GXBool enable, u8 alpha) {
 }
 
 void GXSetFieldMask(GXBool odd_mask, GXBool even_mask) {
+    PORT_GXCAP(GXSetFieldMask, (odd_mask, even_mask));
     u32 reg;
     reg = 0;
     SC_PE_FIELD_MASK_SET_EVEN(reg, even_mask);
@@ -215,6 +228,7 @@ void GXSetFieldMask(GXBool odd_mask, GXBool even_mask) {
 }
 
 void GXSetFieldMode(GXBool field_mode, GXBool half_aspect_ratio) {
+    PORT_GXCAP(GXSetFieldMode, (field_mode, half_aspect_ratio));
     u32 reg;
 
     SC_SU_LPSIZE_SET_FIELDMODE(gx->lpSize, half_aspect_ratio);

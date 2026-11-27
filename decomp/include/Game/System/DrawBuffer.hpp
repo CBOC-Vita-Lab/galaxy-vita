@@ -10,11 +10,28 @@ class J3DShapePacket;
 class J3DDisplayListObj;
 // class LiveActor;
 class ActorLightCtrl;
+#ifdef TARGET_PC
+namespace port {
+    namespace drawpipe {
+        struct Frame;
+        struct FrozenPacket;
+    }  // namespace drawpipe
+}  // namespace port
+extern u32 gPortDrawPipeEpoch;  // (GXV_DRAWPIPE: DrawBuffer.cpp)
+extern bool gPortPipeOverlap;   // (GXV_DRAWPIPE=4: a draw is out on the draw thread beside the update; DrawBuffer.cpp)
+// GXV_HRW (hrw28, PortHrwSet.cpp): gPortHrwPhase != 0 in a pass of the first picture that owner-tags the draws of the models carrying a mPortHrwTag (the phase is the owner key's low byte);
+// gPortHrwOnly != null in the pair's partial draw: the drawers send the packets of that one model only.
+extern u32 gPortHrwPhase;
+extern const J3DModel* gPortHrwOnly;
+#endif
 
 struct PacketInfo {
     /* 0x00 */ J3DShapePacket* mShapePacket;
     /* 0x04 */ ActorLightCtrl* mLightLoader;
     /* 0x08 */ ActorLightCtrl* mLightCtrl;
+#ifdef TARGET_PC
+    void* mPortReplay;  // (GXV_REPLAY25, DrawBuffer.cpp: the record of this packet's shape draw; owned by one packet at a time)
+#endif
 };
 
 class DrawBufferShapeDrawer {
@@ -46,7 +63,16 @@ public:
 #ifdef TARGET_PC
     // (1.3 port, GXV_J3D_MATMERGE / GXV_J3D_DIFFSKIP: DrawBuffer.cpp)
     void drawPort() const;
-    bool callMergedList(J3DDisplayListObj* pMatDL, J3DDisplayListObj* pDiffDL) const;
+    // (GXV_HRW, hrw28: DrawBuffer.cpp) the packets of one model only, sent as draw() sends them with the plain path and the model's own light
+    void portHrwDrawOnly(const J3DModel* pOnly) const;
+    // (GXV_DRAWPIPE, drawpipe24: DrawBuffer.cpp) draw() over this drawer's packets as frozen at the hand-over (port/draw_pipe.h)
+    void drawFrozen(const port::drawpipe::Frame& rFrame, const port::drawpipe::FrozenPacket* pPackets, s32 num, u32 serial) const;
+    // (`ext`: the scene / fog / fade serial for GXV_J3DNATIVE's bracket: J3DPortExtSerial(), or the frozen frame's)
+    bool callMergedList(J3DDisplayListObj* pMatDL, J3DDisplayListObj* pDiffDL, u32 ext) const;
+    void makeMergedList(J3DDisplayListObj* pMatDL, J3DDisplayListObj* pDiffDL, u32 picture) const;
+    // (GXV_DRAWPIPE=4, dpengine) the merged lists the passes on the draw thread left to be made: made now, by the game thread
+    // after the join. Returns how many there were.
+    static u32 portMergedFinish();
     mutable u8* mMergedDL;        // the material list and the first packet's differed list as one (J3DPortBuildMerged; guest memory: the
                                   // drawer's heap), followed by a copy of the two lists it was made of
     mutable u32 mMergedCap;       // the room of the block
@@ -56,6 +82,9 @@ public:
     mutable u32 mMergedLastCall;  // the picture that last called it (J3DPortPicture), 0: never
     mutable u32 mMergedQuietUntil;
     mutable u32 mMergedChanges;   // made again this many times in a row without being called
+    mutable u32 mMergedGen;       // (GXV_J3DNATIVE) the merged block's version: made again
+    u32 mPortSerial;              // (GXV_J3DNATIVE) the drawer's own version: add / remove / swap / resetLightSort
+    const char* mPortFamily;      // (GXV_REPLAY25) the name of the model group the drawer belongs to (DrawBufferExecuter's), for the census
 #endif
 };
 
@@ -90,4 +119,7 @@ public:
     /* 0x1C */ s32 mNumShapeDrawers;
     /* 0x20 */ s32 mNumOpaShapeDrawers;
     /* 0x24 */ DrawBufferShapeDrawer** mShapeDrawers;
+#ifdef TARGET_PC
+    const char* mPortName = nullptr;  // (GXV_REPLAY25) the group's name, given to each drawer when the table is made
+#endif
 };

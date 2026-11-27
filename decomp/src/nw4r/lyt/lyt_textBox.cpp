@@ -148,6 +148,37 @@ namespace nw4r {
 
             LoadMtx(drawInfo);
 
+#ifdef TARGET_PC
+            if (detail::gPortWarmPass != 0) {
+                // (layoutwarm24: a warm-up pass inside a front-end warm scope, common.h: the writer's GX set-up as the real draw makes it - the
+                // font's texture format and the material's colour mapping decide the keys; the text's own layout and tag processing are not run, so
+                // nothing of the game's text state is touched - and one glyph of the font through the writer's own draw, which binds a glyph
+                // sheet's texture. Pass 2 only repeats the pictures' alpha cases, which a text's draw does not have.)
+                if (detail::gPortWarmPass != 1) {
+                    return;
+                }
+                // (a font whose resource is not attached yet has no metrics (ResFontBase::GetWidth reads mFontInfo): the title's layouts are
+                // made before the font archive is in. The real draw never reaches such a text - its layout is not shown yet -, so the warm-up
+                // must not either: console dump of 11 Nov, CharWriter::SetFontSize from here. ResFont is the only font class the game makes.)
+                if (static_cast< const ut::detail::ResFontBase* >(mpFont)->mFontInfo == nullptr) {
+                    return;
+                }
+                ut::WideTextWriter warm;
+                warm.SetFont(*mpFont);
+                warm.SetFontSize(mFontSize.width, mFontSize.height);
+                ut::Color wTop = mTextColors[0];
+                ut::Color wBtm = mTextColors[1];
+                warm.SetGradationMode(wTop != wBtm ? ut::CharWriter::GRADMODE_V : ut::CharWriter::GRADMODE_NONE);
+                warm.SetTextColor(wTop, wBtm);
+                warm.SetColorMapping(GetColor(mpMaterial->GetTevColor(0)), GetColor(mpMaterial->GetTevColor(1)));
+                warm.SetupGX();
+                GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+                warm.SetCursor(0.0f, 0.0f);
+                static_cast< ut::CharWriter& >(warm).Print(static_cast< ut::CharCode >(0x41));
+                return;
+            }
+#endif
+
             ut::WideTextWriter writer;
 
             ut::Rect textRect = GetTextDrawRect(&writer);

@@ -1,0 +1,15 @@
+# (11 Nov, harness3: the power-save tip no longer shows on entering the Multiplayer menu (conntest 716f9e1: only after a laggy session / the test): the old "42 A tip" press is gone)
+# entry (9 Nov): guest of a Same Wi-Fi room through the menus. Title -> entry screen -> Multiplayer -> tip -> Play Together ->
+# Same Wi-Fi -> character (SMG_MP_LOOK) -> Rooms Nearby -> the host's room -> lobby; the host's Start launches the session (the
+# host's progress arrives as the snapshot; no file is picked). PETARI_GAME_CLOCK=1, SMG_MP_NAME set.
+30-30.5:A|B
+35-35.2:DOWN
+37-37.2:A
+44-44.2:A                  # Play Together
+46-46.2:DOWN
+47-47.2:A                  # Same Wi-Fi
+49-49.2:A                  # character
+51-51.2:DOWN               # Host a Room -> Rooms Nearby
+52-52.2:A
+92-92.2:A                  # the host's room (opened at ~82 s)
+97-97.2:A                  # (again: an empty list only buzzes)

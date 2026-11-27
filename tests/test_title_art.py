@@ -1,7 +1,8 @@
 """The game builds its loading, Settings and home-screen pictures from the player's own title screen (port/title_art.h).
 Host checks of that code: the deflate against zlib, the quantizer and PNG writer against Pillow, the trigger and path logic, the
-picture path on a made-up title, and (when the owner's capture is at hand) the real capture against the reference script
-tools/handheld/make_livearea_title.py by mean colour error."""
+picture path on two made-up titles (no game picture), the reference script tools/handheld/make_livearea_title.py against the
+console code pixel for pixel on those, the icon framed for the round bubble, and (when the owner's capture is at hand) the same
+exact comparison on the real capture."""
 import os
 import pathlib
 import shutil
@@ -118,40 +119,71 @@ class TitleArt(unittest.TestCase):
         region = pic[392:518, 222:738]
         self.assertLess((region.sum(axis=2) > 600).mean(), 0.03)
 
-    def test_real_capture_against_the_reference_script(self):
-        if not CAPTURE.is_file() or CAPTURE.stat().st_size != 960 * 544 * 4:
-            self.skipTest("no title capture at hand (TITLEART_CAPTURE)")
-        try:
-            import cv2  # noqa: F401
-        except ImportError:
-            self.skipTest("OpenCV is needed for the reference script")
-        mine, reference = self.dir / "mine", self.dir / "reference"
-        mine.mkdir()
-        reference.mkdir()
-        self.run_mode("pictures", str(CAPTURE), str(mine))
-        subprocess.run([sys.executable, "-I", str(ROOT / "tools/handheld/make_livearea_title.py"), str(CAPTURE), str(reference)], capture_output=True)
-        capture = numpy.asarray(Image.frombytes("RGBA", (960, 544), CAPTURE.read_bytes()).convert("RGB")).astype(int)
+    def reference(self, capture, out):
+        out.mkdir(exist_ok=True)
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "tools/handheld/make_livearea_title.py"), str(capture), str(out)],
+                                capture_output=True, text=True, timeout=900)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def assert_same_pictures(self, mine, reference):
         for name, size in SIZES.items():
             with self.subTest(name=name):
                 a = Image.open(mine / f"{name}.png")
                 b = Image.open(reference / f"{name}.png")
                 a.load()
+                b.load()
                 self.assertEqual((a.mode, a.size), ("P", size))
                 self.assertEqual((b.mode, b.size), ("P", size))
-                self.assertLessEqual(len(a.getpalette()) // 3, 256)
-                error = numpy.abs(numpy.asarray(a.convert("RGB")).astype(int) - numpy.asarray(b.convert("RGB")).astype(int))
-                self.assertLess(error.mean(), 4.5, f"{name}: mean colour error against the reference")
+                self.assertEqual(a.tobytes(), b.tobytes(), f"{name}: palette indices differ from the reference")
+                self.assertEqual(a.getpalette()[:768], b.getpalette()[:768], f"{name}: palette differs from the reference")
+
+    def test_reference_script_agrees_pixel_for_pixel_on_made_up_titles(self):
+        captures = self.dir / "fixture"
+        captures.mkdir()
+        self.run_mode("fixture", str(captures))
+        for name in ("plain", "wordmark"):
+            mine, reference = self.dir / f"mine-{name}", self.dir / f"reference-{name}"
+            mine.mkdir()
+            self.run_mode("pictures", str(captures / f"{name}.rgba"), str(mine))
+            self.reference(captures / f"{name}.rgba", reference)
+            with self.subTest(capture=name):
+                self.assert_same_pictures(mine, reference)
+
+    def test_icon_keeps_the_logo_inside_the_round_bubble(self):
+        captures = self.dir / "fixture-icon"
+        captures.mkdir()
+        self.run_mode("fixture", str(captures))
+        for name in ("plain", "wordmark"):
+            out = self.dir / f"icon-{name}"
+            out.mkdir()
+            self.run_mode("pictures", str(captures / f"{name}.rgba"), str(out))
+            icon = numpy.asarray(Image.open(out / "icon0.png").convert("RGB")).astype(int)
+            yy, xx = numpy.mgrid[0:128, 0:128]
+            r2 = (2 * xx + 1 - 128) ** 2 + (2 * yy + 1 - 128) ** 2  # half pixels, squared
+            # the made-up logos' colours (warm, white, grey, or a green well above blue); the made-up sky and its green-cyan horizon are neither
+            logo = (icon[..., 2] < icon[..., 0] + 35) | (icon[..., 1] > icon[..., 2] + 80)
+            with self.subTest(capture=name):
+                self.assertGreater(logo[r2 <= (2 * 40) ** 2].mean(), 0.2, "the logo is there, in the middle")
+                self.assertEqual(int(logo[(r2 > (2 * 57) ** 2) & (r2 <= (2 * 64) ** 2)].sum()), 0, "nothing of the logo in the bubble's rim")
+                # darker towards the rim than in the middle (the vignette), on the sky
+                sky = ~logo
+                self.assertLess(icon[(r2 > (2 * 60) ** 2) & (r2 <= (2 * 64) ** 2) & sky].mean(), icon[(r2 <= (2 * 50) ** 2) & sky].mean())
+
+    def test_real_capture_against_the_reference_script(self):
+        if not CAPTURE.is_file() or CAPTURE.stat().st_size != 960 * 544 * 4:
+            self.skipTest("no title capture at hand (TITLEART_CAPTURE)")
+        mine, reference = self.dir / "mine", self.dir / "reference"
+        mine.mkdir()
+        self.run_mode("pictures", str(CAPTURE), str(mine))
+        self.reference(CAPTURE, reference)
+        self.assert_same_pictures(mine, reference)
+        capture = numpy.asarray(Image.frombytes("RGBA", (960, 544), CAPTURE.read_bytes()).convert("RGB")).astype(int)
         a = numpy.asarray(Image.open(mine / "pic0.png").convert("RGB")).astype(int)
-        b = numpy.asarray(Image.open(reference / "pic0.png").convert("RGB")).astype(int)
-        # Inside the text rectangle (where the two fills differ most) and outside it (where both only quantise the capture).
         inside = numpy.zeros((544, 960), bool)
         inside[384:526, 214:746] = True
-        self.assertLess(numpy.abs(a - b)[inside].mean(), 4.5)
-        self.assertLess(numpy.abs(a - capture)[~inside].mean(), 3.5)
-        self.assertLess(numpy.abs(b - capture)[~inside].mean(), 3.5)
-        # The text is gone from the picture.
+        self.assertLess(numpy.abs(a - capture)[~inside].mean(), 3.5, "outside the text the picture is the capture (quantised)")
         region = a[392:518, 222:738]
-        self.assertLess(((region.sum(axis=2) > 330) | (region[..., 2] < region[..., 0] + 30)).mean(), 0.05)
+        self.assertLess(((region.sum(axis=2) > 330) | (region[..., 2] < region[..., 0] + 30)).mean(), 0.05, "the text is gone")
 
 
 if __name__ == "__main__":

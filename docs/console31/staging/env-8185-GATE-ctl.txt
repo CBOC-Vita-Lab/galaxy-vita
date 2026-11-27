@@ -1,0 +1,8 @@
+# 8185 GATE-ctl: GPU gate control (default GXV_AUTOQ_GPUGATE=1) on a GPU-heavy route: Beach Bowl 150 s, Performance; compare shed steps and shown fps with GATE-off
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=9000
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1

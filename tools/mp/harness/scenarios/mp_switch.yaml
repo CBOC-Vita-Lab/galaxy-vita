@@ -1,0 +1,29 @@
+# Switch mirroring (Play Together). SMG_MP_TEST_SWITCH="<secs>:<bit>" on the host (MpWorld.cpp, desktop test hook)
+# turns on switch <bit> of the main zone 20 s into Good Egg 1 through the bridge's edge path; the guest gets the same
+# zone/bit from the host. Registries must match.
+name: mp_switch
+description: a switch turned on at the host is mirrored on the guest (same zone and bit); registries match
+seconds: 240
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_SWITCH]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_SWITCH: "20:120"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'order host /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) .*serial=(\d+)/ near guest /\[mp\] world reg n=$1 crc=$2 .*serial=$3/ within 30s each'
+  - 'absent * /\[mp\] world (regcrc mismatch|drop|local-switch table full)/'
+  - 'expect host /\[mp\] world test switch: on zone=\d+ bit=120 serial=\d+/'
+  - 'order host /\[mp\] world switch zone=(\d+) bit=(\d+) on=1 src=local/ before guest /\[mp\] world switch zone=$1 bit=$2 on=1 src=remote/ within 3s tol 250ms each'
+  - 'absent guest /\[mp\] world test switch: on/'
+  - 'count * /\[mp\] world osc-guard/ == 0'

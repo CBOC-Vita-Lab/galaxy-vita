@@ -1,0 +1,15 @@
+# final run (14 Nov): the host's part of scenarios/qa_reconnect_gives_up_skip_local.yaml: it only plays on (a marks-only script starts the autopilot); one early hold of A, a vote the
+# cut guest never answers.
+# scnfix (14 Nov): NAV = the first lines below are file2_observatory.txt's menu path (title -> Single Player -> file 2 -> Play This File -> the Observatory); an SMG_MP_AUTO console only opens its session once it is IN PLAY, so a script that starts at the barrier mark never got there (final run: the guest never joined, no barrier). The host's nav is shifted +30 s, like @file2_observatory+30.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+38-38.5:A|B
+entry+33-33.2:A
+single+45-53:PX=0.25|PY=0.3
+single+48-48.2:A
+single+61-69:PX=0.52|PY=0.78
+single+64-64.2:A
+mark play /flow barrier release serial=1 / ~150
+mark intro /skip: (intro camera|fly-in) playing/ ~155
+intro+1-4:A

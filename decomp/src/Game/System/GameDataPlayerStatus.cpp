@@ -2,6 +2,9 @@
 #include "Game/Util/MathUtil.hpp"
 #include <JSystem/JSupport/JSUMemoryInputStream.hpp>
 #include <JSystem/JSupport/JSUMemoryOutputStream.hpp>
+#ifdef TARGET_PC
+#include <cstdlib>
+#endif
 
 GameDataPlayerStatus::GameDataPlayerStatus() {
     initializeData();
@@ -56,6 +59,12 @@ void GameDataPlayerStatus::initializeData() {
 
 s32 GameDataPlayerStatus::getPlayerLeft() const {
     s32 playerLeft = mPlayerLeft;
+#ifdef TARGET_PC
+    // PETARI_TEST_LIVES=<n> (test routing only, default unset): the lives count reads as n, so a route reaches the Game Over screen at its first miss
+    // (14 Nov: the owner's bottom-strip flicker on that screen; the routes reached it only by chance).
+    static const s32 sTestLives = [] { const char* e = std::getenv("PETARI_TEST_LIVES"); return e && *e ? static_cast<s32>(std::atoi(e)) : -1; }();
+    if (sTestLives >= 0) playerLeft = sTestLives;
+#endif
 
     return MR::clamp(playerLeft, 0, 99);
 }

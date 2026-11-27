@@ -26,6 +26,7 @@ if "static long EnvInt(" in camera:
 parts.extend([
     block(camera, "static bool inGameScene()"),
     block(camera, "static bool inCutscene()"),
+    *([block(camera, "static const char* zoomSetAsideReason()")] if "static const char* zoomSetAsideReason()" in camera else []),
     next(line for line in camera.splitlines() if line.startswith("static f32 sZoomNow =")),
     next(line for line in camera.splitlines() if line.startswith("static bool sZoomKnown =")),
     block(camera, "static f32 zoomedFovy("),
@@ -35,6 +36,7 @@ parts.extend([
     "static const f32 hZCheckAddDepth = 60.0f;",
     block(target, "inline void multProj("),
     block(target, "bool StarPointerTarget::isPointing("),
+    block(target, "bool StarPointerTarget::isPointingEdge("),
     block(target, "f32 StarPointerTarget::calcRadius2d("),
     block(target, "bool StarPointerTarget::calcScreenPositionFromView("),
 ]) + "\n")
@@ -45,9 +47,17 @@ parts.extend([
     *(next(line for line in perf.splitlines() if line.startswith(prefix)) for prefix in (
         "constexpr int kZoomMin", "std::atomic<int> sZoomTenths", "std::atomic<unsigned> sZoomChange",
         "std::string sZoomFile", "static std::atomic<unsigned> sZoomLimitHits",
+        # settingsnative: the other keys of settings.ini and the live setters
+        "std::atomic<int> sRearAim", "std::atomic<int> sStickPointer", "std::atomic<int> sStarBitReach", "constexpr int kStarBitReachLevels",
+        "std::atomic<int> sTapJump", "std::atomic<int> sInvertCamera", 'extern "C" void port_input_set_camera_inverted',
     )),
     block(perf, "int ZoomClamp("), block(perf, "int ZoomTenths("),
     block(perf, "int ZoomFromFile()"), block(perf, "int ZoomRead()"),
+    block(perf, "int OptionFromFile("), block(perf, "int RearAimRead()"), block(perf, "int StickPointerRead()"),
+    block(perf, "int StarBitReachFromFile()"), block(perf, "int StarBitReachRead()"), block(perf, "int TapJumpRead()"), block(perf, "int InvertCameraRead()"),
+    block(perf, "int ZoomFileText("),
+    *(block(perf, 'extern "C" int ' + name + '(') for name in ("port_rear_aim_enabled", "port_stick_pointer_enabled", "port_star_bit_reach", "port_zoom_tenths", "port_tap_jump_enabled", "port_tap_jump_set", "port_invert_camera_enabled", "port_invert_camera_set",
+                                                                "port_rear_aim_set", "port_stick_pointer_set", "port_star_bit_reach_set")),
     block(perf, 'extern "C" float port_camera_zoom('),
     block(perf, 'extern "C" int port_zoom_adjust('),
 ]) + "\n")

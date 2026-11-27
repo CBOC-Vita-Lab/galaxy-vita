@@ -1,0 +1,23 @@
+# 20% loss on both consoles, nobody killed: the guest must stay in the session (corefix: ghost joiners dropped after 5 s without ack progress, a real guest is not)
+name: mp_loss20
+description: "20% loss both ways, guest stays in"
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, SMG_NET_DROP: 20}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'nostall *'
+  - 'expect host /\[mp\] slot 1 joined name=guest/ within 120s'
+  - 'absent host /\[mp\] slot 1 (left reason=(?!leave \(bye\))|lost)/ before host /harness: process end/'
+  - 'absent guest /\[mp\] session ended reason=(?!none \(shutdown\)|host-left)/ before guest /harness: process end/'
+  - 'exit host,guest == 0'

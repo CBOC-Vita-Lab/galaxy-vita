@@ -9,6 +9,8 @@
 
 #if defined(TARGET_PC)
 #include <string.h>
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 // ============================================================== (1.3 port) GXV_LIGHT_DEDUP (default 0; switch and scope:
 // decomp/src/Game/Map/LightFunction.cpp port_light_scope_enter / _exit, used by DrawBufferGroup::drawOpa / drawXlu)
 // Every shape drawer of a DrawBuffer pass loads the light of its first packet (DrawBufferShapeDrawer::draw -> ActorLightCtrl::loadLight
@@ -30,7 +32,32 @@ static u32 sLightShadow[8][13];  // Color, a[3], k[3], lpos[3], ldir[3] as last 
 static u32 sLightShadowValid = 0;
 static int sLightInList = 0;
 
+// (GX capture, port/gx_capture.h: mode 2's scratch replay runs recorded light loads again and puts this state back after)
+void __PortGXLightStateSave(void* out) {
+    u8* p = (u8*)out;
+    memcpy(p, sLightShadow, sizeof(sLightShadow));
+    p += sizeof(sLightShadow);
+    memcpy(p, &sLightShadowValid, 4);
+    memcpy(p + 4, &sLightInList, 4);
+    memcpy(p + 8, &__PortGXLightGen, 4);
+    memcpy(p + 12, &__PortGXLightSent, 4);
+    memcpy(p + 16, &__PortGXLightSkipped, 4);
+    memcpy(p + 20, &__PortGXLightScope, 4);
+}
+void __PortGXLightStateLoad(const void* in) {
+    const u8* p = (const u8*)in;
+    memcpy(sLightShadow, p, sizeof(sLightShadow));
+    p += sizeof(sLightShadow);
+    memcpy(&sLightShadowValid, p, 4);
+    memcpy(&sLightInList, p + 4, 4);
+    memcpy(&__PortGXLightGen, p + 8, 4);
+    memcpy(&__PortGXLightSent, p + 12, 4);
+    memcpy(&__PortGXLightSkipped, p + 16, 4);
+    memcpy(&__PortGXLightScope, p + 20, 4);
+}
+
 void __PortGXLightShadowDrop(void) {
+    PORT_GXCAP(__PortGXLightShadowDrop, ());
     sLightShadowValid = 0;
     ++__PortGXLightGen;
 }
@@ -285,6 +312,7 @@ static inline void WriteLightObjPS(const GXLightObjInt* lt_obj, void* dest) {
 #endif
 
 void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
+    PORT_GXCAP(GXLoadLightObjImm, (lt_obj, light));
     u32 addr, idx;
     GX_SETUP_LIGHT(obj, lt_obj)
     idx = ConvLightID2Num(light);
@@ -326,6 +354,7 @@ void GXLoadLightObjImm(const GXLightObj* lt_obj, GXLightID light) {
 #pragma optimizewithasm reset
 
 void GXSetChanAmbColor(GXChannelID chan, GXColor amb_color) {
+    PORT_GXCAP(GXSetChanAmbColor, (chan, amb_color));
     u32 reg = 0, rgb, colIdx;
     switch (chan) {
     case GX_COLOR0:
@@ -367,6 +396,7 @@ void GXSetChanAmbColor(GXChannelID chan, GXColor amb_color) {
 }
 
 void GXSetChanMatColor(GXChannelID chan, GXColor mat_color) {
+    PORT_GXCAP(GXSetChanMatColor, (chan, mat_color));
     u32 reg = 0, rgb, colIdx;
 
     switch (chan) {
@@ -415,11 +445,13 @@ void GXSetChanMatColor(GXChannelID chan, GXColor mat_color) {
 }
 
 void GXSetNumChans(u8 nChans) {
+    PORT_GXCAP(GXSetNumChans, (nChans));
     SC_GEN_MODE_SET_NCOL(gx->genMode, nChans);
     gx->dirtyState |= 0x1000004;
 }
 
 void GXSetChanCtrl(GXChannelID chan, GXBool enable, GXColorSrc amb_src, GXColorSrc mat_src, u32 light_mask, GXDiffuseFn diff_fn, GXAttnFn attn_fn) {
+    PORT_GXCAP(GXSetChanCtrl, (chan, enable, amb_src, mat_src, light_mask, diff_fn, attn_fn));
     u32 reg, idx;
     idx = (u32)(chan & 0x0003);
 

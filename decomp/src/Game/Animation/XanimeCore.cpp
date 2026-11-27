@@ -111,6 +111,13 @@ void XanimeCore::initMember(u32 trackCount) {
     _29 = 0;
     _6 = 0;
     _C = 0;
+#ifdef TARGET_PC
+    mPortOwed = 0;
+    mPortOwedTracks = 0;
+    mPortShared = 0;
+    mPortCatchUps = 0;
+    mPortOwedRatio = mPortOwed1C = mPortOwed20 = 0.0f;
+#endif
     mTrackList = new XanimeTrack[trackCount];
 
     s32 curTrack = 0;
@@ -139,9 +146,18 @@ XanimeCore::XanimeCore(u32 trackCount, XanimeCore* pOtherCore) {
     mJointList = pOtherCore->mJointList;
     mTransformList = pOtherCore->mTransformList;
     initMember(trackCount);
+#ifdef TARGET_PC
+    mPortShared = 1;  // (blendfix31: two cores write one joint list, in parts (MarioAnimator): a left-out computation's joint state is not made for them)
+    pOtherCore->mPortShared = 1;
+#endif
 }
 
 void XanimeCore::doFreeze() {
+#ifdef TARGET_PC
+    if (__builtin_expect(mPortOwed != 0, 0)) {
+        portCatchUp(kPortCatchChange);  // (blendfix31: the blend starts from the pose the left-out computation would have made)
+    }
+#endif
     _28 = 1;
     _1C = 0.0f;
 }
@@ -358,6 +374,21 @@ void XanimeCore::calcBlendSpecial() {
 }
 
 void XanimeCore::updateFrame() {
+#ifdef TARGET_PC
+    if (__builtin_expect(mPortOwed != 0, 0)) {
+        // (blendfix31: a computation starts while a left-out one's joint state is owed. It overwrites all of it unless it reads the last pose; the
+        // freeze copy reads the same bytes either way: a change after the left-out computation made them already, at doFreeze)
+        if (mPortOwed == 2) {
+            mPortOwed = 0;  // (the drawn turn's flush makes the left-out computation itself, from the same state: LiveActor.cpp port_anim_flush_stale)
+            ++gPortBlendCensus.paid;
+        } else if (portReadsLast() && gPortBlendFix != 2) {
+            portCatchUp(kPortCatchRead);
+        } else {
+            mPortOwed = 0;
+            ++gPortBlendCensus.cleared;
+        }
+    }
+#endif
     for (u32 i = 0; i < mTrackCount; i++) {
         if (mTrackList[i]._0 != nullptr) {
             if (mTrackList[i]._C != 0) {
@@ -699,6 +730,13 @@ void XanimeCore::calcScaleBlendSpecial() {
 }
 
 void XanimeCore::freezeCopy(J3DModelData* pModelData, XanimeCore* pOther, u32 joint, u32 duration) {
+#ifdef TARGET_PC
+    if (__builtin_expect((mPortOwed | pOther->mPortOwed) != 0, 0)) {
+        // (blendfix31: this core's last pose is read and the other's frozen pose written: both as their left-out computations left them)
+        if (mPortOwed != 0) portCatchUp(kPortCatchCopy);
+        if (pOther->mPortOwed != 0) pOther->portCatchUp(kPortCatchCopy);
+    }
+#endif
     J3DJoint* pChild = pModelData->getJointNodePointer(joint)->getChild();
 
     if (pChild != nullptr) {
@@ -814,3 +852,271 @@ void XanimeCore::init(const Vec& rScale, const Mtx& rMtx) {
         break;
     }
 }
+
+#ifdef TARGET_PC
+// blendfix31 (GXV_POSE_BLENDFIX, 17 Nov 2026; tests/blendfix.cpp, tools/test_blendfix.sh): the joint state of a computation a pose cut left out, made when
+// something is about to read it (XanimeCore.hpp). Exact by construction: the joint state a computation leaves (_0 on a freeze copy, _28, _50, _5C) is a
+// function of the core's state before it and of its inputs: the freeze flag (updateFrame), the frame ratio (each track's frame on its resource),
+// _1C, _20, _6 and the tracks (resource, weight, _8 / _C). The inputs are recorded when the computation is left out; the catch-up runs the game's own
+// updateFrame, calcSingle / calcBlend / calcBlendSpecial on them, joint by joint, with J3DMtxCalc pointed at a scratch buffer for the matrices they
+// write (the model's own matrices stay as they are: the cut's picture is unchanged), and puts the live inputs back. A catch-up is needed only if
+// something reads that state before the next computation overwrites it: the next computation when it reads the last pose (portReadsLast), a change
+// of animation (the freeze copy), freezeCopy; and a second left-out computation that reads the last pose is caught up through the first.
+u8 gPortBlendFix = 0;
+u8 gPortBlendFixMeasure = 0;
+XanimePortBlendCensus gPortBlendCensus;
+
+#include <atomic>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+namespace {
+// (scratch for the matrices the joint functions write and, when measured, the joint state before; the game thread only in practice, but a
+// second thread gets memory of its own rather than racing for this)
+std::atomic< int > sPortCatchBusy{0};
+void* sPortCatchMem = nullptr;
+size_t sPortCatchCap = 0;
+J3DMtxBuffer* PortCatchBuffer() {
+    static J3DMtxBuffer* buf = new (malloc(sizeof(J3DMtxBuffer))) J3DMtxBuffer();
+    return buf;
+}
+J3DJoint* PortCatchJoint() {
+    static J3DJoint* joint = new (malloc(sizeof(J3DJoint))) J3DJoint();
+    return joint;
+}
+f32 PortQuatDeg(const Quaternion& a, const Quaternion& b) {
+    f32 d = fabsf(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
+    if (d > 1.0f) d = 1.0f;
+    return 2.0f * acosf(d) * 57.29578f;
+}
+}  // namespace
+
+bool XanimeCore::portReadsLast() const {
+    // (the next computation reads the joint state the last one wrote, other than through the freeze copy: calcBlendSpecial (_5C, _20),
+    // calcScaleBlendSpecial (_28 only), calcSingle without a resource, calcBlend's _20 != 1 or a total weight of 0)
+    if (_6 == 1 || _6 == 2) {
+        return true;
+    }
+    if (mTrackCount == 1) {
+        return mTrackList[0]._0 == nullptr;
+    }
+    if (_20 != 1.0f) {
+        return true;
+    }
+    f32 total = 0.0f;
+    for (s32 i = 0; i < mTrackCount; i++) {
+        if (mTrackList[i]._0 != nullptr) {
+            total += mTrackList[i].mWeight;
+        }
+    }
+    return total == 0.0f;
+}
+
+void XanimeCore::portLeaveOut(f32 frameRatio) {
+    if (mPortShared != 0) {
+        ++gPortBlendCensus.shared;
+        return;
+    }
+    if (mPortOwed != 0 && portReadsLast()) {
+        // (this one reads what the earlier left-out one writes: that one is made first, from its own inputs)
+        if (gPortBlendFix == 2) {
+            mPortOwed = 0;  // (measure only: as before)
+        } else {
+            portCatchUp(kPortCatchChain);
+        }
+    }
+    ++gPortBlendCensus.leftOut;
+    mPortOwedRatio = frameRatio;
+    mPortOwed1C = _1C;
+    mPortOwed20 = _20;
+    if (mTrackCount > kPortOwedTracks) {
+        // (more tracks than recorded: made now, from the inputs it has now; measure only: nothing)
+        mPortOwedTracks = 0;
+        mPortOwed = 1;
+        portCatchUp(kPortCatchEager);
+        return;
+    }
+    mPortOwedTracks = mTrackCount;
+    for (u32 t = 0; t < mTrackCount; t++) {
+        mPortOwedTrack[t] = mTrackList[t];
+    }
+    mPortOwed = 1;
+}
+
+bool XanimeCore::portRemake(void (*calc)(void*), void* ctx, J3DJoint* root) {
+    // (only an intact record: owed and not made since (1; 2 is the flush's own computation), every track recorded, a joint list of its own)
+    if (mPortOwed != 1 || mPortOwedTracks == 0 || mPortOwedTracks != mTrackCount || mPortShared != 0 || root == nullptr) {
+        return false;
+    }
+    const u32 nt = mPortOwedTracks;
+    XanimeTrack live[kPortOwedTracks];
+    f32 anmFrame[kPortOwedTracks];
+    const f32 live1C = _1C, live20 = _20;
+    for (u32 t = 0; t < nt; t++) {
+        live[t] = mTrackList[t];
+        mTrackList[t] = mPortOwedTrack[t];
+    }
+    mFrameRatio = mPortOwedRatio;  // (and left so, as the left-out computation leaves it: portCatchUp does the same; the next computation sets its own)
+    _1C = mPortOwed1C;
+    _20 = mPortOwed20;
+    for (u32 t = 0; t < nt; t++) {
+        anmFrame[t] = mTrackList[t]._0 != nullptr ? mTrackList[t]._0->getFrame() : 0.0f;
+    }
+    mPortOwed = 0;
+    updateFrame();  // (the game's own: the frames onto the shared resources, the freeze flag as the left-out computation would have taken it)
+    J3DMtxCalc* const savedCalc = root->mMtxCalc;
+    root->mMtxCalc = this;
+    calc(ctx);
+    root->mMtxCalc = savedCalc;
+    for (u32 t = nt; t-- > 0;) {
+        if (mTrackList[t]._0 != nullptr) {
+            mTrackList[t]._0->setFrame(anmFrame[t]);
+        }
+    }
+    for (u32 t = 0; t < nt; t++) {
+        mTrackList[t] = live[t];
+    }
+    _1C = live1C;
+    _20 = live20;
+    ++mPortCatchUps;  // (the core changed outside a computation: GXV_ANIM_MEMO / GXV_PAR_ANIM's key word)
+    return true;
+}
+
+void XanimeCore::portCatchUp(int why) {
+    mPortOwed = 0;
+    const bool keep = gPortBlendFix == 2;  // (measure only: made, compared and put back)
+    if (keep && why != kPortCatchChange) {
+        return;
+    }
+    const bool measure = keep || (gPortBlendFixMeasure != 0 && why == kPortCatchChange);
+    const u32 n = mJointCount;
+    const size_t need = n * sizeof(Mtx) + mTrackCount * sizeof(f32) + (measure ? n * sizeof(XjointInfo) : 0);
+    void* mem = nullptr;
+    bool own = false;
+    int expect = 0;
+    if (sPortCatchBusy.compare_exchange_strong(expect, 1, std::memory_order_acquire)) {
+        if (sPortCatchCap < need) {
+            void* p = realloc(sPortCatchMem, need);
+            if (p != nullptr) {
+                sPortCatchMem = p;
+                sPortCatchCap = need;
+            }
+        }
+        mem = sPortCatchCap >= need ? sPortCatchMem : nullptr;
+        if (mem == nullptr) {
+            sPortCatchBusy.store(0, std::memory_order_release);
+        }
+    } else {
+        mem = malloc(need);
+        own = true;
+    }
+    if (mem == nullptr) {
+        ++gPortBlendCensus.noMemory;
+        return;
+    }
+    switch (why) {
+    case kPortCatchChange: ++gPortBlendCensus.atChange; break;
+    case kPortCatchRead: ++gPortBlendCensus.atRead; break;
+    case kPortCatchChain: ++gPortBlendCensus.chained; break;
+    case kPortCatchEager: ++gPortBlendCensus.eager; break;
+    default: ++gPortBlendCensus.atCopy; break;
+    }
+    Mtx* mtx = static_cast< Mtx* >(mem);
+    f32* anmFrame = reinterpret_cast< f32* >(static_cast< u8* >(mem) + n * sizeof(Mtx));
+    XjointInfo* before = measure ? reinterpret_cast< XjointInfo* >(static_cast< u8* >(mem) + n * sizeof(Mtx) + mTrackCount * sizeof(f32)) : nullptr;
+    if (before != nullptr) {
+        memcpy(static_cast< void* >(before), mJointList, n * sizeof(XjointInfo));
+    }
+    // the inputs: the left-out computation's in, the live ones kept (eager: they are the live ones)
+    const bool recorded = mPortOwedTracks != 0;
+    const u32 nt = recorded ? mPortOwedTracks : 0;
+    XanimeTrack live[kPortOwedTracks];
+    const f32 liveRatio = mFrameRatio, live1C = _1C, live20 = _20;
+    const u8 live28 = _28, live29 = _29;
+    for (u32 t = 0; t < nt; t++) {
+        live[t] = mTrackList[t];
+        mTrackList[t] = mPortOwedTrack[t];
+    }
+    mFrameRatio = mPortOwedRatio;
+    _1C = mPortOwed1C;
+    _20 = mPortOwed20;
+    // (the frames updateFrame sets on the shared resources: put back afterwards, as the next computation finds them)
+    const u32 nf = mTrackCount;
+    for (u32 t = 0; t < nf; t++) {
+        anmFrame[t] = mTrackList[t]._0 != nullptr ? mTrackList[t]._0->getFrame() : 0.0f;
+    }
+    updateFrame();  // (the game's own: the frames, and the freeze flag as the left-out computation would have taken it; mPortOwed is 0)
+    J3DMtxBuffer* const savedBuf = J3DMtxCalc::getMtxBuffer();
+    J3DJoint* const savedJoint = J3DMtxCalc::getJoint();
+    J3DMtxBuffer* const buf = PortCatchBuffer();
+    J3DJoint* const joint = PortCatchJoint();
+    buf->mpAnmMtx = mtx;
+    J3DMtxCalc::setMtxBuffer(buf);
+    for (u32 j = 0; j < n; j++) {
+        joint->mJntNo = static_cast< u16 >(j);
+        J3DMtxCalc::setJoint(joint);
+        if (_6 == 1) {
+            calcBlendSpecial();
+        } else if (_6 != 2) {  // (calcScaleBlendSpecial writes no joint state)
+            TVec3f scale;
+            TVec3f translate;
+            if (mTrackCount == 1) {
+                calcSingle(&scale, &translate);
+            } else {
+                calcBlend(&scale, &translate);
+            }
+        }
+    }
+    J3DMtxCalc::setMtxBuffer(savedBuf);
+    J3DMtxCalc::setJoint(savedJoint);
+    for (u32 t = nf; t-- > 0;) {
+        if (mTrackList[t]._0 != nullptr) {
+            mTrackList[t]._0->setFrame(anmFrame[t]);
+        }
+    }
+    for (u32 t = 0; t < nt; t++) {
+        mTrackList[t] = live[t];
+    }
+    _1C = live1C;
+    _20 = live20;
+    // (the frame ratio as the left-out computation left it; a computation about to start (kPortCatchRead) has set its own already)
+    mFrameRatio = why == kPortCatchRead ? liveRatio : mPortOwedRatio;
+    if (measure) {
+        f32 deg = 0.0f, tr = 0.0f;
+        for (u32 j = 0; j < n; j++) {
+            const XtransformInfo& a = before[j]._28;
+            const XtransformInfo& b = mJointList[j]._28;
+            const f32 d = PortQuatDeg(a.mRotation, b.mRotation);
+            const f32 dx = a._C.x - b._C.x, dy = a._C.y - b._C.y, dz = a._C.z - b._C.z;
+            const f32 t = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (d > deg) deg = d;
+            if (t > tr) tr = t;
+        }
+        bool differs = false;
+        for (u32 j = 0; j < n && !differs; j++) {
+            differs = memcmp(&before[j]._28, &mJointList[j]._28, sizeof(XtransformInfo)) != 0;  // (the pose the freeze copies)
+        }
+        if (differs && why == kPortCatchChange) {
+            ++gPortBlendCensus.changed;
+            gPortBlendCensus.sumDeg += deg;
+            if (deg > gPortBlendCensus.maxDeg) gPortBlendCensus.maxDeg = deg;
+            if (tr > gPortBlendCensus.maxTrans) gPortBlendCensus.maxTrans = tr;
+        }
+    }
+    if (keep) {
+        memcpy(mJointList, static_cast< const void* >(before), n * sizeof(XjointInfo));
+        _28 = live28;
+        _29 = live29;
+        mFrameRatio = liveRatio;
+    } else {
+        ++mPortCatchUps;
+    }
+    if (own) {
+        free(mem);
+    } else {
+        sPortCatchBusy.store(0, std::memory_order_release);
+    }
+}
+#endif

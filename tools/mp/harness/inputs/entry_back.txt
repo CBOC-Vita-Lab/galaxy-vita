@@ -1,0 +1,6 @@
+# entry (10 Nov): title -> entry screen -> B -> the title again -> A+B -> the entry screen (cursor remembered) -> Single Player -> the file select's heads
+# (no round Multiplayer button). PETARI_GAME_CLOCK=1.
+30-30.5:A|B
+36-36.2:B                  # entry screen: Back -> the title
+44-44.5:A|B                # the title again
+52-52.2:A                  # entry screen: Single Player (the remembered cursor)

@@ -1,0 +1,26 @@
+# final run (14 Nov), save case c: boot with a TORN GameData.bin (HARNESS_SAVE_SETUP in the run's own copy of the save folder: save_setup.py; the owner's saves are never touched).
+#   console "tmp": ops mptmp,tear = a good .mptmp copy, then GameData.bin torn (second half overwritten): the boot repair (nand.cpp port_nand_set_root -> mp_save_recover)
+#                  replaces it from the valid .mptmp and keeps the torn one aside as GameData.bin.mpbad.
+#   console "bak": ops mpbak,tear = a good .mpbak copy, then the torn file: restored from the .mpbak (a repair-in-progress .mptmp marker is made and removed), torn kept as .mpbad.
+# Boot only (no session, no input): the repair runs at the first call of port_nand_set_root. The two consoles run one after the other (HARNESS_AFTER), each from the test save.
+# After each: GameData.bin whole (save_valid), .mpbad present, no .mptmp and no .mpbak left (the good copy was renamed into place).
+name: qa_save_boot_repair_torn
+description: "torn GameData.bin + good .mptmp, then + good .mpbak (scratch save folders): the good copy is restored, the bad file kept as .mpbad"
+seconds: 50
+link: false
+env: {PETARI_GAME_CLOCK: 1}
+processes:
+  - name: tmp
+    env: {HARNESS_SAVE_SETUP: "mptmp,tear"}
+  - name: bak
+    env: {HARNESS_SAVE_SETUP: "mpbak,tear", HARNESS_AFTER: tmp}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'absent * /nand: GameData\.bin exists and a \.mptmp \/ \.mpbak is beside it; checked: not ok/'
+  - 'expect tmp /nand: GameData\.bin exists and a \.mptmp \/ \.mpbak is beside it; checked: ok, restored from it: yes/'
+  - 'expect bak /nand: GameData\.bin exists and a \.mptmp \/ \.mpbak is beside it; checked: ok, restored from it: yes/'
+  - 'save_valid tmp,bak'
+  - 'save_files tmp,bak present GameData.bin GameData.bin.mpbad'
+  - 'save_files tmp,bak absent GameData.bin.mptmp GameData.bin.mpbak'

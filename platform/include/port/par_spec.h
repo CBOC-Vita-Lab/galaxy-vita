@@ -17,6 +17,7 @@
 #pragma once
 
 #include "port/par_exec.h"  // (Sema, NowUs, CpuRelax)
+#include "port/wait_bound.h"  // (hitch30: BoundedWait)
 
 #include <atomic>
 #include <cstdint>
@@ -70,7 +71,7 @@ public:
         if (!work.Init("smg_spec_work") || !joined.Init("smg_spec_join")) {
             return ok = false;
         }
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
         if (priority < 0) {
             const int mine = sceKernelGetThreadCurrentPriority();  // (-1: one step ABOVE the calling thread: GXV_PAR_VIEW=2's worker)
             priority = mine > 0x41 ? mine - 1 : 0x9E;
@@ -86,6 +87,7 @@ public:
         if (uid < 0) {
             return ok = false;
         }
+        core3::MarkOnCore3(slot = core3::RegisterThread(name), effectiveCore == 3);  // (core3-38: before the thread starts: it reads the slot)
         SpecWorker* self = this;
         if (sceKernelStartThread(uid, sizeof(self), &self) < 0) {
             return ok = false;
@@ -214,7 +216,7 @@ private:
     enum : uint32_t { kIdle = 0, kArmed = 1, kRunning = 2, kDone = 3 };
     static uint32_t Encode(uint32_t g, uint32_t phase) { return (g << 2) | phase; }
 
-#if defined(__vita__)
+#if defined(__vita__) && !defined(PORT_ARMHF_HARNESS)  // (armhf harness: Linux threads, no psp2 kernel headers)
     static int VitaEntry(SceSize, void* argp) {
         SpecWorker* self = *static_cast< SpecWorker** >(argp);
         self->Loop();
@@ -223,8 +225,10 @@ private:
 #endif
 
     void Loop() {
+        core3::Worker c3(slot, true, true);  // (core3-38: on core 3 the worker naps 100 us after every ~1 ms of jobs, between jobs only: the game thread takes what is pending meanwhile)
         for (;;) {
             work.Wait();
+            c3.Wake();
             uint32_t s = state.load(std::memory_order_acquire);
             if ((s & 3u) != kArmed || !state.compare_exchange_strong(s, (s & ~3u) | kRunning, std::memory_order_acq_rel)) {
                 continue;  // (quiesced before it started, or a stale signal)
@@ -237,14 +241,22 @@ private:
             const uint32_t n = bN;
             uint32_t mine = 0;
             for (uint32_t i = 0; i < n && stop.load(std::memory_order_relaxed) == 0; ++i) {
+                if (items[i].load(std::memory_order_relaxed) != kJobPending) {
+                    continue;  // (already taken by the game thread)
+                }
+                if (mine > 0) {
+                    c3.Checkpoint();  // strictly between jobs before claiming so Claim()/Quiesce() never stalls on a nap
+                    if (stop.load(std::memory_order_relaxed) != 0) break;
+                }
                 uint8_t v = kJobPending;
                 if (!items[i].compare_exchange_strong(v, kJobRunning, std::memory_order_acq_rel)) {
-                    continue;  // (taken by the game thread)
+                    continue;  // (taken by the game thread during checkpoint)
                 }
                 fn(ctx, i);
                 items[i].store(kJobDone, std::memory_order_release);
                 ++mine;
             }
+            c3.Sleep();
             workerJobs.fetch_add(mine, std::memory_order_relaxed);
             workerUs.fetch_add(static_cast< uint32_t >(NowUs() - t0), std::memory_order_relaxed);
             state.store((s & ~3u) | kDone, std::memory_order_seq_cst);
@@ -257,7 +269,7 @@ private:
 
     Sema work, joined;
     bool started = false, ok = false, open = false;
-    int threadPriority = 0, effectiveCore = 1;
+    int threadPriority = 0, effectiveCore = 1, slot = -1;
     uint32_t gen = 0, sleeps = 0;
     ItemFn bFn = nullptr;
     void* bCtx = nullptr;
@@ -269,6 +281,79 @@ private:
     std::atomic< uint32_t > workerUs{0};  // (32-bit atomics only: lock-free on the Cortex-A9)
     std::atomic< uint32_t > workerJobs{0};
 };
+
+
+// GXV_PAR_PTCL (parwork, 7 Nov): a synchronous fork-join on a SpecWorker, for work whose items are independent of each other (the particle
+// calc's chains). Publishes items [0, n) (the caller has no batch open: every Dispatch ends with Quiesce here), runs mainFn(ctx) on the
+// calling thread (work that must stay on it, may be null), then claims items from the END while the worker claims from the front; an item
+// the worker is in is waited for, one it has not started is the calling thread's. Returns with every item done and the worker out of the
+// batch (nothing of fn, ctx or the items is touched afterwards). *waitUs: the calling thread's wait for the worker's last item.
+// Items are claimed by atomic exchange, so each runs once, and a result is read only after the acquire load that saw it done.
+inline bool ForkJoin(SpecWorker& w, std::atomic< uint8_t >* items, ItemFn fn, void (*mainFn)(void*), void* ctx, uint32_t n, uint32_t* waitUs) {
+    *waitUs = 0;
+    if (!w.Ready() || n == 0) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        items[i].store(kJobPending, std::memory_order_relaxed);
+    }
+    w.Dispatch(fn, ctx, items, n);  // (the release store inside publishes the items)
+    if (mainFn != nullptr) {
+        mainFn(ctx);
+    }
+    for (uint32_t i = n; i-- > 0;) {
+        uint8_t v = kJobPending;
+        if (items[i].compare_exchange_strong(v, kJobTaken, std::memory_order_acq_rel)) {
+            fn(ctx, i);
+            items[i].store(kJobDone, std::memory_order_release);
+        }
+    }
+    const uint64_t t0 = NowUs();
+    for (uint32_t i = 0; i < n; ++i) {
+        // (hitch30: a job the worker is in cannot be taken over; spin at most GXV_BOUND_SPIN_US, then nap so that the worker can run)
+        std::atomic< uint8_t >& item = items[i];
+        BoundedWait([&item]() { return item.load(std::memory_order_acquire) == kJobRunning; }, SpecWaitCensus(), WaitBoundSpinUs(),
+                    WaitBoundNapUs());
+    }
+    w.Quiesce();
+    *waitUs = static_cast< uint32_t >(NowUs() - t0);
+    return true;
+}
+
+// GXV_PAR_PTCL_OVERLAP (gamepar, 8 Nov): ForkJoin in two halves, so that the calling thread can do other, independent work between the
+// publish and the join. ForkBegin publishes the items (false: no worker, nothing published); ForkEnd is ForkJoin's second half (mainFn,
+// the claims from the end, the wait, Quiesce). Every ForkBegin that returned true is followed by exactly one ForkEnd with the same items.
+inline bool ForkBegin(SpecWorker& w, std::atomic< uint8_t >* items, ItemFn fn, void* ctx, uint32_t n) {
+    if (!w.Ready() || n == 0) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        items[i].store(kJobPending, std::memory_order_relaxed);
+    }
+    w.Dispatch(fn, ctx, items, n);
+    return true;
+}
+inline void ForkEnd(SpecWorker& w, std::atomic< uint8_t >* items, ItemFn fn, void (*mainFn)(void*), void* ctx, uint32_t n, uint32_t* waitUs) {
+    if (mainFn != nullptr) {
+        mainFn(ctx);
+    }
+    for (uint32_t i = n; i-- > 0;) {
+        uint8_t v = kJobPending;
+        if (items[i].compare_exchange_strong(v, kJobTaken, std::memory_order_acq_rel)) {
+            fn(ctx, i);
+            items[i].store(kJobDone, std::memory_order_release);
+        }
+    }
+    const uint64_t t0 = NowUs();
+    for (uint32_t i = 0; i < n; ++i) {
+        // (hitch30: a job the worker is in cannot be taken over; spin at most GXV_BOUND_SPIN_US, then nap so that the worker can run)
+        std::atomic< uint8_t >& item = items[i];
+        BoundedWait([&item]() { return item.load(std::memory_order_acquire) == kJobRunning; }, SpecWaitCensus(), WaitBoundSpinUs(),
+                    WaitBoundNapUs());
+    }
+    w.Quiesce();
+    *waitUs = static_cast< uint32_t >(NowUs() - t0);
+}
 
 }  // namespace par
 }  // namespace port

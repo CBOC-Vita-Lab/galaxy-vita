@@ -1,0 +1,43 @@
+# STRENGTHENED (rigfix, from chk-harness): the old rules judged almost nothing (a host-only line, or crash/stall only). Every log pattern below was
+# checked against the format strings in platform/src/mp, decomp/src/Game/MP and net/src; NOT run against the game (the first real run decides).
+# memfix: 4 players (host Mario, guest Luigi, bots Cosmic Mario and Cosmic Luigi) in a heavy stage; reads the "mem scene" / "puppet heap" /
+# "mem archive" lines (pools at play start). Needs /tmp/harness_core_tests/mp_bot (MP_TEST_OUT=/tmp/harness_core_tests tests/mp/build.sh build).
+name: mp_mem4_EggStarGalaxy
+description: "4 players in EggStarGalaxy:1 for the memory pools"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE], files: [/tmp/harness_core_tests/mp_bot]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+bots:
+  - name: bot1
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot1 --look 3 --duration 240 --radius 0 --data-hash aa3ddccb --scan-for 150"
+  - name: bot2
+    cmd: "/tmp/harness_core_tests/mp_bot --join --name bot2 --look 5 --duration 240 --radius 0 --data-hash aa3ddccb --scan-for 150"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'metric * wall_s >= 240'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect host /\[mp\] slot \d joined name=\S+ rejoin=0 .*players=4/'   # (the bots and the guest join in any order: the last one makes four)
+  - 'expect guest /\[mp\] joined slot=\d session=[0-9a-f]+ host=0 epoch=\d+ players=[2-4]/'
+  - 'count host /\[mp\] slot \d joined name=\S+ rejoin=0/ == 3'
+  - 'expect * /\[mp\] session started/'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/'
+  - 'order host /\[mp\] flow move type=\d+ galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=\d+ galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s tol 250ms each'
+  - 'order host /\[mp\] flow barrier release serial=(\d+) / before guest /\[mp\] flow barrier release serial=$1 / within 3s tol 250ms each'
+  - 'absent * /\[mp\] flow (move refused type=(?!6 )|move not taken|drop|move unmirrored|record leave)/'
+  - 'absent * /\[mp\] mem ui layouts REFUSED/'
+  - 'absent * /OSPanic|FATAL|cannot alloc|heap error:/'
+  - '?absent * /\[mp\] slot \d left reason=(?!leave \(bye\))/ before shutdown'   # (soft: how mp_bot ends is not known)
+  - 'metric host rss_mib <= 2500'
+  - 'metric guest rss_mib <= 2500'

@@ -10,6 +10,7 @@
 // Interrupts (alarms, VI retrace, DVD/audio completion, GPU tokens) are raised
 // by host threads and delivered on the CPU at safe points: when interrupts get
 // re-enabled, at explicit port_irq_poll() calls, and whenever the CPU idles.
+#include <cstdarg>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -23,8 +24,13 @@
 #endif
 
 #include <malloc.h>
+#include <stdint.h>
 #if defined(__vita__)
 #include "memory.h"
+#include <psp2/kernel/sysmem.h>
+#include <reent.h>
+#else
+#include <sys/mman.h>
 #endif
 
 #include <atomic>
@@ -144,8 +150,13 @@ static OSThread* sHostOwner[kMaxThreads];
 
 static std::mutex sCpuMutex;
 static OSThread* sCpuOwner;  // guarded by sCpuMutex
-static thread_local OSThread* tlsSelf;
-static thread_local int tlsHostAllocDepth;
+// (tls40) the three per-thread words in ONE thread_local: the console's emulated TLS costs a call of __emutls_get_address per thread_local
+// variable per function (port_use_game_heap, asked by every malloc, read two); one block is one call. The old names stay as macros.
+struct TlsBlock { OSThread* self; int hostAllocDepth; bool deliveringIrqs; };
+static thread_local TlsBlock tlsBlock;
+#define tlsSelf (tlsBlock.self)
+#define tlsHostAllocDepth (tlsBlock.hostAllocDepth)
+#define tlsDeliveringIrqs (tlsBlock.deliveringIrqs)
 
 static HostThread* hostOf(OSThread* t) {
     for (int i = 0; i < kMaxThreads; i++) {
@@ -173,13 +184,57 @@ static HostThread* hostOf(OSThread* t) {
 // ---------------------------------------------------------------------------
 static bool sIntEnabled = false;  // MSR[EE] of the running thread
 static bool sInIrq = false;       // running interrupt handlers
-static thread_local bool tlsDeliveringIrqs;
 static std::atomic<u32> sPendingIrq{0};
 static std::mutex sIdleMutex;
 static std::condition_variable sIdleCv;
 static PortIrqHandler sIrqHandlers[PORT_IRQ_COUNT];
 
 extern "C" void port_irq_set_handler(int irq, PortIrqHandler handler) { sIrqHandlers[irq] = handler; }
+
+// ---------------------------------------------------------------------------
+// GXV_DRAWPIPE (dpengine, 11 Nov; platform/include/port/draw_thread.h, decomp/src/Game/Scene/SceneFunction.cpp)
+//
+// Mode 4: the draw thread executes a recorded draw while the game thread runs update(). It is no guest thread and must never
+// enter the guest OS: the virtual CPU's interrupt state (sIntEnabled) is the running guest thread's, and a host thread that
+// flipped it would open or close the game thread's critical sections under it. While such a draw is out gPortPipeStackSpan is
+// not 0 and the three interrupt-state functions and OSSleepThread ask whether the caller's frame lies in the draw thread's stack
+// (one compare; a load and a branch not taken otherwise). If so the call does NOTHING and is reported
+// (port_drawpipe_guest_call: counted, the first caller logged, the pipeline turned off after the join): an unprotected critical
+// section on the draw thread is a bug to fix, but it is not the game thread's state corrupted.
+// Mode 3: the draw thread draws the whole picture while the game thread WAITS at the hand-over. For that job it IS the guest's
+// main thread (port_os_lend_main(1) on it: this file's thread-local "which guest thread am I"; the game thread's host thread is
+// asleep in the kernel and touches nothing): interrupts are taken on it at the safe points, the guest heap and scheduler work
+// as on the game thread, another guest thread that becomes ready runs and hands the CPU back to it. port_os_lend_main(0) ends it.
+// port_os_other_guest_runs: how often the CPU went to a guest thread that is neither the main nor the audio thread (a loading
+// thread, the disc threads): the pipeline's decision reads it ("another guest thread ran since the last hand-over").
+// ---------------------------------------------------------------------------
+extern "C" {
+volatile uintptr_t gPortPipeStackLo = 0;
+volatile uintptr_t gPortPipeStackSpan = 0;
+void port_drawpipe_guest_call(void* from) __attribute__((weak));
+}
+static std::atomic<u32> sOtherGuestRuns{0};
+static std::atomic<OSThread*> sOtherGuestLast{nullptr};  // (the last such thread, for the log: which one it is)
+// (console, 11 Nov: the "other" thread of 36-39 turns in 300 in a quiet Honeyhive was JAudio's disc thread, guest priority 5: it
+// reads the streamed music's next block and the wave archives, JAudio's own callbacks only (JASDvd, JASTaskThread), as far from
+// the draw as the audio thread is. Named here by its creator, it is not counted.)
+static std::atomic<OSThread*> sAudioDiscThread{nullptr};
+extern "C" void port_os_guest_audio_disc(void* osThread) { sAudioDiscThread.store(static_cast<OSThread*>(osThread), std::memory_order_relaxed); }
+static inline bool pipeForeign() {
+    const uintptr_t span = gPortPipeStackSpan;
+    return __builtin_expect(span != 0, 0) && reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) - gPortPipeStackLo < span;
+}
+static void pipeForeignCall(void* from) {
+    if (port_drawpipe_guest_call) port_drawpipe_guest_call(from);
+}
+extern "C" unsigned port_os_other_guest_runs(void) { return sOtherGuestRuns.load(std::memory_order_relaxed); }
+// (the OSThread of the last one, its guest priority and the base of its stack: enough to tell the threads apart in a log)
+extern "C" void* port_os_other_guest_last(int* priority, void** stackBase) {
+    OSThread* t = sOtherGuestLast.load(std::memory_order_relaxed);
+    *priority = t != nullptr ? static_cast<int>(t->priority) : -1;
+    *stackBase = t != nullptr ? static_cast<void*>(t->stackBase) : nullptr;
+    return t;
+}
 
 // ---------------------------------------------------------------------------
 // GXV_AUDIO_HOLD=<ms> (read once at boot; 0 or unset: off; 1-12 on; larger values are taken as 12)
@@ -209,6 +264,14 @@ static constexpr u32 kAudioIrqBits = (1u << PORT_IRQ_AI) | (1u << PORT_IRQ_DSP);
 static constexpr long kAudioHoldMaxMs = 12;
 static std::atomic<int> sAudioHoldMs{0};           // the limit; 0: off (set by port_os_boot before any guest thread runs)
 static std::atomic<int64_t> sAudioIrqSince{0};     // when the oldest pending audio interrupt was raised (0: none, or not known yet)
+// imp45 (22 Nov), GXV_AUDIO_HOLD_MID=<ms> (read once at boot; default 0 = off; 1-8; acts only with GXV_AUDIO_CPU1=1 and GXV_AUDIO_HOLD on):
+// with the second virtual CPU the DSP interrupts in the middle of a frame are held too, up to this limit, while the main thread runs outside a
+// window; the next window's CPU1 run takes them on core 1. Without it they are taken at once on the guest CPU, i.e. the audio thread runs on
+// core 0 in the main thread's update(): the console logs of 22 Nov show 0.12-0.23 ms a turn of that at Beach Bowl and Honeyhive, where the
+// main thread has no sleep left and sets the picture rate. A window opens every turn (calc-anim) and update() is 5-6 ms there, so 6 is the
+// value to try. Same handlers, same order, only later, as GXV_AUDIO_HOLD: a frame's sub-frames are then spread over two windows at most; the
+// frame is read 35 ms after its start. The yield bypass (JASDriver::waitSubFrame) and every other taker are as before.
+static std::atomic<int> sAudioHoldMidMs{0};
 static std::atomic<int> sAudioUrgent{1};           // a DSP frame has sub-frames left to render: its interrupts are not held
 static std::atomic<bool> sAudioHoldBypass{false};  // OSYieldThread: the audio interrupts are taken at once
 static std::atomic<unsigned> sAudioHoldPolls{0};   // (the clock is read at every 4th safe point that holds)
@@ -263,8 +326,54 @@ extern "C" int port_audio_hold_stats(unsigned* elsewhere, unsigned* expired, uns
 // for CPU1, and the late/underrun counts (platform/src/audio/ai_dsp.cpp).  Off as well under the armhf/qemu harness's virtual clock.
 // ---------------------------------------------------------------------------
 // (the basic log; weak so the scheduler's host tests that do not provide it still link)
-extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak));
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));
 static bool sCpu1Mode = false;                         // the switch (set by port_os_boot before any guest thread runs)
+static inline bool AudioCpu1On() { return sCpu1Mode; }  // (imp45: for audioHold's mid-frame rule)
+// imp45 (22 Nov), GXV_AUDIO_GATE_CENSUS=1 (default 0; with GXV_AUDIO_CPU1=1): who closes the gate. Inside a window every OSDisableInterrupts of
+// the main thread shuts the gate and, when a CPU1 run is in progress, waits for it to end; the console logs of 22 Nov show 52-69 closes a turn
+// and 0.21-0.27 ms a turn of such waits at Beach Bowl and Honeyhive, more than the audio thread's own time on core 0. The census keeps the
+// callers of OSDisableInterrupts that shut an open gate (return address, count; 24 slots, the rest counted as "other") and the "audio cpu
+// gate:" line (platform/src/audio/ai_dsp.cpp) prints the eight most frequent every 5 s; the addresses are looked up in the link map.
+static bool sGateCensus = false;
+static std::atomic<uintptr_t> sGateSite[24];
+static std::atomic<u32> sGateSiteN[24];
+static std::atomic<u32> sGateSiteOther{0};
+static inline void gateCensusNote(const void* ra) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(ra);
+    for (int i = 0; i < 24; ++i) {
+        uintptr_t cur = sGateSite[i].load(std::memory_order_relaxed);
+        if (cur == 0) {
+            if (!sGateSite[i].compare_exchange_strong(cur, a, std::memory_order_relaxed)) {
+                if (cur != a) continue;
+            }
+            cur = a;
+        }
+        if (cur == a) {
+            sGateSiteN[i].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    sGateSiteOther.fetch_add(1, std::memory_order_relaxed);
+}
+// For the 5 s line: the up to `cap` most frequent callers since the last call (counts cleared), and the count of the rest. Returns how many.
+extern "C" int port_audio_gate_census(uintptr_t* addr, unsigned* n, int cap, unsigned* other) {
+    if (!sGateCensus) return -1;
+    u32 c[24];
+    for (int i = 0; i < 24; ++i) c[i] = sGateSiteN[i].exchange(0, std::memory_order_relaxed);
+    int got = 0;
+    for (; got < cap; ++got) {
+        int best = -1;
+        for (int i = 0; i < 24; ++i) if (c[i] != 0 && (best < 0 || c[i] > c[best])) best = i;
+        if (best < 0) break;
+        addr[got] = sGateSite[best].load(std::memory_order_relaxed);
+        n[got] = c[best];
+        c[best] = 0;
+    }
+    u32 rest = sGateSiteOther.exchange(0, std::memory_order_relaxed);
+    for (int i = 0; i < 24; ++i) rest += c[i];
+    if (other) *other = rest;
+    return got;
+}
 static bool sAudioStats = false;                       // the 5 s line's counts (GXV_AUDIO_CPU1 set, or GXV_AUDIO_STATS=1)
 static std::atomic<OSThread*> sAudioThread{nullptr};   // JASAudioThread's OSThread (port_audio_thread_mark)
 static std::atomic<HostThread*> sAudioHost{nullptr};   // its host side
@@ -434,16 +543,21 @@ extern "C" int port_audio_cpu_stats(int64_t ns[7], unsigned n[8]) {
     return sCpu1Mode ? (sAudioHost.load(std::memory_order_relaxed) ? 1 : 2) : 0;
 }
 
+static std::atomic<bool> sCpu0Idle{false};
+
 extern "C" void port_irq_raise(int irq) {
     sPendingIrq.fetch_or(1u << irq);
     if (((1u << irq) & kAudioIrqBits) && sAudioHoldMs.load(std::memory_order_relaxed) > 0 && sAudioIrqSince.load(std::memory_order_relaxed) == 0) {
         int64_t none = 0;
         sAudioIrqSince.compare_exchange_strong(none, port_host_time_ns(), std::memory_order_relaxed);
     }
-    // (GXV_AUDIO_CPU1) the audio host thread waits for a dispatch: it may take this one on CPU1 (store-load against its own)
-    if (((1u << irq) & kAudioIrqBits) && sCpu1Mode && sCpu1Waiting.load(std::memory_order_seq_cst)) cpu1Notify();
-    std::lock_guard<std::mutex> lk(sIdleMutex);
-    sIdleCv.notify_all();
+    // (GXV_AUDIO_CPU1) only wake CPU1 when the gate is open (Dekker-ordered against cpu0GateOpen's store+fence -> load sPendingIrq)
+    if (((1u << irq) & kAudioIrqBits) && sCpu1Mode && sCpu0Gate.load(std::memory_order_seq_cst) && sCpu1Waiting.load(std::memory_order_seq_cst)) cpu1Notify();
+    // Skip sIdleMutex lock whenever CPU0 is active (Dekker-ordered against idleUntilRunnable's store sCpu0Idle=true -> load sPendingIrq)
+    if (sCpu0Idle.load(std::memory_order_seq_cst)) {
+        std::lock_guard<std::mutex> lk(sIdleMutex);
+        sIdleCv.notify_all();
+    }
 }
 
 // `keep`: the interrupts left pending (GXV_AUDIO_HOLD), `taker`: who takes them (for the counts).
@@ -633,7 +747,14 @@ static void gapNoteSlow() {
 // (kIrqAtOnce: a DSP frame in progress, or a yield; kIrqExpired: held for the limit). Plain globals and relaxed atomics only, no
 // thread_local (see deliverIrqs); the clock is read at every 4th safe point that holds (a syscall on the Vita).
 static IrqTaker audioHold() {
-    if (sAudioUrgent.load(std::memory_order_relaxed) || sAudioHoldBypass.load(std::memory_order_relaxed)) return kIrqAtOnce;
+    if (sAudioHoldBypass.load(std::memory_order_relaxed)) return kIrqAtOnce;
+    int limitMs = sAudioHoldMs.load(std::memory_order_relaxed);
+    if (sAudioUrgent.load(std::memory_order_relaxed)) {
+        // (GXV_AUDIO_HOLD_MID) a DSP frame in progress: at once, unless the second CPU is on and its mid-frame limit is set
+        const int mid = sAudioHoldMidMs.load(std::memory_order_relaxed);
+        if (mid <= 0 || !AudioCpu1On()) return kIrqAtOnce;
+        if (mid < limitMs) limitMs = mid;
+    }
     if (!sAudioHolding.load(std::memory_order_relaxed)) {
         sAudioHolding.store(true, std::memory_order_relaxed);
         sHoldBegun.fetch_add(1, std::memory_order_relaxed);
@@ -648,7 +769,7 @@ static IrqTaker audioHold() {
         sAudioIrqSince.compare_exchange_strong(since, now, std::memory_order_relaxed);
         return kIrqHold;
     }
-    return now - since >= sAudioHoldMs.load(std::memory_order_relaxed) * 1000000ll ? kIrqExpired : kIrqHold;
+    return now - since >= limitMs * 1000000ll ? kIrqExpired : kIrqHold;
 }
 
 static void deliverIrqs() {
@@ -709,11 +830,42 @@ extern "C" void port_irq_poll_at(void* site) {
     deliverIrqs();
 }
 
+// defaults48 (22 Nov), GXV_MUTEX_GATE_FAST=1 (default 0; with GXV_AUDIO_CPU1=1). The gate census on the Vita (night35 row 11, Beach Bowl:
+// "audio cpu gate: ... 0x81179c79 x 3035, 0x81179e61 x 3035, 0x8125a2a1 x 524; others 0", module loaded 0x6c000 above its link address)
+// names the two call sites that shut the open gate 92 % of the time: ModelManager::calc's OSLockMutex and OSUnlockMutex of the material
+// path's mutex (MR::MutexHolder<0>), 10 models a turn inside the calc-anim window; each is an interrupt-disable section, and the game
+// thread's waits for a CPU1 run in progress at them are most of the 0.21-0.27 ms a turn "waits for core 1".
+// With the switch, decomp/src/RVL_SDK/os/OSMutex.c takes or gives back that mutex without an interrupt-disable section when this says
+// yes and nobody else is involved (free or already the caller's at the lock; no waiter and no raised priority at the unlock): the same
+// fields get the same values, the gate stays open and no pending interrupt is taken there (the next safe point takes it).
+// Why that is safe: guest threads on CPU0 change only at safe points, and the short path has none, so no other CPU0 thread sees the
+// mutex half-changed; a CPU1 run (the audio interrupt handlers and the audio thread) never locks this mutex and never walks another
+// thread's mutex list (OSMutex.c: __OSGetEffectivePriority and __OSUnlockAllMutex are called for the unlocking or the ending thread).
+// Any other case (the gate shut, interrupts off, CPU1, the draw thread, an owner that is another thread, a waiter) takes the game's
+// own OSLockMutex / OSUnlockMutex as before. Log: "audio cpu gate: mutex ..." every 5 s (platform/src/audio/ai_dsp.cpp).
+static bool sMutexGateFast = false;
+static std::atomic<u32> sMutexGateFastN{0};
+extern "C" int port_mutex_gate_fast(void) {
+    if (__builtin_expect(!sMutexGateFast, 1)) return 0;
+    if (pipeForeign() || onCpu1() || !sIntEnabled || !sGateMirror) return 0;
+    sMutexGateFastN.fetch_add(1, std::memory_order_relaxed);
+    return 1;
+}
+extern "C" int port_mutex_gate_fast_count(unsigned* n) {  // (-1: the switch is off)
+    if (!sMutexGateFast) return -1;
+    *n = sMutexGateFastN.exchange(0, std::memory_order_relaxed);
+    return 0;
+}
+
 extern "C" {
 
 // (GXV_AUDIO_CPU1) On CPU1 these only change CPU1's own MSR[EE]: the run already excludes CPU0's critical sections, and CPU1 takes no
 // interrupts at its safe points.  On CPU0, in a window, disabling shuts the gate (waiting for a CPU1 run in progress) and enabling opens it.
 BOOL OSDisableInterrupts(void) {
+    if (pipeForeign()) {  // (GXV_DRAWPIPE=4: the draw thread; see the top of this file)
+        pipeForeignCall(__builtin_return_address(0));
+        return TRUE;
+    }
     if (__builtin_expect(sCpu1Mode, 0)) {
         if (onCpu1()) {
             const BOOL p = sCpu1IntEnabled;
@@ -730,12 +882,19 @@ BOOL OSDisableInterrupts(void) {
     // where MSR[EE] stays set). Shut before it, as in r58-r60, a pending interrupt re-opened the gate just before MSR[EE] was cleared, so
     // the main thread entered this critical section with the gate open and CPU1 could run alongside it (the r60 load hang, see
     // tests/os_audio_cpu1_load.cpp).
-    if (__builtin_expect(sCpu1Mode, 0) && sGateMirror) cpu0GateClose();
+    if (__builtin_expect(sCpu1Mode, 0) && sGateMirror) {
+        if (__builtin_expect(sGateCensus, 0)) gateCensusNote(__builtin_return_address(0));  // (GXV_AUDIO_GATE_CENSUS)
+        cpu0GateClose();
+    }
     sIntEnabled = false;
     return prev;
 }
 
 BOOL OSEnableInterrupts(void) {
+    if (pipeForeign()) {
+        pipeForeignCall(__builtin_return_address(0));
+        return TRUE;
+    }
     if (__builtin_expect(sCpu1Mode, 0) && onCpu1()) {
         const BOOL p = sCpu1IntEnabled;
         sCpu1IntEnabled = true;
@@ -750,6 +909,9 @@ BOOL OSEnableInterrupts(void) {
 }
 
 BOOL OSRestoreInterrupts(BOOL level) {
+    if (pipeForeign()) {
+        return TRUE;  // (the matching disable did nothing and was reported)
+    }
     if (__builtin_expect(sCpu1Mode, 0) && onCpu1()) {
         const BOOL p = sCpu1IntEnabled;
         sCpu1IntEnabled = level ? true : false;
@@ -824,8 +986,24 @@ static void resumeAfterWait(OSThread* self, HostThread* h, bool cpu1) {
 // Hands the CPU from the calling host thread to `next`.  Returns when the
 // caller is scheduled again (immediately if next == caller), or never if the
 // caller is exiting.
+// pipe61: WHICH other guest threads ran (the console logs say how often, 64 of 300 drawn turns, never which): a table of the first eight, with the entry
+// function the game gave each (HostThread::func), the guest priority and how often the CPU went to it since the last take. Read by the "pipe25:" window line.
+struct OtherGuestRec { OSThread* t; void* func; int prio; u32 runs; };
+static OtherGuestRec sOtherRecs[8];
+static void noteOtherGuest(OSThread* next);
+extern "C" int port_os_other_guest_take(int i, void** thread, void** func, int* priority, unsigned* runs) {
+    if (i < 0 || i >= 8 || sOtherRecs[i].t == nullptr) return 0;
+    *thread = sOtherRecs[i].t, *func = sOtherRecs[i].func, *priority = sOtherRecs[i].prio, *runs = sOtherRecs[i].runs;
+    sOtherRecs[i].runs = 0;
+    return 1;
+}
 static void switchTo(OSThread* next, bool callerExiting) {
     OSThread* self = tlsSelf;
+    if (cpu0ClassOf(next) == 2 && next != sAudioDiscThread.load(std::memory_order_relaxed)) {  // (GXV_DRAWPIPE: a guest thread other than main / audio / audio's disc thread runs)
+        sOtherGuestRuns.fetch_add(1, std::memory_order_relaxed);
+        sOtherGuestLast.store(next, std::memory_order_relaxed);
+        noteOtherGuest(next);
+    }
     cpu0Account(cpu0ClassOf(next));  // (the 5 s audio line only)
     __OSCurrentThread = next;
 #if defined(__vita__)
@@ -872,6 +1050,7 @@ static void* hostThreadMain(void* arg) {
     if (result < 0 || stackSize < h->stackSize) port_fatal("Vita native thread stack query failed: %08x size %u", (unsigned)result, stackSize);
     self->stackBase = (u8*)stack + stackSize;
     self->stackEnd = (u32*)stack;
+    PORT_THREAD_NAME("guest");  // (the "cores-5s:" lines add the guest threads up)
     const int pinResult = port_vita_pin_core(0);  // only one guest thread runs at a time
     port_thread_class(3);
     if (PORT_RUNTIME_DIAGNOSTICS && PORT_LOGGING) {
@@ -898,22 +1077,41 @@ static void idleUntilRunnable() {
         if (port_vclock_enabled()) {
             // armhf/qemu harness: every OSThread is blocked, so virtual time may pass (port/vclock.h)
             port_vclock_idle_step([]() -> int { return sPendingIrq.load() != 0; });
-            if (sPendingIrq.load() == 0) {
+            sCpu0Idle.store(true, std::memory_order_seq_cst);
+            if (sPendingIrq.load(std::memory_order_seq_cst) == 0) {
                 std::unique_lock<std::mutex> lk(sIdleMutex);
                 sIdleCv.wait_for(lk, std::chrono::microseconds(200), [] { return sPendingIrq.load() != 0; });
             }
+            sCpu0Idle.store(false, std::memory_order_relaxed);
             if (sPendingIrq.load() != 0) runIrqHandlers();
             continue;
         }
         {
-            std::unique_lock<std::mutex> lk(sIdleMutex);
-            sIdleCv.wait(lk, [] { return sPendingIrq.load() != 0; });
+            sCpu0Idle.store(true, std::memory_order_seq_cst);
+            if (sPendingIrq.load(std::memory_order_seq_cst) == 0) {
+                std::unique_lock<std::mutex> lk(sIdleMutex);
+                sIdleCv.wait(lk, [] { return sPendingIrq.load() != 0; });
+            }
+            sCpu0Idle.store(false, std::memory_order_relaxed);
         }
         if (kGapDiagnostics && sGapNs > 0) {
             sGapLast = port_host_time_ns();  // (waiting is not a stretch of work)
         }
         runIrqHandlers();
     }
+}
+
+// armhf/qemu harness (PETARI_VCLOCK=1; compiled out of the Vita and desktop builds, port/vclock.h): a guest thread that waits in a
+// loop while it holds the guest CPU (port_host_sleep_ns in GameScene::init's wait for the scenario's wave data, and
+// MR::waitEndChangeArchivePlayer) leaves no OSThread to reach idleUntilRunnable, so virtual time never passed and a stage load hung
+// (Good Egg, intermittent). It takes the idle step itself. 0: not the case (no virtual clock, or not a guest thread).
+// From Producdevity's fork, 2a1d164.
+extern "C" int port_vclock_guest_wait(void) {
+    if (!port_vclock_enabled() || tlsSelf == nullptr) {
+        return 0;
+    }
+    port_vclock_idle_step([]() -> int { return sPendingIrq.load() != 0; });
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1490,16 @@ void OSYieldThread(void) {
     OSRestoreInterrupts(enabled);
 }
 
+static void noteOtherGuest(OSThread* next) {
+    for (OtherGuestRec& r : sOtherRecs) {
+        if (r.t == next) { ++r.runs; return; }
+        if (r.t == nullptr) {
+            r.func = reinterpret_cast<void*>(hostOf(next)->func), r.prio = static_cast<int>(next->priority), r.runs = 1;
+            r.t = next;
+            return;
+        }
+    }
+}
 BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param, void* stack, u32 stackSize, OSPriority priority, u16 attr) {
     if (priority < 0 || 31 < priority) {
         return FALSE;
@@ -1508,6 +1716,10 @@ s32 OSSuspendThread(OSThread* thread) {
 }
 
 void OSSleepThread(OSThreadQueue* queue) {
+    if (pipeForeign()) {  // (GXV_DRAWPIPE=4: the draw thread is no guest thread and cannot sleep as one; reported)
+        pipeForeignCall(__builtin_return_address(0));
+        return;
+    }
     BOOL enabled = OSDisableInterrupts();
     OSThread* currentThread = OSGetCurrentThread();
     currentThread->state = OS_THREAD_STATE_WAITING;
@@ -1603,6 +1815,11 @@ extern "C" void port_call_sdk_interrupt(int interrupt) {
 // Heap routing (see port/heap_routing.h)
 // ---------------------------------------------------------------------------
 extern "C" int port_is_game_thread(void) { return tlsSelf != nullptr; }
+// (disc26, the "io:" census) the caller is the Wii default thread: the game thread proper, not the loading / file / audio threads.
+extern "C" int port_is_default_thread(void) { return tlsSelf != nullptr && tlsSelf == &DefaultThread; }
+// GXV_DRAWPIPE=3 (see the top of this file): the calling host thread becomes / stops being the guest's main thread. Only for
+// the draw thread, and only while the main thread's own host thread waits for it at the hand-over.
+extern "C" void port_os_lend_main(int on) { tlsSelf = on ? &DefaultThread : nullptr; }
 extern "C" int port_owns_game_cpu(void) {
     if (!tlsSelf) return 0;
     if (sCpu1Mode && onCpu1()) return 1;  // (GXV_AUDIO_CPU1: the audio thread holds CPU1)
@@ -1673,6 +1890,171 @@ static PortHeapStats portHeapStats() {
 #endif
     return r;
 }
+
+// ---- heap23 (9 Nov): GXV_HEAP_BIG, large host `new` blocks outside the C heap (port/host_big.h says why).
+//   GXV_HEAP_BIG=0        off: every host `new` from the C heap, as before.
+//   GXV_HEAP_BIG=1        (the console's default, vita/vgx-game/entry.cpp) from the first scene destroyed on: a `new` of
+//                         GXV_HEAP_BIG_KIB or more gets its own memory block. Start-up's blocks (the frame arenas' floors, made
+//                         while the heap is in one piece and never given back) stay in the C heap.
+//   GXV_HEAP_BIG=2        the same from start-up (port_host_big_boot).
+//   GXV_HEAP_BIG_KIB=128  the smallest request taken out (64..4096).
+//   GXV_HEAP_BIG_FLOOR_MIB=16  free main memory left to the system (sceGxm's render targets, the Settings menu ...); below it the
+//                         request goes to the C heap as before (the console has ~42 MiB free in play).
+//   GXV_HEAP_BIG_CACHE_MIB=8   freed blocks kept for reuse (given back at every scene destroy).
+//   GXV_HEAP_BIG_LAST_MIB=4    when the C heap has no room for a request of any size (the old FATAL), the block is taken outside
+//                         down to this floor instead; only then is the heap called exhausted. (Also with GXV_HEAP_BIG=1 before
+//                         the first scene change.)
+// The blocks are cached USER_RW main memory like the C heap's own, used by the CPU only: the renderer hands vertices, indices and
+// texels to vitaGL by copy (glBufferData, glTexImage2D, the swizzle path's vglForceAllocAligned), never as client pointers.
+#include "port/host_big.h"
+namespace {
+#if defined(__vita__)
+struct PortBigPages {
+    bool Map(size_t bytes, uintptr_t& base, int32_t& handle) {
+        const SceUID uid = sceKernelAllocMemBlock("port_big", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW, static_cast<SceSize>(bytes), nullptr);
+        if (uid < 0) return false;
+        void* b = nullptr;
+        if (sceKernelGetMemBlockBase(uid, &b) < 0 || !b) {
+            sceKernelFreeMemBlock(uid);
+            return false;
+        }
+        base = reinterpret_cast<uintptr_t>(b);
+        handle = uid;
+        return true;
+    }
+    void Unmap(uintptr_t, int32_t handle, size_t) { sceKernelFreeMemBlock(handle); }
+    size_t FreeMemory() {
+        SceKernelFreeMemorySizeInfo info;
+        memset(&info, 0, sizeof info);
+        info.size = sizeof info;
+        if (sceKernelGetFreeMemorySize(&info) < 0) return SIZE_MAX;
+        return static_cast<size_t>(info.size_user);
+    }
+};
+#else
+// (desktop: anonymous mappings; the free memory is not limited)
+struct PortBigPages {
+    bool Map(size_t bytes, uintptr_t& base, int32_t& handle) {
+        void* b = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (b == MAP_FAILED) return false;
+        base = reinterpret_cast<uintptr_t>(b);
+        handle = 0;
+        return true;
+    }
+    void Unmap(uintptr_t base, int32_t, size_t bytes) { munmap(reinterpret_cast<void*>(base), bytes); }
+    size_t FreeMemory() { return SIZE_MAX; }
+};
+#endif
+PortBigPages sBigPages;
+port::bigheap::BigHeap<PortBigPages> sBig(sBigPages);
+std::atomic<uint32_t> sBigMin{UINT32_MAX};  // the smallest request taken out; UINT32_MAX: not armed
+std::atomic<int> sBigMode{-1};              // GXV_HEAP_BIG, read at the first port_host_big_boot / scene destroy / failure
+std::atomic<uint32_t> sBigTouched{0};       // some block was taken out (port_host_free looks them up only then)
+std::atomic<uint32_t> sBigLastResort{0}, sBigLastResortKiB{0};
+size_t sBigFloor = 16u << 20, sBigCache = 8u << 20, sBigLast = 4u << 20;
+std::atomic<size_t> sHostBigLive{0};  // bytes of the game's `new` outside the C heap
+
+long portEnvLong(const char* name, long def, long lo, long hi) {
+    const char* e = getenv(name);
+    if (!e || !*e) return def;
+    long v = strtol(e, nullptr, 0);
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+int portBigMode() {
+    int m = sBigMode.load(std::memory_order_relaxed);
+    if (m >= 0) return m;
+    m = static_cast<int>(portEnvLong("GXV_HEAP_BIG", 0, 0, 2));
+    sBigFloor = static_cast<size_t>(portEnvLong("GXV_HEAP_BIG_FLOOR_MIB", 16, 0, 128)) << 20;
+    sBigCache = static_cast<size_t>(portEnvLong("GXV_HEAP_BIG_CACHE_MIB", 8, 0, 64)) << 20;
+    sBigLast = static_cast<size_t>(portEnvLong("GXV_HEAP_BIG_LAST_MIB", 4, 0, 64)) << 20;
+    sBigMode.store(m, std::memory_order_relaxed);
+    return m;
+}
+void portBigArm(const char* when) {
+    if (portBigMode() == 0 || sBigMin.load(std::memory_order_relaxed) != UINT32_MAX) return;
+    const uint32_t kib = static_cast<uint32_t>(portEnvLong("GXV_HEAP_BIG_KIB", 128, 64, 4096));
+    sBigMin.store(kib * 1024u, std::memory_order_relaxed);
+    if (port_log_summary)
+        port_log_summary("host heap: from %s on, a `new` of %u KiB or more gets its own memory block outside the C heap (GXV_HEAP_BIG=%d; "
+                         "while %u MiB of main memory stay free, else the C heap; freed blocks kept up to %u MiB)",
+                         when, kib, sBigMode.load(), static_cast<unsigned>(sBigFloor >> 20), static_cast<unsigned>(sBigCache >> 20));
+}
+void* portBigAlloc(size_t size, int align, size_t floorBytes) {
+    size_t bytes = 0;
+    void* p = sBig.Alloc(size, static_cast<size_t>(align), floorBytes, &bytes);
+    if (p) {
+        sBigTouched.store(1, std::memory_order_relaxed);
+        sHostBigLive.fetch_add(bytes, std::memory_order_relaxed);
+    }
+    return p;
+}
+
+#if defined(__vita__)
+// The C heap's largest free piece (heap23). newlib's malloc (mallocr.c, dlmalloc 2.6) keeps every free chunk but the top one in 128
+// bins, the bins in increasing size (bin_at(i) = __malloc_av_ + 8 i, a chunk {prev_size, size, fd, bk}; bin 0's fd is the top chunk,
+// bin 1 holds the last remainder; __malloc_update_mallinfo walks the same lists). So the largest free chunk is in the highest
+// non-empty bin, or the last remainder, or it is the top chunk plus the part of newlib's block not yet taken by sbrk. Read under
+// newlib's own (recursive) lock; every pointer is checked against newlib's block before it is followed, and a list that leaves the
+// block or runs on gives up (ok = false).
+extern "C" char __malloc_av_[];
+struct NlChunk { size_t prevSize; size_t size; NlChunk* fd; NlChunk* bk; };
+struct NewlibPieces { unsigned largestKiB = 0, topKiB = 0, tailKiB = 0; bool ok = false; };
+NewlibPieces portNewlibPieces() {
+    NewlibPieces r;
+    static uintptr_t lo = 0, hi = 0;  // newlib's block, fixed for the run
+    if (!hi) {
+        void* probe = malloc(16);
+        if (!probe) return r;
+        SceKernelMemBlockInfo info;
+        memset(&info, 0, sizeof info);
+        info.size = sizeof info;
+        const int rc = sceKernelGetMemBlockInfoByAddr(probe, &info);
+        free(probe);
+        if (rc < 0 || !info.mappedBase || !info.mappedSize) return r;
+        lo = reinterpret_cast<uintptr_t>(info.mappedBase);
+        hi = lo + info.mappedSize;
+    }
+    auto valid = [](const NlChunk* c) {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(c);
+        return a >= lo && a + sizeof(NlChunk) <= hi && (a & 7u) == 0;
+    };
+    auto binAt = [](int i) { return reinterpret_cast<NlChunk*>(__malloc_av_ + 8 * i); };
+    size_t largest = 0, top = 0, tail = 0;
+    bool ok = true;
+    // the largest chunk of bin i (false: the list is not what it should be)
+    auto scan = [&](int i) {
+        NlChunk* b = binAt(i);
+        unsigned steps = 0;
+        for (NlChunk* p = b->bk; p != b; p = p->bk) {
+            if (!valid(p) || ++steps > 65536) return false;
+            const size_t sz = p->size & ~static_cast<size_t>(3);
+            if (sz > hi - lo) return false;
+            if (sz > largest) largest = sz;
+        }
+        return true;
+    };
+    __malloc_lock(_REENT);
+    const NlChunk* t = binAt(0)->fd;
+    if (valid(t)) {
+        top = t->size & ~static_cast<size_t>(3);
+        const uintptr_t end = reinterpret_cast<uintptr_t>(t) + top;
+        tail = end <= hi ? hi - end : 0;
+    }
+    ok = scan(1);
+    for (int i = 127; ok && i >= 2; --i) {
+        if (binAt(i)->bk == binAt(i)) continue;
+        ok = scan(i);
+        break;  // (the highest non-empty bin holds the largest chunks)
+    }
+    __malloc_unlock(_REENT);
+    r.ok = ok;
+    r.largestKiB = static_cast<unsigned>((largest > top + tail ? largest : top + tail) / 1024u);
+    r.topKiB = static_cast<unsigned>(top / 1024u);
+    r.tailKiB = static_cast<unsigned>(tail / 1024u);
+    return r;
+}
+#endif
+}  // namespace
 
 // Large host allocations are where the C heap's growth shows: the first time the heap's
 // arena has grown by another 4 MiB, say so (with the request that did it).
@@ -1759,9 +2141,12 @@ void siteDump(const char* when) {
 
 // Bytes the game's `new` has taken from the host heap and not given back (std containers of the
 // renderer, platform bookkeeping: what is left of the C heap's use once the libc's, vitaGL's and
-// the shader compiler's own blocks are taken away).
+// the shader compiler's own blocks are taken away). (heap23: the blocks outside the C heap,
+// GXV_HEAP_BIG, are counted in sHostBigLive; "the game's `new`" in the logs is both.)
 static std::atomic<size_t> sHostNewLive{0};
-extern "C" unsigned port_host_new_live_kib(void) { return static_cast<unsigned>(sHostNewLive.load(std::memory_order_relaxed) / 1024u); }
+extern "C" unsigned port_host_new_live_kib(void) {
+    return static_cast<unsigned>((sHostNewLive.load(std::memory_order_relaxed) + sHostBigLive.load(std::memory_order_relaxed)) / 1024u);
+}
 
 extern "C" void port_host_heap_log(const char* when) {
     const PortHeapStats hs = portHeapStats();
@@ -1772,42 +2157,91 @@ extern "C" void port_host_heap_log(const char* when) {
 #endif
 }
 
-// One line in the player's basic log: how full the C heap is (written every 30 s with the frame-rate lines).
+// heap23: the C heap's largest free piece in KiB (the top chunk with the part of newlib's block sbrk has not reached yet counts as
+// one piece), or -1 where it cannot be read (desktop, or newlib's lists not as expected).
+static long portLargestFreeKiB(unsigned* topKiB = nullptr) {
+#if defined(__vita__)
+    const NewlibPieces np = portNewlibPieces();
+    if (topKiB) *topKiB = np.topKiB + np.tailKiB;
+    return np.ok ? static_cast<long>(np.largestKiB) : -1;
+#else
+    if (topKiB) *topKiB = 0;
+    return -1;
+#endif
+}
+
+// One line in the player's basic log: how full the C heap is (written every 30 s with the frame-rate lines). (heap23: the largest
+// free piece and the blocks outside the C heap are added at the end; the beginning of the line is as before.)
 extern "C" void port_host_heap_summary(void) {
     const PortHeapStats hs = portHeapStats();
-    port_log_summary("memory: C heap in use %u KiB (arena %u KiB, free %u KiB in %u pieces); the game's `new` holds %u KiB", hs.inUseKiB, hs.arenaKiB,
-                     hs.freeKiB, hs.pieces, port_host_new_live_kib());
+    const long largest = portLargestFreeKiB();
+    const port::bigheap::Stats bs = sBig.Get();
+    port_log_summary("memory: C heap in use %u KiB (arena %u KiB, free %u KiB in %u pieces); the game's `new` holds %u KiB; largest free piece %ld KiB; "
+                     "outside the C heap %u KiB in %u blocks (+%u KiB kept for reuse)", hs.inUseKiB, hs.arenaKiB,
+                     hs.freeKiB, hs.pieces, port_host_new_live_kib(), largest, static_cast<unsigned>(bs.liveBytes / 1024u), bs.liveBlocks,
+                     static_cast<unsigned>(bs.cacheBytes / 1024u));
 }
 
 extern "C" void port_host_alloc_failed(size_t size, int align) {
     const PortHeapStats hs = portHeapStats();
 #if defined(__vita__)
+    const long largest = portLargestFreeKiB();
+    const port::bigheap::Stats bs = sBig.Get();
     // (the player's basic log as well: the full log is off in player builds, and this is the last line before the abort)
     port_log_summary("FATAL: host heap exhausted: a request for %lu KiB (alignment %d) found no room; C heap arena %u KiB, in use %u KiB, free %u KiB in %u pieces, "
-             "releasable at the top %u KiB; the game's `new` holds %u KiB",
-             static_cast<unsigned long>(size / 1024u), align, hs.arenaKiB, hs.inUseKiB, hs.freeKiB, hs.pieces, hs.topKiB, port_host_new_live_kib());
+             "releasable at the top %u KiB; the game's `new` holds %u KiB; largest free piece %ld KiB; outside the C heap %u KiB in %u blocks, "
+             "main memory refused %llu times (floor), %llu failures",
+             static_cast<unsigned long>(size / 1024u), align, hs.arenaKiB, hs.inUseKiB, hs.freeKiB, hs.pieces, hs.topKiB, port_host_new_live_kib(), largest,
+             static_cast<unsigned>(bs.liveBytes / 1024u), bs.liveBlocks, static_cast<unsigned long long>(bs.refusedFloor),
+             static_cast<unsigned long long>(bs.mapFailures));
     port_log_flush();
 #else
-    fprintf(stderr, "FATAL: host heap exhausted: a request for %zu KiB (alignment %d) found no room (in use %u KiB)\n", size / 1024u, align, hs.inUseKiB);
+    fprintf(stderr, "FATAL: host heap exhausted: a request for %lu KiB (alignment %d) found no room (in use %u KiB)\n", (unsigned long)(size / 1024u), align, hs.inUseKiB);
     fflush(stderr);
 #endif
     abort();
+}
+
+// heap23: the C heap had no room. With GXV_HEAP_BIG on (any mode), the request is taken outside it down to GXV_HEAP_BIG_LAST_MIB of
+// free main memory before the caller reports the heap exhausted; each time is logged (it means the C heap is full or cut up).
+static void* portHostLastResort(size_t size, int align) {
+    if (portBigMode() == 0) return nullptr;
+    void* p = portBigAlloc(size, align, sBigLast);
+    if (p) {
+        sBigLastResort.fetch_add(1, std::memory_order_relaxed);
+        sBigLastResortKiB.fetch_add(static_cast<uint32_t>(size / 1024u), std::memory_order_relaxed);
+        static thread_local bool busy = false;
+        if (!busy && port_log_summary) {
+            busy = true;
+            const PortHeapStats hs = portHeapStats();
+            port_log_summary("host heap: the C heap had no room for %lu KiB (in use %u KiB, free %u KiB in %u pieces): taken from main memory outside it "
+                             "(%u times so far)", static_cast<unsigned long>(size / 1024u), hs.inUseKiB, hs.freeKiB, hs.pieces,
+                             sBigLastResort.load(std::memory_order_relaxed));
+            busy = false;
+        }
+    }
+    return p;
 }
 
 extern "C" void* port_host_alloc(size_t size, int align) {
     if (align < 16) {
         align = 16;
     }
+    // (heap23, GXV_HEAP_BIG: one relaxed load and a compare for every request; UINT32_MAX until armed)
+    if (__builtin_expect(size >= sBigMin.load(std::memory_order_relaxed), 0)) {
+        if (void* b = portBigAlloc(size, align, sBigFloor)) return b;
+    }
 #if defined(__vita__)
     if (align & (align - 1)) return nullptr;
     void* p = memalign((size_t)align, size ? size : 1);
-    if (p) sHostNewLive.fetch_add(malloc_usable_size(p), std::memory_order_relaxed);
-    if (p && size >= 256u * 1024u) portHeapMark(size);
+    if (!p) return portHostLastResort(size, align);
+    sHostNewLive.fetch_add(malloc_usable_size(p), std::memory_order_relaxed);
+    if (size >= 256u * 1024u) portHeapMark(size);
     return p;
 #else
     void* p = nullptr;
     if (posix_memalign(&p, (size_t)align, size ? size : 1) != 0) {
-        return nullptr;
+        return portHostLastResort(size, align);
     }
     sHostNewLive.fetch_add(malloc_usable_size(p), std::memory_order_relaxed);
     if (size >= 4096u && siteTracking()) siteAlloc(p, malloc_usable_size(p));
@@ -1816,11 +2250,69 @@ extern "C" void* port_host_alloc(size_t size, int align) {
 #endif
 }
 extern "C" void port_host_free(void* p) {
-    if (p) sHostNewLive.fetch_sub(malloc_usable_size(p), std::memory_order_relaxed);
+    if (!p) return;
+    // (heap23: a page-aligned pointer may be a block outside the C heap; looked up only once one has been made)
+    if (__builtin_expect((reinterpret_cast<uintptr_t>(p) & (port::bigheap::kPage - 1)) == 0, 0) && sBigTouched.load(std::memory_order_relaxed)) {
+        size_t bytes = 0;
+        if (sBig.Free(p, sBigCache, &bytes)) {
+            sHostBigLive.fetch_sub(bytes, std::memory_order_relaxed);
+            return;
+        }
+    }
+    sHostNewLive.fetch_sub(malloc_usable_size(p), std::memory_order_relaxed);
 #if !defined(__vita__) && defined(__GLIBC__)
-    if (p && siteTracking()) siteFree(p);
+    if (siteTracking()) siteFree(p);
 #endif
     free(p);
+}
+
+// heap23: GXV_HEAP_BIG=2 arms the route at start-up (vita/vgx-game/entry.cpp calls this once the environment is set).
+extern "C" void port_host_big_boot(void) {
+    if (portBigMode() == 2) portBigArm("start-up");
+}
+
+// heap23: one basic-log line at the end of every scene's destruction (GameSystemSceneController::exeDestroyScene, game thread, once
+// the scene's heaps and the port's per-scene stores are gone): the C heap and the blocks outside it, each with its change since the
+// last scene destroyed: the net growth of one stage cycle, read at the same point of every cycle. Owners: the game's `new` in the C
+// heap and outside it; "other C heap users" = everything else in the C heap (vitaGL's host objects: shaders, programs, patched
+// variants, its spill of GPU memory when its pools are full; the shader compiler; newlib; the port's own malloc'd stores).
+// The renderer's part (vitaGL's pools, shader / program / texture counts) comes from port_vgx_vita_memory_brief (Vita host).
+// Also arms GXV_HEAP_BIG=1 (at the first call) and gives the cache of freed outside blocks back.
+extern "C" int port_vgx_vita_memory_brief(char* out, unsigned size) __attribute__((weak));
+extern "C" void port_heap_scene_destroyed(const char* scene, const char* stage) {
+    portBigArm("the first scene change");
+    sBig.DropCache();
+    struct Snap { long inUse, newIn, newOut, other, freeKiB, pieces, outside; };
+    static Snap last{};
+    static unsigned n = 0;
+    const PortHeapStats hs = portHeapStats();
+    const port::bigheap::Stats bs = sBig.Get();
+    Snap s;
+    s.inUse = hs.inUseKiB;
+    s.newIn = static_cast<long>(sHostNewLive.load(std::memory_order_relaxed) / 1024u);
+    s.newOut = static_cast<long>(sHostBigLive.load(std::memory_order_relaxed) / 1024u);
+    s.other = s.inUse - s.newIn;
+    s.freeKiB = hs.freeKiB;
+    s.pieces = hs.pieces;
+    s.outside = static_cast<long>(bs.liveBytes / 1024u);
+    unsigned topKiB = 0;
+    const long largest = portLargestFreeKiB(&topKiB);
+    ++n;
+    // (shader23: the renderer's part also has the shader slots, GXV_SHADER_RECLAIM. heap23b: the two parts together passed the log's 1,100
+    // bytes a line - c24's lines lost their last characters -, so the renderer's part is a second line, "heap: scene N renderer: ...")
+    char gl[640] = "";
+    if (port_vgx_vita_memory_brief) port_vgx_vita_memory_brief(gl, sizeof gl);
+    if (port_log_summary) {
+        port_log_summary("heap: scene %u destroyed (%s %s): C heap in use %ld KiB (%+ld since the last scene destroyed), of it the game's `new` %ld (%+ld) and "
+                         "the other users %ld (%+ld); outside the C heap %ld KiB (%+ld) in %u blocks (peak %u KiB); free %ld KiB (%+ld) in %ld pieces (%+ld), "
+                         "largest free piece %ld KiB (the top %u KiB); last-resort blocks %u (%u KiB)",
+                         n, scene ? scene : "", stage ? stage : "", s.inUse, s.inUse - last.inUse, s.newIn, s.newIn - last.newIn, s.other, s.other - last.other,
+                         s.outside, s.outside - last.outside, bs.liveBlocks, static_cast<unsigned>(bs.peakBytes / 1024u), s.freeKiB, s.freeKiB - last.freeKiB,
+                         s.pieces, s.pieces - last.pieces, largest, topKiB, sBigLastResort.load(std::memory_order_relaxed),
+                         sBigLastResortKiB.load(std::memory_order_relaxed));
+        if (gl[0]) port_log_summary("heap: scene %u renderer: %s", n, gl);
+    }
+    last = s;
 }
 
 // ---------------------------------------------------------------------------
@@ -1999,6 +2491,22 @@ extern "C" void port_os_boot(void (*entry)(void)) {
         }
     }
 
+    if (const char* e = getenv("GXV_AUDIO_GATE_CENSUS"); e && *e == '1' && sCpu1Mode) sGateCensus = true;  // (imp45: who closes the gate)
+    if (const char* e = getenv("GXV_MUTEX_GATE_FAST"); e && *e == '1' && sCpu1Mode) {  // (defaults48: see port_mutex_gate_fast)
+        sMutexGateFast = true;
+        if (port_log_summary) port_log_summary("audio: GXV_MUTEX_GATE_FAST=1: the model calc's material mutex is taken without shutting the second CPU's gate when it is free");
+    }
+    // GXV_AUDIO_HOLD_MID (imp45; see sAudioHoldMidMs): read once, here; only with the second CPU and the hold on.
+    if (const char* e = getenv("GXV_AUDIO_HOLD_MID"); e && *e && sCpu1Mode && sAudioHoldMs.load(std::memory_order_relaxed) > 0) {
+        const long ms = strtol(e, nullptr, 10);
+        if (ms > 0) {
+            sAudioHoldMidMs.store(static_cast<int>(ms < 8 ? ms : 8), std::memory_order_relaxed);
+            if (port_log_summary)
+                port_log_summary("audio: a DSP frame's mid-frame interrupts wait up to %d ms for the next audio window while the game thread runs (GXV_AUDIO_HOLD_MID)",
+                                 sAudioHoldMidMs.load(std::memory_order_relaxed));
+        }
+    }
+
     pthread_attr_t attr;
     if (pthread_attr_init(&attr) != 0) port_fatal("pthread_attr_init failed");
 #if defined(__vita__)
@@ -2012,4 +2520,43 @@ extern "C" void port_os_boot(void (*entry)(void)) {
     }
     pthread_attr_destroy(&attr);
     pthread_detach(pt);
+}
+
+// hang47: the guest scheduler as it stands, for the hang watch (vita/runtime/memory.cpp, GXV_HANG_WATCH; called from a host thread that is
+// no guest thread). NO lock is taken and nothing is changed: every value is read as it is, so that a scheduler that is itself stuck
+// (sCpuMutex held for good, a thread waiting for a CPU it never gets) can still be described. A torn or stale value is only a number in
+// a diagnostic text. Returns the text's length.
+extern "C" int port_os_hang_report(char* out, int cap) {
+    if (!out || cap < 64) return 0;
+    int o = 0;
+    auto put = [&](const char* fmt, ...) {
+        if (o >= cap - 1) return;
+        va_list args;
+        va_start(args, fmt);
+        const int n = vsnprintf(out + o, static_cast<size_t>(cap - o), fmt, args);
+        va_end(args);
+        if (n > 0) o = o + n < cap - 1 ? o + n : cap - 1;
+    };
+    OSThread* const owner = sCpuOwner;
+    OSThread* const audio = sAudioThread.load(std::memory_order_relaxed);
+    put("guest os: CPU0 held by %p, interrupts %s%s, pending irq 0x%08x; CPU1 mode %d: gate %s, run %s (thread %p), audio host %s for a dispatch, CPU1 interrupts %s%s; "
+        "audio hold %d ms (holding %d, since %lld ms)\n",
+        static_cast<void*>(owner), sIntEnabled ? "on" : "OFF", sInIrq ? " (in handlers)" : "", sPendingIrq.load(std::memory_order_relaxed), sCpu1Mode ? 1 : 0,
+        sCpu0Gate.load(std::memory_order_relaxed) ? "open" : "shut", sCpu1Run.load(std::memory_order_relaxed) ? "IN PROGRESS" : "none",
+        static_cast<void*>(sCpu1Thread.load(std::memory_order_relaxed)), sCpu1Waiting.load(std::memory_order_relaxed) ? "waits" : "does not wait",
+        sCpu1IntEnabled ? "on" : "off", sCpu1InIrq ? " (in handlers)" : "", sAudioHoldMs.load(std::memory_order_relaxed),
+        sAudioHolding.load(std::memory_order_relaxed) ? 1 : 0,
+        sAudioIrqSince.load(std::memory_order_relaxed) ? static_cast<long long>((port_host_time_ns() - sAudioIrqSince.load(std::memory_order_relaxed)) / 1000000) : -1ll);
+    for (int i = 0; i < kMaxThreads; i++) {
+        OSThread* const t = sHostOwner[i];
+        if (!t) continue;
+        const unsigned state = t->state;
+        put("guest thread %2d %p%s%s: %s, priority %d (base %d), suspend %d, waits on queue %p, mutex %p, host started %d, interrupts saved %s\n", i, static_cast<void*>(t),
+            t == owner ? " [HOLDS CPU0]" : "", t == audio ? " [audio]" : "",
+            state == OS_THREAD_STATE_READY ? "ready" : state == OS_THREAD_STATE_RUNNING ? "running" : state == OS_THREAD_STATE_WAITING ? "WAITING" :
+            state == OS_THREAD_STATE_MORIBUND ? "ended" : "state ?",
+            static_cast<int>(t->priority), static_cast<int>(t->base), static_cast<int>(t->suspend), static_cast<void*>(t->queue), static_cast<void*>(t->mutex),
+            sHost[i].started ? 1 : 0, sHost[i].intEnabled ? "on" : "off");
+    }
+    return o;
 }

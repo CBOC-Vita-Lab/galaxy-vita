@@ -1,0 +1,186 @@
+Patch 0044 (vp34 post-gpu_timers+fbo_msaa, ported from Strikers 0057 + Carbon S9):
+  - vglTexAnisoOff(GLboolean off): scoped per-texture anisotropic filtering toggle on the active unit's descriptor (ANISO_SWITCH).
+  - vglSetTiledTargets(int mode) / vglTexMakeTiledTarget (rejects display textures) / vglTiledStats / vglTexIsTiled: opt-in hardware 32x32 tiled RGBA8 render targets (default off).
+Applies AFTER gpu_timers.py and fbo_msaa.py.
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index 48983f0..ac89a76 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -597,6 +597,11 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
+ 	// patch 0040: detached FBO has no colour texture/data
+ 	if (active_read_fb && (!active_read_fb->tex || !active_read_fb->data))
+ 		return;
++	// patch 0044: CPU reads linear rows; refuse tiled colour surfaces (vglTexMakeTiledTarget)
++	if (active_read_fb && active_read_fb->tex && sceGxmTextureGetType(&active_read_fb->tex->gxm_tex) == SCE_GXM_TEXTURE_TILED) {
++		vgl_tiled_read_refused++;
++		return;
++	}
+ 
+ 	/*
+ 	 * Callbacks are actually used to just perform down/up-sampling
+@@ -819,6 +824,10 @@ void vglReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum forma
+ 
+ 	if (active_read_fb && (!active_read_fb->tex || !active_read_fb->data)) // patch 0040
+ 		return;
++	if (active_read_fb && active_read_fb->tex && sceGxmTextureGetType(&active_read_fb->tex->gxm_tex) == SCE_GXM_TEXTURE_TILED) { // patch 0044
++		vgl_tiled_read_refused++;
++		return;
++	}
+ 
+ 	GLboolean res = _glReadPixels_gpu(x, y, width, height, format, type, data, GL_TRUE);
+ #ifndef SKIP_ERROR_HANDLING
+diff --git a/source/shared.h b/source/shared.h
+index 8056b21..dcca89d 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -1363,6 +1363,7 @@ static inline __attribute__((always_inline)) uint32_t get_color_from_texture(Sce
+ 	}
+ }
+ 
++extern uint32_t vgl_tiled_read_refused; // patch 0044 (textures.c)
+ extern GLboolean vgl_fb_detach_keep; // patch 0040 (framebuffers.c): detaching the colour texture (id 0) keeps the object's size, render target and depth surface
+ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(framebuffer *fb, GLenum attachment, texture *tex, GLuint tex_id) {
+ 	// Extracting texture data
+@@ -1388,7 +1389,9 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 			return;
+ 		}
+ 		vglGetTexSizes(&tex->gxm_tex, &fb->width, &fb->height);
+-		fb->stride = VGL_ALIGN(fb->width, 8) * tex_format_to_bytespp(fmt);
++		// patch 0044: tiled texture (vglTexMakeTiledTarget) uses 32-texel tile-aligned stride and SCE_GXM_COLOR_SURFACE_TILED
++		const int tiled_rt = sceGxmTextureGetType(&tex->gxm_tex) == SCE_GXM_TEXTURE_TILED;
++		fb->stride = VGL_ALIGN(fb->width, tiled_rt ? 32 : 8) * tex_format_to_bytespp(fmt);
+ 		fb->data = vglGetTexData(&tex->gxm_tex);
+ 		fb->format = tex->format;
+ 
+@@ -1430,10 +1433,10 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 		fb->is_float = tex->format == SCE_GXM_TEXTURE_FORMAT_F16F16F16F16_RGBA;
+ 
+ 		// Allocating colorbuffer
+-		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_texture(fmt), SCE_GXM_COLOR_SURFACE_LINEAR,
++		sceGxmColorSurfaceInit(&fb->colorbuffer, get_color_from_texture(fmt), tiled_rt ? SCE_GXM_COLOR_SURFACE_TILED : SCE_GXM_COLOR_SURFACE_LINEAR,
+ 			FB_MSAA(fb) == SCE_GXM_MULTISAMPLE_NONE ? SCE_GXM_COLOR_SURFACE_SCALE_NONE : SCE_GXM_COLOR_SURFACE_SCALE_MSAA_DOWNSCALE,
+ 			fb->is_float ? SCE_GXM_OUTPUT_REGISTER_SIZE_64BIT : SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT,
+-			fb->width, fb->height, VGL_ALIGN(fb->width, 8), fb->data);
++			fb->width, fb->height, VGL_ALIGN(fb->width, tiled_rt ? 32 : 8), fb->data);
+ 		
+ 		// Invalidating current framebuffer if we update its bound texture to force a scene reset
+ 		if (in_use_framebuffer == active_write_fb) {
+diff --git a/source/textures.c b/source/textures.c
+index bc409c6..d709bf7 100644
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -2720,6 +2720,96 @@ void *vglGetTexPaletteDataPointer(GLenum target) {
+ 	}
+ }
+ 
++// patch 0044 (GXV_VGL_ANISO_SCOPE): switch bound texture on active unit between trilinear (off=GL_TRUE) and anisotropic (off=GL_FALSE) via descriptor bits only.
++void vglTexAnisoOff(GLboolean off) {
++#ifdef ANISO_SWITCH
++	extern uint32_t vgl_aniso_min;
++	if (!vgl_aniso_min)
++		return;
++	texture_unit *tex_unit = &texture_units[server_texture_unit];
++	texture *tex = &texture_slots[tex_unit->tex_id[0]];
++	if (tex->status != TEX_VALID)
++		return;
++	SceGxmTextureInternal *ti = (SceGxmTextureInternal *)&tex->gxm_tex;
++	if (!(ti->control_words[0] & 0x200))
++		return;
++	const uint32_t minf = (ti->control_words[0] >> 10) & 3;
++	if (off) {
++		if (minf == vgl_aniso_min)
++			ti->control_words[0] = ((SCE_GXM_TEXTURE_FILTER_LINEAR << 10) & 0xC00) | (ti->control_words[0] & 0xFFFFF3FF);
++	} else if (minf == SCE_GXM_TEXTURE_FILTER_LINEAR) {
++		ti->control_words[0] = ((vgl_aniso_min << 10) & 0xC00) | (ti->control_words[0] & 0xFFFFF3FF);
++	}
++#else
++	(void)off;
++#endif
++}
++
++// patch 0044 (GXV_VGL_TILED_RT, default off): opt-in 32x32 tiled RGBA8 render target colour surfaces (never for display buffers, MSAA, LOADFROM, or CPU readback).
++extern int vglIsDisplayTexture(GLuint name) __attribute__((weak));
++uint32_t vgl_tiled_rt = 0;
++uint32_t vgl_tiled_made = 0;
++uint32_t vgl_tiled_read_refused = 0;
++void vglTiledStats(uint32_t *made, uint32_t *refused) {
++	if (made)
++		*made = vgl_tiled_made;
++	if (refused)
++		*refused = vgl_tiled_read_refused;
++}
++void vglSetTiledTargets(int mode) { vgl_tiled_rt = (mode >= 0 && mode <= 2) ? (uint32_t)mode : 0u; }
++GLboolean vglTexMakeTiledTarget(void) {
++	if (!vgl_tiled_rt)
++		return GL_FALSE;
++	texture_unit *tex_unit = &texture_units[server_texture_unit];
++	const GLuint tid = tex_unit->tex_id[0];
++	if (vglIsDisplayTexture && vglIsDisplayTexture(tid))
++		return GL_FALSE;
++	texture *tex = &texture_slots[tid];
++	if (tex->status != TEX_VALID || !tex->data || tex->palette_data || tex->mip_count != 1)
++		return GL_FALSE;
++	if (sceGxmTextureGetType(&tex->gxm_tex) != SCE_GXM_TEXTURE_LINEAR)
++		return GL_FALSE;
++	const SceGxmTextureFormat fmt = vglGetTexFormat(&tex->gxm_tex);
++	if ((fmt & 0x9F000000) != SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8)
++		return GL_FALSE;
++	uint32_t w, h;
++	vglGetTexSizes(&tex->gxm_tex, &w, &h);
++	if (w < 32 || h < 32 || w > 4096 || h > 4096 || (vgl_tiled_rt == 2 && ((w & 31) || (h & 31))))
++		return GL_FALSE;
++	const uint32_t size = VGL_ALIGN(w, 32) * VGL_ALIGN(h, 32) * 4;
++	void *nd = gpu_alloc_mapped_for_gpu(size);
++	if (!nd)
++		return GL_FALSE;
++	vgl_memset(nd, 0, size);
++	SceGxmTexture nt;
++	if (sceGxmTextureInitTiled(&nt, nd, fmt, w, h, 0) < 0) {
++		vgl_free(nd);
++		return GL_FALSE;
++	}
++	vglSetTexUMode(&nt, tex->u_mode);
++	vglSetTexVMode(&nt, tex->v_mode);
++	vglSetTexMinFilter(&nt, tex->min_filter);
++	vglSetTexMagFilter(&nt, tex->mag_filter);
++	vglSetTexMipFilter(&nt, tex->mip_filter);
++	vglSetTexLodBias(&nt, tex->lod_bias);
++	gpu_free_texture_data(tex);
++	tex->gxm_tex = nt;
++	tex->data = nd;
++	tex->palette_data = NULL;
++	tex->mip_count = 1;
++	tex->status = TEX_VALID;
++#ifndef TEXTURES_SPEEDHACK
++	tex->last_frame = OBJ_NOT_USED;
++#endif
++	vgl_tiled_made++;
++	return GL_TRUE;
++}
++GLboolean vglTexIsTiled(void) {
++	texture_unit *tex_unit = &texture_units[server_texture_unit];
++	texture *tex = &texture_slots[tex_unit->tex_id[0]];
++	return tex->status == TEX_VALID && sceGxmTextureGetType(&tex->gxm_tex) == SCE_GXM_TEXTURE_TILED;
++}
++
+ void vglSetupTexture(GLenum target, void *data, SceGxmTextureFormat format, SceGxmTextureType type, GLsizei width, GLsizei height, GLsizei mip_count) {
+ 	// Aliasing texture unit for cleaner code
+ 	texture_unit *tex_unit = &texture_units[server_texture_unit];
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 2e35a94..4476888 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1418,6 +1418,13 @@ void vglTextureCopyStats(uint32_t *out6);
+ void vglSetRenderTargetPool(uint32_t count, uint32_t kib);
+ void vglGetRenderTargetPoolStats(uint32_t *hits, uint32_t *creates, uint32_t *kept, uint32_t *let_go, uint32_t *kept_now, uint32_t *kib_now);
+ 
++// patch 0044 (GXV_VGL_ANISO_SCOPE / GXV_VGL_TILED_RT): scoped AF per texture and opt-in tiled render targets
++void vglTexAnisoOff(GLboolean off);
++void vglSetTiledTargets(int mode);
++GLboolean vglTexMakeTiledTarget(void);
++void vglTiledStats(uint32_t *made, uint32_t *refused);
++GLboolean vglTexIsTiled(void);
++
+ // Allows vitaGL to use newlib memory once all internal mempools are exhausted. Default value: GL_TRUE.
+ void vglUseExtraMem(GLboolean usage);
+ 

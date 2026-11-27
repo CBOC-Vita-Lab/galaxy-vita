@@ -16,6 +16,10 @@
 #include "Game/Util/SceneUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
 #include <cstdio>
+#ifdef TARGET_PC
+#include "Game/MP/MpFlow.hpp"  // MP3: no game over in a multiplayer session
+#include "Game/MP/MpStarBits.hpp"  // MP3 costar: the team Star Bit count
+#endif
 
 void EventUtil_FORCE_MATCH_STRINGS() {
     MR::isEqualString("\x83\x6e\x83\x60\x83\x7d\x83\x8a\x83\x49\x8f\x89\x95\xcf\x90\x67", "\x83\x6e\x83\x60\x83\x7d\x83\x8a\x83\x49\x8f\x89\x95\xcf\x90\x67");
@@ -75,6 +79,13 @@ namespace {
 
 namespace MR {
     s32 getPlayerLeft() {
+#ifdef TARGET_PC
+        // MP3: lives never read below 1 in a multiplayer session (no game over: it would reset the session to the title)
+        if (mp_active() && MpFlow::blockGameOver()) {
+            const s32 left = GameDataFunction::getPlayerLeft();
+            return left < 1 ? 1 : left;
+        }
+#endif
         return GameDataFunction::getPlayerLeft();
     }
 
@@ -83,6 +94,12 @@ namespace MR {
     }
 
     void decPlayerLeft() {
+#ifdef TARGET_PC
+        // MP3: Play Together loses no lives (a fallen player restarts from the checkpoint)
+        if (mp_active() && MpFlowHooks::keepLives()) {
+            return;
+        }
+#endif
         GameDataFunction::addPlayerLeft(-1);
         GameDataFunction::addMissPoint(1);
         GameDataFunction::incPlayerMissNum();
@@ -132,6 +149,11 @@ namespace MR {
     }
 
     void addStarPiece(int num) {
+        // MP3 costar: Play Together shares one Star Bit count (tells the team; true = a swept bit's arrival, not counted again)
+        if (mp_active() && MpStarBits::onAdd(num)) {
+            return;
+        }
+
         if (MR::isStageAstroLocation()) {
             GameDataFunction::addStockedStarPiece(num);
         } else {

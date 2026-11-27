@@ -97,7 +97,8 @@ void Benchmark() {
         vat[0][A_POS] = {static_cast<uint8_t>(components == 3), static_cast<uint8_t>(type), 0};
         vat[0][A_TEX0] = {1, 4, 0};
         bool dirty = true;
-        const Plan& fast = GetPlanIn(cache, dirty, vcd, vat, 0, false);
+        Plan fast = GetPlanIn(cache, dirty, vcd, vat, 0, false);
+        fast.quad = nullptr; // Isolate the position-defaults kernel, not the fused quad recipe.
         Plan old = fast;
         old.directDefaults = old.defaults;
         for (int i = 0; i < old.n; ++i)

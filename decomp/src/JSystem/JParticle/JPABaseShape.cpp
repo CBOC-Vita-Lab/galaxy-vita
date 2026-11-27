@@ -6,6 +6,11 @@
 #include "JSystem/JParticle/JPAParticle.hpp"
 #include "JSystem/JParticle/JPAResourceManager.hpp"
 #include <revolution/mtx.h>
+#ifdef TARGET_PC
+#include "port/gx_dedup.h"  // (GXV_GX_DEDUP: PORT_GX_CALL_PRIMS, the quad lists' calls)
+#else
+#define PORT_GX_CALL_PRIMS(list, nbytes) GXCallDisplayList((list), (nbytes))
+#endif
 
 void JPASetPointSize(JPAEmitterWorkData* work) {
     GXSetPointSize((u8)(25.0f * work->mGlobalPtclScl.x), GX_TO_ONE);
@@ -57,6 +62,23 @@ void JPARegistPrmEnv(JPAEmitterWorkData* work) {
     GXSetTevColor(GX_TEVREG1, env);
 }
 
+#ifdef TARGET_PC
+// GXV_HOTPROF_PTCLCULL (JPAResource.cpp): in a particle loop armed with mode 1 the colour functions below hand their GXSetTevColor calls
+// over; they are made right before the particle's quad is sent, or not at all when the quad is left out.
+extern unsigned char gPortPtclCullArmed;
+void port_jpa_ptcl_tev(JPAEmitterWorkData* work, GXTevRegID id, GXColor color);
+#define PORT_PTCL_TEV(work, id, color)                                                                                              \
+    do {                                                                                                                            \
+        if (__builtin_expect(gPortPtclCullArmed == 1, 0)) {                                                                         \
+            port_jpa_ptcl_tev((work), (id), (color));                                                                               \
+        } else {                                                                                                                    \
+            GXSetTevColor((id), (color));                                                                                           \
+        }                                                                                                                           \
+    } while (0)
+#else
+#define PORT_PTCL_TEV(work, id, color) GXSetTevColor((id), (color))
+#endif
+
 void JPARegistAlpha(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     JPABaseEmitter* emtr = work->mpEmtr;
     GXColor prm = emtr->mPrmClr;
@@ -65,7 +87,7 @@ void JPARegistAlpha(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     prm.b = COLOR_MULTI(prm.b, emtr->mGlobalPrmClr.b);
     prm.a = COLOR_MULTI(prm.a, emtr->mGlobalPrmClr.a);
     prm.a = COLOR_MULTI(prm.a, ptcl->mPrmColorAlphaAnm);
-    GXSetTevColor(GX_TEVREG0, prm);
+    PORT_PTCL_TEV(work, GX_TEVREG0, prm);
 }
 
 void JPARegistPrmAlpha(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
@@ -76,7 +98,7 @@ void JPARegistPrmAlpha(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     prm.b = COLOR_MULTI(prm.b, emtr->mGlobalPrmClr.b);
     prm.a = COLOR_MULTI(prm.a, emtr->mGlobalPrmClr.a);
     prm.a = COLOR_MULTI(prm.a, ptcl->mPrmColorAlphaAnm);
-    GXSetTevColor(GX_TEVREG0, prm);
+    PORT_PTCL_TEV(work, GX_TEVREG0, prm);
 }
 
 void JPARegistPrmAlphaEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
@@ -91,8 +113,8 @@ void JPARegistPrmAlphaEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     env.r = COLOR_MULTI(env.r, emtr->mGlobalEnvClr.r);
     env.g = COLOR_MULTI(env.g, emtr->mGlobalEnvClr.g);
     env.b = COLOR_MULTI(env.b, emtr->mGlobalEnvClr.b);
-    GXSetTevColor(GX_TEVREG0, prm);
-    GXSetTevColor(GX_TEVREG1, env);
+    PORT_PTCL_TEV(work, GX_TEVREG0, prm);
+    PORT_PTCL_TEV(work, GX_TEVREG1, env);
 }
 
 void JPARegistAlphaEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
@@ -107,8 +129,8 @@ void JPARegistAlphaEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     env.r = COLOR_MULTI(env.r, emtr->mGlobalEnvClr.r);
     env.g = COLOR_MULTI(env.g, emtr->mGlobalEnvClr.g);
     env.b = COLOR_MULTI(env.b, emtr->mGlobalEnvClr.b);
-    GXSetTevColor(GX_TEVREG0, prm);
-    GXSetTevColor(GX_TEVREG1, env);
+    PORT_PTCL_TEV(work, GX_TEVREG0, prm);
+    PORT_PTCL_TEV(work, GX_TEVREG1, env);
 }
 
 void JPARegistEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
@@ -117,7 +139,7 @@ void JPARegistEnv(JPAEmitterWorkData* work, JPABaseParticle* ptcl) {
     env.r = COLOR_MULTI(env.r, emtr->mGlobalEnvClr.r);
     env.g = COLOR_MULTI(env.g, emtr->mGlobalEnvClr.g);
     env.b = COLOR_MULTI(env.b, emtr->mGlobalEnvClr.b);
-    GXSetTevColor(GX_TEVREG1, env);
+    PORT_PTCL_TEV(work, GX_TEVREG1, env);
 }
 
 void JPACalcClrIdxNormal(JPAEmitterWorkData* work) {
@@ -439,6 +461,20 @@ static projectionFunc p_prj[3] = {
     loadPrjAnm,
 };
 
+#ifdef TARGET_PC
+// GXV_HOTPROF_PTCLCULL (JPAResource.cpp): the projection-texture matrix load of the loop being drawn, for the matrices owed at its end;
+// and the quad functions' test (one byte while no loop is armed).
+void port_jpa_load_prj(JPAEmitterWorkData const* work, const Mtx srt) {
+    p_prj[work->mPrjType](work, srt);
+}
+extern unsigned char gPortPtclCullArmed;
+bool port_jpa_ptcl_cull(JPAEmitterWorkData* work, const Mtx m, bool cross);
+#define PORT_PTCL_CULL(work, m, cross)                                                                                              \
+    if (__builtin_expect(gPortPtclCullArmed != 0, 0) && port_jpa_ptcl_cull((work), (m), (cross))) return
+#else
+#define PORT_PTCL_CULL(work, m, cross) ((void)0)
+#endif
+
 void JPADrawBillboard(JPAEmitterWorkData* work, JPABaseParticle* param_1) {
     if (param_1->checkStatus(8) == 0) {
         JGeometry::TVec3< f32 > local_48;
@@ -456,9 +492,10 @@ void JPADrawBillboard(JPAEmitterWorkData* work, JPABaseParticle* param_1) {
         local_38[1][0] = 0.0f;
         local_38[0][2] = 0.0f;
         local_38[0][1] = 0.0f;
+        PORT_PTCL_CULL(work, local_38, false);  // (GXV_HOTPROF_PTCLCULL)
         GXLoadPosMtxImm(local_38, 0);
         p_prj[work->mPrjType](work, local_38);
-        GXCallDisplayList(jpa_dl, sizeof(jpa_dl));
+        PORT_GX_CALL_PRIMS(jpa_dl, sizeof(jpa_dl));  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
     }
 }
 
@@ -484,9 +521,10 @@ void JPADrawRotBillboard(JPAEmitterWorkData* work, JPABaseParticle* param_1) {
         local_38[2][0] = 0.0f;
         local_38[1][2] = 0.0f;
         local_38[0][2] = 0.0f;
+        PORT_PTCL_CULL(work, local_38, false);  // (GXV_HOTPROF_PTCLCULL)
         GXLoadPosMtxImm(local_38, 0);
         p_prj[work->mPrjType](work, local_38);
-        GXCallDisplayList(jpa_dl, sizeof(jpa_dl));
+        PORT_GX_CALL_PRIMS(jpa_dl, sizeof(jpa_dl));  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
     }
 }
 
@@ -647,9 +685,10 @@ void JPADrawRotation(JPAEmitterWorkData* param_0, JPABaseParticle* param_1) {
         auStack_88[1][3] = param_1->mPosition.y;
         auStack_88[2][3] = param_1->mPosition.z;
         PSMTXConcat(param_0->mPosCamMtx, auStack_88, auStack_88);
+        PORT_PTCL_CULL(param_0, auStack_88, param_0->mDLType != 0);  // (GXV_HOTPROF_PTCLCULL)
         GXLoadPosMtxImm(auStack_88, 0);
         p_prj[param_0->mPrjType](param_0, auStack_88);
-        GXCallDisplayList(p_dl[param_0->mDLType], sizeof(jpa_dl));
+        PORT_GX_CALL_PRIMS(p_dl[param_0->mDLType], sizeof(jpa_dl));  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
     }
 }
 

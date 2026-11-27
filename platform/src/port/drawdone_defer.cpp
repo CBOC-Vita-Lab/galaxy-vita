@@ -28,6 +28,7 @@ extern "C" int port_gx_drawdone_defer_mode(void) { return DrawDoneDeferral().Mod
 extern "C" int port_gx_drawdone_pending(void) { return DrawDoneDeferral().Pending() ? 1 : 0; }
 extern "C" void port_gx_drawdone_armed(void) { DrawDoneDeferral().Arm(); }
 extern "C" int port_gx_drawdone_must_wait(int point) { return DrawDoneDeferral().MustWait(point) ? 1 : 0; }
+extern "C" int port_gx_drawdone_would_wait(int point) { return DrawDoneDeferral().WouldWait(point) ? 1 : 0; }  // (GXV_DRAWDONE_OTHER)
 extern "C" void port_gx_drawdone_waited(int64_t ns) {
     port::drawdone::Deferral& d = DrawDoneDeferral();
     d.Waited(ns);

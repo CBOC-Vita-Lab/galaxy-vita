@@ -95,12 +95,11 @@ void Change(UiState& s,int direction) {
             ApplyPreset(s.working,static_cast<Preset>((index+direction+3)%3));break;
         }
         case RowRate: {
-            // Picture mode: Right moves along the screen (Quality, Performance, Locked 30) and wraps; Locked 30 needs the driver capability.
-            const bool locked=s.working.fpsLimit==30||s.working.fpsLimit==kSteady30;
-            if(!s.session->features.fixed30&&locked) {s.message="Fixed 30 FPS unavailable in this build";break;}
-            const int n=s.session->features.fixed30?3:2;
-            const int index=locked?2:s.working.performance60?1:0,next=(index+direction+n)%n;
-            s.working.fpsLimit=next==2?30:0;s.working.performance60=next==1;
+            // Picture mode (modes26): Performance (60) and Quality (30); either direction toggles. Quality needs the driver's fixed 30 cap.
+            if(!s.session->features.fixed30&&!Mode30(s.working)) {s.message="Fixed 30 FPS unavailable in this build";break;}
+            if(!s.session->features.fixed30) {s.working.fpsLimit=0;s.working.performance60=true;break;}
+            const bool toQuality=!Mode30(s.working);
+            s.working.fpsLimit=toQuality?30:0;s.working.performance60=!toQuality;
             break;
         }
         // On and the default are one choice on the console; turning it back on returns to the default (no switch is forced).
@@ -122,6 +121,7 @@ void Change(UiState& s,int direction) {
         case RowFarAnimation: s.working.farAnimation=static_cast<FarAnimation>((static_cast<int>(s.working.farAnimation)+direction+3)%3);break;
         case RowSpeed: s.working.fullSpeed=!s.working.fullSpeed;break;
         case RowMotion: s.working.reducedMotion=!s.working.reducedMotion;break;
+        case RowSafeSaves: s.working.safeSaves=!s.working.safeSaves;break;
         case RowLanguage: {
             if(s.session->languages.names.empty()) {s.message="Game language unavailable until game data is found";break;}
             std::vector<std::string> choices{""};choices.insert(choices.end(),s.session->languages.names.begin(),s.session->languages.names.end());
@@ -288,18 +288,14 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
         }
         case RowRate:
             v.label="Picture mode";
-            if(c.fpsLimit==30||c.fpsLimit==kSteady30) {
-                Put(v.value,s.session->features.fixed30?"Locked 30":"Locked 30 (unavailable here)");
-                if(!s.session->features.fixed30) {v.help1="Locked 30 is saved, but this build cannot hold it. The current mode is unchanged.";v.help2="";}
-                else {v.help1="Locked 30: an even 30 FPS with the full 960x544 picture, every frame, never smaller.";v.help2="A very heavy scene may dip under 30 rather than lose sharpness; Quality gives up size first.";}
-            } else if(c.performance60) {
-                Put(v.value,"Performance (aims for 60)");
-                v.help1="Aims for 60 FPS: under load edge smoothing, background detail, then picture size give way; Mario stays sharp.";
-                v.help2="Where the console's processor cannot come near 60, the pictures come at an even 30 instead.";
+            if(Mode30(c)) {
+                Put(v.value,s.session->features.fixed30?"Quality (30)":"Quality (30, unavailable here)");
+                if(!s.session->features.fixed30) {v.help1="Quality is saved, but this build cannot hold a locked 30. The current mode is unchanged.";v.help2="";}
+                else {v.help1="30 fps, smooth, with the highest quality. Always.";v.help2="An even 30 at 960x544; the heaviest spots may use 896x512 to hold it.";}
             } else {
-                Put(v.value,s.session->features.fixed30?"Quality (30, sharpest)":"Quality (sharpest)");
-                v.help1="Quality: a steady 30 FPS at up to the screen's full 960x544, with smoothed edges when the GPU has room.";
-                v.help2="The default. In a scene too heavy for that the picture size gives way first, never below the standard size.";
+                Put(v.value,"Performance (60)");
+                v.help1="60 fps. The smoothest play. Some far detail and effects are lighter.";
+                v.help2="960x544 always. Mario, the HUD and nearby objects keep full quality. The default.";
             }
             break;
         case RowDynamic:
@@ -364,6 +360,10 @@ void DisplayRowView(const UiState& s,unsigned row,RowView& v) {
             v.label="Reduced motion";Put(v.value,OnOff(c.reducedMotion));
             v.help1="Less camera shake and screen blur; short bright flashes are softened.";
             v.help2="Physics, timing and the camera's pose are not changed.";break;
+        case RowSafeSaves:   // (words: share/flow/words-wanted.md, SETTINGS_SAFE_SAVES)
+            v.label="Safe saves";Put(v.value,OnOff(c.safeSaves));
+            v.help1="On: each single-player save goes to a temporary file, is checked, then swapped in; a power cut cannot ruin it.";
+            v.help2="Keeps the save before as GameData.bin.mpbak and costs a few ms a save. Off: the game's own write. Next launch.";break;
         case RowLanguage:
             v.label="Game language";
             if(c.language.empty())Put(v.value,s.session->languages.names.empty()?"Game data unavailable":"Disc default");

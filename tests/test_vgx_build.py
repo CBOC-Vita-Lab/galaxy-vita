@@ -224,6 +224,18 @@ class VgxBuildTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "No game units"):
                 builder.write_lto_ninja(database[1:], Path(directory) / "none")
 
+    def test_release_vpk_step_tags_and_checks_the_stage_list(self):
+        # (fix31) build.py link --seed makes the release VPK through stagetags.py package and fails unless checkvpk passes (the stamp is there)
+        text = (TOOLS / "build.py").read_text()
+        link = text[text.index('run(["cmake", "--build", game, "--target", "eboot.bin"'):]
+        self.assertIn('"--seed"', text)
+        self.assertIn('"package", game / "smg-vgx.vpk"', link)
+        self.assertIn('"checkvpk", vpk', link)
+        self.assertLess(link.index('"package", game'), link.index('"checkvpk", vpk'))
+        result = subprocess.run([sys.executable, "-I", str(ROOT / "tools/seedrun/stagetags.py"), "selftest"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("package / checkvpk (fix31) PASS", result.stdout)
+
     def test_inputs_list_the_link_set(self):
         inputs = json.loads((TOOLS / "inputs.json").read_text())
         self.assertIn("lib/libvitaGL.a", inputs["dependencies"])

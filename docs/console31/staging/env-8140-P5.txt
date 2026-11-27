@@ -1,0 +1,12 @@
+# 8140 P5: pop-in P5: optional: floor 3 px with lead 6; Honeyhive 200 s (the fly-in first) then Beach Bowl 80 s
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=12000
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_POPIN_CENSUS=1
+GXV_PB_DEMO=2
+GXV_PB_MINPX=3
+GXV_POPIN_LEAD=6

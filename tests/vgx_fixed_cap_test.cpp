@@ -7,6 +7,7 @@ void frame_sink_observe_ready(bool) {}
 #include <cstdio>
 #include <cstdlib>
 namespace vgx { unsigned FixedCapHudDepth(); }
+namespace vgx::backend { void FixedCapSetStats(const Stats&); void FixedCapSetWarmPending(unsigned); }
 
 namespace {
 std::vector<int> calls;
@@ -54,6 +55,7 @@ void port_log_summary(const char* format, ...) {
     summary = buf;
 }
 void port_log(const char*, ...) {}
+unsigned port_host_new_live_kib() { return 0; }
 int port_vgx_vita_fail(const char*) { return 0; }  // (loading-screen hooks the fixture slice of vgx_galaxy.cpp references)
 int port_vgx_vita_error_shown(void) { return 0; }
 void port_perf_game_totals(int64_t* work, uint32_t* turns, int64_t* cpu, int64_t* max) {
@@ -108,6 +110,44 @@ int main(int argc, char**) {
     PerfFrame(0, 0);
     Require(summary.find(fixed ? "swap FPS 2.0" : "shown 0.0 fps") != std::string::npos,
             "basic logs count actual game swaps rather than completed jobs and preserve off-path wording");
+    if (fixed) {
+        for (unsigned i = 0; i < 6; ++i) {
+            clockUs += 20000;
+            PerfFrame(0, 0);
+        }
+        clockUs += 20000;
+        ++swaps;
+        PerfFrame(0, 0);
+        for (unsigned i = 0; i < 43; ++i) {
+            clockUs += 20000;
+            ++swaps;
+            PerfFrame(0, 0);
+        }
+        Require(summary.find("1 swapped-job gaps over 100 ms (longest 140 ms)") != std::string::npos,
+                "hidden completed jobs must not hide a gap between jobs that actually swapped");
+    }
+    vgx::backend::Stats shaderWork;
+    shaderWork.programLinks = 4;
+    shaderWork.shaderWorkMs = 125;
+    vgx::backend::FixedCapSetStats(shaderWork);
+    clockUs += 1000000;
+    PerfFrame(0, 0);
+    Require(summary.find("0 shaders prepared (125 ms); 4 program links") != std::string::npos,
+            "program-only preparation time must remain visible without a shader compile");
+    clockUs += 1000000;
+    PerfFrame(0, 0);
+    Require(summary.find("shaders prepared") == std::string::npos,
+            "a preparation window must not report cumulative work again");
+    vgx::backend::FixedCapSetWarmPending(9);
+    clockUs += 1000000;
+    PerfFrame(0, 0);
+    Require(summary.find("0 shaders prepared (0 ms); 0 program links; warm 9 left") != std::string::npos,
+            "pending-only warm work must remain visible without new compiles, links, or measured time");
+    vgx::backend::FixedCapSetWarmPending(0);
+    clockUs += 1000000;
+    PerfFrame(0, 0);
+    Require(summary.find("shaders prepared") == std::string::npos,
+            "completed warm work must not remain visible in a later empty window");
 #endif
     Enqueue(true, false);
     Require(sJobs.front()->presentAllowed, "reused buffer cannot inherit a suppressed marker");

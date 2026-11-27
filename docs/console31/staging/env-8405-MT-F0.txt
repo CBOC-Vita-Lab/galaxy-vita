@@ -1,0 +1,11 @@
+# 8405 MT-F0: mariolag31 MT-F0, Performance + 60 Assist: flip-book, the control with the census; Honeyhive 120 s, scripted (jumps); pull ux0:data/smg/hrw31/ after the run; B pictures at his landings
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_HRW_FLIPBOOK=240
+GXV_HRW_FLIPBOOK_FROM=600
+GXV_HRW_MARIOTIME_CENSUS=1

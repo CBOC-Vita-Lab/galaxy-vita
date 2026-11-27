@@ -1,0 +1,37 @@
+# PROPOSED (emu): host takeover UNDER LOSS. Like emu_host_power_loss, but on bad_wifi (3 % loss, bursts, reordering) and with a 6 s burst-loss storm (35 % loss, bursts of
+# 12, 150 ms extra delay) switched on by the relay at the moment the host dies, so the takeover handshake itself (the new host's announcement and the other guest's
+# follow) has to get through a lossy link. Marks: HARNESS_KILL and the relay event both fire on the same log line of the host.
+name: emu_takeover_loss
+description: "3 consoles on bad Wi-Fi plus a loss storm at the moment the host is killed; the takeover still completes once, nobody is stranded"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE]}
+link:
+  profile: bad_wifi
+  events:
+    - {'on': "host /flow barrier release serial=1 /", delay: 15, set: {loss_pct: 35, burst_enter_pct: 3, burst_len: 12, latency_ms: 150, jitter_ms: 60}, for: 6}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_KILL: 'flow barrier release serial=1 |15|9'}
+  - name: g1
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+  - name: g2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'nostall g1,g2'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot [12] joined name=g[12] .*players=3/'
+  - 'expect host /harness: kill signal=9/'
+  - 'expect any /\[mp\] host lost: slot \d takes over epoch=\d+ \(old host 0\)/ within 60s after host /harness: kill signal=9/'
+  - 'expect g1,g2 /\[mp\] (following new host slot=\d epoch=\d+|host lost: slot \d takes over)/ within 60s after host /harness: kill signal=9/'   # both consoles know the new host
+  - 'expect any /\[mp\] flow host now slot=\d epoch=\d+/ within 60s after host /harness: kill signal=9/'
+  - 'distinct g1,g2 /\[mp\] (?:following new host|host lost: slot \d takes over)[^\n]*epoch=(\d+)/ == 1'   # one epoch: no split brain
+  - 'absent g1,g2 /\[mp\] session ended reason=(?!none \(shutdown\))/ before g1,g2 /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'exit g1,g2 == 0'

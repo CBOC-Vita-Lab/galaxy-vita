@@ -9,15 +9,20 @@
 #include "Game/Animation/XanimePlayer.hpp"
 #include "Game/Animation/XanimeResource.hpp"
 #include "Game/LiveActor/DisplayListMaker.hpp"
+#include "Game/MapObj/StarPiece.hpp"  // (GXV_STARBATCH_DL: the star bit's colour)
 #include "Game/System/ResourceHolder.hpp"
 #include "Game/Util/ModelUtil.hpp"
 #include "Game/Util/MutexHolder.hpp"
+#include "Game/Util/CameraUtil.hpp"  // (GXV_MATCALM: the camera position)
+#include <JSystem/J3DGraphBase/J3DPacket.hpp>  // (GXV_MATCALM: gJ3DPortListStats)
 #include "Game/Util/ObjUtil.hpp"
 #include <JSystem/J3DGraphAnimator/J3DModel.hpp>
 #include <cstdio>
 
 #ifdef TARGET_PC
 #include "port/diagnostics.h"
+#include "port/logic_prof.h"  // (update25: GXV_LOGIC_PROF=3's per-model flush rows)
+#include "port/gt71.h"  // (gt71)
 #if defined(__vita__) && PORT_LOGGING
 extern "C" u32 port_workload_anim_family_begin(unsigned family);
 extern "C" void port_workload_anim_family_end(u32 token);
@@ -71,6 +76,7 @@ extern "C" int port_turn_skipped_raw(void);
 extern "C" int port_dl_lazy_on(void);
 extern "C" void port_gx_drawdone_settle(int point);
 extern "C" void port_gx_view_write_from(void*);
+extern "C" void port_drawpipe_join_before_material(void);  // (fx66: SceneFunction.cpp; GXV_PIPE25_JOINLATE: the helper is joined before calcAnim's material work)
 #include <vector>
 #include "port/host_vector.h"  // (PortHostVector: lists that outlive a scene keep host memory)
 #include "Game/LiveActor/LiveActor.hpp"
@@ -84,6 +90,715 @@ struct StaleDL { LiveActor* owner; ModelManager* model; };
 PortHostVector< StaleDL > sStaleDL;  // (host heap: it outlives the scene; port/host_vector.h)
 PORT_HEAP_GUARD(sStaleDL);
 }  // namespace
+#include "port/hot_knob.h"
+#include <cstdlib>
+// GXV_DL_LAZY_KEY (dlcrash, 8 Nov; default 1, vita/vgx-game/entry.cpp). The Bee Mushroom crash (2.0 .. 2.3, Honeyhive's crystal, two
+// c3 dumps and the shipped 2.2's): a listed refresh is "updateDL(true) of this model manager", but what that call computes depends on
+// where the manager points when it runs. MarioActor has one model manager and one display-list maker for his six bodies (normal, bone,
+// bee, ice, rainbow, spring): MarioActor::changeDisplayMode points the animator's XanimePlayer (so getJ3DModel()) and
+// mDisplayListMaker->mModel at mModels[n], and MarioActor::calcAnim asks for MR::updateModelDiffDL(this) only while the normal body
+// (mCurrModel 0) is the one pointed at (the other bodies refresh through their own ModelHolders). Listed on the turn Mario touched the
+// mushroom (still the normal body) and flushed after the next turn had switched to the bee body, the refresh ran Mario's maker over
+// BeeMario's materials with Mario's flags: material 0 with fog + 2 texture numbers (0x10020000, 0xC0 bytes) into BeeMario's differed
+// list sized for fog only (0x40), 0x60 bytes over the next J3DDisplayListObj, and the next material's endDiffDL copied to a pointer made
+// of GX bytes. Electrified Mario (bone body) after a listed turn does the same.
+// The fix: each listing notes the models it is for (the latest one wins: it is the refresh a synchronous call would have made last);
+// the flush computes the entry only while the manager still points at them. Otherwise the refresh is left out: it was for a body that
+// the manager no longer draws (the one it draws now was not asked for, exactly as with the synchronous call), and the next request
+// for that body, made whenever it is shown again, lists it again. 0 = as before (A/B only: it crashes at the crystal).
+namespace {
+inline bool PortDlLazyKeyOn() {
+    return PORT_HOT_KNOB(bool, [] {
+        const char* e = getenv("GXV_DL_LAZY_KEY");
+        return !(e != nullptr && *e == '0');
+    }());
+}
+inline J3DModel* PortDlDiffModel(const ModelManager* mm) {
+    return mm->mDisplayListMaker != nullptr ? mm->mDisplayListMaker->mModel : nullptr;
+}
+// (at every request, listed now or already listed)
+inline void PortDlNoteTarget(ModelManager* mm) {
+    mm->mStaleDLModel = mm->getJ3DModel();
+    mm->mStaleDLDiffModel = PortDlDiffModel(mm);
+}
+inline bool PortDlTargetSame(const ModelManager* mm) {
+    return mm->getJ3DModel() == mm->mStaleDLModel && PortDlDiffModel(mm) == mm->mStaleDLDiffModel;
+}
+unsigned sDlRetargeted = 0;
+}  // namespace
+// (GXV_DL_GUARD's log line, J3DPacket.cpp: the actor whose lists are being made, when known)
+const LiveActor* gPortDLOwner = nullptr;
+extern "C" const char* port_dl_owner_name(void) {
+    const LiveActor* a = gPortDLOwner != nullptr ? gPortDLOwner : gPortCalcAnimOwner;
+    return a != nullptr ? a->getName() : nullptr;
+}
+extern "C" int port_flush_prefetch_on(void);   // (GXV_FLUSH_PREFETCH: perf.cpp; the prefetches: LiveActor.cpp)
+extern "C" void port_prefetch_actor(const void* actor);
+extern "C" void port_prefetch_model(const void* actor);
+extern "C" int port_dl_static_on(void);        // (GXV_DL_STATIC: perf.cpp)
+extern "C" int port_dl_static_flagfix_on(void); // (GXV_DL_STATIC_FLAGFIX: perf.cpp, cpu60)
+extern "C" int port_dl_static_tm_on(void);      // (GXV_DL_STATIC_TM: perf.cpp, game24)
+extern "C" int port_draw_prof_on(void);
+extern "C" int64_t port_host_time_ns(void);  // (dead26: PortDlCensus)
+extern "C" void port_draw_prof_count(int what, unsigned n);
+namespace {
+// GXV_DL_STATIC (flushcut, 7 Nov). updateDL(true) of a model with no display-list maker and no material animation player is
+// calcMaterial: j3dSys.setModel / flags / setTexture, then for each material: its animation (none), J3DMaterial::calc (the texture
+// matrices of its texgen block, none in a material without any; then the current-matrix register words, set from the texgen's own
+// matrix numbers, into the material and its shape). Nothing in a material without animation, without a texture matrix, in a model
+// that nothing else feeds, can differ from one call to the next, except the two register words, which are constants of the material's
+// data. A model that meets that test and has computed its materials in full once (with the same j3dSys flag 0x40000000, which picks the
+// register words' source) leaves the repeats out. The flush still does what is global in calcMaterial: j3dSys's model, flags, texture and
+// last material packet, in the same order. Where the test fails (a player started later, a texture matrix) the model is computed in
+// full as before, and the memo starts again.
+// Verify (GXV_DL_STATIC=2): the repeat is computed in full, and the register words of each material and its shape are compared with
+// what they were before; "dl-static verify" in the draw-prof line (GXV_DRAW_PROF=2) counts the models compared and the ones that differed.
+// cpu60-test-begin (tests/dl_static_why.cpp compiles the text between these markers)
+// gamecpu25 (12 Nov): GXV_DL_STATIC_XANIM. The repeat test below took the model from ModelManager::mModel, which is set only for a model WITHOUT a
+// BCK: with a Xanime player (every model that has a BCK) the model lives in mXanimePlayer->mModel and mModel stays null, so DlStaticQualifies
+// answered "no data" for every animated model and never left one out (the console's "no data/shape 64-77" of ~97 lists a drawn turn in Honeyhive,
+// "0 repeats compared" in every log). With XANIM on the model is getJ3DModel() (what updateDL's calcMaterial works on). The memo then also
+// remembers WHICH model it was made for (mixed into mDlTmHash: mDlStatic alone says "computed in full with flag f", not for which model; the
+// Xanime player's model can be re-pointed, MarioActor::changeDisplayMode). XANIM 0: the old behaviour bit for bit (null model for animated).
+extern "C" int port_dl_static_xanim_on(void);  // (GXV_DL_STATIC_XANIM: perf.cpp)
+// cpu60 (10 Nov): why a model was not left out. Counted only while GXV_DRAW_PROF=2 and GXV_DL_STATIC are on (port_draw_prof_count 8..15, the
+// "dl-static why" part of the draw-prof line); the classification runs on the refusal path and never changes an answer.
+// 0 left out, 1 computed in full: first time, or the post-texture-matrix flag changed (the model qualifies), 2 computed in full: a material's
+// words differ from its shape's, 3 display-list maker, 4 a Btk/Brk/Btp/Bpk player, 5 a material animation on a material, 6 a plain
+// (mode 0) texture matrix is the only thing in the way (GXV_DL_STATIC would take the model if it were allowed), 7 a texture matrix of another
+// mode (environment, projection, effect matrix: it reads the view or the model matrix), 8 no model data / a material without a shape.
+// game24 (GXV_DL_STATIC_TM): 9 computed in full: a plain texture matrix's content (or its texgen words) is not what it was after the last
+// full computation; 10 (a subset of 0, not a reason of its own) left out although the model has plain texture matrices.
+// With GXV_DL_STATIC_TM on, a plain (mode 0) texture matrix no longer disqualifies a model: J3DTexGenBlockPatched::calc / calcPostTexMtx run
+// J3DTexMtx::calc(j3dDefaultMtx) for it, whose result mMtx is a function of the matrix's own info alone (default branch of calcTexMtx /
+// calcPostTexMtx), and the texgen's register is a function of the data's post flag. So a model whose plain texture matrices (info, result,
+// texgen fields, pointer) are bit-for-bit what the last full computation left, with the same flag, would compute the same bytes again.
+// DlStaticTmHash is that content; the stamp that would skip even the hash (a generation bumped by every writer of a texture matrix pointer
+// or info) is NOT built: its writers (btk calc, attach, MaterialAnmBuffer, TexMtxCtrl, setTexMtx) change every frame wherever a btk plays,
+// and a missed writer would be silent, while the content hash cannot miss one.
+enum DlWhy { kWhyLeftOut, kWhyFirst, kWhyWords, kWhyMaker, kWhyPlayer, kWhyMatAnm, kWhyPlainTexMtx, kWhyOtherTexMtx, kWhyNoData, kWhyTmChanged, kWhyLeftOutTm, kWhyCount };
+bool DlStaticQualifiesImpl(ModelManager* mm, J3DModel* model, int* why, bool* hasTex = nullptr) {
+    const bool tmOk = port_dl_static_tm_on() != 0;
+    if (hasTex) *hasTex = false;
+    if (model == nullptr) { if (why) *why = kWhyNoData; return false; }
+    if (mm->mDisplayListMaker != nullptr) { if (why) *why = kWhyMaker; return false; }
+    if (mm->mBtkPlayer != nullptr || mm->mBrkPlayer != nullptr || mm->mBtpPlayer != nullptr || mm->mBpkPlayer != nullptr) {
+        if (why) *why = kWhyPlayer;
+        return false;
+    }
+    J3DModelData* data = model->getModelData();
+    if (data == nullptr) { if (why) *why = kWhyNoData; return false; }
+    const u16 matNum = data->getMaterialNum();
+    bool plain = false, other = false, anm = false, noShape = false;
+    for (u16 i = 0; i < matNum; i++) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material == nullptr || material->getShape() == nullptr) {
+            if (!why) return false;
+            noShape = true;
+            if (material == nullptr) break;
+            continue;
+        }
+        if (material->getMaterialAnm() != nullptr) {
+            if (!why) return false;
+            anm = true;
+        }
+        for (u32 j = 0; j < 8; j++) {
+            J3DTexMtx* t = material->getTexMtx(j);
+            if (t != nullptr) {
+                const bool isPlain = (t->getTexMtxInfo().mInfo & 0x3F) == 0;
+                if (!(isPlain && tmOk) && !why) return false;
+                if (isPlain) { plain = true; if (hasTex) *hasTex = true; } else other = true;
+            }
+        }
+    }
+    if (why) {
+        if (noShape) *why = kWhyNoData;
+        else if (anm) *why = kWhyMatAnm;
+        else if (other) *why = kWhyOtherTexMtx;
+        else if (plain) *why = kWhyPlainTexMtx;
+        else *why = kWhyFirst;
+    }
+    return !noShape && !anm && (!plain || tmOk) && !other;
+}
+bool DlStaticQualifies(ModelManager* mm, J3DModel* model, bool* hasTex = nullptr) {
+    return DlStaticQualifiesImpl(mm, model, nullptr, hasTex);
+}
+// What the full computation leaves in the plain texture matrices of this model's materials (see the comment at DlWhy).
+inline u64 DlTmMix(u64 h, u32 v) { return (h ^ v) * 0x100000001b3ull; }
+u64 DlStaticTmHash(J3DModel* model, u8 flag) {
+    u64 h = 0xcbf29ce484222325ull ^ flag;
+    J3DModelData* data = model->getModelData();
+    const u16 matNum = data->getMaterialNum();
+    for (u16 i = 0; i < matNum; i++) {
+        J3DMaterial* m = data->getMaterialNodePointer(i);
+        for (u32 j = 0; j < 8; j++) {
+            J3DTexMtx* t = m->getTexMtx(j);
+            if (t == nullptr) continue;
+            h = DlTmMix(h, (static_cast< u32 >(i) << 3) | j);
+            h = DlTmMix(h, static_cast< u32 >(reinterpret_cast< uintptr_t >(t) >> 2));
+            u32 w[(sizeof(J3DTexMtxInfo) + 3) / 4] = {};
+            std::memcpy(w, &t->getTexMtxInfo(), sizeof(J3DTexMtxInfo));
+            for (u32 k = 0; k < sizeof w / 4; k++) h = DlTmMix(h, w[k]);
+            u32 r[(sizeof(t->getMtx()) + 3) / 4] = {};
+            std::memcpy(r, &t->getMtx(), sizeof(t->getMtx()));
+            for (u32 k = 0; k < sizeof r / 4; k++) h = DlTmMix(h, r[k]);
+            J3DTexCoord* c = m->getTexCoord(j);
+            if (c != nullptr) {
+                h = DlTmMix(h, c->getTexGenType() | (c->getTexGenSrc() << 8) | (c->getTexGenMtx() << 16));
+                h = DlTmMix(h, c->getTexMtxReg());
+            }
+        }
+    }
+    return h;
+}
+// The post-texture-matrix state calcMaterial will use for this model: J3DModelData::syncJ3DSysFlags (flag 0x20 of the data) sets j3dSys's
+// 0x40000000 from it before the first material is calculated. cpu60: the first version asked j3dSys's flag as it stood at the flush, i.e.
+// what the PREVIOUS listed model left, so in a list of models of different kinds a model asked "is the flag what I computed with" against
+// another model's flag and was computed in full again and again (mDlStatic alternated 1 / 2 / 1). The data's own flag is what the full
+// computation uses, so it is the right thing to compare.
+inline u8 DlStaticFlagOf(J3DModel* model) {
+    return model->getModelData()->checkFlag(0x20) ? 2 : 1;
+}
+// The outcome test: every material's register words already equal its shape's. What the full computation writes into the shape is the
+// material's own words (J3DMaterial::setCurrentMtx), so where they agree the shape would be left as it is; where something else set the
+// shape's words since (FurCtrl's draw does, to its fur layers' value), the model is computed in full as before.
+bool DlStaticWordsAgree(J3DModel* model) {
+    J3DModelData* data = model->getModelData();
+    const u16 matNum = data->getMaterialNum();
+    for (u16 i = 0; i < matNum; i++) {
+        J3DMaterial* m = data->getMaterialNodePointer(i);
+        if (m->getShape()->mCurrentMtx.mMtxIdxRegA != m->mCurrentMtx.mMtxIdxRegA || m->getShape()->mCurrentMtx.mMtxIdxRegB != m->mCurrentMtx.mMtxIdxRegB) {
+            return false;
+        }
+    }
+    return true;
+}
+// What J3DModel::calcMaterial does besides its materials, in its order (model, the two skinning flags, flags from the data, texture,
+// and the packet of the last material).
+void DlStaticSysState(J3DModel* model) {
+    J3D_MSYS.setModel(model);
+    if (model->checkFlag(J3DMdlFlag_SkinPosCpu)) {
+        J3D_MSYS.onFlag(4);
+    } else {
+        J3D_MSYS.offFlag(4);
+    }
+    if (model->checkFlag(J3DMdlFlag_SkinNrmCpu)) {
+        J3D_MSYS.onFlag(8);
+    } else {
+        J3D_MSYS.offFlag(8);
+    }
+    J3DModelData* data = model->getModelData();
+    data->syncJ3DSysFlags();
+    J3D_MSYS.setTexture(data->getTexture());
+    const u16 matNum = data->getMaterialNum();
+    if (matNum != 0) {
+        J3D_MSYS.setMatPacket(model->getMatPacket(matNum - 1));
+    }
+}
+// true: taken care of (left out, or in verify mode computed and compared); false: the caller computes in full.
+inline J3DModel* DlStaticModelOf(ModelManager* mm) {
+    return port_dl_static_xanim_on() != 0 ? mm->getJ3DModel() : mm->mModel;
+}
+// which model the memo is for: 0 with XANIM off (nothing mixed in), else a non-zero mix of the pointer
+inline u64 DlStaticIdent(J3DModel* model) {
+    return port_dl_static_xanim_on() != 0 ? ((static_cast< u64 >(reinterpret_cast< uintptr_t >(model)) * 0x9E3779B97F4A7C15ull) | 1ull) : 0ull;
+}
+bool DlStaticTry(ModelManager* mm, const StaleDL& e, int mode, unsigned* left, unsigned* verified, unsigned* bad, unsigned* why9) {
+    J3DModel* model = DlStaticModelOf(mm);
+    bool hasTex = false;
+    if (!DlStaticQualifies(mm, model, &hasTex)) {
+        mm->mDlStatic = 0;
+        if (port_draw_prof_on() == 2) {
+            int why = kWhyNoData;
+            DlStaticQualifiesImpl(mm, model, &why);
+            ++why9[why];
+        }
+        return false;
+    }
+    const u8 want = port_dl_static_flagfix_on() ? DlStaticFlagOf(model) : (J3D_MSYS.checkFlag(0x40000000) ? 2 : 1);
+    if (mm->mDlStatic != want) {
+        ++why9[kWhyFirst];
+        return false;  // (computed in full by the caller; DlStaticDone below then notes it)
+    }
+    if (!DlStaticWordsAgree(model)) {
+        ++why9[kWhyWords];
+        return false;  // (see above: computed in full)
+    }
+    u64 tmNow = 0;
+    const u64 ident = DlStaticIdent(model);
+    if (hasTex || ident != 0) {
+        tmNow = (hasTex ? DlStaticTmHash(model, want) : 0ull) ^ ident;
+        if (tmNow != mm->mDlTmHash) {
+            ++why9[hasTex ? kWhyTmChanged : kWhyFirst];  // (without texture matrices: the memo was made for another model)
+            return false;  // (computed in full by the caller)
+        }
+    }
+    if (mode == 2) {
+        const J3DModelData* data = model->getModelData();
+        const u16 matNum = data->getMaterialNum();
+        u32 before[64][4];
+        const bool fits = matNum <= 64;
+        if (fits) {
+            for (u16 i = 0; i < matNum; i++) {
+                J3DMaterial* m = data->getMaterialNodePointer(i);
+                before[i][0] = m->mCurrentMtx.mMtxIdxRegA;
+                before[i][1] = m->mCurrentMtx.mMtxIdxRegB;
+                before[i][2] = m->getShape()->mCurrentMtx.mMtxIdxRegA;
+                before[i][3] = m->getShape()->mCurrentMtx.mMtxIdxRegB;
+            }
+        }
+        mm->updateDL(true);
+        if (hasTex && (DlStaticTmHash(model, want) ^ ident) != tmNow) {
+            ++*bad;
+            static unsigned sTmLogged = 0;
+            if (sTmLogged < 8) {
+                ++sTmLogged;
+                port_log_summary("dl-static: verify MISMATCH \"%s\": the full computation changed a plain texture matrix (or its texgen) that GXV_DL_STATIC_TM would have left", e.owner->getName());
+            }
+        }
+        if (fits) {
+            ++*verified;
+            for (u16 i = 0; i < matNum; i++) {
+                J3DMaterial* m = data->getMaterialNodePointer(i);
+                if (before[i][0] != m->mCurrentMtx.mMtxIdxRegA || before[i][1] != m->mCurrentMtx.mMtxIdxRegB ||
+                    before[i][2] != m->getShape()->mCurrentMtx.mMtxIdxRegA || before[i][3] != m->getShape()->mCurrentMtx.mMtxIdxRegB) {
+                    ++*bad;
+                    static unsigned sLogged = 0;
+                    if (sLogged < 8) {
+                        ++sLogged;
+                        port_log_summary("dl-static: verify MISMATCH \"%s\" material %u: material words %08x %08x -> %08x %08x, shape words %08x %08x -> %08x %08x",
+                                         e.owner->getName(), static_cast< unsigned >(i), before[i][0], before[i][1], m->mCurrentMtx.mMtxIdxRegA,
+                                         m->mCurrentMtx.mMtxIdxRegB, before[i][2], before[i][3], m->getShape()->mCurrentMtx.mMtxIdxRegA,
+                                         m->getShape()->mCurrentMtx.mMtxIdxRegB);
+                    }
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+    DlStaticSysState(model);
+    ++*left;
+    ++why9[kWhyLeftOut];
+    if (hasTex) ++why9[kWhyLeftOutTm];
+    return true;
+}
+// After a full computation: a model that qualifies has now computed its materials in full.
+void DlStaticDone(ModelManager* mm) {
+    J3DModel* model = DlStaticModelOf(mm);
+    bool hasTex = false;
+    mm->mDlStatic = DlStaticQualifies(mm, model, &hasTex) ? (port_dl_static_flagfix_on() ? DlStaticFlagOf(model) : (J3D_MSYS.checkFlag(0x40000000) ? 2 : 1)) : 0;
+    mm->mDlTmHash = mm->mDlStatic != 0 ? ((hasTex ? DlStaticTmHash(model, mm->mDlStatic) : 0ull) ^ DlStaticIdent(model)) : 0;
+}
+// cpu60-test-end
+}  // namespace
+// ================================================================================================================================
+// GXV_STARBATCH_DL (starbatch26; default 0; needs GXV_DL_STATIC on). A star bit's material list refresh (updateDL(true)) is the colour control's
+// update (MatColorCtrl: the actor's mColor into the shared material's colour block), calcMaterial, and DisplayListMaker::diff (the instance's own
+// differed list, made from the shared material). The model has a display-list maker, so GXV_DL_STATIC (kWhyMaker) always computes it in full,
+// every picture it is posed: ~100 of them at Honeyhive. Its differed list is a function of the colour alone (the maker holds one colour control,
+// no animation player runs, no material has an animation or a texture matrix), and the colour of a star bit changes only when it is placed
+// (StarPiece::setColor / init). So a star bit whose colour is what it was after its last full refresh (the memo: mDlStatic = 9 and mDlTmHash = the
+// colour mixed with the data's post-texture-matrix flag) and whose materials' register words still agree with their shapes' (DlStaticWordsAgree)
+// leaves the refresh out: DlStaticSysState does what calcMaterial leaves in j3dSys, and the last flagged material's packet is set as diff()'s last
+// loop turn sets it. Its differed list keeps the bytes (and the buffer) of the last refresh, which are the ones a refresh would write. The shared
+// material keeps the colour the last refreshed instance wrote: nothing reads it between refreshes (every refresh sets the colour first).
+// GXV_STARBATCH_DL=2 verifies: the refresh runs in full and the bytes of each material's differed list, and the register words, are compared with
+// what they were before ("starbatch: dl ... differed" counts the models whose list changed: must be 0).
+// Not for a model whose owner is not a star bit (mFlFam 1), with an animation player (a gift star bit's Btk), a material with an animation or a
+// texture matrix, a maker with more than the one control (counted), or after any change of the colour or the model.
+namespace {
+std::atomic< unsigned > sSbDl[8];  // 0 considered, 1 left out, 2 computed (first / colour changed), 3 not eligible, 4 verified, 5 verified and differed, 6 words disagree
+inline int SbDlMode() {
+    return PORT_HOT_KNOB(int, [] {
+        const char* e = getenv("GXV_STARBATCH_DL");
+        const int v = (e != nullptr && *e != '\0') ? atoi(e) : 0;
+        return v >= 1 && v <= 2 ? v : 0;
+    }());
+}
+inline u32 SbDlColor(const LiveActor* o) {
+    u32 c;
+    std::memcpy(&c, &static_cast< const StarPiece* >(o)->mColor, 4);
+    return c;
+}
+bool SbDlEligible(ModelManager* mm, const LiveActor* o) {
+    if (o == nullptr || o->mFlFam != 1 || o->mModelManager != mm || mm->mDisplayListMaker == nullptr) {
+        return false;
+    }
+    J3DModel* model = mm->getJ3DModel();
+    if (model == nullptr || mm->mBtkPlayer != nullptr || mm->mBrkPlayer != nullptr || mm->mBtpPlayer != nullptr || mm->mBpkPlayer != nullptr ||
+        mm->mDisplayListMaker->mFogCtrl != nullptr || mm->mDisplayListMaker->mMaterialCtrl.size() != 1) {
+        return false;
+    }
+    J3DModelData* data = model->getModelData();
+    if (data == nullptr) {
+        return false;
+    }
+    const u16 matNum = data->getMaterialNum();
+    for (u16 i = 0; i < matNum; i++) {
+        J3DMaterial* m = data->getMaterialNodePointer(i);
+        if (m == nullptr || m->getShape() == nullptr || m->getMaterialAnm() != nullptr || model->getMatPacket(i) == nullptr ||
+            model->getMatPacket(i)->getShapePacket() == nullptr) {
+            return false;
+        }
+        for (u32 j = 0; j < 8; j++) {
+            if (m->getTexMtx(j) != nullptr) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+inline u64 SbDlKey(J3DModel* model, const LiveActor* o) {
+    return ((static_cast< u64 >(SbDlColor(o)) | (static_cast< u64 >(DlStaticFlagOf(model)) << 32) | (1ull << 40)) * 0x9E3779B97F4A7C15ull) | 1ull;
+}
+u32 SbDlListHash(J3DModel* model) {
+    u32 h = 2166136261u;
+    const u16 n = model->getModelData()->getMaterialNum();
+    for (u16 i = 0; i < n; i++) {
+        J3DDisplayListObj* dl = model->getMatPacket(i)->getShapePacket()->mpDisplayListObj;
+        if (dl == nullptr) {
+            h = (h ^ 0xFFu) * 16777619u;
+            continue;
+        }
+        const u8* p = dl->getDisplayList(0);
+        const u32 size = dl->getDisplayListSize();
+        h = (h ^ size) * 16777619u;
+        for (u32 k = 0; p != nullptr && k < size; k++) {
+            h = (h ^ p[k]) * 16777619u;
+        }
+    }
+    return h;
+}
+// The refresh of one eligible star bit: left out, or computed (and memoed), or (mode 2) computed and compared.
+void SbDlRefresh(ModelManager* mm, const LiveActor* o, int mode) {
+    J3DModel* model = mm->getJ3DModel();
+    ++sSbDl[0];
+    const u64 key = SbDlKey(model, o);
+    if (mm->mDlStatic == 9 && mm->mDlTmHash == key) {
+        if (!DlStaticWordsAgree(model)) {
+            ++sSbDl[6];
+        } else if (mode == 2) {
+            const u32 before = SbDlListHash(model);
+            mm->updateDL(true);
+            ++sSbDl[4];
+            if (SbDlListHash(model) != before || !DlStaticWordsAgree(model)) {
+                ++sSbDl[5];
+                static unsigned sLogged = 0;
+                if (sLogged < 8) {
+                    ++sLogged;
+                    port_log_summary("starbatch: dl VERIFY MISMATCH \"%s\": the refresh changed a differed list (or a register word) that GXV_STARBATCH_DL would have left", o->getName());
+                }
+            }
+            return;
+        } else {
+            DlStaticSysState(model);
+            const DisplayListMaker* maker = mm->mDisplayListMaker;
+            for (u16 i = model->getModelData()->getMaterialNum(); i-- > 0;) {
+                if (maker->mCurFlag[i]) {
+                    J3D_MSYS.setMatPacket(model->getMatPacket(i));  // (diff()'s last turn)
+                    break;
+                }
+            }
+            ++sSbDl[1];
+            return;
+        }
+    }
+    mm->updateDL(true);
+    ++sSbDl[2];
+    mm->mDlStatic = 9;
+    mm->mDlTmHash = SbDlKey(model, o);
+}
+}  // namespace
+extern "C" void port_starbatch_dl_counts(unsigned* out) {  // (J3DPacket.cpp's "starbatch:" line)
+    for (int i = 0; i < 8; i++) {
+        out[i] = sSbDl[i].load(std::memory_order_relaxed);
+    }
+}
+extern "C" int port_starbatch_dl_mode(void) {
+    return SbDlMode();
+}
+namespace {
+struct DlCounts {
+    unsigned updated = 0, leftOut = 0, notModel = 0, verified = 0, bad = 0;
+    unsigned why[11] = {};  // (cpu60: DlStaticTry's reasons, see DlWhy)
+};
+// GXV_MATCALM=<n> (cpu34d, 14 Nov; 2..4; default 0 = off). A drawn turn's flush refreshes every listed model's material lists
+// (updateDL(true): the material controls, calcMaterial, J3DMaterial::diff for each flagged material). In the Comet Observatory 235
+// differed lists are made a drawn turn and 204 of them are, byte for byte, the list already stored (the "j3d lists:" line, console run
+// 2900a): the 4.25 ms of the flush mostly rebuild lists that do not change. A model whose last GXV_MATCALM_RUNS (6) refreshes in a row
+// stored no changed list (the count J3DDisplayListObj::endDiffDL keeps: made minus kept) is "calm": its refresh is made every n-th
+// flush only (every 2nd within GXV_MATCALM_NEAR, 1500 units, of the camera), until a refresh stores a change (then every flush again,
+// and the count starts over). The start of a Btk / Brk / Btp / Bpk on the model ends the calm at once (ModelManager::startBtk ..),
+// so an animation that starts is shown on its own turn. What can be late: a change made another way (a colour control's value, a
+// texture matrix that follows the camera when the camera starts to move, a frame set directly) first shows up to n-1 drawn turns
+// (33-67 ms at n = 3) later on that model; from then on the model is refreshed every flush. A MINOR CHANGE, not exact.
+// Never: the player (a camera controller), a model never refreshed, the GXV_PAR_DL worker's flush. A model left out keeps j3dSys as
+// the full computation leaves it (DlStaticSysState), as GXV_DL_STATIC does. After GXV_DL_STATIC / GXV_STARBATCH_DL had their say.
+// GXV_MATCALM_DRY=1: nothing is left out; the refreshes the rule would leave out are timed and those that stored a change counted.
+// Line "matcalm:" every 5 s.
+// fix1 (review34 M1, M2, L3):
+//  - A stored list is not the refresh's only output: calcMaterial also writes the materials' texture matrices, and a shape packet with a
+//    texture-matrix object has them read at DRAW time (J3DDifferedTexMtx::loadExecute), not through a list. So never calm: a model with
+//    a shape packet that has a texture-matrix object, or with a texture matrix of any mode but the plain one (environment, projection,
+//    view-projection maps: they follow the camera, the model or an effect matrix every turn), or while one of its Btk / Brk / Btp / Bpk
+//    players runs. CalmExcluded says which; such a model's count never reaches the calm ("never calm" in the line, per flush).
+//  - A refresh left out is OWED: the entry goes back on the list (mStaleDL stays set), so the following flushes see the model whether
+//    or not its calcAnim still runs (a stop, a pause, a clipped actor) and the n-th makes the refresh.
+//  - The models left out are no longer added to GXV_DL_STATIC's "left out".
+extern "C" int port_matcalm_n(void);  // (the switch, below)
+extern "C" int port_safe_cam_exists(void);  // (LodCtrl.cpp)
+namespace {
+struct CalmCounts {
+    unsigned asked = 0, left = 0, made = 0, changed = 0, dryLeft = 0, dryChanged = 0, flushes = 0, exTex = 0, exPlayer = 0, owed = 0;
+    int64_t dryNs = 0, t0 = 0;
+};
+CalmCounts sCalm;
+inline int CalmEnv(const char* name, int fallback) {
+    const char* e = getenv(name);
+    return e != nullptr && *e != 0 ? atoi(e) : fallback;
+}
+inline int CalmRuns() {
+    return PORT_HOT_KNOB(int, [] { const int v = CalmEnv("GXV_MATCALM_RUNS", 6); return v < 2 ? 2 : v > 200 ? 200 : v; }());
+}
+inline float CalmNear2() {
+    return PORT_HOT_KNOB(float, [] { const float v = static_cast< float >(CalmEnv("GXV_MATCALM_NEAR", 1500)); return v * v; }());
+}
+inline bool CalmDry() {
+    return PORT_HOT_KNOB(bool, CalmEnv("GXV_MATCALM_DRY", 0) != 0);
+}
+inline unsigned CalmStored() {
+    return gJ3DPortListStats.diffMade - gJ3DPortListStats.diffKept;
+}
+// (fix1) a material animation player of the model is running: its frames reach the materials every turn
+inline bool CalmPlayerRuns(const ModelManager* mm) {
+    return (mm->mBtkPlayer != nullptr && !mm->mBtkPlayer->isStop()) || (mm->mBrkPlayer != nullptr && !mm->mBrkPlayer->isStop()) ||
+           (mm->mBtpPlayer != nullptr && !mm->mBtpPlayer->isStop()) || (mm->mBpkPlayer != nullptr && !mm->mBpkPlayer->isStop());
+}
+// (fix1) the refresh has an output that is not a stored list, or an input that moves every turn: a shape packet with a texture-matrix
+// object (read at draw time), a texture matrix of a mode other than the plain one, a texture SRT player on the model. Walks the
+// materials: asked only when a model's count is about to reach the calm, and at each refresh a calm model makes.
+bool CalmTexDriven(ModelManager* mm) {
+    if (mm->mBtkPlayer != nullptr) {
+        return true;
+    }
+    J3DModel* model = mm->getJ3DModel();
+    if (model == nullptr || model->getModelData() == nullptr) {
+        return true;
+    }
+    J3DModelData* data = model->getModelData();
+    const u16 matNum = data->getMaterialNum();
+    for (u16 i = 0; i < matNum; i++) {
+        J3DMaterial* material = data->getMaterialNodePointer(i);
+        if (material == nullptr) {
+            return true;
+        }
+        for (u32 j = 0; j < 8; j++) {
+            J3DTexMtx* t = material->getTexMtx(j);
+            if (t != nullptr && (t->getTexMtxInfo().mInfo & 0x3F) != 0) {
+                return true;
+            }
+        }
+    }
+    const u16 shapeNum = data->getShapeNum();
+    for (u16 i = 0; i < shapeNum; i++) {
+        J3DShapePacket* sp = model->getShapePacket(i);
+        if (sp != nullptr && sp->getTexMtxObj() != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+// true: this flush's refresh of the model is one the rule leaves out
+bool CalmWouldSkip(const StaleDL& e, int n) {
+    ModelManager* mm = e.model;
+    if (mm->mCalmRun >= CalmRuns() && CalmPlayerRuns(mm)) {
+        mm->mCalmRun = 0;  // (fix1: a player runs: every flush, and the count starts over)
+        mm->mCalmSkip = 0;
+        ++sCalm.exPlayer;
+        return false;
+    }
+    if (mm->mCalmRun < CalmRuns() || mm->mCpDlMade == 0 || e.owner->mCameraCtrl != nullptr || !port_safe_cam_exists()) {
+        return false;
+    }
+    int every = n;
+    const TVec3f cam = MR::getCamPos();
+    const TVec3f& p = e.owner->mPosition;
+    const float dx = p.x - cam.x, dy = p.y - cam.y, dz = p.z - cam.z;
+    if (dx * dx + dy * dy + dz * dz < CalmNear2()) {
+        every = 2;
+    }
+    return static_cast< int >(mm->mCalmSkip) + 1 < every;
+}
+void CalmLog(int n) {
+    CalmCounts& k = sCalm;
+    ++k.flushes;
+    const int64_t now = port_host_time_ns();
+    if (k.t0 == 0) {
+        k.t0 = now;
+        return;
+    }
+    if (now - k.t0 < 5000000000LL) {
+        return;
+    }
+    const double f = k.flushes != 0 ? static_cast< double >(k.flushes) : 1.0;
+    port_log_summary("matcalm: GXV_MATCALM=%d (calm after %d unchanged refreshes; every 2nd within %d units), %.1f s, %u flushes; a flush: refreshes "
+                     "asked %.1f, left out %.1f (owed, listed again %.1f), made %.1f (%.1f of them stored a changed list); never calm: %.2f for a texture "
+                     "matrix read at the draw or following the camera / an effect, %.2f for a running Btk/Brk/Btp/Bpk; dry (GXV_MATCALM_DRY=%d): would "
+                     "leave out %.1f, %.2f of them stored a change (a change shown late), their time %.3f ms a flush",
+                     n, CalmRuns(), CalmEnv("GXV_MATCALM_NEAR", 1500), static_cast< double >(now - k.t0) / 1e9, k.flushes, k.asked / f, k.left / f, k.owed / f, k.made / f,
+                     k.changed / f, k.exTex / f, k.exPlayer / f, CalmDry() ? 1 : 0, k.dryLeft / f, k.dryChanged / f, static_cast< double >(k.dryNs) / 1e6 / f);
+    k = CalmCounts();
+    k.t0 = now;
+}
+}  // namespace
+// port_dl_flush_stale's work for one listed entry (not dropping) whose actor is still one of the scene's and still owns the manager (the
+// caller has checked both). GXV_PAR_DL runs the same function on its worker, with the knobs read on the game thread.
+void PortDlRefreshOne(const StaleDL& e, int staticMode, bool lazyKey, DlCounts& c) {
+    bool calmOwed = false;  // (GXV_MATCALM fix1: the refresh was left out and the entry listed again)
+    if (e.model->mStaleDL && lazyKey && !PortDlTargetSame(e.model)) {
+        // (GXV_DL_LAZY_KEY: the manager points at another model since the request; see above)
+        ++sDlRetargeted;
+        if (sDlRetargeted <= 8 || (sDlRetargeted & 1023) == 0) {
+            port_log_summary("dl-lazy: stale entry \"%s\" left out (%u so far): its model manager now points at model %p / maker %p, "
+                             "the refresh was asked for %p / %p",
+                             e.owner->getName(), sDlRetargeted, static_cast< void* >(e.model->getJ3DModel()),
+                             static_cast< void* >(PortDlDiffModel(e.model)), static_cast< void* >(e.model->mStaleDLModel),
+                             static_cast< void* >(e.model->mStaleDLDiffModel));
+        }
+        ++c.notModel;
+    } else if (e.model->mStaleDL) {
+        gPortDLOwner = e.owner;
+        if (staticMode != 0 && SbDlMode() != 0 && SbDlEligible(e.model, e.owner)) {
+            const unsigned left0 = sSbDl[1].load(std::memory_order_relaxed);
+            SbDlRefresh(e.model, e.owner, SbDlMode());
+            if (sSbDl[1].load(std::memory_order_relaxed) != left0) {
+                ++c.leftOut;
+            } else {
+                ++c.updated;
+            }
+        } else if (staticMode != 0 && DlStaticTry(e.model, e, staticMode, &c.leftOut, &c.verified, &c.bad, c.why)) {
+            // (left out, or computed and compared)
+        } else {
+            // (GXV_MATCALM, above)
+            const int calmN = gPortParDlRun ? 0 : port_matcalm_n();
+            bool calmSkip = false, calmDry = false;
+            if (__builtin_expect(calmN >= 2, 0)) {
+                ++sCalm.asked;
+                calmSkip = CalmWouldSkip(e, calmN);
+                if (calmSkip && CalmDry()) {
+                    calmSkip = false;
+                    calmDry = true;
+                }
+            }
+            if (calmSkip) {
+                ++e.model->mCalmSkip;
+                ++sCalm.left;
+                // (fix1: owed. The entry is listed again and mStaleDL stays set, so the next flushes come back to this model even if
+                // its calcAnim no longer runs; port_dl_flush_stale took its work list out before this loop, so this is the new list.)
+                sStaleDL.push_back(e);
+                calmOwed = true;
+                ++sCalm.owed;
+                J3DModel* calmModel = e.model->getJ3DModel();
+                if (calmModel != nullptr) {
+                    DlStaticSysState(calmModel);
+                }
+            } else {
+                const unsigned stored0 = calmN >= 2 ? CalmStored() : 0;
+                const int64_t calmT0 = calmDry ? port_host_time_ns() : 0;
+                e.model->updateDL(true);
+                ++c.updated;
+                if (staticMode != 0) {
+                    DlStaticDone(e.model);
+                }
+                if (calmN >= 2) {
+                    const bool changed = CalmStored() != stored0;
+                    ++sCalm.made;
+                    sCalm.changed += changed ? 1u : 0u;
+                    if (calmDry) {
+                        ++sCalm.dryLeft;
+                        sCalm.dryChanged += changed ? 1u : 0u;
+                        sCalm.dryNs += port_host_time_ns() - calmT0;
+                        ++e.model->mCalmSkip;  // (the phase the rule would have: the n-th asks for a real refresh)
+                    } else {
+                        e.model->mCalmSkip = 0;
+                    }
+                    if (changed) {
+                        e.model->mCalmRun = 0;
+                        e.model->mCalmSkip = 0;
+                    } else if (static_cast< int >(e.model->mCalmRun) + 1 >= CalmRuns() && CalmTexDriven(e.model)) {
+                        // (fix1: about to be, or already, calm, but its refresh feeds the draw outside the stored lists: never calm)
+                        e.model->mCalmRun = 0;
+                        e.model->mCalmSkip = 0;
+                        ++sCalm.exTex;
+                    } else if (e.model->mCalmRun < 255) {
+                        ++e.model->mCalmRun;
+                    }
+                }
+            }
+        }
+        gPortDLOwner = nullptr;
+    }
+    e.model->mStaleDL = calmOwed;
+}
+void PortDlProfCounts(const DlCounts& c) {
+    for (unsigned k = 0; k < 11; ++k) {
+        port_draw_prof_count(8 + k, c.why[k]);
+    }
+    port_draw_prof_count(2, c.updated + c.verified);
+    port_draw_prof_count(3, c.leftOut);
+    port_draw_prof_count(4, c.notModel);
+    port_draw_prof_count(5, c.verified);
+    port_draw_prof_count(6, c.bad);
+}
+// dead26 (12 Nov): the "dl-static:" census line, every 5 s, with GXV_DL_STATIC=1 or 2 and no other switch. The old verify counts were only in the
+// "draw-prof:" line (GXV_DRAW_PROF=2); the mismatch lines (port_log_summary) printed only on a failure, so a clean verify run showed nothing.
+// Game thread only (port_dl_flush_stale, and the GXV_PAR_DL join).
+void PortDlCensus(const DlCounts& c, int staticMode) {
+    static DlCounts sum;
+    static int64_t t0 = 0;
+    static unsigned flushes = 0;
+    ++flushes;
+    sum.updated += c.updated;
+    sum.leftOut += c.leftOut;
+    sum.notModel += c.notModel;
+    sum.verified += c.verified;
+    sum.bad += c.bad;
+    for (unsigned k = 0; k < 11; ++k) {
+        sum.why[k] += c.why[k];
+    }
+    const int64_t now = port_host_time_ns();
+    if (t0 == 0) {
+        t0 = now;
+        port_log_summary("dl-static: GXV_DL_STATIC=%d GXV_DL_STATIC_XANIM=%d GXV_DL_STATIC_TM=%d GXV_DL_STATIC_FLAGFIX=%d: census every 5 s", staticMode,
+                         port_dl_static_xanim_on(), port_dl_static_tm_on(), port_dl_static_flagfix_on());
+        return;
+    }
+    if (now - t0 < 5000000000LL) {
+        return;
+    }
+    const double secs = static_cast< double >(now - t0) / 1e9;
+    const unsigned all = sum.updated + sum.leftOut + sum.verified;
+    port_log_summary("dl-static: %.1f s, %u flushes, %u material lists asked: %u left out (%.0f %%), %u computed, %u computed and compared (verify, GXV_DL_STATIC=2); "
+                     "verify: %u repeats compared, %u differed%s; not an actor's model %u; refused: first or flag changed %u, words differ %u, maker %u, player %u, "
+                     "material animation %u, plain texture matrix only %u, other texture matrix %u, no data/shape %u",
+                     secs, flushes, all, sum.leftOut, all != 0 ? 100.0 * sum.leftOut / all : 0.0, sum.updated, sum.verified, sum.verified, sum.bad,
+                     staticMode == 2 ? (sum.bad == 0 && sum.verified != 0 ? " (clean)" : sum.bad != 0 ? " (MISMATCHES: see the dl-static: verify MISMATCH lines)" : " (nothing compared yet)") : " (verify is off)",
+                     sum.notModel, sum.why[kWhyFirst], sum.why[kWhyWords], sum.why[kWhyMaker], sum.why[kWhyPlayer], sum.why[kWhyMatAnm], sum.why[kWhyPlainTexMtx],
+                     sum.why[kWhyOtherTexMtx], sum.why[kWhyNoData]);
+    sum = DlCounts();
+    flushes = 0;
+    t0 = now;
+}
+}  // namespace
+// GXV_MATCALM (see PortDlRefreshOne): 0 off, 2..4 = a calm model's refresh every n-th flush
+extern "C" int port_matcalm_n(void) {
+    return PORT_HOT_KNOB(int, [] {
+        const char* e = getenv("GXV_MATCALM");
+        const int v = e != nullptr && *e != 0 ? atoi(e) : 0;
+        return v < 2 ? 0 : v > 4 ? 4 : v;
+    }());
+}
 extern "C" void port_dl_flush_stale(int drop) {
     if (sStaleDL.empty()) {
         return;
@@ -92,19 +807,539 @@ extern "C" void port_dl_flush_stale(int drop) {
     // (taken out first: updateDL can list models while this runs, and a reallocated list under the loop crashed on 3 Nov)
     PortHostVector< StaleDL > work;
     work.swap(sStaleDL);
-    for (size_t i = 0; i < work.size(); ++i) {
+    const bool prefetch = !drop && port_flush_prefetch_on() != 0;
+    const int staticMode = drop ? 0 : port_dl_static_on();
+    const bool lazyKey = PortDlLazyKeyOn();
+    DlCounts c;
+    const size_t count = work.size();
+    if (prefetch) {
+        for (size_t k = 0; k < 6 && k < count; ++k) {
+            port_prefetch_actor(work[k].owner);
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (prefetch) {
+            if (i + 6 < count) {
+                port_prefetch_actor(work[i + 6].owner);
+            }
+            if (i + 3 < count && port_live_actor_valid(work[i + 3].owner)) {
+                port_prefetch_model(work[i + 3].owner);
+            }
+        }
         const StaleDL e = work[i];
         if (!port_live_actor_valid(e.owner) || e.owner->mModelManager != e.model) {
+            ++c.notModel;
             continue;
         }
-        if (!drop && e.model->mStaleDL) {
-            e.model->updateDL(true);
+        if (drop) {
+            e.model->mStaleDL = false;  // (the scene is about to go; a model that outlives it is listed again)
+            continue;
         }
-        e.model->mStaleDL = false;  // (drop: the scene is about to go; a model that outlives it is listed again)
+        if (__builtin_expect(::port::LogicProfOn(2), 0)) {
+            // (update25, GXV_LOGIC_PROF=3, a sampled turn: this model's refresh timed under its owner's class)
+            const unsigned leftBefore = c.leftOut + c.notModel;
+            port_logic_prof_flush_begin(0, e.owner, e.owner->getName());
+            PortDlRefreshOne(e, staticMode, lazyKey, c);
+            port_logic_prof_flush_end(c.leftOut + c.notModel != leftBefore ? 1 : 0);
+            continue;
+        }
+        PortDlRefreshOne(e, staticMode, lazyKey, c);
+    }
+    if (!drop && port_draw_prof_on()) {
+        PortDlProfCounts(c);
+    }
+    if (!drop && staticMode != 0) {
+        PortDlCensus(c, staticMode);  // (dead26)
+    }
+    if (!drop && port_matcalm_n() >= 2) {
+        CalmLog(port_matcalm_n());  // (GXV_MATCALM)
     }
     work.clear();
     if (sStaleDL.empty() && sStaleDL.capacity() < work.capacity()) {
         sStaleDL.swap(work);  // (keep the larger buffer when nothing was listed meanwhile)
+    }
+}
+
+// ================================================================================================================================
+// GXV_PAR_DL (gamedraw23, 8 Nov; default 0; platform/src/port/perf.cpp, platform/include/port/par_dl.h, GameSystem::frameLoop).
+// The drawn turn runs three flushes on the game thread, one after the other: the far models' joints (anim), the material lists
+// (this, port_dl_flush_stale: ~2.5 ms a drawn turn in heavy Honeyhive) and the deferred view pass (port_view_flush: ~0.9 ms). With
+// GXV_PAR_DL on, the material lists are made by a worker on the fourth core WHILE the game thread makes the view pass; the game thread
+// joins the worker before the draw. The game thread saves the shorter of the two (the view pass, as long as the lists take longer).
+//
+// Why the pictures and the game are exactly as before (the serial order is: material lists, then view pass):
+//  1. The worker runs this file's own loop (PortDlRefreshOne: updateDL / GXV_DL_STATIC / GXV_DL_LAZY_KEY as port_dl_flush_stale) over the
+//     same list in the same order: one thread makes every material list, as before, so whatever the material path keeps in shared
+//     state (the materials of a model data shared by instances, the animation resources' frames, J3DDisplayListObj::sGDLObj, GD's
+//     current list, the differed-list scratch buffer, J3DSys::sTexCoordScaleTable) is written in the same order with the same values.
+//  2. The view pass touches nothing the material path reads or writes, and the reverse, except j3dSys (one global J3DSys): the view
+//     pass writes its view matrix (identity for the 2D groups, then the camera's) and reads it; the material path reads the view
+//     matrix (environment and view-projection texture matrices) and writes the model, flags, texture and material packet. The view
+//     pass (executeCalcViewAndEntryListExceptPlayer -> DrawBufferExecuter -> LiveActor::calcViewAndEntry -> ModelManager::calcView:
+//     GXV_VIEW_KEEP, GXV_PAR_VIEW, J3DModel::viewCalc; the overrides MirrorActor, PartsModel, RailBlock, WoodBox, MirrorReflectionModel
+//     end there too) computes draw / normal / bump matrices from the joints, which the material path only reads, and the shape packets'
+//     matrix pointers, which it does not touch. So the material path gets a J3DSys of its own for the overlap (J3D_MSYS, J3DSys.hpp:
+//     a copy of j3dSys made at the dispatch = the j3dSys the serial flush would have seen, view matrix included), and at the join every
+//     word the worker changed is written into j3dSys unless the view pass changed it too (port::par::MergeWords; then the view pass's
+//     value stands, as it comes later in the serial order). j3dSys is then what the serial flush + view pass left.
+//  3. Only the player's view pass uses the material path's shared state (MarioActor::calcFogLighting -> updateLightDL: GD's current list
+//     and the guest scheduler's prohibit; the search light and its hand models' J3DModel::calc write j3dSys). The overlap therefore never
+//     runs it: either it was made in calc-anim (PETARI_VIEW_PLAYER, mode <= 2 or the front end done), or (round 2, GXV_PAR_DL_PLAYER) the
+//     pending pass is split and the player's part runs after the join, on the merged j3dSys (GameScene.cpp port_view_split_player_last:
+//     why its place among the groups changes nothing). Its j3dSys and GD writes are then the last ones, as in the serial pass.
+//  4. Should the game thread reach the material path while the worker runs (an entry into J3DModel::calcMaterial / makeDL / entry /
+//     calcDiffTexMtx, J3DMaterial::calc / diff / makeDisplayList / patch, DisplayListMaker::update / diff, a differed list's beginDL,
+//     a material animation's beginDiff, updateDL: PortDlGameEnter), it first finishes the overlap (port_par_dl_game_enter: waits for the
+//     worker, merges j3dSys). In the serial order that call came after every material list too, so it sees exactly what it saw. None is
+//     known; the log counts them ("finished early").
+//  5. Guest OS: the worker is no guest thread. The game thread takes the material path's mutex (MR::MutexHolder<0>, as updateDL does per
+//     model) and turns the guest's interrupts off for the whole overlap, so no other guest thread (the loading thread: model set-up,
+//     updateDL) can run material code meanwhile; the worker makes none of the guest calls the serial flush makes per list (interrupts,
+//     the scheduler's prohibit and yield, the mutex: J3DPacket.cpp, DisplayListMaker.cpp, updateDL), nor the front-end waits (the game
+//     thread made the draw-done wait before the flushes and is inside the flush scope) nor the logging builds' workload counters.
+//  6. Worker identity: the actors' validity (the live-actor snapshot) and the knobs are read on the game thread before the dispatch.
+//     If the worker has not started when the game thread joins, the game thread takes the job and runs it itself (same function, same
+//     private J3DSys: after the view pass, which does not read what it writes).
+// Verify (GXV_PAR_DL=2): the material state the lists can write (per material of the listed models' model data: TEV / konst colours,
+// texture numbers, material / ambient colours, fog, texture-matrix pointers and contents, texture coordinates, current-matrix words,
+// the shape's) is saved before the dispatch; after the join the overlapped result is fingerprinted (per entry, right after it: the
+// differed lists' bytes, the texture matrices and current-matrix words) and saved, the saved state is put back with j3dSys as it was at
+// the dispatch, and the serial flush runs again on the game thread (the original guest calls included) and is compared entry by entry,
+// material by material and word by word (j3dSys, the view pass's words overlaid). The game goes on with the serial result.
+// Log (every 5 s, basic log): "par-dl: ..." (perf.cpp).
+extern "C" int port_par_dl_mode(void);                                    // (perf.cpp: GXV_PAR_DL 0 / 1 / 2)
+extern "C" int port_par_dl_start(void);                                   // (the worker, started once; 0: none)
+extern "C" void port_par_dl_dispatch(void (*fn)(void*), void* ctx);
+extern "C" int port_par_dl_take(void);
+extern "C" void port_par_dl_wait(unsigned* waitUs);
+extern "C" void port_par_dl_reset(void);
+extern "C" void port_par_dl_note(const unsigned* counts, unsigned n);
+extern "C" int port_view_pending_except_player(void);                     // (GameScene.cpp)
+extern "C" int port_view_pending_state(void);                             // (GameScene.cpp: 0 none, 1 with the player's, 2 without, 3 splittable)
+extern "C" int port_view_split_player_last(void);                         // (GameScene.cpp)
+extern "C" int port_par_dl_player_on(void);                               // (perf.cpp: GXV_PAR_DL_PLAYER)
+extern "C" int port_par_dl_defer_view(void);                              // (perf.cpp: GXV_PAR_DL_VIEW)
+extern "C" int port_gx_drawdone_defer_mode(void);
+extern "C" int port_on_frame_thread(void);                                // (perf.cpp)
+extern "C" unsigned port_par_dl_self(void);                               // (perf.cpp: this thread's id, never 0)
+extern "C" int port_par_dl_done(void);                                    // (perf.cpp: the worker has finished the job)
+extern "C" void port_par_dl_stack(unsigned long* lo, unsigned long* hi);  // (perf.cpp: the worker's stack)
+extern "C" int port_par_dl_help_on(void);                                 // (perf.cpp: GXV_PAR_DL_HELP)
+extern "C" int port_par_view_help_one(void);                              // (below)
+extern "C" int64_t port_host_time_ns(void);
+#include "port/par_dl.h"
+#include "Game/LiveActor/ParDlSnap.hpp"
+#include <atomic>
+#include <JSystem/J3DGraphAnimator/J3DModelData.hpp>
+namespace {
+// (GXV_PAR_DL=2) one entry's outputs, right after its refresh (ParDlSnap.hpp)
+u32 ParDlFingerprint(ModelManager* mm) {
+    J3DModel* model = mm->getJ3DModel();
+    if (model == nullptr || model->getModelData() == nullptr) return 2166136261u;
+    J3DModelData* data = model->getModelData();
+    const u16 matNum = data->getMaterialNum();
+    J3DMaterial* mats[256];
+    J3DMatPacket* packets[256];
+    const u16 n = matNum < 256 ? matNum : 256;
+    for (u16 i = 0; i < n; ++i) {
+        mats[i] = data->getMaterialNodePointer(i);
+        packets[i] = model->getMatPacket(i);
+    }
+    return ParDlFingerprint(mats, packets, n);
+}
+void ParDlFingerprintParts(ModelManager* mm, u32 out[5]) {
+    for (u32 k = 0; k < 5; ++k) out[k] = 2166136261u;
+    J3DModel* model = mm->getJ3DModel();
+    if (model == nullptr || model->getModelData() == nullptr) return;
+    J3DModelData* data = model->getModelData();
+    const u16 matNum = data->getMaterialNum();
+    J3DMaterial* mats[256];
+    J3DMatPacket* packets[256];
+    const u16 n = matNum < 256 ? matNum : 256;
+    for (u16 i = 0; i < n; ++i) {
+        mats[i] = data->getMaterialNodePointer(i);
+        packets[i] = model->getMatPacket(i);
+    }
+    ParDlFingerprintParts(mats, packets, n, out);
+}
+struct ParDl {
+    PortHostVector< StaleDL > work;
+    PortHostVector< u8 > valid, stale0, static0, firstOfData;
+    PortHostVector< u64 > tm0;  // (game24: the model's plain texture matrix hash, saved and restored with static0)  // (per entry; the last three for the verify)
+    PortHostVector< u32 > fpPar, fpSer;
+    PortHostVector< u32 > partsPar;  // (fedl25: 5 words an entry, ParDlFingerprintParts after the overlapped refresh)
+    PortHostVector< u8 > firstUse;   // (fedl25: the entry's model data was never refreshed before this turn)
+    PortHostVector< ParDlMatSnap > snap0, snap1, snap2;
+    int staticMode = 0;
+    bool lazyKey = true, prefetch = false, verify = false;
+    bool open = false, joined = false;
+    bool tookJob = false, playerLast = false;
+    unsigned waitUs = 0, taken = 0, conflicts = 0, helped = 0;
+    BOOL ints = FALSE;
+    DlCounts c;
+    int64_t t0 = 0;
+    unsigned earlyFinish = 0;
+    alignas(8) u8 sys[sizeof(J3DSys)];
+    alignas(8) u8 pre[sizeof(J3DSys)];
+    alignas(8) u8 gameSys[sizeof(J3DSys)];
+    // (defaults48, GXV_PAR_DL=2) J3DSys::sTexCoordScaleTable as the flush found it. A material's diff can read a slot it does not write in the same pass
+    // (J3DTevBlock::diff: diffTexCoordScale without diffTexNo, or a TEV order naming a texture map whose number is 0xFFFF), so an entry's list bytes
+    // depend on what the last writer BEFORE the flush left there. The serial redo started from what the overlapped pass's last entry left instead:
+    // the one "MISMATCH" of the Vita run of 22 Nov (night35 row 16, Beach Bowl, 1 entry of 444,200: the Low penguin, first of its model data that turn;
+    // list bytes differed, list sizes, texture matrices, current-matrix words and every material state the same) is that case, not a difference
+    // between the worker and the serial order. The redo now starts from the saved table, and the tables after both passes are compared.
+    J3DTexCoordScaleInfo scale0[8];
+};
+ParDl sParDl;
+// The job: port_dl_flush_stale's loop over the entries the game thread found valid, with the knobs it read.
+std::atomic< unsigned > sParDlRunner{0};  // (the thread running the job: the worker, or the game thread that took it; 0 between jobs)
+void ParDlRun(void* ctx) {
+    ParDl& d = *static_cast< ParDl* >(ctx);
+    sParDlRunner.store(port_par_dl_self(), std::memory_order_relaxed);
+    const size_t count = d.work.size();
+    if (d.prefetch) {
+        for (size_t k = 0; k < 6 && k < count; ++k) {
+            port_prefetch_actor(d.work[k].owner);
+        }
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (d.prefetch) {
+            if (i + 6 < count) {
+                port_prefetch_actor(d.work[i + 6].owner);
+            }
+            if (i + 3 < count && d.valid[i + 3]) {
+                port_prefetch_model(d.work[i + 3].owner);
+            }
+        }
+        if (!d.valid[i]) {
+            continue;  // (counted by the game thread)
+        }
+        PortDlRefreshOne(d.work[i], d.staticMode, d.lazyKey, d.c);
+        if (d.verify) {
+            d.fpPar[i] = ParDlFingerprint(d.work[i].model);
+            ParDlFingerprintParts(d.work[i].model, &d.partsPar[i * 5]);
+        }
+    }
+    sParDlRunner.store(0, std::memory_order_relaxed);
+}
+// (GXV_PAR_DL=2) the distinct materials of the listed entries' model data, in list order
+void ParDlSnapAll(ParDl& d, PortHostVector< ParDlMatSnap >& out, bool first) {
+    out.clear();
+    PortHostVector< J3DModelData* > seen;
+    for (size_t i = 0; i < d.work.size(); ++i) {
+        if (first) d.firstOfData[i] = 0;
+        if (!d.valid[i]) continue;
+        J3DModel* model = d.work[i].model->getJ3DModel();
+        J3DModelData* data = model != nullptr ? model->getModelData() : nullptr;
+        if (data == nullptr) continue;
+        bool dup = false;
+        for (size_t k = 0; k < seen.size() && !dup; ++k) dup = seen[k] == data;
+        if (dup) continue;
+        seen.push_back(data);
+        if (first) d.firstOfData[i] = 1;
+        for (u16 m = 0; m < data->getMaterialNum(); ++m) {
+            out.push_back(ParDlMatSnap());
+            ParDlSnap(out.back(), data->getMaterialNodePointer(m));
+        }
+    }
+}
+// (GXV_PAR_DL=2) after the join: the serial flush again from the saved state, compared with the overlapped one; the game keeps the serial.
+void ParDlVerify(ParDl& d, unsigned* checked, unsigned* differed, unsigned* differedFirst, unsigned* sysDiffer, unsigned* matDiffer) {
+    ParDlSnapAll(d, d.snap1, false);
+    u8 overlapped[sizeof(J3DSys)];
+    std::memcpy(overlapped, &j3dSys, sizeof(J3DSys));
+    for (size_t k = 0; k < d.snap0.size(); ++k) ParDlRestore(d.snap0[k]);
+    std::memcpy(&j3dSys, d.pre, sizeof(J3DSys));
+    J3DTexCoordScaleInfo scaleOverlapped[8];  // (defaults48: see ParDl::scale0)
+    std::memcpy(scaleOverlapped, J3DSys::sTexCoordScaleTable, sizeof(scaleOverlapped));
+    std::memcpy(J3DSys::sTexCoordScaleTable, d.scale0, sizeof(d.scale0));
+    for (size_t i = 0; i < d.work.size(); ++i) {
+        if (!d.valid[i]) continue;
+        d.work[i].model->mStaleDL = d.stale0[i] != 0;
+        d.work[i].model->mDlStatic = d.static0[i];
+        d.work[i].model->mDlTmHash = d.tm0[i];
+    }
+    // (fedl25) The serial redo is exact only for a model data the game has refreshed before: the first refresh of a model data builds state that
+    // ParDlRestore does not take back (the 6 entries of the 12 Nov console run that differed, of 283,174, were all in the first drawn turn of their
+    // model data: the first Honeyhive turn, then the first turn the Low bees came: and every entry of one data shows the same two hashes, which a race
+    // would not). Entries of a model data not seen before this turn are compared and counted apart ("first use"): they cannot be part of "differed",
+    // and the line names which part of the fingerprint differs; a data seen in an earlier turn that differs is a real difference.
+    static PortHostVector< const J3DModelData* > sSeen;
+    static unsigned sFirstUseDiffers = 0, sFirstUseChecked = 0;
+    for (size_t i = 0; i < d.work.size(); ++i) {
+        d.firstUse[i] = 0;
+        if (!d.valid[i]) continue;
+        J3DModel* model = d.work[i].model->getJ3DModel();
+        const J3DModelData* data = model != nullptr ? model->getModelData() : nullptr;
+        bool seen = data == nullptr;
+        for (size_t k = 0; k < sSeen.size() && !seen; ++k) seen = sSeen[k] == data;
+        d.firstUse[i] = seen ? 0 : 1;
+    }
+    DlCounts c;
+    for (size_t i = 0; i < d.work.size(); ++i) {
+        if (!d.valid[i]) continue;
+        PortDlRefreshOne(d.work[i], d.staticMode, d.lazyKey, c);
+        d.fpSer[i] = ParDlFingerprint(d.work[i].model);
+        ++*checked;
+        if (d.firstUse[i]) ++sFirstUseChecked;
+        if (d.fpSer[i] != d.fpPar[i]) {
+            u32 parts[5];
+            ParDlFingerprintParts(d.work[i].model, parts);
+            if (d.firstUse[i]) {
+                ++sFirstUseDiffers;
+                --*checked;  // (not compared: counted in "first use" below)
+            } else {
+                ++*differed;
+                if (d.firstOfData[i]) ++*differedFirst;
+            }
+            static unsigned sLogged = 0;
+            if (sLogged < 16) {
+                ++sLogged;
+                const u32* pp = &d.partsPar[i * 5];
+                port_log_summary("par-dl: verify %s entry %u \"%s\"%s: overlapped %08x, serial %08x; parts (current-matrix words, texture matrices, "
+                                 "list sizes, list bytes, other buffer's bytes) overlapped %08x %08x %08x %08x %08x, serial %08x %08x %08x %08x %08x; "
+                                 "first-use entries so far: %u checked, %u differ",
+                                 d.firstUse[i] ? "first-use difference (the serial redo is not exact for a model data's first refresh; not counted)" : "MISMATCH",
+                                 static_cast< unsigned >(i), d.work[i].owner->getName(), d.firstOfData[i] ? " (first of its model data)" : "", d.fpPar[i], d.fpSer[i],
+                                 pp[0], pp[1], pp[2], pp[3], pp[4], parts[0], parts[1], parts[2], parts[3], parts[4], sFirstUseChecked, sFirstUseDiffers);
+            }
+        }
+    }
+    for (size_t i = 0; i < d.work.size(); ++i) {
+        if (!d.valid[i]) continue;
+        J3DModel* model = d.work[i].model->getJ3DModel();
+        const J3DModelData* data = model != nullptr ? model->getModelData() : nullptr;
+        bool seen = data == nullptr;
+        for (size_t k = 0; k < sSeen.size() && !seen; ++k) seen = sSeen[k] == data;
+        if (!seen) sSeen.push_back(data);
+    }
+    // j3dSys: the serial flush's words, then the view pass's (it came later), against the merged one
+    u8 expected[sizeof(J3DSys)];
+    std::memcpy(expected, &j3dSys, sizeof(J3DSys));
+    for (size_t b = 0; b < sizeof(J3DSys); ++b) {
+        if (d.gameSys[b] != d.pre[b]) expected[b] = d.gameSys[b];
+    }
+    for (size_t w = 0; w + 4 <= sizeof(J3DSys); w += 4) {
+        if (std::memcmp(expected + w, overlapped + w, 4) != 0) ++*sysDiffer;
+    }
+    std::memcpy(&j3dSys, expected, sizeof(J3DSys));  // (the serial result)
+    // (defaults48) the texture-size table both passes leave must be the same too (counted with the j3dSys words: it is J3DSys's)
+    for (size_t w = 0; w < 8; ++w) {
+        if (std::memcmp(&scaleOverlapped[w], &J3DSys::sTexCoordScaleTable[w], sizeof(J3DTexCoordScaleInfo)) != 0) ++*sysDiffer;
+    }
+    ParDlSnapAll(d, d.snap2, false);
+    for (size_t k = 0; k < d.snap1.size() && k < d.snap2.size(); ++k) {
+        if (!ParDlSnapSame(d.snap1[k], d.snap2[k])) ++*matDiffer;
+    }
+}
+}  // namespace
+
+// The per-picture record port_par_dl_note (perf.cpp) sums: 0 overlapped, 1 serial (no view pass to overlap), 2 entries, 3 the game thread
+// took the job (the worker had not started), 4 finished early (port_par_dl_game_enter), 5 the game thread's wait at the join (us), 6 the
+// merge and verify (us), 7 the game thread's section from the dispatch to the end of the join (us; the view pass included), 8 lists
+// updated, 9 the listing and dispatch (us), 10 j3dSys words taken from the worker, 11 conflicts, 12 verify: entries checked, 13 differed,
+// 14 of them the first entry of their model data, 15 j3dSys words differed, 16 material states differed, 17 view jobs the game thread ran
+// while it waited (GXV_PAR_DL_HELP), 18 serial: no view pass pending, 19 serial: the player's included and not split, 20 overlapped with the
+// player's part split off to after the join (round 2).
+enum { kParDlRecord = 21 };
+namespace {
+unsigned sParDlDispatchUs = 0;
+bool sParDlEarly = false;
+}  // namespace
+
+// GameSystem::frameLoop, in place of port_dl_flush_stale(0) on a drawn turn: 1 = the material lists are the worker's now (the caller makes
+// the view pass and then calls port_par_dl_end); 0 = nothing done (the caller flushes serially).
+extern "C" int port_par_dl_begin(void) {
+    const int mode = port_par_dl_mode();
+    if (mode == 0 || sStaleDL.empty() || sParDl.open || !port_on_frame_thread()) {
+        return 0;
+    }
+    // The view pass the material lists overlap: pending "except the player" (made in calc-anim), or pending with the player's included
+    // (draw-done modes 3 / 4 with the front end behind at calc-anim: the default Settings "Logic overlap: Max" at 60 pictures a second),
+    // which is then split: the rest overlapped, the player's part after the join (round 2: GameScene.cpp port_view_split_player_last).
+    const int viewState = port_view_pending_state();
+    const bool playerLast = viewState == 3 && port_par_dl_player_on();
+    if (viewState != 2 && !playerLast) {
+        unsigned rec[kParDlRecord] = {};
+        rec[1] = 1;  // (no view pass to overlap: serial)
+        rec[18 + (viewState == 0 ? 0 : 1)] = 1;  // (why: none pending / the player's included and not split)
+        port_par_dl_note(rec, kParDlRecord);
+        static bool sSaid = false;
+        if (!sSaid) {
+            sSaid = true;
+            port_log_summary("par-dl: a drawn turn with nothing to overlap: %s (draw-done mode %d, GXV_PAR_DL_VIEW %d, GXV_PAR_DL_PLAYER %d)",
+                             viewState == 0 ? "no view pass pending at the flush" : "the pending pass includes the player's and is not split (PETARI_VIEW_PLAYER=0 or GXV_PAR_DL_PLAYER=0)",
+                             port_gx_drawdone_defer_mode(), port_par_dl_defer_view(), port_par_dl_player_on());
+        }
+        return 0;
+    }
+    if (!port_par_dl_start()) {
+        return 0;
+    }
+    ParDl& d = sParDl;
+    const int64_t t0 = port_host_time_ns();
+    port_live_actor_snapshot();
+    d.work.clear();
+    d.work.swap(sStaleDL);  // (as port_dl_flush_stale: anything listed meanwhile goes into a new list)
+    const size_t n = d.work.size();
+    d.valid.resize(n);
+    d.c = DlCounts();
+    for (size_t i = 0; i < n; ++i) {
+        const StaleDL& e = d.work[i];
+        d.valid[i] = port_live_actor_valid(e.owner) && e.owner->mModelManager == e.model ? 1 : 0;
+        if (!d.valid[i]) {
+            ++d.c.notModel;
+        }
+    }
+    d.staticMode = port_dl_static_on();
+    d.lazyKey = PortDlLazyKeyOn();
+    d.prefetch = port_flush_prefetch_on() != 0;
+    d.verify = mode == 2;
+    if (d.verify) {
+        d.fpPar.assign(n, 0);
+        d.fpSer.assign(n, 0);
+        d.partsPar.assign(n * 5, 0);
+        d.firstUse.assign(n, 0);
+        d.stale0.resize(n);
+        d.static0.resize(n);
+        d.tm0.resize(n);
+        d.firstOfData.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            d.stale0[i] = d.valid[i] && d.work[i].model->mStaleDL ? 1 : 0;
+            d.static0[i] = d.valid[i] ? d.work[i].model->mDlStatic : 0;
+            d.tm0[i] = d.valid[i] ? d.work[i].model->mDlTmHash : 0;
+        }
+        ParDlSnapAll(d, d.snap0, true);
+        std::memcpy(d.scale0, J3DSys::sTexCoordScaleTable, sizeof(d.scale0));  // (defaults48: the redo starts from it too)
+    }
+    OSLockMutex(&MR::MutexHolder< 0 >::sMutex);  // (the material path's mutex, as updateDL takes it; held for the worker)
+    d.ints = OSDisableInterrupts();               // (no other guest thread runs until the join)
+    std::memcpy(d.pre, &j3dSys, sizeof(J3DSys));  // (j3dSys as the serial material lists would find it)
+    std::memcpy(d.sys, &j3dSys, sizeof(J3DSys));
+    d.playerLast = playerLast && port_view_split_player_last() != 0;  // (round 2: the player's part after the join, GameSystem::frameLoop)
+    gPortJ3DSysMat = reinterpret_cast< J3DSys* >(d.sys);
+    port_par_dl_stack(&gPortParDlStackLo, &gPortParDlStackHi);  // (J3DSys.hpp PortDlGameEnter: the worker's frames go on at once)
+    gPortParDlRun = true;
+    d.joined = false;
+    d.open = true;
+    d.t0 = t0;
+    sParDlEarly = false;
+    port_par_dl_dispatch(&ParDlRun, &d);
+    sParDlDispatchUs = static_cast< unsigned >((port_host_time_ns() - t0) / 1000);
+    return 1;
+}
+
+namespace {
+// The join: every material list made (by the worker, or here if it had not started), j3dSys merged, the material path's own J3DSys and the
+// overlap flag gone. Thread-agnostic: the game thread's port_par_dl_end makes it, or whichever thread reaches the material path first
+// (port_par_dl_game_enter). Afterwards nothing of the job is touched by the worker.
+void ParDlJoin() {
+    ParDl& d = sParDl;
+    if (d.joined) {
+        return;
+    }
+    d.joined = true;
+    d.waitUs = 0;
+    d.helped = 0;
+    d.tookJob = false;
+    if (port_par_dl_take()) {
+        d.tookJob = true;  // (the worker had not started: run it here, still with the private J3DSys)
+        ParDlRun(&d);
+        port_par_dl_reset();
+    } else {
+        // (GXV_PAR_DL_HELP, default 1: the wait is idle time on the game thread; it takes the view jobs the view worker, on the same
+        // fourth core, has not reached, so the draw's touches find them done. Only on the game thread, the only one that draws.)
+        const int64_t th = port_host_time_ns();
+        if (port_par_dl_help_on() && port_on_frame_thread()) {
+            while (!port_par_dl_done() && port_par_view_help_one()) {
+                ++d.helped;
+            }
+        }
+        port_par_dl_wait(&d.waitUs);
+        d.waitUs = static_cast< unsigned >((port_host_time_ns() - th) / 1000);  // (the game thread's time at the join, the help included)
+    }
+    std::memcpy(d.gameSys, &j3dSys, sizeof(J3DSys));
+    d.taken = d.conflicts = 0;
+    port::par::MergeWords(&j3dSys, d.pre, d.sys, sizeof(J3DSys), &d.taken, &d.conflicts);
+    gPortJ3DSysMat = &j3dSys;
+    gPortParDlRun = false;
+}
+}  // namespace
+
+// After the view pass (GameSystem::frameLoop), or earlier from port_par_dl_game_enter on the game thread: the join (if no one made it yet),
+// then the guest's interrupts and the mutex given back, the verify, the counts. j3dSys is what the serial flush and view pass left.
+extern "C" void port_par_dl_end(void) {
+    ParDl& d = sParDl;
+    if (!d.open) {
+        return;
+    }
+    d.open = false;
+    ParDlJoin();
+    const int64_t tm = port_host_time_ns();
+    unsigned rec[kParDlRecord] = {};
+    rec[3] = d.tookJob ? 1 : 0;
+    if (d.conflicts != 0) {
+        static unsigned sLogged = 0;
+        if (sLogged < 4) {
+            ++sLogged;
+            port_log_summary("par-dl: %u j3dSys words written by both the material lists and the view pass (the view pass's kept)", d.conflicts);
+        }
+    }
+    OSRestoreInterrupts(d.ints);
+    OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
+    if (d.verify) {
+        ParDlVerify(d, &rec[12], &rec[13], &rec[14], &rec[15], &rec[16]);  // (in the serial flush's own surroundings)
+    }
+    if (port_draw_prof_on()) {
+        PortDlProfCounts(d.c);
+    }
+    if (port_dl_static_on() != 0) {
+        PortDlCensus(d.c, port_dl_static_on());  // (dead26)
+    }
+    rec[2] = static_cast< unsigned >(d.work.size());
+    d.work.clear();
+    if (sStaleDL.empty() && sStaleDL.capacity() < d.work.capacity()) {
+        sStaleDL.swap(d.work);
+    }
+    const int64_t te = port_host_time_ns();
+    rec[0] = 1;
+    rec[4] = sParDlEarly ? 1 : 0;
+    rec[5] = d.waitUs;
+    rec[6] = static_cast< unsigned >((te - tm) / 1000);
+    rec[7] = static_cast< unsigned >((te - d.t0) / 1000);
+    rec[8] = d.c.updated + d.c.verified;
+    rec[9] = sParDlDispatchUs;
+    rec[10] = d.taken;
+    rec[11] = d.conflicts;
+    rec[17] = d.helped;
+    rec[20] = d.playerLast ? 1 : 0;
+    port_par_dl_note(rec, kParDlRecord);
+}
+
+// J3DSys.hpp PortDlGameEnter, on any thread while the overlap is open (gPortParDlRun): the job's own runner goes on; any other thread is
+// about to enter the material path while the job may be running, so the job is finished (joined and merged) first. The game thread also
+// ends the overlap there (port_par_dl_end); another guest thread (none is known: the game thread holds the guest's interrupts off and
+// the material mutex) leaves the interrupts and the mutex to the game thread's own port_par_dl_end.
+extern "C" void port_par_dl_game_enter(void) {
+    if (sParDlRunner.load(std::memory_order_relaxed) == port_par_dl_self()) {
+        return;  // (the worker, or the game thread running the job it took: neither reads the fields below)
+    }
+    ParDl& d = sParDl;
+    if (!d.open || d.joined) {
+        return;
+    }
+    sParDlEarly = true;
+    static unsigned sLogged = 0;
+    const bool game = port_on_frame_thread() != 0;
+    if (sLogged < 8) {
+        ++sLogged;
+        port_log_summary("par-dl: %s reached the material path during the overlap (from %p): the material lists were finished first",
+                         game ? "the game thread" : "ANOTHER THREAD", __builtin_return_address(0));
+    }
+    if (game) {
+        port_par_dl_end();
+    } else {
+        ParDlJoin();
     }
 }
 extern "C" int port_gx_in_flush_scope(void);
@@ -119,6 +1354,7 @@ bool port_dl_defer(LiveActor* owner, ModelManager* model) {
         model->mStaleDL = true;
         sStaleDL.push_back(StaleDL{owner, model});
     }
+    PortDlNoteTarget(model);  // (GXV_DL_LAZY_KEY)
     return true;
 }
 extern "C" unsigned port_dl_stale_count(void) { return static_cast< unsigned >(sStaleDL.size()); }
@@ -198,10 +1434,12 @@ struct KeyBlend {
 // JointControlDelegator< NPCActor > (MR::preScaleMtx of the joint's matrix by the actor's AnimScaleController::_C, timing 0; nothing
 // at timing 1; the callback unregisters itself after the walk, JointController::staticCallBack).
 struct ParCb {
-    u8 kind;     // 0 none
+    u8 kind;     // 0 none, 1 NPCActor::calcJointScale, 2 KoteBug::calcJoint (GXV_PAR_ANIM_CB2, gamecpu23)
     u16 joint;
     const void* ctl;  // the JointController
-    Vec scale;
+    Vec scale;        // (kind 1)
+    f32 quat[4];      // (kind 2) KoteBug::mPosture
+    const void* host; // the delegator's host (a LiveActor)
 };
 // (par2) what the key reads instead of the model's state now: GXV_PAR_FLUSH / GXV_PAR_LATE's scale and base matrix as the computation
 // will have them; cbMode: a recognised joint callback is let through (registered now: frames == null; or cb: as predicted).
@@ -211,6 +1449,8 @@ struct ParOverride {
     bool cbMode;
     const ParCb* cb;  // (prediction; null with frames == null: read from the joints now)
     ParCb* cbOut;     // (the callback found, when cbMode)
+    bool noScan;      // (GXV_PAR_PLANT: the worker's prediction for a plant: the joint scan of the SHARED model data is left out (another
+                      // plant's computation on the game thread writes its joint 0's calc pointer); the real key at the take scans as always)
 };
 bool ParRecogniseCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* out);
 u32 MemoKey(ModelManager* mm, J3DModel* model, u32* key, const f32* frames = nullptr, bool blend = false, const KeyBlend* pred = nullptr,
@@ -243,7 +1483,7 @@ u32 MemoKey(ModelManager* mm, J3DModel* model, u32* key, const f32* frames = nul
     }
     ParCb cbFound;
     cbFound.kind = 0;
-    for (u16 i = 0; i < jointNum; i++) {
+    for (u16 i = 0; i < jointNum && !(ov != nullptr && ov->noScan); i++) {
         J3DJoint* joint = data->getJointNodePointer(i);
         if (joint->getCallBack() != nullptr && ov != nullptr && ov->cbMode && frames == nullptr && cbFound.kind == 0 &&
             joint->getMtxCalc() == (i == 0 ? static_cast< J3DMtxCalc* >(core) : nullptr) && ParRecogniseCb(model, joint, joint->mCallBackUserData, &cbFound)) {
@@ -279,7 +1519,7 @@ u32 MemoKey(ModelManager* mm, J3DModel* model, u32* key, const f32* frames = nul
     if (core != nullptr) {
         KeyP(key, w, core);
         key[w++] = (static_cast< u32 >(core->_4) << 24) | (static_cast< u32 >(core->_6) << 16) | (static_cast< u32 >(core->mTrackCount) << 8);
-        key[w++] = core->_C;
+        key[w++] = core->_C | (static_cast< u32 >(core->mPortCatchUps) << 16);  // (blendfix31: a catch-up rewrote the core's joint state since the key was taken)
         KeyF(key, w, k1C);
         KeyF(key, w, k20);
         for (u32 t = 0; t < core->mTrackCount; t++) {
@@ -298,11 +1538,19 @@ u32 MemoKey(ModelManager* mm, J3DModel* model, u32* key, const f32* frames = nul
         // (GXV_PAR_ANIM_CB: which callback, on which joint, through which controller, with which inputs)
         key[w++] = 0xCB000000u | (static_cast< u32 >(cbFound.kind) << 16) | cbFound.joint;
         KeyP(key, w, cbFound.ctl);
-        KeyF(key, w, cbFound.scale.x);
-        KeyF(key, w, cbFound.scale.y);
-        KeyF(key, w, cbFound.scale.z);
+        if (cbFound.kind == 2) {
+            // (GXV_PAR_ANIM_CB2: KoteBug::calcJoint's one input, the posture)
+            KeyF(key, w, cbFound.quat[0]);
+            KeyF(key, w, cbFound.quat[1]);
+            KeyF(key, w, cbFound.quat[2]);
+            KeyF(key, w, cbFound.quat[3]);
+        } else {
+            KeyF(key, w, cbFound.scale.x);
+            KeyF(key, w, cbFound.scale.y);
+            KeyF(key, w, cbFound.scale.z);
+        }
     }
-    return w;  // (at most 2 + 1 + 3 + 12 + 1 + 4 + 3 * 8 + 1 + 5 = 53 < kMemoKeyMax)
+    return w;  // (at most 2 + 1 + 3 + 12 + 1 + 4 + 3 * 8 + 1 + 6 = 54 < kMemoKeyMax)
 }
 // The bytes the joint computation writes into the buffer: anm matrices, envelopes and both scale flag arrays.
 u32 MemoSnapBytes(J3DMtxBuffer* buf) {
@@ -576,7 +1824,7 @@ static bool PortAnimMemoCalc(ModelManager* mm) {
     if (sameKey && memo->snapValid && MemoSame(buf, memo->snap)) {
         MemoPrologue(model);
 #if PORT_LOGGING
-        if (port_anim_prof_on()) {
+        if (::port::gt71::AnimProfOn()) {
             port_anim_prof_count(1);
         }
 #endif
@@ -849,6 +2097,9 @@ extern "C" void port_par_view_end(void) {
     sParRecording = false;
     if (sParAsyncRecording) {
         sParAsyncRecording = false;
+        if (port_draw_prof_on()) {
+            port_draw_prof_count(7, sParViewA.Count());  // (GXV_DRAW_PROF=2: the view jobs of the drawn turn's pass)
+        }
         if (sParViewA.Dispatch() == 0) {
             gPortParViewOpen = false;  // (nothing pending: every job ran in the walk)
             return;
@@ -882,6 +2133,11 @@ extern "C" void port_par_view_retire(void) {
     if (port_par_verify_on()) {
         ParVerifyAfter(sParViewA, true);
     }
+}
+// GXV_PAR_DL (gamedraw23): the game thread waits at the material lists' join; meanwhile it runs one view job the view worker has not
+// started (from the end). 0: none left (or no batch outstanding). The view worker shares the fourth core with the material-list worker.
+extern "C" int port_par_view_help_one(void) {
+    return gPortParViewAsync && sParViewA.HelpOne() ? 1 : 0;
 }
 // J3DModel::calc and ::viewCalc (J3DModel.cpp), while a batch is open or outstanding: a pending job of this buffer runs first.
 extern "C" void port_par_view_touch(void* buf) {
@@ -936,7 +2192,12 @@ extern "C" void port_par_view_touch_out(const void* out) {
 // GXV_PAR_ANIM_VERIFY=1 (diagnostic): a hit also runs the original, and compares it with the worker's result (xspec::Compare).
 #include "Game/Animation/XanimeSpecWalk.hpp"
 #include "port/par_spec.h"  // (the job states; NowUs)
+#include "port/par_plant.h"  // (GXV_PAR_PLANT: a plant job's phase)
+#include "port/view_cone.h"  // (GXV_PAR_PLANT: the plants the flush leaves out as off-screen get no job)
 #include "Game/NPC/NPCActor.hpp"                // (GXV_PAR_ANIM_CB: NPCActor::calcJointScale)
+#include "Game/Enemy/KoteBug.hpp"               // (GXV_PAR_ANIM_CB2, gamecpu23: KoteBug::calcJoint)
+#include "Game/Enemy/AnimStampController.hpp"
+#include "Game/Util/ActorMovementUtil.hpp"
 #include "Game/Enemy/AnimScaleController.hpp"
 #include "Game/Util/JointController.hpp"
 #include <atomic>
@@ -952,11 +2213,20 @@ extern "C" void port_par_anim_quiesce(void);
 extern "C" int port_par_anim_claim(void* item);
 extern "C" void port_par_anim_note(const unsigned* counts, unsigned n);
 extern "C" int port_j3d_basic_calc_kind(const J3DMtxCalc* calc);
+extern "C" int port_par_anim_why_on(void);     // (GXV_PAR_ANIM_WHY, game24: perf.cpp)
 extern "C" int port_par_anim_blend_on(void);   // (GXV_PAR_ANIM_BLEND, par2: perf.cpp)
 extern "C" int port_par_anim_cb_on(void);      // (GXV_PAR_ANIM_CB, par2: perf.cpp)
-extern "C" int port_par_late_on(void);         // (GXV_PAR_LATE, par2: perf.cpp)
+extern "C" int port_par_late_on(void);         // (GXV_PAR_LATE, par2: perf.cpp; 2 = heavy models only, gamecpu23)
+extern "C" unsigned port_par_late_min(void);   // (GXV_PAR_LATE=2: joints + envelopes a model needs, perf.cpp)
+extern "C" int port_par_anim_cb2_on(void);     // (GXV_PAR_ANIM_CB2, gamecpu23: perf.cpp)
 bool port_predict_default_base(const LiveActor* a, MtxPtr out);  // (LiveActor.cpp: LiveActor::calcAndSetBaseMtx's matrix, not set)
 extern "C" int port_par_flush_on(void);        // (GXV_PAR_FLUSH, par2: perf.cpp)
+extern "C" int port_par_plant_on(void);        // (GXV_PAR_PLANT, revisit23: perf.cpp)
+extern "C" int port_par_plant_early_mode(void);  // (GXV_PAR_PLANT_EARLY, parplant23: perf.cpp)
+extern "C" int port_par_plant_take_on(void);     // (GXV_PAR_PLANT_TAKE, parplant23: perf.cpp)
+extern "C" int port_turn_skipped_raw(void);      // (perf.cpp: this turn makes no picture)
+bool port_flush_plant_cone(port::viewcone::Cone* cone);           // (LiveActor.cpp: GXV_FLUSH_OFFSCREEN's view pyramid of this picture)
+bool port_flush_plant_off(const port::viewcone::Cone& cone, LiveActor* a);  // (LiveActor.cpp: the flush will leave it out as off-screen)
 extern "C" int port_par_flush_run(void (*fn)(void*, unsigned), void* ctx, void* items, unsigned n);
 extern "C" void port_par_flush_quiesce(void);
 extern "C" int port_par_flush_try_quiesce(void);
@@ -996,8 +2266,14 @@ struct ParAnimJob {
     u16 envNum;
     u32 keyWords;
     u32 item;  // (GXV_PAR_FLUSH) its state's index (the worker goes from the end of the flush list)
+    u8 plant;  // (GXV_PAR_PLANT) made by the worker from plantActor's live state (port/par_plant.h); built: it was (key and inputs valid)
+    u8 built;
+    u8 refuse;  // (GXV_PAR_PLANT, parplant23) why the worker made no job of it: kPlRefuse* (0 made, or not tried)
+    LiveActor* plantActor;
     u32 key[kParKeyMax];
 };
+// (parplant23) the worker's refusal codes in ParAnimJob::refuse
+enum { kPlRefuseNone, kPlRefuseKey, kPlRefuseMemo, kPlRefuseQualify, kPlRefuseArena, kPlRefuseOther, kPlRefuseSoft };
 // A scratch store (bump allocated, emptied when its batch is made again).
 struct ParArena {
     u8* base;
@@ -1125,10 +2401,40 @@ namespace {
 // (GXV_PAR_ANIM_CB) ctl, the user data of a joint whose callback is (or will be) JointController::staticCallBack, is NPCActor's scale
 // delegator for this model: the callback the walk performs (kind 1), with its input now. joint: null for a prediction (the joint is
 // the record's); else the joint must carry staticCallBack and ctl.
-bool ParRecogniseCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* out) {
-    if (!port_par_anim_cb_on() || ctl == nullptr || (joint != nullptr && (joint->getCallBack() != &JointController::staticCallBack || joint->mCallBackUserData != ctl)) ||
-        *reinterpret_cast< const void* const* >(ctl) != NpcDelegatorVtable()) {
+// (GXV_PAR_ANIM_CB2, gamecpu23) the vtable of JointControlDelegator< KoteBug >.
+const void* KoteDelegatorVtable() {
+    alignas(JointControlDelegator< KoteBug >) static unsigned char sProbe[sizeof(JointControlDelegator< KoteBug >)];
+    static const void* const vt = *reinterpret_cast< const void* const* >(new (sProbe) JointControlDelegator< KoteBug >(static_cast< KoteBug* >(nullptr),
+                                                       static_cast< JointControlDelegator< KoteBug >::func >(nullptr),
+                                                       static_cast< JointControlDelegator< KoteBug >::func >(nullptr)));
+    return vt;
+}
+// (GXV_PAR_ANIM_CB2) ctl is KoteBug's posture delegator for this model (MR::createJointDelegatorWithNullChildFunc(this, &KoteBug::calcJoint,
+// "Center")): kind 2, its input the host's posture now.
+bool ParRecogniseKoteCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* out) {
+    if (!port_par_anim_cb2_on() || *reinterpret_cast< const void* const* >(ctl) != KoteDelegatorVtable()) {
         return false;
+    }
+    const JointControlDelegator< KoteBug >* d = static_cast< const JointControlDelegator< KoteBug >* >(static_cast< const JointController* >(ctl));
+    if (d->mMtxCalcFunc != &KoteBug::calcJoint || d->mMtxCalcAfterChildFunc != nullptr || d->mModel != model || d->mHost == nullptr ||
+        (joint != nullptr && d->mJoint != joint)) {
+        return false;
+    }
+    out->kind = 2;
+    out->ctl = ctl;
+    out->host = static_cast< const LiveActor* >(d->mHost);
+    out->quat[0] = d->mHost->mPosture.x;
+    out->quat[1] = d->mHost->mPosture.y;
+    out->quat[2] = d->mHost->mPosture.z;
+    out->quat[3] = d->mHost->mPosture.w;
+    return true;
+}
+bool ParRecogniseCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* out) {
+    if (!port_par_anim_cb_on() || ctl == nullptr || (joint != nullptr && (joint->getCallBack() != &JointController::staticCallBack || joint->mCallBackUserData != ctl))) {
+        return false;
+    }
+    if (*reinterpret_cast< const void* const* >(ctl) != NpcDelegatorVtable()) {
+        return ParRecogniseKoteCb(model, joint, ctl, out);
     }
     const JointControlDelegator< NPCActor >* d = static_cast< const JointControlDelegator< NPCActor >* >(static_cast< const JointController* >(ctl));
     if (d->mMtxCalcFunc != &NPCActor::calcJointScale || d->mMtxCalcAfterChildFunc != nullptr || d->mModel != model || d->mHost == nullptr ||
@@ -1137,6 +2443,7 @@ bool ParRecogniseCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* ou
     }
     out->kind = 1;
     out->ctl = ctl;
+    out->host = static_cast< const LiveActor* >(d->mHost);
     out->scale = d->mHost->mScaleController->_C;
     return true;
 }
@@ -1144,8 +2451,10 @@ bool ParRecogniseCb(J3DModel* model, J3DJoint* joint, const void* ctl, ParCb* ou
 // (GXV_PAR_ANIM_BLEND) blend: pred holds the core's _1C, _20, _29 at the computation (MemoKey has let a blend state through only then);
 // *needPrev: the walk reads the core's joint state (a blend state, track 0 without a resource, a total weight of 0): the caller gives
 // the job Input::prev. scale: the base scale the computation will have (null: the model's now).
+// (GXV_PAR_PLANT) workerSide: made on the flush worker: no global is read (a Softimage init, whose walk reads J3DSys::mParentS, which the
+// game thread's computations write, does not qualify there).
 bool ParQualify(ParAnimRec* rec, J3DModel* model, XanimeCore* core, const f32* frames, xspec::Input& in, J3DMtxCalc** basicOut,
-                const KeyBlend* pred = nullptr, bool* needPrev = nullptr, const Vec* scale = nullptr) {
+                const KeyBlend* pred = nullptr, bool* needPrev = nullptr, const Vec* scale = nullptr, bool workerSide = false) {
     bool prev = pred != nullptr && (pred->b29 != 0 || pred->b1C < 1.0f || pred->b20 != 1.0f);
     J3DModelData* data = model->getModelData();
     J3DMtxBuffer* buf = model->getMtxBuffer();
@@ -1161,7 +2470,7 @@ bool ParQualify(ParAnimRec* rec, J3DModel* model, XanimeCore* core, const f32* f
     }
     J3DMtxCalc* basic = data->getJointTree().getBasicMtxCalc();
     const int kind = port_j3d_basic_calc_kind(basic);
-    if (kind < 0) {
+    if (kind < 0 || (workerSide && kind == xspec::kInitSoftimage)) {
         return false;
     }
     // (calcSingle reads the core's own state when track 0 has no resource, calcBlend when the total weight is 0)
@@ -1218,7 +2527,11 @@ bool ParQualify(ParAnimRec* rec, J3DModel* model, XanimeCore* core, const f32* f
     in.freeze29 = pred != nullptr ? pred->b29 : 0;
     in.scale = scale != nullptr ? *scale : model->mBaseScale;
     PSMTXCopy(model->mBaseTransformMtx, in.base);
-    in.parentS = J3DSys::mParentS;
+    if (workerSide) {
+        in.parentS.x = in.parentS.y = in.parentS.z = 0.0f;  // (not read by the walk of the other inits: they set it)
+    } else {
+        in.parentS = J3DSys::mParentS;
+    }
     in.prev = nullptr;  // (set by ParBuild when *needPrev)
     in.cbKind = 0;      // (set by ParBuild: GXV_PAR_ANIM_CB)
     if (needPrev != nullptr) {
@@ -1315,8 +2628,17 @@ u32 ParKeyTail(int kind, u32* key, u32 w) {
 // of the model says the memo will keep it (no job is worth making).
 // (GXV_PAR_LATE) late: the job is for this turn's calc-anim (port_par_late_prepare): update() is over; flushActor is then the actor,
 // and base the predicted base matrix (null: the model's now). 3 is returned when par-anim's own job for the model has this very key.
-int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flushActor = nullptr, bool late = false, const f32 (*base)[4] = nullptr) {
+// (GXV_PAR_PLANT) workerSide: made by the flush worker from the plant's live state (port_par_plant_own keeps the game thread off it):
+// no joint scan of the shared model data, no callback, no global (ParQualify); the take at the real computation checks as always.
+int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flushActor = nullptr, bool late = false, const f32 (*base)[4] = nullptr,
+             const Vec* scaleOverride = nullptr, bool workerSide = false) {
     ModelManager* mm = rec->mm;
+    if (workerSide) {
+        job.refuse = kPlRefuseOther;  // (parplant23: the reason, for the par-plant line; kPlRefuseNone once made)
+    }
+    if (workerSide && (rec->cbKind != 0 || late || base != nullptr || scaleOverride != nullptr)) {
+        return 0;
+    }
     J3DModel* model = mm->getJ3DModel();
     XanimePlayer* player = mm->mXanimePlayer;
     if (model == nullptr || player == nullptr || player->mCore == nullptr || player->_20 == nullptr ||
@@ -1330,7 +2652,7 @@ int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flush
     if (blend) {
         ParPredictBlend(player, rec->owner, flushActor != nullptr, pb);
     }
-    const Vec* scale = flushActor != nullptr ? static_cast< const Vec* >(&flushActor->mScale) : nullptr;
+    const Vec* scale = scaleOverride != nullptr ? scaleOverride : flushActor != nullptr ? static_cast< const Vec* >(&flushActor->mScale) : nullptr;
     // (GXV_PAR_ANIM_CB: the callback the record's last computation had, if its controller is still the same kind for this model)
     ParCb cb;
     cb.kind = 0;
@@ -1338,14 +2660,17 @@ int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flush
     if (cbMode && rec->cbKind != 0 && rec->cbJoint < model->getModelData()->getJointNum() &&
         ParRecogniseCb(model, nullptr, rec->cbCtl, &cb) &&
         static_cast< const JointController* >(rec->cbCtl)->mJoint == model->getModelData()->getJointNodePointer(rec->cbJoint) &&
-        static_cast< const LiveActor* >(static_cast< const JointControlDelegator< NPCActor >* >(static_cast< const JointController* >(rec->cbCtl))->mHost) == rec->owner) {
+        static_cast< const LiveActor* >(cb.host) == rec->owner) {
         cb.joint = rec->cbJoint;
     } else {
         cb.kind = 0;
     }
-    ParOverride ov = {scale, base, cbMode, &cb, nullptr};
+    ParOverride ov = {scale, base, cbMode, &cb, nullptr, workerSide};
     u32 words = MemoKey(mm, model, job.key, frames, blend, blend ? &pb : nullptr, &ov);
     if (words == 0) {
+        if (workerSide) {
+            job.refuse = kPlRefuseKey;
+        }
         return 0;
     }
     if (late && rec->jobBatch == sParBatch && rec->job >= 0 && static_cast< u32 >(rec->job) < sParJobCount && sParJobs[rec->job].rec == rec) {
@@ -1360,11 +2685,19 @@ int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flush
         // (the memo's key is the plain one: equal to this prediction, with its copy valid, the memo keeps the model at the flush)
         const AnimMemo* memo = static_cast< const AnimMemo* >(mm->mAnimMemo);
         if (memo->snapValid && memo->keyWords == words && memcmp(memo->key, job.key, words * sizeof(u32)) == 0) {
+            if (workerSide) {
+                job.refuse = kPlRefuseMemo;
+            }
             return 2;
         }
     }
     bool needPrev = false;
-    if (!ParQualify(rec, model, player->mCore, frames, job.in, &job.basic, blend ? &pb : nullptr, &needPrev, scale)) {
+    if (!ParQualify(rec, model, player->mCore, frames, job.in, &job.basic, blend ? &pb : nullptr, &needPrev, scale, workerSide)) {
+        if (workerSide) {
+            job.refuse = port_j3d_basic_calc_kind(model->getModelData()->getJointTree().getBasicMtxCalc()) == xspec::kInitSoftimage
+                             ? kPlRefuseSoft
+                             : kPlRefuseQualify;
+        }
         return 0;
     }
     if (base != nullptr) {
@@ -1374,6 +2707,7 @@ int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flush
         job.in.cbKind = cb.kind;
         job.in.cbJoint = cb.joint;
         job.in.cbScale = cb.scale;
+        memcpy(job.in.cbQuat, cb.quat, sizeof(job.in.cbQuat));  // (kind 2, GXV_PAR_ANIM_CB2)
     }
     words = ParKeyTail(job.in.initKind, job.key, words);
     const u16 n = job.in.jointNum;
@@ -1390,17 +2724,25 @@ int ParBuild(ParAnimRec* rec, ParAnimJob& job, ParArena& arena, LiveActor* flush
     if (job.out.anm == nullptr || job.out.scaleFlag == nullptr || (needPrev ? (job.out.full == nullptr || prev == nullptr) : job.out.joint == nullptr) ||
         (e != 0 && (job.out.env == nullptr || job.out.envScale == nullptr))) {
         arena.used = save;
+        if (workerSide) {
+            job.refuse = kPlRefuseArena;
+        }
         return 0;
     }
     if (needPrev) {
         xspec::TakePrev(player->mCore, n, prev);  // (compared again at the real computation: xspec::SamePrev)
         job.in.prev = prev;
     }
-    job.rec = rec;
+    if (!workerSide) {
+        job.rec = rec;  // (GXV_PAR_PLANT: the prepare set it, and the game thread may read it while the worker is here)
+    }
     job.keyWords = words;
     job.envNum = e;
     job.us = 0;
     job.ok = 0;
+    if (workerSide) {
+        job.refuse = kPlRefuseNone;
+    }
     return true;
 }
 void ParAnimItem(void* ctx, unsigned i) {
@@ -1429,8 +2771,30 @@ u32 sFlCap = 0, sFlCount = 0, sFlGen = 1;
 bool sFlOpen = false, sFlInitTried = false;
 bool sFlLate = false;  // (GXV_PAR_LATE: the open batch is calc-anim's, not the flush's; the same arrays and worker)
 enum { kFlBuilt, kFlHit, kFlMiss, kFlNotReady, kFlBusy, kFlSavedUs, kFlHitUs, kFlBuildUs, kFlCovered, kFlMemo, kFlUnqual, kFlQuiet, kFlVerified,
-       kFlVerifyBad, kFlDeferred, kFlCount };
+       kFlVerifyBad, kFlDeferred,
+       // (GXV_PAR_PLANT) plant jobs listed, built by the worker, reached first by the game thread (never built), waits for a build in progress,
+       // their time (us), plants left out of the batch as off-screen (GXV_FLUSH_OFFSCREEN leaves them out of the flush)
+       kFlPlant, kFlPlBuilt, kFlPlGameFirst, kFlPlWaits, kFlPlWaitUs, kFlPlOff,
+       // (parplant23) plants the listing saw (computed by the flush); plants not listed: covered by par-anim's batch, quiet; deferred
+       // models with no record (the record store full); the worker's refusals: the memo keeps it, it does not qualify (key / walk), a
+       // Softimage init (J3DSys::mParentS is not the worker's to read), the scratch store full; early batches (GXV_PAR_PLANT_EARLY): made,
+       // ended unused before an update(), jobs built in those; timing: plant batches, the worker's first plant job (us after the listing,
+       // batches with one), the game thread's first plant (us after the listing, batches with one)
+       kFlPlSeen, kFlPlCovered, kFlPlQuiet, kFlNoRec, kFlPlMemo, kFlPlRefused, kFlPlSoft, kFlPlArena, kFlEarly, kFlEarlyCancel, kFlPlWasted,
+       kFlPlBatches, kFlPlWorkerUs, kFlPlWorkerN, kFlPlGameUs, kFlPlGameN, kFlCount };
+std::atomic< uint8_t >* sPlPhase = nullptr;  // (GXV_PAR_PLANT) a plant job's phase: port/par_plant.h
+bool sPlBatch = false;                       // the open flush batch has plant jobs
+u32 sPlPause = 0;                            // pictures left without plant jobs after a long wait for a build
+u32 sPlWaitMax = 0;
 unsigned sFlCounts[kFlCount];
+// (GXV_PAR_PLANT_EARLY, parplant23; port/par_plant.h PlantTurns) the open flush batch was listed at the end of the last turn, for the
+// drawn turn that follows; the counts as they were before that listing (an early batch ended unused gives its listing back)
+bool sFlEarly = false;
+unsigned sFlEarlySnap[kFlCount];
+port::par::PlantTurns sPlTurns;
+uint64_t sFlListUs = 0;      // (the listing's time: the timing fields of the par-plant line)
+u32 sPlWorkerFirstUs = 0;    // (written by the worker in a batch, read by the game thread after the batch: us after the listing + 1)
+bool sPlGameSeen = false;
 bool FlushInit() {
     if (sFlJobs != nullptr) {
         return true;
@@ -1443,10 +2807,13 @@ bool FlushInit() {
     sFlArena.size = port_par_anim_kb() * 1024u;
     sFlJobs = static_cast< ParAnimJob* >(malloc(sizeof(ParAnimJob) * sFlCap));
     sFlItems = static_cast< std::atomic< uint8_t >* >(malloc(sizeof(std::atomic< uint8_t >) * sFlCap));
+    sPlPhase = static_cast< std::atomic< uint8_t >* >(malloc(sizeof(std::atomic< uint8_t >) * sFlCap));
     sFlArena.base = static_cast< u8* >(malloc(sFlArena.size));
-    if (sFlJobs == nullptr || sFlItems == nullptr || sFlArena.base == nullptr) {
+    if (sFlJobs == nullptr || sFlItems == nullptr || sPlPhase == nullptr || sFlArena.base == nullptr) {
         free(sFlJobs);
         free(sFlItems);
+        free(sPlPhase);
+        sPlPhase = nullptr;
         free(sFlArena.base);
         sFlJobs = nullptr;
         port_log_summary("par-flush: no memory for GXV_PAR_FLUSH (%u jobs, %u KiB): off", sFlCap, port_par_anim_kb());
@@ -1454,19 +2821,39 @@ bool FlushInit() {
     }
     for (u32 i = 0; i < sFlCap; ++i) {
         new (&sFlItems[i]) std::atomic< uint8_t >(port::par::kJobTaken);
+        new (&sPlPhase[i]) std::atomic< uint8_t >(port::par::kPlGame);
+        sFlJobs[i].plant = 0;
+        sFlJobs[i].built = 0;
     }
     return true;
 }
 void ParFlushItem(void* ctx, unsigned i) {
     // (item i is the (n-1-i)th job: the worker starts at the end of the flush list)
-    ParAnimItem(ctx, sFlCount - 1u - i);
+    const u32 j = sFlCount - 1u - i;
+    ParAnimJob& job = sFlJobs[j];
+    if (job.plant) {
+        // (GXV_PAR_PLANT: the job is made here, from the plant's live state, unless the game thread has reached the plant already)
+        if (!port::par::PlantWorkerBegin(sPlPhase[j])) {
+            return;  // (built stays 0: the game thread computes it)
+        }
+        if (sPlWorkerFirstUs == 0) {
+            sPlWorkerFirstUs = static_cast< u32 >(port::par::NowUs() - sFlListUs) + 1u;  // (read by the game thread after the batch)
+        }
+        job.ok = 0;
+        job.built = ParBuild(job.rec, job, sFlArena, job.plantActor, false, nullptr, nullptr, true) == 1 ? 1 : 0;
+        port::par::PlantWorkerBuilt(sPlPhase[j]);  // (from here on only the job is read: the game thread may write the plant again)
+        if (!job.built) {
+            return;
+        }
+    }
+    ParAnimItem(ctx, j);
 }
 
 enum TakeResult { kTakeHit, kTakeMiss, kTakeNotReady, kTakeBusy };
 // A job's result at the model's real computation (par-anim's or the flush's): kTakeHit: the joints are in, as J3DModel::calc would
 // leave them (or, with GXV_PAR_ANIM_VERIFY, the original ran and was compared); otherwise the caller computes as before.
 TakeResult ParTakeJob(ParAnimJob& job, std::atomic< uint8_t >& item, ModelManager* mm, J3DModel* model, const u32* key, u32 words, unsigned* verified,
-                      unsigned* verifyBad, const char* what) {
+                      unsigned* verifyBad, const char* what, bool verify) {
     u32 real[kParKeyMax];
     memcpy(real, key, words * sizeof(u32));
     const u32 realWords = ParKeyTail(job.in.initKind, real, words);
@@ -1483,7 +2870,7 @@ TakeResult ParTakeJob(ParAnimJob& job, std::atomic< uint8_t >& item, ModelManage
     if (claim != 0 || !job.ok) {
         return claim == 2 ? kTakeBusy : kTakeNotReady;
     }
-    if (port_par_anim_verify_on()) {
+    if (verify) {
         // The original, then the worker's result against what it wrote (and the state it left).
         model->calc();
         const u32 bad = xspec::Compare(job.out, job.in.jointNum, job.envNum, job.in.doEnv != 0, buf, core, job.basic);
@@ -1548,7 +2935,23 @@ static bool PortParAnimTake(ModelManager* mm, J3DModel* model, const u32* key, u
         ParAnimJob& job = sFlJobs[rec->flushJob];
         rec->flushJob = -1;  // (consulted once)
         const uint64_t t0 = port::par::NowUs();
-        const TakeResult r = ParTakeJob(job, sFlItems[job.item], mm, model, key, words, &sFlCounts[kFlVerified], &sFlCounts[kFlVerifyBad], "par-flush");
+        TakeResult r;
+        if (job.plant) {
+            // (GXV_PAR_PLANT: the flush has taken the plant's state from the worker already, port_par_plant_own; again here for safety)
+            uint64_t waited = 0;
+            const uint8_t ph = port::par::PlantGameOwn(sPlPhase[static_cast< u32 >(&job - sFlJobs)], &waited);
+            if (ph != port::par::kPlBuilt || !job.built) {
+                uint8_t v = port::par::kJobPending;
+                sFlItems[job.item].compare_exchange_strong(v, port::par::kJobTaken, std::memory_order_acq_rel);
+                r = kTakeNotReady;
+            } else {
+                r = ParTakeJob(job, sFlItems[job.item], mm, model, key, words, &sFlCounts[kFlVerified], &sFlCounts[kFlVerifyBad], "par-plant",
+                               port_par_anim_verify_on() || port_par_plant_on() == 2);
+            }
+        } else {
+            r = ParTakeJob(job, sFlItems[job.item], mm, model, key, words, &sFlCounts[kFlVerified], &sFlCounts[kFlVerifyBad], "par-flush",
+                           port_par_anim_verify_on() != 0);
+        }
         if (r == kTakeHit) {
             rec->flushMiss = 0;
             rec->lateMiss = 0;
@@ -1585,7 +2988,8 @@ static bool PortParAnimTake(ModelManager* mm, J3DModel* model, const u32* key, u
     }
     rec->consulted = 1;  // (GXV_PAR_ANIM_LEAN: hit or miss, the job was looked at)
     const uint64_t t0 = port::par::NowUs();
-    const TakeResult r = ParTakeJob(job, item, mm, model, key, words, &sParCounts[kPaVerified], &sParCounts[kPaVerifyBad], "par-anim");
+    const TakeResult r = ParTakeJob(job, item, mm, model, key, words, &sParCounts[kPaVerified], &sParCounts[kPaVerifyBad], "par-anim",
+                                    port_par_anim_verify_on() != 0);
     if (r == kTakeMiss) {
         ++sParCounts[kPaMiss];
         if (++rec->misses >= 4) {
@@ -1607,6 +3011,83 @@ static bool PortParAnimTake(ModelManager* mm, J3DModel* model, const u32* key, u
     return true;
 }
 // ModelManager::calc for a model GXV_ANIM_MEMO did not take (off, or its store full): GXV_PAR_ANIM on its own.
+// GXV_PAR_ANIM_WHY (game24, 10 Nov; default 0; a census, changes nothing): which models the game thread computes in full in calc-anim (neither the memo
+// nor GXV_PAR_ANIM took them), why (the first test in MemoKey's / ParQualify's order that refuses), what that costs (the model's calc() timed), and
+// the top actors. One line per ~5 s: "par-anim-why". The reason is found by the same tests on the refusal path, so it is an exact classification for
+// the first nine kinds and the order of ParQualify's for the rest; "13" is a model both would take that was still computed here (a miss, a limit).
+namespace {
+enum { kPwAll, kPwNoBuf, kPwCalcCb, kPwDeform, kPwCpuSkin, kPwList, kPwBlend, kPwJointCb, kPwJointCalc, kPwQualVt, kPwTree, kPwTrack, kPwKind, kPwTaken, kPwNoAnm, kPwN };
+const char* const kPwName[kPwN] = {"all", "no joint buffer/tree mismatch", "model calc callback", "deformer/skin deform/vtx colour/unk calc", "cpu skin",
+                                   "transform list / mode _6 / tracks > 8", "blend (BLEND off)", "joint callback (not recognised / CB off)",
+                                   "joint calc other than the core", "model vtable / flag / core fields", "tree not rooted at joint 0",
+                                   "non-BCK track / weight 0", "basic calc kind", "qualified, not taken (miss / limit / switch)", "no XanimePlayer (static pose)"};
+struct PwRow { char name[28]; u32 n; u64 ns; u8 why; };
+struct PwState { u32 n[kPwN]; u64 ns[kPwN]; PwRow top[40]; int nTop; int64_t t0; u32 calls; };
+PwState sPw;
+int PwClassify(ModelManager* mm, J3DModel* model) {
+    J3DModelData* data = model->getModelData();
+    J3DMtxBuffer* buf = model->getMtxBuffer();
+    if (data == nullptr || buf == nullptr || buf->mJointTree == nullptr) return kPwNoBuf;
+    if (model->mCalcCallBack != nullptr) return kPwCalcCb;
+    if (model->mDeformData != nullptr || model->mSkinDeform != nullptr || model->mVtxColorCalc != nullptr || model->mUnkCalc1 != nullptr || model->mUnkCalc2 != nullptr) return kPwDeform;
+    if (model->checkFlag(J3DMdlFlag_SkinPosCpu) || model->checkFlag(J3DMdlFlag_SkinNrmCpu)) return kPwCpuSkin;
+    const u16 jointNum = data->getJointNum();
+    if (jointNum == 0 || buf->mJointTree->getJointNum() != jointNum || buf->mJointTree->getWEvlpMtxNum() != data->getWEvlpMtxNum() || buf->mpAnmMtx == nullptr || buf->mpScaleFlagArr == nullptr) return kPwNoBuf;
+    XanimeCore* core = nullptr;
+    if (mm->mXanimePlayer != nullptr) {
+        core = mm->mXanimePlayer->mCore;
+        if (core == nullptr || core->mTransformList != nullptr || (core->_6 != 0 && core->_6 != 3) || core->mTrackCount > 8) return kPwList;
+        if ((core->_29 != 0 || core->_1C < 1.0f || core->_20 != 1.0f) && port_par_anim_blend_on() == 0) return kPwBlend;
+    }
+    for (u16 i = 0; i < jointNum; i++) {
+        J3DJoint* joint = data->getJointNodePointer(i);
+        if (joint->getCallBack() != nullptr) return kPwJointCb;
+        if (joint->getMtxCalc() != (i == 0 ? static_cast< J3DMtxCalc* >(core) : nullptr)) return kPwJointCalc;
+    }
+    if (core == nullptr) return kPwNoAnm;
+    if (*reinterpret_cast< const void* const* >(model) != PlainJ3DModelVtable() || core->mTrackCount == 0 || core->_4 > 2 || model->checkFlag(J3DMdlFlag_UseDefaultJ3D) ||
+        core->mJointList == nullptr || core->mJointCount < jointNum) return kPwQualVt;
+    if (!ParTreeOk(data->getJointTree())) return kPwTree;
+    const void* keyVt = AnmKeyVtable();
+    for (s32 i = 0; i < core->mTrackCount; i++) {
+        const XanimeTrack& t = core->mTrackList[i];
+        if (t._0 != nullptr && (core->mTrackCount == 1 || t.mWeight != 0.0f) && *reinterpret_cast< const void* const* >(t._0) != keyVt) return kPwTrack;
+    }
+    if (port_j3d_basic_calc_kind(data->getJointTree().getBasicMtxCalc()) < 0) return kPwKind;
+    return kPwTaken;
+}
+void PwRecord(ModelManager* mm, J3DModel* model, u64 ns) {
+    const int why = PwClassify(mm, model);
+    ++sPw.n[kPwAll]; sPw.ns[kPwAll] += ns; ++sPw.n[why]; sPw.ns[why] += ns;
+    const LiveActor* a = gPortCalcAnimOwner != nullptr && gPortCalcAnimOwner->mModelManager == mm ? gPortCalcAnimOwner : nullptr;
+    const char* nm = a != nullptr ? a->getName() : "?";
+    int k = 0;
+    for (; k < sPw.nTop; ++k) if (sPw.top[k].why == why && strncmp(sPw.top[k].name, nm, sizeof sPw.top[k].name - 1) == 0) break;
+    if (k == sPw.nTop) {
+        if (sPw.nTop == 40) return;
+        PwRow& r = sPw.top[sPw.nTop++];
+        strncpy(r.name, nm, sizeof r.name - 1); r.name[sizeof r.name - 1] = 0; r.n = 0; r.ns = 0; r.why = static_cast< u8 >(why);
+    }
+    ++sPw.top[k].n; sPw.top[k].ns += ns;
+    const int64_t now = port_host_time_ns();
+    if (sPw.t0 == 0) sPw.t0 = now;
+    if (now - sPw.t0 >= 5000000000ll) {
+        const double secs = (now - sPw.t0) * 1e-9;
+        char line[900]; int o = snprintf(line, sizeof line, "par-anim-why: %.1f s, game-thread full computations %.1f a second, %.3f ms of a second (timed calc(); no memo, no par-anim):", secs, sPw.n[kPwAll] / secs, sPw.ns[kPwAll] * 1e-6 / secs);
+        for (int w = 1; w < kPwN; ++w) if (sPw.n[w] != 0 && o < 700) o += snprintf(line + o, sizeof line - o, " [%s: %.1f/s %.3f ms/s]", kPwName[w], sPw.n[w] / secs, sPw.ns[w] * 1e-6 / secs);
+        port_log_summary("%s", line);
+        for (int pass = 0; pass < 8; ++pass) {  // the 8 most expensive (actor, reason) rows
+            int best = -1;
+            for (int q = 0; q < sPw.nTop; ++q) if (sPw.top[q].n != 0 && (best < 0 || sPw.top[q].ns > sPw.top[best].ns)) best = q;
+            if (best < 0) break;
+            port_log_summary("par-anim-why:   %-26s %6.1f/s %.3f ms/s  (%s)", sPw.top[best].name, sPw.top[best].n / secs, sPw.top[best].ns * 1e-6 / secs, kPwName[sPw.top[best].why]);
+            sPw.top[best].n = 0;
+        }
+        memset(&sPw, 0, sizeof sPw);
+        sPw.t0 = now;
+    }
+}
+}  // namespace
 static bool PortParAnimCalc(ModelManager* mm) {
     if (!port_par_anim_on() || !port_on_frame_thread()) {
         return false;
@@ -1644,6 +3125,16 @@ extern "C" void port_par_anim_dispatch(void) {
     sParArenaS.used = 0;
     sParJobCount = 0;
     port_live_actor_snapshot();
+    // (GXV_PAR_PLANT_TAKE, parplant23: a plant deferred to the next picture's flush gets its job from GXV_PAR_PLANT's worker, made there
+    // from its live state, instead of one made here on the game thread. 1: only when this turn's end lists the early batch (the next
+    // turn is predicted to draw: else this job is kept, in case the next turn draws after all); 2: always.)
+    bool plantTake = false;
+    if (port_par_plant_on() != 0 && sPlPause == 0) {
+        const int take = port_par_plant_take_on();
+        port::par::PlantTurns next = sPlTurns;
+        next.Note(port_turn_skipped_raw() == 0);
+        plantTake = take >= 2 || (take == 1 && next.NextDraws(port_par_plant_early_mode()));
+    }
     size_t keep = 0;
     for (size_t i = 0; i < sParList.size(); ++i) {
         ParAnimRec* rec = sParList[i];
@@ -1672,6 +3163,9 @@ extern "C" void port_par_anim_dispatch(void) {
         if (a->mFlag.mIsDead || a->mFlag.mIsClipped || a->mFlag.mIsNoCalcAnim || sParJobCount >= sParJobCap) {
             continue;
         }
+        if (plantTake && a->mStaleAnim && a->mLogicFreeJoints != 0) {
+            continue;  // (GXV_PAR_PLANT_TAKE: its next computation is the flush; GXV_PAR_PLANT makes that job)
+        }
         ParAnimJob& job = sParJobs[sParJobCount];
         if (ParBuild(rec, job, sParArenaS) != 1) {
             if (lean) {
@@ -1690,12 +3184,77 @@ extern "C" void port_par_anim_dispatch(void) {
     sParCounts[kPaDispatchUs] = static_cast< unsigned >(port::par::NowUs() - t0);
     port_par_anim_run(&ParAnimItem, sParJobs, sParItems, sParJobCount);
 }
-// GXV_PAR_FLUSH (above): the flush batch, made at the start of a drawn turn before the deferred draw-done wait (GameSystem::frameLoop),
-// from the actors port_anim_flush_stale is about to compute, in its order; the worker takes them from the end.
+// GXV_PAR_FLUSH (above): the flush batch, from the actors port_anim_flush_stale is about to compute, in its order; the worker takes them
+// from the end. Made at the start of a drawn turn before the deferred draw-done wait (GameSystem::frameLoop, port_par_flush_prepare), or,
+// with GXV_PAR_PLANT and GXV_PAR_PLANT_EARLY (parplant23), at the end of the turn before it (port_par_plant_turn_end).
+// WHY EARLY (parplant23, console 472-verify, Honeyhive: plants listed 18.1 a picture, made by the worker 0.0, reached first by the game
+// thread 17.7; the worker 0.002 ms a picture): listed at the drawn turn's start, the batch had no head start at all. The deferred draw-done
+// wait (GXV_DRAWDONE_DEFER=2, the default) is taken at the start of calc-anim (point 2), so port_gx_drawdone_settle(3) right after the
+// listing never waits, and port_anim_flush_stale begins at once; its list is in calc-anim order, and the plants defer in
+// CalcAnimType_MapObj, the second calc-anim list (CutBushModelObj: connectToSceneNoSilhouettedMapObjWeakLightNoMovement), so they are the
+// first entries the game thread reaches, within tens of microseconds of the semaphore signal that wakes the worker on the fourth core.
+// The worker's priority (one step above the game thread's, above par-anim's) and its wake are not the issue; the window is. At the end
+// of the turn before, everything the jobs read is final (no update() runs before the flush; LiveActor::calcViewAndEntry leaves stale
+// actors alone), and the worker has the retrace wait and the next turn's start.
 LiveActor* const* port_anim_stale_items(size_t* n);  // (LiveActor.cpp: the deferred actors, in the flush's order)
-extern "C" void port_par_flush_prepare(void) {
+// (parplant23) The plant jobs' tally once the worker is out of the batch: built, refused and why (a plant the memo keeps, or one that
+// does not qualify, is left out of the next listings for a while: its job could never be used), the worker's first job's time.
+static void PlantBatchTally(bool used) {
+    for (u32 j = 0; j < sFlCount; ++j) {
+        ParAnimJob& job = sFlJobs[j];
+        if (!job.plant) {
+            continue;
+        }
+        if (job.built) {
+            ++sFlCounts[used ? kFlPlBuilt : kFlPlWasted];
+        } else if (used) {
+            ParAnimRec* rec = job.rec;
+            switch (job.refuse) {
+            case kPlRefuseMemo:
+                ++sFlCounts[kFlPlMemo];
+                rec->flushQuiet = 8;  // (a still plant: the memo keeps it at the flush, no take ever reads a job)
+                break;
+            case kPlRefuseKey:
+            case kPlRefuseQualify:
+            case kPlRefuseOther:
+                ++sFlCounts[kFlPlRefused];
+                rec->flushQuiet = 16;
+                break;
+            case kPlRefuseSoft:
+                ++sFlCounts[kFlPlSoft];
+                rec->flushQuiet = 64;
+                break;
+            case kPlRefuseArena:
+                ++sFlCounts[kFlPlArena];
+                break;
+            default:
+                break;
+            }
+        }
+        job.plant = 0;
+    }
+    if (used && sPlWorkerFirstUs != 0) {
+        sFlCounts[kFlPlWorkerUs] += sPlWorkerFirstUs - 1u;
+        ++sFlCounts[kFlPlWorkerN];
+    }
+    sPlWorkerFirstUs = 0;
+}
+// The batch (both places): the deferred actors' jobs, listed (plants) or made (GXV_PAR_FLUSH's others), handed to the worker.
+static void FlushListAndRun(bool early) {
     sFlOpen = false;
-    if (!port_par_flush_on() || !port_par_anim_switch() || !port_on_frame_thread() || !ParInit() || !FlushInit()) {
+    sFlEarly = false;
+    sPlBatch = false;
+    // (GXV_PAR_PLANT, revisit23: the plants' jobs are made by the worker; the other deferred models' as before, with GXV_PAR_FLUSH)
+    const bool flushOn = port_par_flush_on() != 0;
+    bool plantOn = port_par_plant_on() != 0;
+    if (plantOn && sPlPause != 0) {
+        --sPlPause;
+        plantOn = false;
+    }
+    if (early && !plantOn) {
+        return;  // (GXV_PAR_FLUSH alone keeps its old place)
+    }
+    if ((!flushOn && !plantOn) || !port_par_anim_switch() || !port_on_frame_thread() || !ParInit() || !FlushInit()) {
         return;
     }
     size_t n = 0;
@@ -1705,6 +3264,9 @@ extern "C" void port_par_flush_prepare(void) {
     }
     const uint64_t t0 = port::par::NowUs();
     port_par_flush_quiesce();  // (the last flush batch's worker is out of it: its jobs and scratch can be made again)
+    if (early) {
+        memcpy(sFlEarlySnap, sFlCounts, sizeof(sFlCounts));  // (given back if the batch ends unused)
+    }
     ++sFlGen;
     if (sFlGen == 0) {
         sFlGen = 1;
@@ -1712,6 +3274,8 @@ extern "C" void port_par_flush_prepare(void) {
     sFlArena.used = 0;
     sFlCount = 0;
     port_live_actor_snapshot();
+    port::viewcone::Cone plantCone;
+    const bool plantCull = plantOn && port_flush_plant_cone(&plantCone);
     for (size_t i = 0; i < n && sFlCount < sFlCap; ++i) {
         LiveActor* a = list[i];
         // (port_anim_flush_stale's own tests: the actors it computes)
@@ -1720,22 +3284,61 @@ extern "C" void port_par_flush_prepare(void) {
             continue;
         }
         ++sFlCounts[kFlDeferred];
+        const bool isPlant = plantOn && a->mLogicFreeJoints != 0;
+        if (isPlant) {
+            ++sFlCounts[kFlPlSeen];
+        } else if (!flushOn) {
+            continue;  // (parplant23: GXV_PAR_PLANT alone: no record is made for a model that gets no job; the record store is not filled)
+        }
         ModelManager* mm = a->mModelManager;
         ParAnimRec* rec = ParRecord(mm, true);
         if (rec == nullptr) {
-            break;
+            ++sFlCounts[kFlNoRec];  // (the record store is full: this one is computed as before; the others still get their jobs)
+            continue;
         }
         rec->owner = a;
         if (rec->flushQuiet != 0) {
             --rec->flushQuiet;
-            ++sFlCounts[kFlQuiet];
+            ++sFlCounts[isPlant ? kFlPlQuiet : kFlQuiet];
             continue;
         }
         if (rec->jobBatch == sParBatch && rec->job >= 0 && static_cast< u32 >(rec->job) < sParJobCount && sParJobs[rec->job].rec == rec) {
-            ++sFlCounts[kFlCovered];  // (par-anim's batch has a job for it already)
+            ++sFlCounts[isPlant ? kFlPlCovered : kFlCovered];  // (par-anim's batch has a job for it already)
             continue;
         }
         ParAnimJob& job = sFlJobs[sFlCount];
+        if (isPlant) {
+            // GXV_PAR_PLANT: listed only; the worker makes the job from the plant's live state (ParFlushItem), the game thread keeps off that
+            // state until the job is made (port_par_plant_own). A plant with a joint callback or a tree the walk cannot take, or one the
+            // flush will leave out as off-screen, gets none.
+            if (rec->cbKind != 0 || rec->treeOk == 2) {
+                ++sFlCounts[kFlUnqual];
+                continue;
+            }
+            if (plantCull && port_flush_plant_off(plantCone, a)) {
+                ++sFlCounts[kFlPlOff];
+                continue;
+            }
+            job.rec = rec;
+            job.plant = 1;
+            job.built = 0;
+            job.refuse = kPlRefuseNone;
+            job.ok = 0;
+            job.plantActor = a;
+            sPlPhase[sFlCount].store(port::par::kPlFree, std::memory_order_relaxed);
+            rec->flushGen = sFlGen;
+            rec->flushJob = static_cast< s32 >(sFlCount);
+            ++sFlCount;
+            ++sFlCounts[kFlPlant];
+            sPlBatch = true;
+            continue;
+        }
+        if (!flushOn) {
+            continue;
+        }
+        job.plant = 0;
+        job.built = 1;
+        sPlPhase[sFlCount].store(port::par::kPlGame, std::memory_order_relaxed);
         const int b = ParBuild(rec, job, sFlArena, a);
         if (b != 1) {
             ++sFlCounts[b == 2 ? kFlMemo : kFlUnqual];
@@ -1753,10 +3356,68 @@ extern "C" void port_par_flush_prepare(void) {
     sFlCounts[kFlBuildUs] += static_cast< unsigned >(port::par::NowUs() - t0);
     if (sFlCount != 0) {
         sFlOpen = true;
+        sFlEarly = early;
+        if (early) {
+            ++sFlCounts[kFlEarly];
+        }
+        if (sPlBatch) {
+            ++sFlCounts[kFlPlBatches];
+        }
+        sPlWorkerFirstUs = 0;
+        sPlGameSeen = false;
+        sFlListUs = port::par::NowUs();  // (published to the worker by the dispatch's release store)
         if (!port_par_flush_run(&ParFlushItem, sFlJobs, sFlItems, sFlCount)) {
             // (no worker: the jobs stay pending and the game thread takes each one: the flush as before, plus the jobs' making)
         }
     }
+}
+// The start of a drawn turn (GameSystem::frameLoop, before the deferred draw-done wait): the batch, unless the end of the last turn
+// listed it already (GXV_PAR_PLANT_EARLY; nothing has run since but the frame's start).
+extern "C" void port_par_flush_prepare(void) {
+    if (sFlOpen && sFlEarly && !sFlLate) {
+        return;
+    }
+    FlushListAndRun(false);
+}
+// (GXV_PAR_PLANT_EARLY, parplant23) An open flush batch when the game's state is about to change (the start of GameSystem::update, the
+// start of calc-anim's GXV_PAR_LATE batch, the settings menu): only an early batch whose next turn did not draw (a skipped turn, the
+// fast-forward of a cutscene skip) is still open there. The worker may be making a plant's job from its live state: wait for the job it
+// is in (at most one), and give the batch's counts back (its work was for nothing; counted as ended unused).
+extern "C" void port_par_plant_close_early(void) {
+    if (sFlJobs == nullptr || !sFlOpen || sFlLate) {
+        return;
+    }
+    port_par_flush_quiesce();
+    const bool early = sFlEarly;
+    sFlOpen = false;
+    sFlEarly = false;
+    if (early) {
+        unsigned wasted = 0;
+        for (u32 j = 0; j < sFlCount; ++j) {
+            wasted += sFlJobs[j].plant && sFlJobs[j].built ? 1u : 0u;
+        }
+        memcpy(sFlCounts, sFlEarlySnap, sizeof(sFlCounts));
+        ++sFlCounts[kFlEarlyCancel];
+        sFlCounts[kFlPlWasted] += wasted;
+    }
+    for (u32 j = 0; j < sFlCount; ++j) {
+        sFlJobs[j].plant = 0;
+    }
+    sPlWorkerFirstUs = 0;
+    sPlBatch = false;
+}
+// (GXV_PAR_PLANT_EARLY) The end of every turn (GameSystem::frameLoop, before the retrace wait; drawn: the turn made a picture): if the
+// next turn is predicted to draw (port/par_plant.h PlantTurns), its flush batch is listed now.
+extern "C" void port_par_plant_turn_end(int drawn) {
+    sPlTurns.Note(drawn != 0);
+    if (sFlOpen) {
+        return;  // (a batch still open here: none is; the flush or the update's start ended it)
+    }
+    const int mode = port_par_plant_on() != 0 ? port_par_plant_early_mode() : 0;
+    if (!sPlTurns.NextDraws(mode)) {
+        return;
+    }
+    FlushListAndRun(true);
 }
 // After port_anim_flush_stale: no flush job is read any more; the batch ends (the worker stops after the job it may be in; the next
 // prepare, or the scene's drop, waits for it).
@@ -1766,11 +3427,74 @@ extern "C" void port_par_flush_end(void) {
     }
     if (sFlOpen) {
         sFlOpen = false;
-        (void)port_par_flush_try_quiesce();
+        sFlEarly = false;
+        if (sPlBatch) {
+            // (GXV_PAR_PLANT: the worker may be making a job of a plant from its live state; the next turn's update() writes that state:
+            // wait for the job it is in, at most one, before the game goes on)
+            port_par_flush_quiesce();
+            PlantBatchTally(true);
+            sPlBatch = false;
+        } else {
+            (void)port_par_flush_try_quiesce();
+        }
     }
     port_par_flush_note(sFlCounts, kFlCount, sFlLate ? 1 : 0);
     memset(sFlCounts, 0, sizeof(sFlCounts));
     sFlLate = false;
+}
+extern "C" unsigned port_par_plant_wait_max(void) {
+    const unsigned m = sPlWaitMax;
+    sPlWaitMax = 0;
+    return m;
+}
+// GXV_PAR_PLANT (revisit23; port/par_plant.h): port_anim_flush_stale calls this for each listed actor BEFORE it writes anything of it
+// (its latch, its model's player): a plant whose job the worker has not begun is the game thread's from now on (the worker skips it);
+// one the worker is making is waited for (it copies a few words; the two threads meet once a flush). A wait longer than
+// GXV_PAR_PLANT_PAUSE_US (default 2000: the worker was put off its core) leaves the plant jobs out for the next 120 pictures.
+extern "C" void port_par_plant_own(LiveActor* a) {
+    if (!sPlBatch || !sFlOpen) {
+        return;
+    }
+    ModelManager* mm = a->mModelManager;
+    if (mm == nullptr || mm->mParAnimGen != sParRecGen || mm->mParAnim == nullptr) {
+        return;
+    }
+    const ParAnimRec* rec = static_cast< const ParAnimRec* >(mm->mParAnim);
+    if (rec->flushGen != sFlGen || rec->flushJob < 0 || static_cast< u32 >(rec->flushJob) >= sFlCount) {
+        return;
+    }
+    const u32 j = static_cast< u32 >(rec->flushJob);
+    if (!sFlJobs[j].plant || sFlJobs[j].plantActor != a) {
+        return;
+    }
+    if (!sPlGameSeen) {
+        sPlGameSeen = true;  // (parplant23: the game thread's first plant, us after the listing)
+        sFlCounts[kFlPlGameUs] += static_cast< unsigned >(port::par::NowUs() - sFlListUs);
+        ++sFlCounts[kFlPlGameN];
+    }
+    uint64_t waited = 0;
+    if (port::par::PlantGameOwn(sPlPhase[j], &waited) == port::par::kPlGame) {
+        ++sFlCounts[kFlPlGameFirst];
+        uint8_t v = port::par::kJobPending;
+        sFlItems[sFlJobs[j].item].compare_exchange_strong(v, port::par::kJobTaken, std::memory_order_acq_rel);  // (nothing to run)
+    }
+    if (waited != 0) {
+        ++sFlCounts[kFlPlWaits];
+        sFlCounts[kFlPlWaitUs] += static_cast< unsigned >(waited);
+        static const u32 pauseUs = [] {
+            const char* e = getenv("GXV_PAR_PLANT_PAUSE_US");
+            const long v = e != nullptr && *e != 0 ? strtol(e, nullptr, 0) : 2000;
+            return static_cast< u32 >(v < 100 ? 100 : v);
+        }();
+        if (waited > sPlWaitMax) {
+            sPlWaitMax = static_cast< u32 >(waited);
+        }
+        if (waited > pauseUs && sPlPause == 0) {
+            sPlPause = 120;
+            port_log_summary("par-plant: the game thread waited %u us for the worker's job of a plant (more than %u): plant jobs paused for 120 pictures",
+                             static_cast< unsigned >(waited), static_cast< unsigned >(pauseUs));
+        }
+    }
 }
 // GXV_PAR_LATE (par2, 6 Nov; default 1 in the Vita player build; needs GXV_PAR_ANIM=1): the start of calc-anim
 // (SceneFunction::executeCalcAnimList). update() is over: the frames (XanimePlayer's latch), the blend state, the scale the actor will
@@ -1782,12 +3506,30 @@ extern "C" void port_par_flush_end(void) {
 // from the end of the list while the game thread runs calc-anim from the start, unchanged: each model takes its job at its own
 // ModelManager::calc on par-anim's word-for-word key rule, else computes as before. A synchronous fork-join in effect, with no
 // reader ever seeing a joint early or late. port_par_late_end before par-anim's dispatch: no late job is read after calc-anim.
+// (GXV_PAR_ANIM_CB2, gamecpu23) KoteBug::calcAndSetBaseMtx's base matrix and base scale, as it will set them (the same functions on the
+// same members; nothing written). LiveActor::calcAnmMtx sets the actor's scale first; KoteBug's own setBaseScale then replaces it.
+void PortPredictKoteBugBase(const KoteBug* k, Mtx out, Vec* scale) {
+    TPos3f mtx;
+    MR::calcMtxFromGravityAndZAxis(&mtx, k, k->mGravity, k->mFront);
+    TPos3f stampMtx(k->mStampController->_14);
+    mtx.concat(stampMtx, mtx);
+    mtx.setTrans(k->mPosition);
+    PSMTXCopy(mtx.toMtxPtr(), out);
+    TVec3f s = k->mScaleController->_C * k->mScale;
+    scale->x = s.x;
+    scale->y = s.y;
+    scale->z = s.z;
+}
+extern "C" void port_par_plant_close_early(void);
 extern "C" void port_par_late_prepare(void) {
+    port_par_plant_close_early();  // (parplant23: never open here; the update's start ended it)
     sFlOpen = false;
     if (!port_par_late_on() || !port_par_anim_switch() || !port_on_frame_thread() || !ParInit() || !FlushInit() || sParList.empty()) {
         return;
     }
     const uint64_t t0 = port::par::NowUs();
+    const int lateMode = port_par_late_on();
+    const unsigned lateMin = port_par_late_min();
     port_par_flush_quiesce();
     ++sFlGen;
     if (sFlGen == 0) {
@@ -1810,13 +3552,30 @@ extern "C" void port_par_late_prepare(void) {
             ++sFlCounts[kFlQuiet];
             continue;
         }
+        if (lateMode == 2 && rec->cbKind != 2) {
+            // (GXV_PAR_LATE=2, gamecpu23: only the heavy models, whose joints cost far more than a job's making and taking)
+            J3DModelData* data = rec->mm->getJ3DModel() != nullptr ? rec->mm->getJ3DModel()->getModelData() : nullptr;
+            if (data == nullptr || static_cast< unsigned >(data->getJointNum()) + data->getWEvlpMtxNum() < lateMin) {
+                continue;
+            }
+        }
         Mtx bm;
+        Vec bs;
         const f32(*base)[4] = nullptr;
-        if (rec->lateBase == 1 && port_predict_default_base(a, bm)) {
+        const Vec* scaleOv = nullptr;
+        if (rec->cbKind == 2) {
+            // (GXV_PAR_ANIM_CB2: the record's callback is KoteBug's posture delegator whose host is this actor, so the actor is a KoteBug;
+            // its own calcAndSetBaseMtx's base matrix and scale, computed now from the final inputs. A wrong one only misses the key.)
+            PortPredictKoteBugBase(static_cast< const KoteBug* >(a), bm, &bs);
+            base = bm;
+            scaleOv = &bs;
+        } else if (rec->lateBase == 1 && port_predict_default_base(a, bm)) {
             base = bm;
         }
         ParAnimJob& job = sFlJobs[sFlCount];
-        const int b = ParBuild(rec, job, sFlArena, a, true, base);
+        job.plant = 0;  // (GXV_PAR_PLANT: a job made here, on the game thread)
+        job.built = 1;
+        const int b = ParBuild(rec, job, sFlArena, a, true, base, scaleOv);
         if (b != 1) {
             ++sFlCounts[b == 3 ? kFlCovered : (b == 2 ? kFlMemo : kFlUnqual)];
             continue;
@@ -1879,9 +3638,18 @@ extern "C" void port_par_anim_drop(void) {
 }
 #endif
 
+#ifdef TARGET_PC
+// GXV_MATLOD (cpulod26; LiveActor.cpp): true = this turn's material-list refresh of a far model is left out (the last list stays; joints and logic untouched).
+bool port_cpulod_mat_skip(LiveActor* pActor, ModelManager* pMm);
+extern "C" int port_cpulod_timer_on(void);
+extern "C" void port_cpulod_dl_time(int64_t ns);
+#endif
 void ModelManager::calcAnim() {
     calc();
 #ifdef TARGET_PC
+    if (gPortCalcAnimOwner != nullptr && gPortCalcAnimOwner->mModelManager == this && port_on_frame_thread() && port_cpulod_mat_skip(gPortCalcAnimOwner, this)) {
+        return;  // (GXV_MATLOD: not listed and not refreshed this turn; the flush, if it still has the model listed from before, refreshes it once)
+    }
     const int lazy = port_dl_lazy_on();
     if ((lazy == 2 || (lazy == 1 && port_turn_skipped_raw())) && gPortCalcAnimOwner != nullptr && gPortCalcAnimOwner->mModelManager == this &&
         port_on_frame_thread()) {
@@ -1890,6 +3658,7 @@ void ModelManager::calcAnim() {
             mStaleDL = true;
             sStaleDL.push_back(StaleDL{gPortCalcAnimOwner, this});
         }
+        PortDlNoteTarget(this);  // (GXV_DL_LAZY_KEY)
         return;
     }
     mStaleDL = false;  // (computed now; a stale entry still listed is skipped by the flush)
@@ -1919,18 +3688,31 @@ void ModelManager::newDifferedDLBuffer() {
 
 void ModelManager::updateDL(bool isDiffDL) {
 #ifdef TARGET_PC
+    mCpDlMade = 1;  // (GXV_MATLOD: a model is never left out before its first full refresh)
+    const int64_t cpT0 = (mCpDlFar != 0 && !gPortParDlRun && port_cpulod_timer_on() != 0) ? port_host_time_ns() : 0;  // (the census times the refreshes of far models)
+    PortDlGameEnter();  // (GXV_PAR_DL: on the game thread during the overlap, the worker's material lists are finished first)
+    // GXV_PAR_DL: inside the overlap this runs on the worker (or on the game thread that took the job): the game thread has made the
+    // draw-done wait (settle 3, before the flushes), is inside the flush scope, holds this mutex and the guest's interrupts for the whole
+    // overlap. Nothing of the guest OS, the front-end waits or the game thread's workload counters is touched from here then.
+    const bool parDl = gPortParDlRun;
+    if (!parDl) {
     // (GXV_DRAWDONE_DEFER=2: the front end may still be reading the last picture's lists while update() runs; a model that writes
     // its display lists outside calcAnim, EarthenPipe::control for one, waits for the deferred draw-done first. No wait is pending
     // in the ordinary case, and then this returns at once.)
     port_gx_drawdone_settle(3);  // (modes 1-3: a list written outside the drawn turn's flush waits for the front end)
     port_gx_view_write_from(__builtin_return_address(0));  // (modes 3, 4: the same, outside the flush, through the one counter)
+    port_drawpipe_join_before_material();  // (fx66: in the flush scope the line above does not join; with JOINLATE this does, before the material blocks / texture matrices are written)
+    }
 #endif
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-    const u32 familyToken = port_workload_anim_family_begin(2);
+    const u32 familyToken = parDl ? 0u : port_workload_anim_family_begin(2);
+#endif
+#ifdef TARGET_PC
+    if (!parDl)
 #endif
     OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-    port_workload_anim_material_checkpoint(familyToken, 1);
+    if (!parDl) port_workload_anim_material_checkpoint(familyToken, 1);
 #endif
 
     bool isUpdateDL = mDisplayListMaker != nullptr && mDisplayListMaker->isValidDiff();
@@ -1956,21 +3738,21 @@ void ModelManager::updateDL(bool isDiffDL) {
     }
 
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-    port_workload_anim_material_checkpoint(familyToken, 2);
+    if (!parDl) port_workload_anim_material_checkpoint(familyToken, 2);
 #endif
     getJ3DModel()->calcMaterial();
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-    port_workload_anim_material_checkpoint(familyToken, 4);
+    if (!parDl) port_workload_anim_material_checkpoint(familyToken, 4);
 #endif
 
     if (isUpdateDL) {
         if (isDiffDL) {
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-            port_workload_anim_material_checkpoint(familyToken, 3);
+            if (!parDl) port_workload_anim_material_checkpoint(familyToken, 3);
 #endif
             mDisplayListMaker->diff();
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-            port_workload_anim_material_checkpoint(familyToken, 4);
+            if (!parDl) port_workload_anim_material_checkpoint(familyToken, 4);
 #endif
         }
 
@@ -1991,9 +3773,17 @@ void ModelManager::updateDL(bool isDiffDL) {
         }
     }
 
+#ifdef TARGET_PC
+    if (!parDl)
+#endif
     OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
-    port_workload_anim_family_end(familyToken);
+    if (!parDl) port_workload_anim_family_end(familyToken);
+#endif
+#ifdef TARGET_PC
+    if (cpT0 != 0) {
+        port_cpulod_dl_time(port_host_time_ns() - cpT0);
+    }
 #endif
 }
 
@@ -2010,24 +3800,40 @@ void ModelManager::startBckWithInterpole(const char* pBckName, s32 interpole) {
 }
 
 void ModelManager::startBtk(const char* pBtkName) {
+#ifdef TARGET_PC
+    mCalmRun = 0;  // (GXV_MATCALM: a material animation starts: refreshed every flush again)
+    mCalmSkip = 0;
+#endif
     stopBtk();
     mBtkPlayer->start(pBtkName);
     mDisplayListMaker->onCurFlagBtk(mBtkPlayer->mAnmRes);
 }
 
 void ModelManager::startBrk(const char* pBrkName) {
+#ifdef TARGET_PC
+    mCalmRun = 0;  // (GXV_MATCALM: a material animation starts: refreshed every flush again)
+    mCalmSkip = 0;
+#endif
     stopBrk();
     mBrkPlayer->start(pBrkName);
     mDisplayListMaker->onCurFlagBrk(mBrkPlayer->mAnmRes);
 }
 
 void ModelManager::startBtp(const char* pBtpName) {
+#ifdef TARGET_PC
+    mCalmRun = 0;  // (GXV_MATCALM: a material animation starts: refreshed every flush again)
+    mCalmSkip = 0;
+#endif
     stopBtp();
     mBtpPlayer->start(pBtpName);
     mDisplayListMaker->onCurFlagBtp(mBtpPlayer->mAnmRes);
 }
 
 void ModelManager::startBpk(const char* pBpkName) {
+#ifdef TARGET_PC
+    mCalmRun = 0;  // (GXV_MATCALM: a material animation starts: refreshed every flush again)
+    mCalmSkip = 0;
+#endif
     stopBpk();
     mBpkPlayer->start(pBpkName);
     mDisplayListMaker->onCurFlagBpk(mBpkPlayer->mAnmRes);
@@ -2244,6 +4050,10 @@ void ModelManager::initVisibilityAnm() {
     }
 }
 
+#if defined(TARGET_PC) && defined(__vita__)
+extern "C" int port_mutex_lock_gate_fast(OSMutex* mutex);    // (defaults48: decomp/src/RVL_SDK/os/OSMutex.c)
+extern "C" int port_mutex_unlock_gate_fast(OSMutex* mutex);
+#endif
 void ModelManager::calc() {
 #if defined(TARGET_PC) && defined(__vita__) && PORT_LOGGING
     const u32 familyToken = port_workload_anim_family_begin(1);
@@ -2256,15 +4066,30 @@ void ModelManager::calc() {
         mBvaPlayer->calc();
     }
 
+#if defined(TARGET_PC) && defined(__vita__)
+    // (defaults48, GXV_MUTEX_GATE_FAST: the lock and the unlock below were the two call sites that shut the second CPU's gate most often, OSMutex.c)
+    if (!port_mutex_lock_gate_fast(&MR::MutexHolder< 0 >::sMutex)) OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
+#else
     OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
+#endif
 #ifdef TARGET_PC
     if (!PortAnimMemoCalc(this) && !PortParAnimCalc(this)) {
-        getJ3DModel()->calc();  // (GXV_ANIM_MEMO, GXV_PAR_ANIM: a model that does not qualify, as before)
+        if (port_par_anim_why_on() && port_on_frame_thread()) {
+            const int64_t t0 = port_host_time_ns();
+            getJ3DModel()->calc();
+            PwRecord(this, getJ3DModel(), static_cast< u64 >(port_host_time_ns() - t0));
+        } else {
+            getJ3DModel()->calc();  // (GXV_ANIM_MEMO, GXV_PAR_ANIM: a model that does not qualify, as before)
+        }
     }
 #else
     getJ3DModel()->calc();
 #endif
+#if defined(TARGET_PC) && defined(__vita__)
+    if (!port_mutex_unlock_gate_fast(&MR::MutexHolder< 0 >::sMutex)) OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
+#else
     OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
+#endif
 
     if (mXanimePlayer != nullptr) {
         mXanimePlayer->clearAnm(0);

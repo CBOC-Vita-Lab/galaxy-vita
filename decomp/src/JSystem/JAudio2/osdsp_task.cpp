@@ -15,7 +15,7 @@ static u8 lbl_806B75B9;
 DSPTaskInfo* DSP_prior_task;
 
 void osdsp_task_FORCE_MATCH_RODATA(void* pTask) {
-    OSReport("GEN-REQ HALT (Task %x)\n", pTask);
+    OSReport("GEN-REQ HALT (Task %x)\n", static_cast< unsigned >(reinterpret_cast< uintptr_t >(pTask)));  // (fmt32: %x takes an unsigned, not a pointer)
 }
 
 extern "C" void __DSPHandler(__OSInterrupt interrupt, OSContext* pContext) {
@@ -80,7 +80,7 @@ extern "C" void __DSPHandler(__OSInterrupt interrupt, OSContext* pContext) {
 
         break;
     case 0xDCD10003:
-        OSReport("Done DSP Task  %x \n", __DSP_curr_task);
+        OSReport("Done DSP Task  %x \n", static_cast< unsigned >(reinterpret_cast< uintptr_t >(__DSP_curr_task)));  // (fmt32)
         if (__DSP_curr_task->done_cb != NULL) {
             __DSP_curr_task->done_cb(__DSP_curr_task);
         }

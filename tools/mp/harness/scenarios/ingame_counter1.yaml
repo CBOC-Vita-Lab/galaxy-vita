@@ -1,0 +1,43 @@
+# STRENGTHENED (rigfix, from chk-harness): the old rules judged almost nothing (a host-only line, or crash/stall only). Every log pattern below was
+# checked against the format strings in platform/src/mp, decomp/src/Game/MP and net/src; NOT run against the game (the first real run decides).
+# ingame: the life counter shows exactly one head (the host's look 1) and the party strip stands clear of it. Two consoles on
+# ingame_star's footing (Good Egg 1); the guest gets the star at 40 s so the frames show play, the star row and the counter.
+name: ingame_counter1
+description: the counter corner for look 1
+shot_size: 960x544
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 1}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Daisy, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'metric * wall_s >= 240'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect host /\[mp\] slot 1 joined name=\S+ rejoin=0 .*players=2/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/'
+  - 'expect * /\[mp\] flow session start role=(host|guest)/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30s'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - 'absent guest /\[mp\] session ended reason=host-left/ before shutdown'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/'
+  - 'order host /\[mp\] flow move type=\d+ galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=\d+ galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s tol 250ms each'
+  - 'order host /\[mp\] flow barrier release serial=(\d+) / before guest /\[mp\] flow barrier release serial=$1 / within 3s tol 250ms each'
+  - 'absent * /\[mp\] flow (move refused type=(?!6 )|move not taken|drop|move unmirrored|record leave)/'
+  - 'expect host /\[mp\] puppet slot=1 appear/ within 30s after host /\[mp\] flow barrier release/'
+  - 'shots * >= 30'

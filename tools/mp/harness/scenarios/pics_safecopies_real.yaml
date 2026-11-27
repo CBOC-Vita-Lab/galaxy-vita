@@ -1,0 +1,42 @@
+# checks83 (14 Nov): the pictures still missing of Safe Copies: the screen with real copies, the list "Bring Back a Copy" and a copy's page.
+# "Make a Copy" copies only the Team Files and the online account (never settings), so a fresh profile has nothing to copy: pics_c made its
+# "copies" on a profile with an mp.cfg only and got "There is nothing to save yet". Here the first console makes a Team File (it plays on a
+# copy of single-player file 2 and keeps the progress in co-op file 1 when it leaves, as qa_save_relaunch_continue does), then the SAME console
+# restarts (HARNESS_AFTER + HARNESS_CONTINUE) and walks the menus in inputs/pics_safecopies_real.txt. Not a test of the game's play: the rules
+# only say the walk reached each screen and that both copies were made.
+name: pics_safecopies_real
+description: pictures - Safe Copies with two real copies (Make a Copy, Make a Copy to Share), Bring Back a Copy's list and a copy's page
+seconds: 400
+shot_size: 960x544
+min_speed: 0.4
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    seconds: 250
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3, SMG_MP_TEST_LEAVE: 60, SMG_MP_AUTO_LEAVE: "coop:1"}
+  - name: guest
+    seconds: 250
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2, SMG_MP_AUTO_LEAVE: discard}
+  - name: host2
+    seconds: 260
+    input: "@pics_safecopies_real"
+    env: {HARNESS_AFTER: host, HARNESS_CONTINUE: host, SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL/'
+  # the first console really made its Team File before the copies are made
+  - 'expect host /\[mp\] save auto choice copy:2 ready/'
+  - 'expect host /\[mp\] save test: leaving the session/'
+  - 'expect host /\[mp\] (save test: leave decision coop|ui: progress saved choice=1 slot=1 ok)/'
+  - 'mp_save host'
+  # the walk: Safe Copies, two copies made (r=0 = made, read back and checked), the list, a copy's page
+  - 'expect host2 /\[mp\] ui: screen keep/'
+  - 'count host2 /\[mp\] ui: safe copy made r=0/ >= 2'
+  - 'absent host2 /\[mp\] ui: safe copy made r=[1-9]/'
+  - 'expect host2 /\[mp\] ui: screen keeplist/'
+  - 'expect host2 /\[mp\] ui: screen keepcopy/'
+  - 'absent host2 /\[mp\] ui: safe copy \d+ refused/'

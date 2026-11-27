@@ -72,6 +72,7 @@ int sceKernelStartThread(SceUID uid, SceSize arglen, void* argp) {
     return 0;
 }
 int sceKernelGetThreadCurrentPriority(void) { return 0x9F; }
+int sceKernelDelayThread(SceUInt delay) { std::this_thread::sleep_for(std::chrono::microseconds(delay)); return 0; }  // (core3-38: port/core3_budget.h SleepUs; the stub worker is never on core 3, so it is not called)
 SceUInt64 sceKernelGetProcessTimeWide(void) {
     return static_cast< SceUInt64 >(
         std::chrono::duration_cast< std::chrono::microseconds >(std::chrono::steady_clock::now().time_since_epoch()).count());

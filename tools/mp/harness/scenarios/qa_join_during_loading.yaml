@@ -1,0 +1,42 @@
+# QA-FUNC 4/15. A third player's HELLO arrives while the host and a guest are LOADING (between the host's MOVE and the barrier release). A game
+# cannot be that fast (it boots in 40+ s, the host's load is 20-30 s), so the late joiner is an mp_bot, started by wait_then_bot.sh at the host's
+# MOVE line (a mark, not a time). --mirror 0 makes the bot answer LOADED for every scene serial, so the barrier can release. Expected: the host
+# admits it (slot 2), sends it the snapshot, the existing guest's barrier is NOT delayed past its normal wait, nobody is dropped, the host's
+# puppet list gains slot 2. Needs: /tmp/harness_core_tests/mp_bot (MP_TEST_OUT=/tmp/harness_core_tests tests/mp/build.sh build). READY once the bot exists.
+name: qa_join_during_loading
+description: "mp_bot joins at the host's MOVE (host and guest are loading): admitted, snapshot, no barrier stall, nobody dropped"
+seconds: 330
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+requires: {files: [/tmp/harness_core_tests/mp_bot, '{HARNESS}/bin/wait_then_bot.sh']}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+bots:
+  - name: late
+    cmd: "{HARNESS}/bin/wait_then_bot.sh host flow.move.type=0.galaxy=EggStarGalaxy --join --name late --look 2 --duration 150 --scan-for 120 --data-hash aa3ddccb --mirror 0 --radius 300"
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 .*players=2/'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/'
+  - 'expect host /\[mp\] slot 2 joined name=late rejoin=0 .*players=3/ within 60s after host /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order host /\[mp\] slot 2 joined name=late / before host /\[mp\] flow barrier release serial=1 / within 60s'
+  - 'order host /\[mp\] flow move type=0 galaxy=EggStarGalaxy / before host /\[mp\] slot 2 joined name=late / within 60s'
+  - 'order host /\[mp\] snapshot sent slot=2 bytes=(\d+) crc=([0-9a-f]+)/ before host /\[mp\] flow barrier release serial=\d+ waited=\d+ms players=3/ within 60s'
+  - 'expect host /\[mp\] flow barrier release serial=1 waited=\d{1,5}ms/'
+  - 'expect guest /\[mp\] flow barrier release serial=1 waited=\d{1,5}ms/'
+  - 'expect host /\[mp\] puppet slot=2 appear model=\w+ self=0/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'absent host /\[mp\] (slot \d left reason=(?!leave \(bye\))|flow barrier timeout|flow warp failed)/'
+  - 'absent guest /\[mp\] (session ended reason=(?!none \(shutdown\)|host-left)|flow barrier timeout|flow warp failed)/'
+  - 'absent * /\[mp\] (rejected by host|hello rejected|bad message from slot|events lost|queue overflow)/'
+  - 'exit host,guest == 0'

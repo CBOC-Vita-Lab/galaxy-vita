@@ -1,0 +1,51 @@
+# FOUR game processes at once (nobody had run more than three): one leader (host) and three guests on 127.0.0.1 on this 2-core machine: join, arrive in the
+# Observatory with the host's progress, the host moves everyone to Good Egg 1, one guest gets the scenario star. Sized for the machine: a long
+# wall-clock timeout, few screenshots, and the starvation threshold lowered to min_speed 0.15 (four software-rendered games on two cores run at a fraction of
+# real time; below 0.15 a failure is INVALID, not FAIL). Memory: about 0.9 GB per game, so run it only when the queue is quiet.
+name: mp_four
+description: "one leader and three guests - join (4 players), Observatory, move to Good Egg 1, one star, everyone follows; peak memory of each process"
+seconds: 220
+timeout: 1800
+min_speed: 0.15
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, "desktop: input mark"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 20000, PETARI_STALL_S: 240}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_LOOK: 0}
+  - name: g1
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15}
+  - name: g2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2}
+  - name: g3
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 3}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=wifi/ within 300s'
+  - 'count host /\[mp\] slot [123] joined name=g[123] rejoin=0 .*players=\d/ == 3'
+  - 'expect host /\[mp\] slot \d joined name=g\d rejoin=0 .*players=4/'
+  - 'expect g1,g2,g3 /\[mp\] joined slot=\d session=[0-9a-f]+ host=0 epoch=\d+ players=\d/'
+  - 'expect * /\[mp\] session started/'
+  # the three guests got three different slots
+  - 'distinct host /\[mp\] slot (\d) joined name=g\d/ == 3'
+  # the Observatory with the host's progress: every guest received the same snapshot (same bytes and crc as the host sent to its slot)
+  - 'order host /\[mp\] snapshot sent slot=(\d) bytes=(\d+) crc=([0-9a-f]+)/ before g1,g2,g3 /\[mp\] snapshot received bytes=$2 crc=$3 ok=1/ within 60s each'
+  # each console sees the three others as puppets
+  - 'count * /\[mp\] puppet slot=[0-3] appear model=\w+ self=0/ >= 3'
+  # the move to Good Egg: one serial, followed by every guest
+  - 'order host /\[mp\] flow move type=0 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before g1,g2,g3 /\[mp\] flow move type=0 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 120s'
+  - 'expect * /\[mp\] flow barrier release serial=\d+ /'
+  - 'expect g1 /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/ within 120s after g1 /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'same host,g1,g2,g3 /\[mp\] flow star got id=(\d+) grand=\d by=1/ first'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - 'absent * /\[mp\] session ended/ before shutdown'
+  - '?metric * rss_mib <= 1300'

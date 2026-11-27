@@ -6,8 +6,13 @@
 //   GXV_CORE0_ALONE=1    (default 0) the game thread has core 0 to itself: every other thread of the port, the ones with a class
 //                        and the ones without (log flusher, watchdog, frame clock, library threads found by name) runs on
 //                        cores 1-2 (mask 0x60000), whatever GXV_HELPER_CORES says.
-//   GXV_CORE3_IO=1       (default 0) delay-tolerant work may use the system core (mask 0x80000): the disc read-ahead worker and
-//                        the third movie decoder. A thread tries the move on itself (1.3: only once the probe below proved the core),
+//   GXV_HELPER_CORE=1|2  (sched24, default 0 = both) the helper threads' shared mask (HelperMask) is that user core alone: core 1 keeps them off
+//                        the front end's core 2 (the player is the stage nearest its limit), core 2 off the back end's. Ignored by GXV_HELPER_CORES=0.
+//   GXV_CLOCK_CORE=1|2   (sched24, default 0 = as GXV_HELPER_CORE) the same for the clock-class threads only (frame clock, OS timer, retrace clock,
+//                        the thread that polls the pad: priority 0x50, a few microseconds each wake-up, but at 0x50 each one preempts the thread it
+//                        lands on, and which of cores 1-2 the system picks is not under our control).
+//   GXV_CORE3_IO=1       (default 0) delay-tolerant work may use the system core (mask 0x80000): the third movie decoder and, only with
+//                        GXV_CORE3_DISC=1 below, the disc read-ahead worker. A thread tries the move on itself (1.3: only once the probe below proved the core),
 //                        keeps it only when the call succeeded AND the mask reads back as asked, and otherwise goes back where it was,
 //                        without a message to the player. Never the render, front-end or present path.
 //
@@ -21,6 +26,10 @@
 //                        thread (GXV_CORE3_AUDIO defaults to 2 here), and nothing else.
 //   GXV_CORE3=1          every part: IO, audio output and the DSP mixer, and the front-end finishing thread. A part switch set to 0
 //                        still keeps its part off.
+//   GXV_CORE3_DISC=1     (core3-36, default 0) the disc read-ahead worker (file IO) may ask for the system core too. Default OFF: it does
+//                        sceIo reads (735 reads / 31 MiB at a stage start) next to the system's own file-system threads, and is the one
+//                        part whose CPU use jumped (6 ms/picture vs 0.16) in the launches that froze the whole console (see CORE3.md). It
+//                        stays on cores 1-2. Not covered by GXV_CORE3=1; GXV_CORE3=0 still turns everything off.
 //   GXV_CORE3_AUDIO=1    the audio output thread and the DSP mixer thread; =2 the output thread only; =0 neither.
 //   GXV_CORE3_SPLIT=1    the front-end split's finishing thread (default off unless GXV_CORE3=1); a SplitGuard moves it back.
 //   GXV_CORE3_SHADERS=0  the asynchronous shader compiler's worker thread (GXV_ASYNC_SHADERS, platform/vgx/src/vgx_async_shaders.h) stays
@@ -45,9 +54,12 @@ struct Switches {
     bool helperCores = true;   // GXV_HELPER_CORES (anything but "0")
     bool core0Alone = false;   // GXV_CORE0_ALONE=1
     bool core3Io = false;      // GXV_CORE3_IO=1 (or GXV_CORE3=1), and not GXV_CORE3=0
+    bool core3Disc = false;    // GXV_CORE3_DISC=1 (core3-36): the disc read-ahead worker may use the system core (never through the umbrella)
     int core3Audio = 0;        // GXV_CORE3_AUDIO resolved: 0 none, 1 output + DSP mixer, 2 output only
     bool core3Split = false;   // GXV_CORE3_SPLIT=1 (or GXV_CORE3=1)
-    bool core3Shaders = false; // GXV_CORE3_SHADERS (default on, off with GXV_CORE3=0): the asynchronous shader compiler's worker
+    bool core3Shaders = false; // always false since hitch33 11 (GXV_CORE3_SHADERS is no longer read): the compile worker never uses the system core
+    int helperCore = 0;        // GXV_HELPER_CORE (sched24): 1 or 2 = the helpers' mask is that user core alone, else cores 1-2
+    int clockCore = 0;         // GXV_CLOCK_CORE (sched24): 1 or 2 = the clock-class threads' mask is that user core alone, else as the helpers
 };
 
 // A part switch: 1 on, 0 off, -1 not set (or not understood: the umbrella's default applies). `top` is the highest "on" value.
@@ -65,16 +77,24 @@ template <class Get> Switches ReadSwitches(Get get) {
     s.helperCores = !(helper && *helper == '0');
     const char* alone = get("GXV_CORE0_ALONE");
     s.core0Alone = alone && std::atoi(alone) == 1;
+    const char* helperCore = get("GXV_HELPER_CORE");
+    const int hc = helperCore && *helperCore ? std::atoi(helperCore) : 0;
+    s.helperCore = hc == 1 || hc == 2 ? hc : 0;
+    const char* clockCore = get("GXV_CLOCK_CORE");
+    const int cc = clockCore && *clockCore ? std::atoi(clockCore) : 0;
+    s.clockCore = cc == 1 || cc == 2 ? cc : 0;
     // GXV_CORE3: 0 off, 1 every part, anything else (unset, "auto") each part's own default.
     const int all = PartSwitch(get("GXV_CORE3"), 1);
     if (all == 0) return s;
     const int io = PartSwitch(get("GXV_CORE3_IO"), 1), audio = PartSwitch(get("GXV_CORE3_AUDIO"), 2), split = PartSwitch(get("GXV_CORE3_SPLIT"), 1);
+    s.core3Disc = PartSwitch(get("GXV_CORE3_DISC"), 1) == 1;       // (explicit only: the umbrella and entry.cpp leave the disc worker on cores 1-2)
     s.core3Io = io == 1 || (io < 0 && all == 1);                    // (unset: off in code; vita/vgx-game/entry.cpp sets 1)
     s.core3Audio = audio >= 0 ? audio : all == 1 ? 1 : 2;           // (unset: the output thread only, the mixer only with GXV_CORE3=1)
     s.core3Split = split == 1 || (split < 0 && all == 1);           // (unset: off; GXV_CORE3=1 or GXV_CORE3_SPLIT=1)
-    const int shaders = PartSwitch(get("GXV_CORE3_SHADERS"), 1);
-    const char* async = get("GXV_ASYNC_SHADERS");                   // (0: there is no worker, so no part for the core and no reason to probe for it)
-    s.core3Shaders = shaders != 0 && async && async[0] == '1';       // (only with GXV_ASYNC_SHADERS=1, off by default in 2.1; GXV_CORE3=0 returned above)
+    // hitch33 11 (14 Nov, console job 2752, c127): the compile worker NEVER asks for the system core, whatever GXV_CORE3_SHADERS says. On the console it was moved there
+    // ("the shader compile worker runs on the fourth core"), ran libshacccg for 957 ms in one piece next to the OS's own threads, and the console was found powered off
+    // seconds later. The emulator has no fourth core, so it had never run there before. The switch is read no more; the worker stays on cores 1-2 at the lowest priority.
+    s.core3Shaders = false;
     return s;
 }
 
@@ -98,7 +118,14 @@ constexpr bool Core3Uses(const Switches& s, Core3Part part, bool proven) {
 
 // The mask for a helper thread with a class (clocks, disc reader, host jobs, movie decoders, audio): cores 1-2, or 0 = leave the
 // thread where it is (the older GXV_HELPER_CORES=0 behaviour, which GXV_CORE0_ALONE overrides).
-constexpr int HelperMask(const Switches& s) { return (s.helperCores || s.core0Alone) ? kHelpers : 0; }
+// GXV_HELPER_CORE (sched24): 1 or 2 narrows it to that core.
+constexpr int HelpersMask(const Switches& s) { return s.helperCore == 1 ? kUser1 : s.helperCore == 2 ? kUser2 : kHelpers; }
+constexpr int HelperMask(const Switches& s) { return (s.helperCores || s.core0Alone) ? HelpersMask(s) : 0; }
+
+// The mask for a clock-class thread (class 1: frame clock, OS timer, retrace clock, the pad poller): the helpers' mask unless GXV_CLOCK_CORE names a core.
+constexpr int ClockMask(const Switches& s) {
+    return (s.helperCores || s.core0Alone) ? (s.clockCore == 1 ? kUser1 : s.clockCore == 2 ? kUser2 : HelpersMask(s)) : 0;
+}
 
 // The mask for a helper thread that never had a class (log writer, freeze watch, the display's frame clock when it is not raised):
 // only GXV_CORE0_ALONE moves them.
@@ -113,7 +140,7 @@ enum class IoKind { DiscReader = 0, MovieDecoder = 1 };
 // system core. The other decoders stay on cores 1-2, so a system core that gives an application only part of its time cannot
 // slow a movie below what two decoders do.
 constexpr bool MayUseSystemCore(const Switches& s, IoKind kind, int index) {
-    return s.core3Io && (kind == IoKind::DiscReader || (kind == IoKind::MovieDecoder && index == 2));
+    return s.core3Io && ((kind == IoKind::DiscReader && s.core3Disc) || (kind == IoKind::MovieDecoder && index == 2));
 }
 
 struct Placement {
@@ -243,10 +270,10 @@ struct SplitGuard {
 // purpose), and so is everything that cannot run on a user core.
 constexpr int SweepTarget(const Switches& s, unsigned currentMask) {
     if (!s.core0Alone) return 0;
-    if (currentMask == 0) return kHelpers;
+    if (currentMask == 0) return HelpersMask(s);
     if ((currentMask & kUser0) == 0) return 0;
     if (currentMask == static_cast<unsigned>(kUser0)) return 0;
-    return kHelpers;
+    return HelpersMask(s);
 }
 
 }  // namespace port::cores

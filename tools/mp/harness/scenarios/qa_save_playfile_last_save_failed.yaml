@@ -1,0 +1,33 @@
+# final run (14 Nov), save case b: "Play This File" with Safe saves off where the LAST in-game save of the session fails. SMG_MP_TEST_SAVE_FAIL=2 (desktop-only hook,
+# mp_savefile.cpp): the first GameData.bin commit passes (it makes GameData.bin.mpbak), the later ones fail and leave their complete .mptmp beside the file, as a failed save would.
+# WHAT THE GAME DOES (found by the runs): a failed write is a hard NAND error; the game's own NANDErrorSequence (tryNoRecoverErroSequence, isUnknown -> startErrorToFreeze "NAND_11_2")
+# shows "Could not write to/read from Wii system memory" and the save sequence never goes idle again (the original game's freeze). The host therefore can NOT leave with a decision
+# afterwards (the leave autopilot waits for an idle sequence), so finishSession never runs: the session ends by the run's timeout. This is the original game's behaviour, kept on purpose
+# (single-player must not change); the first version of this scenario (leave + 'save kept') could not pass for that reason.
+# What is judged here: nothing removes the session's backup: GameData.bin, GameData.bin.mpbak and the stale .mptmp are all still beside each other, no "save removed" line, no crash.
+# The finishSession rule itself (a .mptmp beside GameData.bin: the .mpbak is KEPT with a reason) is covered by the host test tests/mp/save_test.cpp (mp_save_drop_session_backup, the case after line 340).
+# Saves are requested at 25 s and 50 s of play (one good, one failed).
+name: qa_save_playfile_last_save_failed
+description: "Play This File, Safe saves off, the last save fails (SMG_MP_TEST_SAVE_FAIL=2): the game freezes on the write error; the session's .mpbak and the stale .mptmp stay (nothing removes them)"
+# seconds: the host reaches the game at about 160 s of game time, the second save (the failing one) comes 50 s later; 200 ended the run before it.
+seconds: 290
+requires: {strings: [SMG_MP_TEST_SAVE_FAIL, SMG_MP_TEST_SAVE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_TEST_SAVE_FAIL: 2, SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "mine:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_TEST_SAVE: 25, SMG_MP_AUTO_LEAVE: discard}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_AUTO_LEAVE: discard}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard guest'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect host /\[mp\] save auto choice mine:2 ready/'
+  - 'expect host /\[mp\] save write file=GameData\.bin ok=1/'
+  - 'expect host /\[mp\] save write file=GameData\.bin ok=0/'
+  - 'order host /\[mp\] save write file=GameData\.bin ok=1/ before host /\[mp\] save write file=GameData\.bin ok=0/ within 120s'
+  - 'absent host /\[mp\] save removed \S*\.mpbak/'
+  - 'save_files host present GameData.bin GameData.bin.mpbak GameData.bin.mptmp'

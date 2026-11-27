@@ -1,0 +1,27 @@
+# touches (wave 2a): screenshots of the small native touches on the mp_chat pair's footing. The host (Mario, red) takes both to
+# Good Egg 1; the guest (Toad, blue) sees the destination card ("<host> picked <galaxy>, Star 1.") and the host-rules card (the desktop
+# hook SMG_MP_TEST_RULES shows it in play: a harness has no lobby). In the second scene: the guest's Star Pointer (its colour), a
+# phrase balloon, the quick ring, "Be right back" (the head dims on the host's strip, "zzz" on the tag), forced connection bars
+# (SMG_MP_TEST_LINK: weak on the host's view of the guest, lost on the guest's view of the host).
+name: touches_shots
+description: destination card, host-rules card, character colours, strip bars, phrase ring, away player
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_CHAT, SMG_MP_TEST_LINK, SMG_MP_TEST_RULES]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 1000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@touches_host+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 0, SMG_MP_TEST_LINK: "1:1", SMG_MP_TEST_CHAT: "12@1:0"}
+  - name: guest
+    input: "@touches_guest"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2, SMG_MP_TEST_RULES: 150, SMG_MP_TEST_LINK: "0:2",
+          SMG_MP_TEST_POINTER: "6:6", SMG_MP_TEST_CHAT: "6@1:4,12@1:ring1,24@1:11"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] ui: toast "Rosalina picked .*, Star 1\."/'
+  - 'expect guest /\[mp\] ui: rules card host=Rosalina mode=0 falls=0 bump=1/'
+  - 'expect host /\[mp\] away slot=1 on=1/'
+  - 'shots * >= 20'

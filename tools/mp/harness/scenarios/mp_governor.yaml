@@ -1,0 +1,35 @@
+# The puppet quality governor: the host sleeps 60 ms in every drawn turn while its level is below 2 (SMG_MP_TEST_SLOW_MS
+# "60:2"): its picture p95 misses the 33.3 ms target with the guest's puppet on screen -> level 1, then 2. At level 2 the sleep
+# stops: the pictures have room again -> it steps back up to 1 (a trial), which misses again -> 2, with the backoff.
+# SMG_MP_PERFLOG=1 gives the "[mp] perf" line every 10 s. The guest has no test sleep; its own levels are not judged (the
+# desktop's llvmpipe pictures are noisy under two processes on two cores).
+name: mp_governor
+description: SMG_MP_TEST_SLOW_MS makes the host step down 0->1->2, then back up to 1 (and down again)
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_SLOW_MS, SMG_MP_PERFLOG]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, SMG_MP_PERFLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_SLOW_MS: "60:2"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect * /\[mp\] perf \d+\.\d s: mp /'
+  - 'absent host /\[mp\] quality level \d \(fixed by SMG_MP_QUALITY\)/'
+  # down one step at a time, never past the test's floor (the sleep stops at 2, so a miss at 2 has no cause)
+  - 'expect host /\[mp\] quality level 1 \(frame p95 \d+\.\d ms\)/'
+  - 'order host /\[mp\] quality level 1 \(frame p95/ before host /\[mp\] quality level 2 \(frame p95/ within 30s'
+  - 'absent host /\[mp\] quality level 2 / before host /\[mp\] quality level 1 /'
+  - '?absent host /\[mp\] quality level [34] /'
+  # back up: a step up to 1 after reaching 2
+  - 'expect host /\[mp\] quality level 1 \(frame p95 \d+\.\d ms\)/ within 60s after host /\[mp\] quality level 2 /'
+  - 'expect host /\[mp\] perf .*quality level 2,/'
+  - 'exit * == 0'

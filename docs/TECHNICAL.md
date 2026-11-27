@@ -66,6 +66,101 @@ Developer switches (`GXV_*` in `platform/vgx/src/` and `platform/vgx/vita/vgx_ho
 The automatic quality's ladder (rungs 0-8): 544x388, 592x422, 640x456 (the Wii's EFB size and the
 start), 720x480, 800x504, 880x520, 960x544, then 960x544 with the EFB multisampled 2x and 4x.
 
+## Settings in the game (3.0)
+
+The package has no LiveArea Settings tile (`template.xml` has no `liveitem`, content-rev 4; `settings.png` stays in the tree but is not in the VPK; `tools/handheld/check_livearea.py` requires the tile to be absent). Settings open inside the game: a **Settings** choice on the Single Player / Multiplayer screen and **△ Settings** in the pause menu. An updated console keeps the old tile (the Vita does not refresh LiveArea); its `psla:-settings` request opens the in-game Settings. Rows that were removed are forced to their defaults for the run (file lines kept) and env.txt still wins: [TESTER-SWITCHES.md](TESTER-SWITCHES.md). Safe saves is always on (`SMG_ATOMIC_SAVES=0` still turns it off for a test).
+
+## Version 2.3 Picture Modes (modes26)
+
+Settings > Display > **Picture mode** has two choices; the older Quality / Performance / Locked 30 rows, Preset, Dynamic resolution, Sharper when possible,
+Prioritize Mario, Anti-aliasing and Effects quality are no longer shown (their keys stay in `player-settings.cfg` and are read and written as before; the
+mode ignores them). Settings maps the choice to start-up switches (`platform/src/settings/settings_launch.cpp`); an `env.txt` value wins and is listed as an override.
+
+| | Performance (60), the default | Quality (30) |
+| --- | --- | --- |
+| Settings text | "60 fps. The smoothest play. Some far detail and effects are lighter." | "30 fps, smooth, with the highest quality. Always." |
+| File | `fps_limit=0` `perf_mode=1` | `fps_limit=30` `perf_mode=0` |
+| `GXV_PICTURE_MODE` | 60 | 30 |
+| Frame rate | `GXV_FPS_LIMIT` unset (= 0), `GXV_AUTOQ_TARGET=60`, `GXV_STEADY30=0` | `GXV_FPS_LIMIT=30` (the driver's fixed cap: an even 30), `GXV_AUTOQ_TARGET=30`, `GXV_STEADY30=0` |
+| Picture size | `GXV_AUTOQ_MIN=6` `GXV_AUTOQ_MAX=6` `GXV_AUTOQ_MSAA=0`: 960x544 only | the same, plus `GXV_AUTOQ_LOCKED30_FLOOR=6` `_START=6` |
+| Edge smoothing | `GXV_EDGE_AA_NATIVE=0` (no pass over a 1:1 picture, about 3.5 ms of GPU), `GXV_AUTOQ_EDGESTEP=1` | `GXV_EDGE_AA_NATIVE=1`, `GXV_AUTOQ_EDGESTEP=0`, `GXV_PACE23_LOCKED_EDGE=0`: kept in every picture |
+| Load steps | `GXV_AUTOQ_FXSTEP` as the start-up sets it (3) | `GXV_AUTOQ_FXSTEP=0` |
+| Visual budget | `GXV_PERF_BUDGET=1` | `GXV_PERF_BUDGET=0` |
+| `GXV_SMOOTH60` ladder | off unless `env.txt` turns it on | never runs |
+| Stage table | the stage's row as written | exact keys only; frame forced to 960x544 fixed, edge pass on, effect steps held, no half-rate captures; plus the `mode=30` rows |
+
+Old files migrate when read (the file on the card is rewritten only when the player saves): `perf_mode=1` and `fps_limit=0` read Performance; `fps_limit=30`,
+`steady30`, and a file with `fps_limit=0` and no `perf_mode` or `perf_mode=0` (the old Quality) read Quality; any unknown `fps_limit` or `perf_mode` value reads Performance.
+
+**The stage table by mode.** `platform/include/port/stage_knob.h` `Desc::ex` classes every stage-settable key: `x` exact (a bit-identical picture and game, applies in
+both modes: `indcap_skip`, `scenes_dry`, `clearq`, `mirror_census`, `clip_skipempty`), `p` exact up to a value (`lightvol` 3, `mirror` 1, `colshadow_clip` 1), `s` a sacrifice
+(everything else, including every key nobody has proven exact; `hsr_ties` too, as only 4 is exact). The decision follows `new/policy26/LEDGER.tsv` ("player loses: nothing
+(exact)" / "bit-identical") and the older class letter E. A row without a tag is a 60-mode row; `mode=30` on a row (`Stage mode=30 ...`, `* mode=30 ...`) makes it a 30-mode row,
+read only in the 30 mode and applied whole after the stage's exact keys. In the 30 mode `Resolve` (`platform/vgx/src/vgx_stagepreset.h`) reads the stage's 60 row, drops every
+sacrifice key and its frame, applies the stage's `mode=30` row (else the `* mode=30` row), and fixes the frame. Every stage load logs one line:
+`mode: 60|30, stage <name>[:scenario], preset keys applied: <switch>=<value> ..., skipped for mode: <key> ... frame` (in `log.txt`; with `GXV_STAGE_PRESETS=0` it says nothing was applied).
+
+**The third class, `b` barely noticeable (q30-26).** The Quality (30) mode keeps `x`, `p` up to its exact value, and `b`: a cut a player would not see in normal play, kept so that the locked 30
+has headroom while the picture stays at its best. A `b` key with levels has a range (`Desc::bMin` / `bMax`); Quality clamps a stage row's value into it instead of dropping the key (a `p` key
+is lowered to its exact value: `lightvol=7` becomes 3). The umbrellas have a Quality level, "q", chosen when the mode is known (`platform/include/port/quality30.h`; `GXV_CPULOD`,
+`GXV_ACROSS`, `GXV_GLOW26`, `GXV_FE_GOV`, `GXV_GAME_GOV` at any level mean q in Quality): cpulod q = the far-model material refresh and the far small-character / marked-family pose every second turn
+beyond 3000 units (`cpulod.h` `Member::q`; star bits and coins shielded by `GXV_PROTECT_SPRITES=1`), across q = `INDCAP_SKIP`, `CLEARQ` and the silhouette gate confirmed by the occlusion query
+(`across.h`), glow26 q = `GXV_IND_FLAT=1` and the exact light-volume cull (`glow26.h` `kQ`). The two governors run in Quality at level 1 only and aim at the 30 fps budget (front end 30.9 ms,
+game thread 25.0 ms for the drawn turn, `fegov.h`); the far-draw governor (`GXV_CPUGOV`) stays off. The `mode:` line now reads
+`mode: 30, stage <name>, preset keys applied: ..., clamped for Quality: <alias>=<asked>><kept> ..., skipped for mode: ...`; the `quality30:` line says what the q level rewrote.
+
+## Version 2.3 Switches
+
+Every 2.3 change is behind a switch in `ux0:data/smg/env.txt` (defaults are set in `vita/vgx-game/entry.cpp` or where the switch
+is read). "perf" means on in Performance mode only (`GXV_AUTOQ_TARGET=60` without `GXV_FPS_LIMIT=30`); `=2` is a verify or
+census mode where one exists (the fast path is checked against the original and differences are logged).
+
+**On by default** (`NAME=0` gives the 2.2.1 / r110 behaviour, for comparison only):
+
+| Switch | Default | What it does |
+| --- | --- | --- |
+| `GXV_DL_LAZY_KEY` | 1 | The Bee Mushroom crash: a deferred material-list refresh runs only while Mario's model manager still points at the models it was asked for (his one manager switches between his bodies) |
+| `GXV_DL_GUARD` | 1 | A differed display list longer than its buffer is not stored (`FATAL: display list overflow` line) instead of overwriting the heap |
+| `GXV_RT_DEFER` | 4 | The Comet Observatory crash: a texture the GPU may draw into is deleted this many presents after the back end drops it, and a copy texture that changes size gets a new name. vitaGL frees an unsampled texture's storage at once |
+| `GXV_DRAWDONE_OTHER` | 1 | A draw-done wait made by the loading thread waits for its own finish (by count) and no longer takes the game thread's deferred wait, which could starve it at 60 pictures a second |
+| `GXV_FOG_BIND` | 2 | The vertex-fog varying `v_fogt7` on TEXCOORD7 (`GXV_FOG_SLOT`); `1` = `v_fogc` on FOG (check with `GXV_FOG_SELFTEST=1`); `0` = the unbound `v_fog` of 2.0-2.2 |
+| `GXV_ZOOM_LOGIC_VIEW` | 1 | Object clipping and every `isJudgedToClipFrustum` test use the game's own field of view, not the handheld zoom's narrower one |
+| `GXV_ZOOM_DRAWCULL` | 1 | An actor kept alive by the above is still not drawn while it is outside the zoomed picture |
+| `GXV_ZOOM_PULLSTAR` | 1 | (minor change) the zoom eases to 1.0 while a Pull Star is in reach |
+| `GXV_ZOOM_FIXEDCAM` | 1 | (minor change) the zoom eases to 1.0 while the camera is a fixed point shot; `2` also for fixed-eye cameras that turn |
+| `GXV_SETTINGS_POLL_MS` / `GXV_SETTINGS_EVENTS` | 250 / 2 | The Settings request (from a stale LiveArea tile) is polled every 250 ms (was 1 s), and system events are read: a resume or parameter notice checks for the request at once, a quit request is held for `GXV_SETTINGS_QUIT_MS` (750) and honoured only if no Settings request comes with it; `2` (the default since 2.3) logs the first 40 events, `0` reads none |
+| `GXV_COLSHADOW_STABLE` | 1 | Mario's ground shadow: a stable choice of ground triangles (a band on the camera and facing thresholds, nearest to the drop point at the cap, a box radius that never shrinks below the radius it last grew to). `0` is the game's selection, `2` also lifts the polygons 10 units. `GXV_COLSHADOW_LOG=1` writes a `colshadow:` line every 300 pictures that ends in a verdict |
+| `GXV_RUNG_SKIPRS_SETTLE` | 300 | Presents after a destroyed scene (a stage load) in which a picture-size change does not skip the resample of "rewritten every picture" textures; the evidence is forgotten at the load. `0` = off |
+| `GXV_PAD_RAWFALLBACK` | 1 | When the Settings menu's pad read fails, the plain read of the Vita's own controls is used (logged once as `pad:`). `0` = off |
+| `GXV_ABORT_TRAP` | 1 | `abort()`, `std::terminate` and `sceKernelExitProcess(!=0)` write a `FATAL:` line to the basic log and stop with a core dump |
+| `GXV_SENSOR_BP` | 1 | Sensor hit checks: a sorted broad phase with a proven margin, same hit lists in the same order (`2` verifies against the plain loops) |
+| `GXV_UPD_PREFETCH` | 1 | Cache hints in the update's pointer-chasing loops; nothing read for a result changes |
+| `GXV_TITLEART_LIVEAREA` | 1 | The captured title art is also written to `ur0:appmeta/<ID>/livearea/contents` when that folder exists and the console allows it |
+| `GXV_PERF_BUDGET` | perf | (minor changes) Performance mode's visual budget, parts `GXV_PB_LOD` 0.6, `_DECOR` 5000, `_PTCL` 0.5, `_SHADOW` 2800, `_ANIM` 2000, `_FUR` 2500 (each `0` = that part off); never near the player, no gameplay change. One `perf-budget:` line per stage load |
+| `GXV_FLUSH_OFFSCREEN` / `GXV_PLANT_DRAWCULL` | perf | Flower-group plants wholly outside the picture are not posed / not drawn (exact) |
+| `GXV_HR_PLANTMOVE` | perf | (minor change) far resting flower-group members move every second turn, their clock replayed |
+| `GXV_SHADERPACK` / `GXV_SHADERPACK_SEED` | 1 / 1 | The RAM shader pack (`stages.pack`, one read at start-up) answers vitaGL's compiled-shader lookups; with no pack on the card the package's `app0:shadercache/<key>/stages.pack` is used. The package's pack must be built from the same seed it ships with (`tools/vita_shader_pack.cpp`) |
+| `GXV_RUNG_RSORDER` / `GXV_RUNG_PREMULTI` / `GXV_RUNG_RSFREE` | 1 | A picture-size change resamples into premade textures first, has one premade texture per resampled texture, and never resamples through a pooled object (no GPU wait mid-change) |
+| `GXV_STAGEWARM_REBUILD` | 1 | A warm-up queue made before its shaders were registered (the start-up menu list) is made again |
+| `GXV_EFBSWAP2` | 1 | The shadow-alpha and indirect screen captures without an EFB scene split (r110; exact) |
+| `GXV_FLUSH_PREFETCH` | 1 | Prefetch in the drawn turn's flushes (r110) |
+
+Also back on from 2.2 (r108; 2.2.1 ran the 2.1.1 code): the stage warm-up hold (`GXV_STAGEWARM_HOLD_MS` 5000 and the
+`GXV_STAGEWARM_*` family), the prebuilt picture sizes (`GXV_RUNG_PREBUILD`, `GXV_RUNG_SKIPRS`, both 1) and `GXV_AUTOQ_FAST60` (1).
+
+**Available, off by default** (in the source for console A/B; set `1`, or `2` to verify first):
+
+| Area | Switches |
+| --- | --- |
+| Front end (core 2) | `GXV_DL_VARIANTS` (8; 24 makes fur layers cache hits), `GXV_RETAINED`, `GXV_DIRECT_J3D`, `GXV_FE_PARALLEL` (vertex decode on core 3), `GXV_TEX_SWIZZLE`, `GXV_FE_CENSUS`, `GXV_STATIC_INST` (instanced plants in one draw) |
+| Shaders (new texts: the pack needs a refill) | `GXV_TEVIN_CANON`, `GXV_FS_FINCLAMP`, `GXV_FS_ADEAD`, `GXV_FS_PROJ`, `GXV_IND_PRECOMP` (minor change) |
+| GPU scenes and vertices | `GXV_INDCAP_SKIP`, `PETARI_BLOOM_SKIP`, `GXV_LA88_MIPS`, `GXV_SHADOWFETCH` (needs vitaGL vp24; minor change at shadow edges), `GXV_SHADOW_STENCIL` (pass24; exact on the host, default 0 until the console A/B: the shadow volumes are counted in the EFB's stencil and the silhouette fill drawn where it is not 0, so the whole-EFB alpha capture and its EFB scene split are left out; 2 = analyse and count only), `GXV_STATICCULL_PAL`, `GXV_DYNCULL`, `GXV_DLVCACHE`; half-rate (minor changes): `GXV_INDCAP_HALFRATE`, `PETARI_BLOOM_HALFRATE`, `PETARI_SHADOWTEX_HALFRATE` |
+| Game thread | `GXV_PAR_PTCL` (+ `GXV_PAR_PTCL_OVERLAP`, already 1), `GXV_PTCL_LOOKPAR`, `GXV_JPA_LOOK_PURE`, `GXV_PAR_ANIM_CB2`, `GXV_PAR_LATE=2`, `GXV_PAR_PLANT`, `GXV_LIGHT_DEDUP`, `GXV_OC_LIGHTFIND`, `GXV_OC_CLIPFAST`, `GXV_ALOD` (minor change: far actors' update every second turn) |
+| Pacing and picture | `GXV_PACE23`, `GXV_PACE60`, `GXV_UPSCALE` (`3` = Performance only), `GXV_UPSCALE_NEAR` |
+| Boss fights (minor changes) | `PETARI_BOSS_PTCL`, `PETARI_BOSS_PTCL_GROW`, `PETARI_BOSS_HAZE`, `PETARI_BOSS_PSHADOW` |
+
+Each one's exact behaviour is in the comment where entry.cpp sets it.
+
 ## What's In Version 1.0
 
 Everything below is in the source of this release; figures are labelled
@@ -125,17 +220,26 @@ not console timings.
   frame's shaders read only channels the conversion leaves unchanged; a later frame that reads
   another channel gets the buffer converted first. Two scenes fewer per picture
   (`tools/test_vgx_efbswap2_gl.sh`).
-- Reduced-size additive effects (`GXV_FXHALF`) and half-size blur passes (`GXV_PASSHALF`) are in
-  the source but **off** by default.
-- **Asynchronous shaders** (`GXV_ASYNC_SHADERS`, default **on**; `0` = the blocking behaviour of before, exactly). A draw whose program is not
+- Reduced-size additive effects (`GXV_FXHALF`) are in the source but **off** by default. Half-size blur passes (`GXV_PASSHALF`)
+  are on for the bloom chain only (`GXV_PASSHALF=2`, the default since gpu960; `0` = full size, `1` = every blur pass).
+- **Asynchronous shaders** (`GXV_ASYNC_SHADERS`, default **off** since 2.1: the r101 console A/B showed cached links waiting behind the
+  worker's compile lock; `1` turns it on, `0` = the blocking behaviour, exactly). A draw whose program is not
   linked and whose shaders are in neither the card's cache nor the package's seed does not compile on the render thread: the pair goes to one worker
-  thread (`platform/vgx/src/vgx_async_shaders.h`; the fourth core when proven, else cores 1-2 at the lowest priority: `GXV_CORE3_SHADERS`) and the draw is
+  thread (`platform/vgx/src/vgx_async_shaders.h`; cores 1-2 at the lowest priority, never the fourth (system) core: hitch33 item 11 refuses to run the
+  worker if that core is in its mask; an earlier core-3 worker powered a console off) and the draw is
   skipped, as a draw of a program that failed to link always was, until the worker has written vitaGL's cache files (`vglCompileShaderPairToCache`,
   `tools/vitagl/patches/0020`; no GL object, no GXM call off the render thread). The program then links with a file read. Never skipped: the characters'
   draws (the HD pack's list), the HUD and every draw without depth test, draws into textures, opaque cached geometry (the map). A skipped draw goes on to
   the blocking path after `GXV_ASYNC_SHADERS_MAXWAIT_MS` (15,000). `GXV_ASYNC_SMALL_VERTS=<n>` lets opaque cached draws of at most n vertices wait too.
   The basic log gets `async shaders: on, worker ...` once and an `async-shaders-5s:` line when the worker or a skipped draw had work in the window.
   Host tests: `tools/test_vgx_async_shaders.sh`.
+  The worker compiles only while the C heap has `GXV_ASYNC_SHADERS_HEAP_MIB` (8) free, and (asyncsh31) every vitaGL allocation it makes comes from newlib's
+  heap only (`vita/vgx-game/alloc_wrap.cpp`, link wrappers of vglMalloc / vglCalloc / vglMemalign / vglRealloc; `platform/vgx/src/vgx_worker_alloc.h`): a block the
+  heap cannot give fails the job over to the render thread instead of reaching vitaGL's unlocked pools. Host test: `tools/test_vgx_worker_alloc.sh`.
+- **Ubershader census** (`GXV_UBERSHADER`, default **0**; asyncsh31, stage 1 of `reports/asyncsh31.md`): `1` = count only, nothing is drawn differently. One
+  `first-use: ubershader census:` line per stage left: the draws in play whose program needed the compiler, by whether the fragment ubershader
+  (`platform/vgx/src/vgx_ubershader.{h,cpp}`: one program per varying/sampler interface that reads the key's TEV configuration from `u_ucfg`) would have drawn
+  them meanwhile, and the compiles that would still block. Host proof: `tools/test_vgx_ubershader_gl.sh` (ubershader against each key's own text on Mesa).
 - Half precision (fp16) fragment shaders (`GXV_FS_HALF`, **off** by default). `1`: only the shaders
   `FsHalfAnalyse` proves to differ from the float shader by at most one 8-bit level (a forward error
   analysis of the TEV stages: unit-range inputs, a half rounding after every operation; no indirect
@@ -206,6 +310,13 @@ not console timings.
     is read from the package too, only when the package holds the seed folder of this build's key; the card's records
     win, the others are added and written to the card's file at the next quiet moment (`GXV_STAGEWARM_PKG`, default 1).
     While a galaxy loads, its programs may take up to `GXV_STAGEWARM_COMPILE_MS` (default 1500) ms beyond the usual slices.
+- **The vertex-fog varying has a fixed register (2.3, `GXV_FOG_BIND`, default 2).** Before 2.3 `v_fog` had no semantic binding,
+  so vitaGL gave it the first free TEXCOORD of whichever shader met it first in that run; vertex and fragment shaders compiled in
+  different runs (card, package, emulator) could disagree, and the fog was lost or a texture coordinate read the fog. Now the
+  varying is `v_fogt7` on TEXCOORD7 (`GXV_FOG_SLOT`, free in every fog shader of the 2.2 list), or `v_fogc` on FOG with
+  `GXV_FOG_BIND=1` (`GXV_FOG_SELFTEST=1` logs whether the console's compiler takes it); `0` is the old unbound `v_fog`. The new
+  name changes only the ~210 fog shader texts, so their old compiled files are never found again (vitaGL's cache is keyed by the
+  text), while the cache folder key, every other packaged shader and the warm-up lists stay valid.
 - The vitaGL in use (upstream HEAD) keeps its cache in `v3`; the port's folder, the package's
   compiled-shader seed and the shader RAM pack follow it (`GXV_VGL_CACHE_DIR`).
 - **Caches stay valid across updates:** an older cache layout is moved in place, in whole folders, before the graphics library starts.

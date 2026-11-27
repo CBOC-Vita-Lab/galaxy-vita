@@ -1,0 +1,28 @@
+# host dies 0.05 s after the switch it mirrored: both guests still get the switch (corefix: the dead host's events kept and re-sent)
+name: mp_migrate3_switch
+description: "host dies 0.05 s after the switch it mirrored: both guests still get the switch (corefix: the dead host's events kept and re-sent)"
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_SWITCH: "20:120", HARNESS_KILL: 'world test switch: on|0.05|9'}
+  - name: g1
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+  - name: g2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'nostall g1,g2'
+  - 'expect host /\[mp\] slot [12] joined name=g[12] .*players=3/'
+  - 'expect host /harness: kill signal=9/'
+  - 'expect any /\[mp\] flow host now slot=\d epoch=\d+/ within 30s after host /harness: kill signal=9/'
+  - 'absent g1,g2 /Assertion|OSPanic|FATAL/'
+  - 'exit g1,g2 == 0'

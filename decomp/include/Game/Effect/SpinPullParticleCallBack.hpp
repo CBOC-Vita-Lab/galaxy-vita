@@ -8,6 +8,11 @@ public:
     SpinPullParticleCallBack();
 
     virtual void execute(JPABaseEmitter*, JPABaseParticle*);
+#ifdef TARGET_PC
+    virtual int portCalcKind() const {
+        return 2;  // (GXV_PAR_PTCL: calls MR::calcPlayerSpinPullVelocity, game code: stays on the game thread)
+    }
+#endif
 
     f32 _4;
 };

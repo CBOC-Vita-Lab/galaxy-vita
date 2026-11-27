@@ -1,9 +1,12 @@
 #include "revolution/gx.h"
 #include "revolution/gx/GXRegs.h"
 #include "revolution/os.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 void GXSetTevIndirect(GXTevStageID tev_stage, GXIndTexStageID ind_stage, GXIndTexFormat format, GXIndTexBiasSel bias_sel, GXIndTexMtxID matrix_sel,
                       GXIndTexWrap wrap_s, GXIndTexWrap wrap_t, GXBool add_prev, GXBool utc_lod, GXIndTexAlphaSel alpha_sel) {
+    PORT_GXCAP(GXSetTevIndirect, (tev_stage, ind_stage, format, bias_sel, matrix_sel, wrap_s, wrap_t, add_prev, utc_lod, alpha_sel));
     u32 reg;
 
     CHECK_IN_BGN(GXInitIndTexture);
@@ -23,6 +26,7 @@ void GXSetTevIndirect(GXTevStageID tev_stage, GXIndTexStageID ind_stage, GXIndTe
 }
 
 void GXSetIndTexMtx(GXIndTexMtxID mtx_id, const f32 offset[2][3], s8 scale_exp) {
+    PORT_GXCAP(GXSetIndTexMtx, (mtx_id, offset, scale_exp));
     s32 mtx[6];
     u32 reg, id;
 
@@ -79,6 +83,7 @@ void GXSetIndTexMtx(GXIndTexMtxID mtx_id, const f32 offset[2][3], s8 scale_exp) 
 }
 
 void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXIndTexScale scale_t) {
+    PORT_GXCAP(GXSetIndTexCoordScale, (ind_state, scale_s, scale_t));
     switch (ind_state) {
     case GX_INDTEXSTAGE0:
         SC_RAS1_SS_SET_SS0(gx->IndTexScale0, scale_s);
@@ -111,6 +116,7 @@ void GXSetIndTexCoordScale(GXIndTexStageID ind_state, GXIndTexScale scale_s, GXI
 }
 
 void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMapID tex_map) {
+    PORT_GXCAP(GXSetIndTexOrder, (ind_stage, tex_coord, tex_map));
     if (tex_map == GX_TEXMAP_NULL) {
         tex_map = GX_TEXMAP0;
     }
@@ -147,16 +153,46 @@ void GXSetIndTexOrder(GXIndTexStageID ind_stage, GXTexCoordID tex_coord, GXTexMa
 }
 
 void GXSetNumIndStages(u8 nIndStages) {
+    PORT_GXCAP(GXSetNumIndStages, (nIndStages));
     SC_GEN_MODE_SET_NBMP(gx->genMode, nIndStages);
     gx->dirtyState |= 6;
 }
 
+#if defined(TARGET_PC)
+// GXV_HOTPROF_REINITGX (GXTev.c port_gx_reinit_tev has the reasons): J3DSys::reinitIndStages' sixteen GXSetTevDirect calls as one pass:
+// the register GXSetTevIndirect(stage, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_NONE, GX_ITM_OFF, GX_ITW_OFF, GX_ITW_OFF, FALSE, FALSE,
+// GX_ITBA_OFF) writes, for every stage (the library keeps no state of it but "a BP register was sent"). 1: done. 0: the caller calls.
+int port_gx_reinit_ok(void);
+int port_gx_reinit_tevdirect(void) {
+    u32 stage;
+    if (!port_gx_reinit_ok()) return 0;
+    for (stage = 0; stage < 16; stage++) {
+        u32 reg = 0;
+        SC_BP_CMD_SET_BT(reg, GX_INDTEXSTAGE0);
+        SC_BP_CMD_SET_FMT(reg, GX_ITF_8);
+        SC_BP_CMD_SET_BIAS(reg, GX_ITB_NONE);
+        SC_BP_CMD_SET_BS(reg, GX_ITBA_OFF);
+        SC_BP_CMD_SET_M(reg, GX_ITM_OFF);
+        SC_BP_CMD_SET_SW(reg, GX_ITW_OFF);
+        SC_BP_CMD_SET_TW(reg, GX_ITW_OFF);
+        SC_BP_CMD_SET_LB(reg, FALSE);
+        SC_BP_CMD_SET_FB(reg, FALSE);
+        SC_BP_CMD_SET_RID(reg, (0x10 + stage));
+        GX_WRITE_RA_REG(reg);
+    }
+    gx->bpSentNot = GX_FALSE;
+    return 1;
+}
+#endif
+
 void GXSetTevDirect(GXTevStageID tev_stage) {
+    PORT_GXCAP(GXSetTevDirect, (tev_stage));
     CHECK_IN_BGN(GXSetTevDirect);
     GXSetTevIndirect(tev_stage, GX_INDTEXSTAGE0, GX_ITF_8, GX_ITB_NONE, GX_ITM_OFF, GX_ITW_OFF, GX_ITW_OFF, FALSE, FALSE, GX_ITBA_OFF);
 }
 
 void GXSetTevIndWarp(GXTevStageID tev_stage, GXIndTexStageID ind_stage, GXBool signed_offset, GXBool replace_mode, GXIndTexMtxID matrix_sel) {
+    PORT_GXCAP(GXSetTevIndWarp, (tev_stage, ind_stage, signed_offset, replace_mode, matrix_sel));
     GXIndTexWrap wrap = (replace_mode) ? GX_ITW_0 : GX_ITW_OFF;
 
     CHECK_IN_BGN(GXSetTevIndWarp);

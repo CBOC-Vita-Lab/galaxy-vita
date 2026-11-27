@@ -15,7 +15,7 @@ sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_
 args=()
 for unit in "${sources[@]}"; do args+=("$src/$unit.cpp"); done
 if [[ "${CORNERFX_SKIP_BUILD:-0}" != 1 ]]; then
-  nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/vgx/third_party" -I"$khr" \
+  nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/include" -I"$root/platform/vgx/third_party" -I"$khr" \
     "$root/tests/vgx_cornerfx_gl.cpp" "${args[@]}" "$root/platform/vgx/host/vgx_host_egl.cpp" \
     -lEGL -lGLESv2 -pthread -o "$out/vgx_cornerfx_gl"
 fi

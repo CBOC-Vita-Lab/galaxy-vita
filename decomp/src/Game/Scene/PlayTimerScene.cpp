@@ -79,7 +79,20 @@ void PlayTimerScene::update() {
     }
 }
 
+#ifdef TARGET_PC
+namespace {
+// (GXV_HUD_NATIVE: everything this scene draws is 2D)
+struct HudnScope {
+    HudnScope() { port_gx_marker(PORT_GX_MARK_HUDN_BEGIN); }
+    ~HudnScope() { port_gx_marker(PORT_GX_MARK_HUDN_END); }
+};
+}  // namespace
+#endif
+
 void PlayTimerScene::draw() const {
+#ifdef TARGET_PC
+    HudnScope hudnScope;
+#endif
     if (mTimeLimitLayout != nullptr) {
         mTimeLimitLayout->draw();
     }

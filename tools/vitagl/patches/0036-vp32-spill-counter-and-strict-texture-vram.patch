@@ -1,0 +1,219 @@
+Patch 0036 (spill24; define nothing, inert until the host calls vglSpillSetKind / vglSetSpillStrictHook). Written against the vp29 tree
+(/home/claude/g23/agents/slow24/vgl-new29) and checked with `patch --dry-run` there; not built, not run (no Vita build in this task).
+1. Spill counter, always on: every allocation of gpu_alloc_mapped_aligned_for_gpu_inner that missed video memory and was given main RAM,
+   phycont, cdlg or newlib memory is counted by kind (other / texture / render target) and pool, with its bytes: vglGetSpillStats(out, 28).
+   Textures are filed automatically (gpu_alloc_mapped_for_gpu_tex at the texture storage sites); the host files render targets with
+   vglSpillSetKind(2) around their creation (and anything else stays "other"). Cost: a branch and two adds, only on a spill.
+2. GXV_VRAM_STRICT: vglSetSpillStrictHook(fn). With a hook set, a texture allocation that finds no video memory calls fn(size) and takes the old
+   fallback chain this once. fn only RECORDS a request (no sceGxmFinish, no collector cycle, no log, no frees inside the allocation: it can run in an
+   open scene, as patch 0035 removed from glFinish); the host drains its deferred frees at its next present, and the allocations after that find the
+   video memory. Without a hook (the default) nothing changes. Stats: [24] tries, [25] new requests recorded, [26] spilled anyway (every try),
+   [27] tries that found a request already waiting. Swizzled uploads (vglForceAllocAligned, which the host calls) are filed by the host with
+   vglSpillSetKind(1) around the call, so they count as textures and go strict too.
+
+diff -ruN a/src/shared.h b/src/shared.h
+--- a/src/shared.h	2026-11-24 21:21:14.978636552 -0500
++++ b/src/shared.h	2026-11-24 21:21:18.938679345 -0500
+@@ -252,7 +252,7 @@
+ 		SceUID f = sceIoOpen(fname, SCE_O_RDONLY, 0777); \
+ 		size_t sz = sceIoLseek(f, 0, SCE_SEEK_END); \
+ 		sceIoLseek(f, 0, SCE_SEEK_SET); \
+-		void *texture_data = gpu_alloc_mapped_for_gpu(sz); \
++		void *texture_data = gpu_alloc_mapped_for_gpu_tex(sz); \
+ 		sceIoRead(f, texture_data, sz); \
+ 		sceIoClose(f); \
+ 		sceIoRemove(fname); \
+diff -ruN a/src/textures.c b/src/textures.c
+--- a/src/textures.c	2026-11-24 21:21:14.974344637 -0500
++++ b/src/textures.c	2026-11-24 21:21:18.939147949 -0500
+@@ -1000,7 +1000,7 @@
+ 		} else {
+ 			size = orig_h * VGL_ALIGN(orig_w, 8) * bpp;
+ 		}
+-		void *texture_data = gpu_alloc_mapped_for_gpu(size);
++		void *texture_data = gpu_alloc_mapped_for_gpu_tex(size);
+ 		vgl_fast_memcpy(texture_data, tex->data, size);
+ 		gpu_free_texture_data(tex);
+ 		sceGxmTextureSetData(&tex->gxm_tex, texture_data);
+diff -ruN a/src/utils/gpu_utils.c b/src/utils/gpu_utils.c
+--- a/src/utils/gpu_utils.c	2026-11-24 21:21:14.975793880 -0500
++++ b/src/utils/gpu_utils.c	2026-11-24 21:21:30.428337912 -0500
+@@ -44,6 +44,43 @@
+ 		return res; \
+ 	}
+ 
++// (patch 0036, vglGetSpillStats) allocations that wanted video memory (every gpu_alloc_mapped_aligned_for_gpu starts there) and were
++// given main memory, physically contiguous memory, common dialog memory or newlib memory instead: count and KiB by kind (other,
++// texture, render target) and pool (main, phycont, cdlg, external). Always counted: two adds and a branch only when it spilled.
++uint32_t vgl_spill_kind = 0;
++static uint32_t vgl_spill_n[3][4];
++static uint64_t vgl_spill_bytes[3][4];
++static uint32_t vgl_strict_tries = 0, vgl_strict_saved = 0, vgl_strict_failed = 0, vgl_strict_freed = 0; // tries, new requests recorded, spilled anyway, requests already waiting
++static uint32_t (*vgl_strict_hook)(uint32_t size) = NULL; // GXV_VRAM_STRICT: the host's request; returns 1 when it recorded a new one (it drains at the next present)
++static int vgl_strict_in_hook = 0;
++static inline __attribute__((always_inline)) void vgl_spill_note(size_t size, int pool) {
++	const uint32_t k = vgl_spill_kind < 3 ? vgl_spill_kind : 0;
++	vgl_spill_n[k][pool]++;
++	vgl_spill_bytes[k][pool] += size;
++}
++uint32_t vglSpillSetKind(uint32_t kind) { // returns the previous kind; the host sets 2 around a render target's storage and puts it back
++	const uint32_t old = vgl_spill_kind;
++	vgl_spill_kind = kind < 3 ? kind : 0;
++	return old;
++}
++// out[0 + 4 * kind + pool]: spilled allocations, out[12 + 4 * kind + pool]: KiB; out[24] strict tries, [25] strict requests recorded,
++// [26] spilled anyway (every try: the request is served at the present), [27] tries that found a request already waiting. Fills min(n, 28) words.
++void vglGetSpillStats(uint32_t *out, uint32_t n) {
++	uint32_t v[28];
++	for (int k = 0; k < 3; k++)
++		for (int p = 0; p < 4; p++) {
++			v[4 * k + p] = vgl_spill_n[k][p];
++			v[12 + 4 * k + p] = (uint32_t)(vgl_spill_bytes[k][p] >> 10);
++		}
++	v[24] = vgl_strict_tries; v[25] = vgl_strict_saved; v[26] = vgl_strict_failed; v[27] = vgl_strict_freed;
++	for (uint32_t i = 0; i < n && i < 28; i++) out[i] = v[i];
++}
++// GXV_VRAM_STRICT: with a hook set, a texture allocation that finds no video memory calls hook(size), which only records a request (no wait, no free, no log here),
++// and then takes the old way (spill) this once. The host serves the request at its next present. NULL: off.
++void vglSetSpillStrictHook(uint32_t (*hook)(uint32_t size)) {
++	vgl_strict_hook = hook;
++}
++
+ // VRAM usage setting
+ uint8_t use_vram_for_usse = GL_FALSE;
+ 
+@@ -104,11 +141,18 @@
+ static inline __attribute__((always_inline)) void *gpu_alloc_mapped_aligned_for_gpu_inner(size_t alignment, size_t size) {
+ 	void *res;
+ 	vgl_alloc_attempt(alignment, size, VGL_MEM_VRAM)
+-	vgl_alloc_attempt(alignment, size, VGL_MEM_RAM)
+-	vgl_alloc_attempt(alignment, size, VGL_MEM_PHYCONT)
+-	vgl_alloc_attempt(alignment, size, VGL_MEM_BUDGET)
++#define vgl_spill_attempt(type, pool) \
++	res = vgl_memalign(alignment, size, type); \
++	if (res) { \
++		vgl_spill_note(size, pool); \
++		return res; \
++	}
++	vgl_spill_attempt(VGL_MEM_RAM, 0)
++	vgl_spill_attempt(VGL_MEM_PHYCONT, 1)
++	vgl_spill_attempt(VGL_MEM_BUDGET, 2)
+ 	if (use_extra_mem) {
+ 		res = vgl_memalign(alignment, size, VGL_MEM_EXTERNAL);
++		if (res) vgl_spill_note(size, 3);
+ 	}
+ 	return res;
+ }
+@@ -236,6 +280,18 @@
+ }
+ 
+ void *gpu_alloc_mapped_aligned_for_gpu(size_t alignment, size_t size) {
++	// (patch 0036) GXV_VRAM_STRICT: a texture that finds no video memory tells the host (the hook only records a request: nothing is freed, waited for or logged here, inside the open scene),
++	// and is given the old fallback memory this once. The host drains its deferred frees at the next present, where no scene is open; the allocations after that find the video memory.
++	if (vgl_strict_hook && vgl_spill_kind == 1 && !vgl_strict_in_hook) {
++		void *v = vgl_memalign(alignment, size, VGL_MEM_VRAM);
++		if (v) return v;
++		vgl_strict_tries++;
++		vgl_strict_in_hook = 1;
++		if (vgl_strict_hook((uint32_t)size)) vgl_strict_saved++; // a new request recorded
++		else vgl_strict_freed++;                                  // one was already waiting
++		vgl_strict_in_hook = 0;
++		vgl_strict_failed++;                                      // (spilled this time, always)
++	}
+ 	void *res = gpu_alloc_mapped_aligned_for_gpu_inner(alignment, size);
+ 	if (res) {
+ 		return res;
+@@ -352,7 +408,7 @@
+ 
+ 	// Allocating texture data buffer
+ 	const int face_size = VGL_ALIGN(w, 8) * h * bpp;
+-	void *base_texture_data = tex->faces_counter == 1 ? gpu_alloc_mapped_for_gpu(face_size * 6) : tex->data;
++	void *base_texture_data = tex->faces_counter == 1 ? gpu_alloc_mapped_for_gpu_tex(face_size * 6) : tex->data;
+ 
+ 	if (base_texture_data) {
+ 		// Calculating face texture data pointer
+@@ -434,7 +490,7 @@
+ 		if (chain > (uint32_t)alloc_size)
+ 			alloc_size = chain;
+ 	}
+-	void *texture_data = gpu_alloc_mapped_for_gpu(alloc_size);
++	void *texture_data = gpu_alloc_mapped_for_gpu_tex(alloc_size);
+ 
+ 	if (texture_data) {
+ 		// Initializing texture data buffer
+@@ -513,7 +569,7 @@
+ 	// Allocating texture and palette data buffers
+ 	int num_entries = is_p8 ? 256 : 16;
+ 	tex->palette_data = gpu_alloc_mapped_aligned_for_gpu(SCE_GXM_PALETTE_ALIGNMENT, num_entries * sizeof(uint32_t));
+-	tex->data = gpu_alloc_mapped_for_gpu(tex_size);
++	tex->data = gpu_alloc_mapped_for_gpu_tex(tex_size);
+ 
+ 	// Populating palette data
+ 	uint32_t *palette_data = (uint32_t *)tex->palette_data;
+@@ -637,7 +693,7 @@
+ 	const int mip_offset = gpu_get_compressed_mip_offset(0, aligned_max_width, aligned_max_height, format);
+ 	const int face_size = gpu_get_compressed_mipchain_size(0, aligned_max_width, aligned_max_height, format);
+ 	const int mip_size = face_size - mip_offset;
+-	void *base_texture_data = tex->faces_counter == 1 ? gpu_alloc_mapped_for_gpu(face_size * 6) : tex->data;
++	void *base_texture_data = tex->faces_counter == 1 ? gpu_alloc_mapped_for_gpu_tex(face_size * 6) : tex->data;
+ 	void *texture_data = (uint8_t *)base_texture_data + face_size * index;
+ 
+ 	// Initializing texture data buffer
+@@ -768,7 +824,7 @@
+ 			texture_data = vgl_realloc(tex->data, tex_size);
+ 			if (!texture_data) {
+ 				// Reallocation in the same mspace failed, try manually.
+-				texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++				texture_data = gpu_alloc_mapped_for_gpu_tex(tex_size);
+ 				const int old_data_size = gpu_get_compressed_mipchain_size(mip_count, aligned_max_width, aligned_max_height, format);
+ 				vgl_memcpy(texture_data, tex->data, old_data_size);
+ 				gpu_free_texture_data(tex);
+@@ -786,9 +842,9 @@
+ 		const int32_t reserve = vgl_take_reserve(w, h);
+ 		if (reserve > 1 && reserve <= 16) {
+ 			mip_count = reserve - 1;
+-			texture_data = gpu_alloc_mapped_for_gpu(gpu_get_compressed_mipchain_size(mip_count, aligned_max_width, aligned_max_height, format));
++			texture_data = gpu_alloc_mapped_for_gpu_tex(gpu_get_compressed_mipchain_size(mip_count, aligned_max_width, aligned_max_height, format));
+ 		} else
+-			texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++			texture_data = gpu_alloc_mapped_for_gpu_tex(tex_size);
+ 	}
+ 
+ 	// Initializing texture data buffer
+@@ -928,7 +984,7 @@
+ 		void *texture_data = count <= 0 ? vgl_realloc(tex->data, size) : tex->data;
+ 		if (count <= 0 && !texture_data) {
+ 			// Reallocation in the same mspace failed, try manually.
+-			texture_data = gpu_alloc_mapped_for_gpu(size);
++			texture_data = gpu_alloc_mapped_for_gpu_tex(size);
+ 			vgl_memcpy(texture_data, tex->data, VGL_ALIGN(orig_w, 8) * orig_h * bpp);
+ 			gpu_free_texture_data(tex);
+ 		}
+@@ -1005,7 +1061,7 @@
+ 	const int aligned_w = VGL_ALIGN(w, 8);
+ 	const int aligned_half_w = VGL_ALIGN(w / 2, 8);
+ 	const int tex_size = plane_w * plane_h + half_plane_w * half_plane_h * 2;
+-	void *texture_data = gpu_alloc_mapped_for_gpu(tex_size);
++	void *texture_data = gpu_alloc_mapped_for_gpu_tex(tex_size);
+ 
+ 	if (texture_data != NULL) {
+ 		// Initializing texture data buffer
+diff -ruN a/src/utils/gpu_utils.h b/src/utils/gpu_utils.h
+--- a/src/utils/gpu_utils.h	2026-11-24 21:21:14.975931394 -0500
++++ b/src/utils/gpu_utils.h	2026-11-24 21:21:18.939687588 -0500
+@@ -42,6 +42,15 @@
+ static inline __attribute__((always_inline)) void *gpu_alloc_mapped_for_gpu(size_t size) {
+ 	return gpu_alloc_mapped_aligned_for_gpu(MEM_ALIGNMENT, size);
+ }
++// (patch 0036) the same, for texture storage: the spill counter files it under "textures" and GXV_VRAM_STRICT's hook may run for it.
++extern uint32_t vgl_spill_kind; // 0 other, 1 texture, 2 render target (vglSpillSetKind)
++static inline __attribute__((always_inline)) void *gpu_alloc_mapped_for_gpu_tex(size_t size) {
++	const uint32_t old = vgl_spill_kind;
++	vgl_spill_kind = old == 2 ? 2 : 1; // (a render target's texture, filed by the host as 2, stays 2)
++	void *res = gpu_alloc_mapped_aligned_for_gpu(MEM_ALIGNMENT, size);
++	vgl_spill_kind = old;
++	return res;
++}
+ static inline __attribute__((always_inline)) void *gpu_alloc_mapped_for_cpu(size_t size) {
+ 	return gpu_alloc_mapped_aligned_for_cpu(MEM_ALIGNMENT, size);
+ }

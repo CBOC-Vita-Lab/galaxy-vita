@@ -1,4 +1,5 @@
 #include "Game/NPC/PenguinCoach.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/LiveActorGroup.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Map/RaceManager.hpp"
@@ -37,6 +38,9 @@ namespace NrvPenguinCoach {
 };  // namespace NrvPenguinCoach
 
 PenguinCoach::PenguinCoach(const char* pName) : NPCActor(pName), mIsRaceComplete(false), mTakeOutStar(nullptr), mBehavior(-1), mCameraInfo(nullptr) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
 }
 
 void PenguinCoach::init(const JMapInfoIter& rIter) {

@@ -5,10 +5,11 @@
 # the stream it is given), and a ThreadSanitizer build with the front-end split and its jitter reports no race.
 #   tools/test_vgx_fe_prefetch.sh [frames] [seeds]      (CXX: host compiler, default g++; out-of-tree build in $OUT, default /tmp/vgx_fe_prefetch)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-120}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_fe_prefetch}
+out=${OUT:-$MP_TMP/vgx_fe_prefetch}
 mkdir -p "$out"
 cxx=${CXX:-g++}
 srcs=(tests/vgx_fe_prefetch.cpp platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp

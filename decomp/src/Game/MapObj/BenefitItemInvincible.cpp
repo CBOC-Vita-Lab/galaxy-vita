@@ -38,6 +38,16 @@ void BenefitItemInvincible::exeCatch() {
     kill();
 }
 
+bool BenefitItemInvincible::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pReceiver) {
+    // port (relfix24): the Rainbow Star is used up one turn after the touch (exeCatch), which is too late to take back; ask first. A refused
+    // change leaves the star as if untouched (mHitSensorActor stays null, the nerve stays, no sound).
+    if (msg == ACTMES_ITEM_GET && !MR::isDead(this) && !MR::canChangePlayerItemStatus(7)) {
+        return false;
+    }
+
+    return BenefitItemObj::receiveOtherMsg(msg, pSender, pReceiver);
+}
+
 void BenefitItemInvincible::init(const JMapInfoIter& rIter) {
     BenefitItemObj::init(rIter);
 

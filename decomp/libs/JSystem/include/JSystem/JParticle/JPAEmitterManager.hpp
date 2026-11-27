@@ -19,6 +19,10 @@ public:
     JPAEmitterManager(u32, u32, JKRHeap*, u8, u8);
     JPABaseEmitter* createSimpleEmitterID(JGeometry::TVec3< f32 > const&, u16, u8, u8, JPAEmitterCallBack*, JPAParticleCallBack*);
     void calc(u8);
+#ifdef TARGET_PC
+    // ParticleCalcExecutor::movementNormal's nine calcs (groups 0-8, in order); GXV_PAR_PTCL: the independent emitters on two cores.
+    void calcNormal();
+#endif
     void draw(JPADrawInfo const*, u8);
     void forceDeleteAllEmitter();
     void forceDeleteGroupEmitter(u8);
@@ -46,4 +50,19 @@ public:
     /* 0x28 */ u32 ptclNum;
     /* 0x2C */ u8 gidMax;
     /* 0x2D */ u8 ridMax;
+#ifdef TARGET_PC
+    // GXV_PAR_PTCL: the emitter and particle arrays made in the constructor (the verify mode saves and restores them) and the state of
+    // calcNormal (JPAEmitterManager.cpp, made on the first parallel turn).
+    JPABaseEmitter* mPortEmtrArr = nullptr;
+    JPANode< JPABaseParticle >* mPortPtclArr = nullptr;
+    struct JPAPortPar* mPortPar = nullptr;
+#endif
 };
+
+#ifdef TARGET_PC
+// GXV_PAR_PTCL: the particle pool is shared by the emitters of one calcNormal; while its threads run (gJpaPoolShared) a pop or a push
+// takes a spin lock, otherwise these are the list's own pop_front / push_front.
+extern bool gJpaPoolShared;
+JPANode< JPABaseParticle >* jpaPoolPop(JPAList< JPABaseParticle >* pool);
+void jpaPoolPush(JPAList< JPABaseParticle >* pool, JPANode< JPABaseParticle >* node);
+#endif

@@ -1,0 +1,27 @@
+# Regression (found 8 Nov 2026, mp_lost_peer-135319): the guest presses "Play This File" AFTER the host's first MOVE has
+# arrived. Its own file-select move then computed PeachCastleGardenGalaxy:1 (a new-file prologue: the snapshot had just
+# switched the save root), flow overrode the destination to AstroGalaxy:2, the story executor still ran the prologue:
+# SIGSEGV in MR::startPrologue() right after the barrier. Here the guest is always 3 s later than the host.
+name: mp_guest_play_late
+description: guest starts its file after the host's MOVE arrived; must land in the Observatory without a crash
+seconds: 150
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2}
+  - name: guest
+    input: "@file2_observatory+3"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'order host /\[mp\] flow move type=6 galaxy=AstroGalaxy scen=\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=6 galaxy=AstroGalaxy scen=\d+ serial=$1 role=guest/ within 15s'
+  - 'absent guest /\[mp\] flow move override PeachCastleGarden/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/ within 15s after guest /\[mp\] flow barrier release serial=1 /'
+  - 'metric guest fps >= 3'   # (was: distinct 'gx: frame' lines; the vgx renderer prints none)

@@ -20,6 +20,9 @@ public:
     JPAResource();
     void init(JKRHeap*);
     bool calc(JPAEmitterWorkData*, JPABaseEmitter*);
+#ifdef TARGET_PC
+    bool calcBody(JPAEmitterWorkData*, JPABaseEmitter*);  // (GXV_PAR_PTCL: calc's body; calc binds the emitter to the work area around it)
+#endif
     void draw(JPAEmitterWorkData*, JPABaseEmitter*);
     void drawP(JPAEmitterWorkData*);
     void drawC(JPAEmitterWorkData*);

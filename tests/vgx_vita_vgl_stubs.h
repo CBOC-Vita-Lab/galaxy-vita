@@ -4,6 +4,7 @@
 #pragma once
 #include <cstddef>
 #include <GLES2/gl2.h>
+#include "vgx_native_capacity_stub.h"
 constexpr int VGL_MEM_VRAM = 0;
 inline size_t vglMemFree(int) { return 128u << 20; }
 inline size_t vglMemTotal(int) { return 128u << 20; }

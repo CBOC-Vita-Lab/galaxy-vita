@@ -70,6 +70,18 @@ public:
     /* 0x34 */ ResTIMG* mLengthMap;
     /* 0x38 */ ResTIMG* mBodyMap;
     /* 0x3C */ ResTIMG* mIndirectMap;
+#ifdef TARGET_PC
+    u8 mDetailInit = 0, mDetailTgt = 0, mDetailFrom = 0, mDetailTo = 0, mDetailT = 30;  // (detail25, GXV_DETAIL_FUR: the layer state and its fade)
+    u8 mPbThin = 0;  // (popin24, GXV_POPIN_HYST: GXV_PB_FUR drew it thinned at the last draw)
+    // reflfur25 (GXV_FUR25, port/fur25.h): the applied kept shells, the pictures since the last change, the picture it was last drawn in, the object's bound
+    u8 mF25Keep = 0;
+    u32 mPbBasePic = 0;     // (fur31) the picture GXV_PB_FUR's latched base distance was last used in
+    f32 mPbBase = 0.0f;     // (fur31) the latched base distance (the governor's / the level's value this coat is drawn by; see port/fur25.h PbThin)
+    u16 mF25Wait = 0;
+    u32 mF25LastPic = 0;
+    f32 mF25Radius = -1.0f;
+    f32 mPbFloorR0 = -1.0f;  // (popin31, GXV_PB_MINPX: the fur shape's box as a sphere round the model's origin, unscaled; -1 = not yet)
+#endif
 };
 
 class FurDrawManager : public NameObj {

@@ -153,3 +153,14 @@ MiniatureGalaxy* MiniatureGalaxyFunction::getPointingMiniatureGalaxy() {
 
     return nullptr;
 }
+
+#ifdef TARGET_PC
+// (prog32a, PETARI_DOMEMAP_PICK_LOG: AstroDomeGalaxySelector.cpp; read only)
+extern "C" const void* port_miniature_galaxy_at(int index) {
+    MiniatureGalaxyHolder* holder = ::getHolder();
+    if (holder == nullptr || index < 0 || index >= holder->mMiniatureGalaxyGroup->getObjNum()) {
+        return nullptr;
+    }
+    return holder->mMiniatureGalaxyGroup->getActor(index);
+}
+#endif

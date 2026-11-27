@@ -15,8 +15,9 @@ mkdir -p "$out/syn"
 "$out/title_art" synthetic "$out/syn"
 # the worker, with the console's headers (types only) and a fake console
 "$cxx" "${flags[@]}" -Wno-deprecated-declarations -I"$root/platform/vgx/src" -idirafter "$VITASDK/arm-vita-eabi/include" "$root/tests/title_art_runtime.cpp" -o "$out/runtime"
-for mode in disabled enabled-start titleart-off-in-worker first-run write-once package-update old-bubble-version force unsettled not-a-title \
-            unsupported-format tear appmeta-denied app-denied both-denied low-heap title-id title-id-invalid title-id-failed corrupt-capture; do
+for mode in contributor-default disabled enabled-start titleart-off-in-worker first-run write-once package-update old-bubble-version force unsettled not-a-title \
+            unsupported-format tear appmeta-denied app-denied both-denied low-heap title-id title-id-invalid title-id-failed corrupt-capture livearea-meta livearea-meta-off \
+            same-size-update old-stamp; do
   "$out/runtime" "$mode" | tail -1
 done
 # 32-bit ARM (the console's width) under qemu, when the cross compiler and qemu-arm are at hand: the made-up title must give the very
@@ -26,7 +27,7 @@ if command -v arm-linux-gnueabihf-g++ >/dev/null && command -v qemu-arm >/dev/nu
   mkdir -p "$out/syn_arm"
   qemu-arm "$out/title_art_arm" logic | tail -1
   qemu-arm "$out/title_art_arm" synthetic "$out/syn_arm" | tail -1
-  for n in pic0 bg startup icon0; do cmp "$out/syn/$n.png" "$out/syn_arm/$n.png"; done
+  for n in pic0 bg startup icon0 wordmark/pic0 wordmark/bg wordmark/startup wordmark/icon0; do cmp "$out/syn/$n.png" "$out/syn_arm/$n.png"; done
   echo "PASS: 32-bit ARM pictures are byte-identical to the host's"
 else
   echo "skipped: 32-bit ARM leg (arm-linux-gnueabihf-g++ or qemu-arm not found)"

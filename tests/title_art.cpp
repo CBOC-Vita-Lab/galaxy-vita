@@ -4,6 +4,9 @@
 //   title_art png <dir>                writes <name>.rgb and <name>.png (and cases.txt) for a Pillow check in Python
 //   title_art synthetic <dir>          a made-up title screen through the whole picture path
 //   title_art pictures <capture> <dir> a real capture through the whole picture path
+//   title_art fixture <dir>            writes the made-up captures (plain.rgba, wordmark.rgba) for the reference comparison
+#include <sys/stat.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -44,6 +47,25 @@ static void Logic() {
     Check(ParseStamp(text, parsed) && parsed.capture == fresh.capture && parsed.bubble == fresh.bubble && parsed.icon == fresh.icon, "stamp round trip");
     Check(!ParseStamp("garbage", parsed) && parsed.capture == 0 && parsed.icon == -1, "garbage is an empty stamp");
     Check(!ParseStamp(nullptr, parsed), "null is an empty stamp");
+    // Since picture version 2 the stamp also holds a checksum of the bubble files (a same-size replacement is noticed).
+    Check(ParseStamp("SMGART capture=1 bubble=1 icon=5239\n", parsed) && !parsed.hasSum && parsed.icon == 5239, "an old stamp (no sum) still parses");
+    Check(Decide(1, true, parsed, 5239, 0x1234u) == Plan::kBuildOnly, "an old stamp has an old picture version: rebuilt with the new pictures");
+    Stamp summed{kCaptureVersion, kBubbleVersion, 1234, 0xCAFEF00Du, true};
+    Check(FormatStamp(summed, text, sizeof text) > 0 && ParseStamp(text, parsed) && parsed.hasSum && parsed.sum == 0xCAFEF00Du && parsed.icon == 1234,
+          "a stamp with a sum round-trips");
+    Check(Decide(1, true, summed, 1234, 0xCAFEF00Du) == Plan::kNone, "same size, same sum: nothing to do");
+    Check(Decide(1, true, summed, 1234, 0xCAFEF00Eu) == Plan::kBuildOnly, "same size, other bytes (a same-size package icon): rebuilt");
+    Check(Decide(0, true, summed, 1234, 1u) == Plan::kNone, "GXV_TITLEART=0 ignores the sum");
+    Check(Decide(1, true, fresh, 1234, 0xFFFFu) == Plan::kNone, "a stamp without a sum is judged by the size alone (as before)");
+    {
+        const uint8_t a1[3] = {1, 2, 3}, a2[3] = {1, 2, 4};
+        BubbleSum x, y, z, missing;
+        x.File(a1, 3); x.File(a1, 3);
+        y.File(a1, 3); y.File(a2, 3);
+        z.File(a1, 3); z.File(nullptr, -1);
+        missing.File(nullptr, -1); missing.File(a1, 3);
+        Check(x.crc != y.crc && x.crc != z.crc && z.crc != missing.crc, "the bubble sum tells contents, order and missing files apart");
+    }
     // Title id and targets.
     Check(ValidTitleId("SMGV00001") && ValidTitleId("PCSE00000") && !ValidTitleId("") && !ValidTitleId("smgv00001") && !ValidTitleId("SMGV0000") &&
               !ValidTitleId("SMGV000011") && !ValidTitleId("SMG/00001") && !ValidTitleId(nullptr), "title id validity");
@@ -54,6 +76,11 @@ static void Logic() {
               std::string(targets[1]) == "ur0:appmeta/SMGV00001/pic0.png", "pic0 goes to the app folder and the shell's cache");
     Check(Targets(kBackground, "SMGV00001", targets) == 1 && std::string(targets[0]) == "ux0:app/SMGV00001/sce_sys/livearea/contents/bg.png", "bg.png: app folder only");
     Check(Targets(kStartup, "SMGV00001", targets) == 1 && std::string(targets[0]) == "ux0:app/SMGV00001/sce_sys/livearea/contents/startup.png", "startup.png: app folder only");
+    Check(Targets(kBackground, "SMGV00001", targets, true) == 2 && std::string(targets[0]) == "ux0:app/SMGV00001/sce_sys/livearea/contents/bg.png" &&
+              std::string(targets[1]) == "ur0:appmeta/SMGV00001/livearea/contents/bg.png", "bg.png with the shell's LiveArea copy");
+    Check(Targets(kStartup, "SMGV00001", targets, true) == 2 && std::string(targets[1]) == "ur0:appmeta/SMGV00001/livearea/contents/startup.png",
+          "startup.png with the shell's LiveArea copy");
+    Check(Targets(kIcon, "SMGV00001", targets, true) == 2 && std::string(targets[1]) == "ur0:appmeta/SMGV00001/icon0.png", "icon0 unchanged by the flag");
     // The stable-frame decision.
     {
         CaptureTrigger t;
@@ -309,6 +336,38 @@ static void Synthetic(const std::string& dir) {
     auto sink = [](void* ctx, int, const uint8_t*, size_t) { return ++static_cast<Flaky*>(ctx)->calls != 2; };
     ok = 0;
     Check(BuildPictures(title.data(), sink, &flaky, &ok) && ok == 3 && flaky.calls == 4, "a refused picture is counted, the others still come");
+    // The wordmark-like made-up title (rounded blocks on two rows, a glowing horizon behind the text lines) through the same path.
+    {
+        const auto mark = fixture::MakeWordmarkTitle();
+        Check(LooksLikeTitle(mark.data(), 4), "the wordmark-like title looks like a title");
+        Collected m;
+        m.dir = dir + "/wordmark";
+        mkdir(m.dir.c_str(), 0777);
+        int made = 0;
+        Check(BuildPictures(mark.data(), Collect, &m, &made) && made == 4, "the wordmark-like title makes all four pictures");
+        std::vector<uint8_t> clean(size_t(kW) * kH * 3), scratch(size_t(kW) * kH);
+        for (size_t i = 0; i < size_t(kW) * kH; ++i) { clean[i * 3] = mark[i * 4]; clean[i * 3 + 1] = mark[i * 4 + 1]; clean[i * 3 + 2] = mark[i * 4 + 2]; }
+        CleanTitle(clean.data(), scratch.data());
+        long changed = 0, region = 0;
+        for (int y = kTextY0; y < kTextY1; ++y)
+            for (int x = kTextX0; x < kTextX1; ++x) {
+                const uint8_t* p = &clean[(size_t(y) * kW + x) * 3];
+                ++region;
+                changed += (p[0] == 250 && p[1] == 250 && p[2] == 250) || (p[0] == 25 && p[1] == 25 && p[2] == 25);
+            }
+        Check(changed == 0 && region > 0, "the text over a glowing horizon is gone too");
+        // The bright horizon inside the rectangle is sky, not text: where there was no text it comes back nearly as it was (with the
+        // old absolute brightness rule the whole glow was taken out and interpolated over 130 rows).
+        long diff = 0, count = 0;
+        for (int y = 480; y < kTextY1; ++y)
+            for (int x = kTextX0; x < 240; ++x)
+                for (int c = 0; c < 3; ++c) {
+                    diff += std::abs(int(clean[(size_t(y) * kW + x) * 3 + c]) - int(mark[(size_t(y) * kW + x) * 4 + c]));
+                    ++count;
+                }
+        std::printf("wordmark: mean difference in the glow beside the text %.2f\n", double(diff) / double(count));
+        Check(diff < count * 6, "a glowing horizon behind the text is kept (mean difference under 6)");
+    }
     // A frame with no logo cannot make pictures.
     const auto empty = fixture::MakeTitle(false, true);
     Check(!BuildPictures(empty.data(), Collect, &c, &ok) && ok == 0, "no logo: no pictures, no crash");
@@ -331,6 +390,14 @@ static void Pictures(const std::string& capture, const std::string& dir) {
     std::printf("pictures: pic0 %zu, bg %zu, startup %zu, icon0 %zu bytes\n", c.sizes[0], c.sizes[1], c.sizes[2], c.sizes[3]);
 }
 
+static void Fixture(const std::string& dir) {
+    const auto plain = fixture::MakeTitle();
+    const auto mark = fixture::MakeWordmarkTitle();
+    Check(LooksLikeTitle(plain.data(), 4) && LooksLikeTitle(mark.data(), 4), "both made-up captures look like titles");
+    WriteFile(dir + "/plain.rgba", plain.data(), plain.size());
+    WriteFile(dir + "/wordmark.rgba", mark.data(), mark.size());
+}
+
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "";
     if (mode == "logic" && argc == 2) Logic();
@@ -338,7 +405,8 @@ int main(int argc, char** argv) {
     else if (mode == "png" && argc == 3) Png(argv[2]);
     else if (mode == "synthetic" && argc == 3) Synthetic(argv[2]);
     else if (mode == "pictures" && argc == 4) Pictures(argv[2], argv[3]);
-    else { std::fprintf(stderr, "usage: title_art logic | deflate <dir> | png <dir> | synthetic <dir> | pictures <capture> <dir>\n"); return 2; }
+    else if (mode == "fixture" && argc == 3) Fixture(argv[2]);
+    else { std::fprintf(stderr, "usage: title_art logic | deflate <dir> | png <dir> | synthetic <dir> | pictures <capture> <dir> | fixture <dir>\n"); return 2; }
     std::printf("PASS: %s\n", mode.c_str());
     return 0;
 }

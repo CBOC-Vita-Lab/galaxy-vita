@@ -1,5 +1,6 @@
 #include "Game/Screen/TitleSequenceProduct.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/MP/MpDemo.hpp"  // MP3 demo (SMG_MP_DEMO=menus)
 #include "Game/Screen/EncouragePal60Window.hpp"
 #include "Game/System/GameDataFunction.hpp"
 #include "Game/Util/GamePadUtil.hpp"
@@ -127,7 +128,7 @@ void TitleSequenceProduct::exeLogoDisplay() {
     }
 
     // (port: START or a touch of the screen stands for both buttons)
-    const bool portConfirm = port_title_confirm() != 0;
+    const bool portConfirm = port_title_confirm() != 0 || (MpDemo::enabled() && MpDemo::titleConfirm());   // (MP3 demo: SMG_MP_DEMO=menus presses START once)
     mAButtonChecker->update(MR::testCorePadButtonA(WPAD_CHAN0) || portConfirm);
     mBButtonChecker->update(MR::testCorePadButtonB(WPAD_CHAN0) || portConfirm);
 

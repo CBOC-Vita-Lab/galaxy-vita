@@ -16,6 +16,43 @@
 #include <cstdio>
 #ifdef TARGET_PC
 #include "port/boot_dialog.h"
+#include "Game/MP/MpSaveHook.hpp"  // MP3: session save policy (savefix: one shared predicate, host-tested)
+#include "port/mp_bridge.h"
+extern "C" int port_boot_nosave(int note);  // (fastboot32, GameScene.cpp: 1 = PETARI_BOOT is on, the save is never written)
+#endif
+
+#ifdef TARGET_PC
+// MP3: multiplayer save policy (decomp/src/Game/MP/MpSaveGame.cpp, predicate in Game/MP/MpSaveHook.hpp). Both are false in
+// single-player (no session, no unsafe image), so single-player saves take exactly the original paths. Suppressed: every console but the original host takes the game's own
+// "continue without saving" path (the in-memory image still updates, nothing is written). Auto-confirm: the original host saves
+// through the no-window path (no Yes/No, no A wait while the others play on).
+static bool sMpStoreWorkUserFile = false;
+static bool mpSaveSuppressed() { return MpSaveHook::suppressed(); }   // savefix: no pre-check (review finding 2)
+static bool mpSaveAutoconfirm() { return MpSaveHook::autoconfirm(); }
+#else
+static bool mpSaveSuppressed() { return false; }
+static bool mpSaveAutoconfirm() { return false; }
+#define mp_log(...) ((void)0)
+#endif
+
+#ifdef TARGET_PC
+// MP3 + fastboot32: PETARI_BOOT's "never write the save" guard stands aside while a multiplayer session is active: a session's save policy
+// (suppressed for guests, the host's own atomic save) is MpSaveHook's, and must not be turned into "continue without saving" by a test switch.
+// One log line per run when that happens. PETARI_BOOT off: port_boot_nosave(0) returns 0 at once, as before.
+static bool bootNoSave(int note) {
+    if (!port_boot_nosave(0)) {
+        return false;
+    }
+    if (mp_active()) {
+        static bool sLogged = false;
+        if (!sLogged) {
+            sLogged = true;
+            mp_log("PETARI_BOOT save guard stands aside: a multiplayer session is active, its saves follow the session's own rules");
+        }
+        return false;
+    }
+    return note ? port_boot_nosave(1) != 0 : true;
+}
 #endif
 
 namespace {
@@ -292,6 +329,29 @@ void SaveDataHandleSequence::exeCheckEnableToCreate() {
 
 void SaveDataHandleSequence::exeSaveConfirm() {
     bool b = _2C || _2B;
+#ifdef TARGET_PC
+    if (!b && bootNoSave(0)) {
+        b = true;  // (fastboot32: PETARI_BOOT: no question; the Save nerve then ends in tryNoSave without a write)
+    }
+#endif
+
+    // MP3: guests (and everyone after a host migration) never save during a session: skip the dialog, tryNoSave ends it.
+    if (!b && mpSaveSuppressed()) {
+        b = true;
+        mp_log("save suppressed (progress kept in RAM)");
+    }
+
+    // MP3: the original host's save prompt confirms itself: store the work file, then the no-window save path.
+    if (!b && mpSaveAutoconfirm()) {
+        mWorkUserFile->setCreated();
+        mWorkUserFile->updateLastModified();
+#ifdef TARGET_PC
+        sMpStoreWorkUserFile = true;
+#endif
+        mp_log("save autoconfirm (host)");
+        setNerve(GET_NERVE_ANON(SaveDataHandleSequenceSaveAllWithoutWindow));
+        return;
+    }
 
     if (b) {
         mWorkUserFile->setCreated();
@@ -419,6 +479,13 @@ void SaveDataHandleSequence::exeSaveAllWithoutWindow() {
         }
 
         mSaveDataHandler->storeSysConfigFile(mSysConfigFile);
+#ifdef TARGET_PC
+        // MP3: auto-confirmed host save (set only in exeSaveConfirm during a session): store the work file like exeSave does.
+        if (sMpStoreWorkUserFile) {
+            sMpStoreWorkUserFile = false;
+            mSaveDataHandler->storeUserFile(mWorkUserFile);
+        }
+#endif
     }
 
     if (tryNoSave()) {
@@ -643,7 +710,12 @@ bool SaveDataHandleSequence::tryProcessDoneKeyWait(const char* pSystemMessageId)
 }
 
 bool SaveDataHandleSequence::tryNoSave() {
-    bool b = _2C || _2B;
+    bool b = _2C || _2B || mpSaveSuppressed();  // MP3: session save suppression (false without a session)
+#ifdef TARGET_PC
+    if (!b && bootNoSave(1)) {
+        b = true;  // (fastboot32: PETARI_BOOT: as the game's own "continue without saving": every write path asks here first)
+    }
+#endif
 
     if (b) {
         setNerve(GET_NERVE_ANON(SaveDataHandleSequenceNoOperation));

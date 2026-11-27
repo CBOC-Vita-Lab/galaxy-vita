@@ -1,0 +1,31 @@
+# Pre-ship checklist #1: both players get the same Power Star at (almost) the same moment: exactly one credit, no duplicate
+# delivery, no stuck demo; both move on together. SMG_MP_TEST_STAR on both consoles with the same delay.
+name: mp_star_both
+description: host and guest get the same star together; one credit, one move on, no stuck demo
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000, SMG_MP_TEST_STAR: 15}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  # the test hook fires per console once it is in normal play on the ground: the two are close, not the same frame
+  - 'expect any /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/'
+  - '?expect * /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/'
+  # the host's ledger credits the star once: one "flow star got" accepted per console for this serial, a dup refused or none
+  - 'expect host /\[mp\] flow star got id=\d+ grand=\d by=[01]/'
+  - '?count host /\[mp\] flow star dup id=/ <= 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow star delivery dropped|flow drop STAR|flow clear hold timeout)/'
+  # exactly one after-clear move, followed by the guest
+  - 'count host /\[mp\] flow move type=4 .*role=host/ == 1'
+  - 'order host /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s'
+  - 'expect * /\[mp\] flow barrier release serial=\d+ / within 60s after host /\[mp\] flow move type=4/'

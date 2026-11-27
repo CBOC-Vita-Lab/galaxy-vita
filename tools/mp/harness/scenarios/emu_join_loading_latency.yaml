@@ -1,0 +1,37 @@
+# PROPOSED (emu): JOIN DURING LOADING under latency. The host (alone, on a hotspot-like link: 60 ms +-40 ms, 2 Mbit/s, 2 % loss) starts a move to Good Egg 1; the guest console is
+# STARTED by that mark (HARNESS_START_ON: when the host prints its move line, so the guest's boot, menus and JOIN happen while the host is loading / in the new scene).
+# A latency spike (300 ms, 8 % loss, 12 s) is switched on by the relay when the host's barrier opens, i.e. while the late joiner's WHERE / snapshot are on the wire.
+# Expected: the guest joins, lands in the host's galaxy (a drop-in, not the Observatory), puppets both ways, no crash, the host never waits out the 20 s barrier for it.
+name: emu_join_loading_latency
+description: "guest boots at the host's move and joins while it loads, over a hotspot link with a latency spike; lands in the host's galaxy"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE]}
+link:
+  profile: hotspot
+  events:
+    - {'on': "host /flow barrier release serial=1 /", set: {latency_ms: 300, loss_pct: 8}, for: 12}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    seconds: 240
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_START_ON: 'host|\[mp\] flow move type=0 galaxy=EggStarGalaxy|0'}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'expect host /\[mp\] slot 1 joined name=guest/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 90s after host /\[mp\] slot 1 joined/'
+  - 'expect guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy .*role=guest/ within 120s after host /\[mp\] slot 1 joined/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/ within 60s after guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/ within 60s after guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy/'
+  - 'absent host /\[mp\] slot 1 left reason=(?!leave \(bye\))/ before shutdown'
+  - 'absent * /\[mp\] (session ended reason=(?!none \(shutdown\)|host-left)|bad message from slot|events lost)/ before shutdown'
+  - 'metric guest fps >= 3'

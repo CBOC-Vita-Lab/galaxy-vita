@@ -1,0 +1,213 @@
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -303,6 +303,13 @@
+ 	display_fb.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+ 	display_fb.width = DISPLAY_WIDTH;
+ 	display_fb.height = DISPLAY_HEIGHT;
++#ifdef VP27_DISPLAY_MODE
++	if (cb_data->width) { // (patch 0029: the entry's own mode)
++		display_fb.pitch = cb_data->pitch;
++		display_fb.width = cb_data->width;
++		display_fb.height = cb_data->height;
++	}
++#endif
+ 
+ #ifdef HAVE_DEBUG_INTERFACE
+ 	// Drawing lightweighted debugger info
+@@ -887,6 +894,17 @@
+ static void *vgl_color_skip_data = NULL;
+ static SceGxmColorSurface vgl_color_skip_display_saved;
+ static int vgl_color_skip_display_idx = -1;
++#ifdef VP27_DISPLAY_MODE
++// (patch 0029: the display mode state, used by scene_reset, vglSwapBuffers and vglSetDisplayMode below)
++#define VGL_DISPLAY_MODES_MAX 4
++static struct { int w, h; SceGxmRenderTarget *rt; } vgl_display_modes[VGL_DISPLAY_MODES_MAX];
++static int vgl_display_modes_n = 0;
++static int vgl_display_alloc_w = 0, vgl_display_alloc_h = 0;
++static uint32_t vgl_display_switches = 0, vgl_display_refusals = 0;
++static int vgl_display_mode_cur = 0; // index into vgl_display_modes
++static GLboolean vgl_display_scene_open = GL_FALSE;
++static uint32_t vgl_display_flips[VGL_DISPLAY_MODES_MAX];
++#endif
+ uint32_t vglGetColorLoadSkips(void) { return vgl_color_load_skips; }
+ #ifdef VP26_SKIP_COLOR
+ static void *vgl_color_skip_cur = NULL;                  // (patch 0028: the armed scene's texture, zeros when NULL)
+@@ -1162,6 +1180,9 @@
+ 			apply_depth_hint(&gxm_depth_stencil_surface, NULL);
+ #endif
+ 			VGL_COLOR_SKIP_DISPLAY_BEGIN();
++#ifdef VP27_DISPLAY_MODE
++			vgl_display_scene_open = GL_TRUE; // (patch 0029: until the swap, DISPLAY_* must not change)
++#endif
+ 			int r = sceGxmBeginScene(gxm_context, 0, gxm_render_target,
+ 				NULL, NULL,
+ 				gxm_sync_objects[gxm_back_buffer_index],
+@@ -1345,6 +1366,97 @@
+ 	gxm_display_buffer_count = usage ? 3 : 2;
+ }
+ 
++#ifdef VP27_DISPLAY_MODE
++// ---- Patch 0029 (VP27_DISPLAY_MODE): the display mode changes between pictures, without sceGxmFinish and without new memory ----
++// The display buffers are allocated once, for the size vitaGL was started with (960x544: 3 x 3 MiB). A smaller sceDisplay mode (480x272,
++// 640x368, 720x408: the display controller scales it to the panel, bilinear on the 0x18-byte frame buffer structure) needs less of the
++// same memory: the colour surfaces are described again over it (width, height, stride = align(width, 64), as vglInitWithCustomSizes
++// would for that size), the display scene uses a render target of that size (made by vglPrepareDisplayMode, kept), and each queued flip
++// carries its own width/height/pitch to the display callback. DISPLAY_WIDTH/HEIGHT/STRIDE (and so glViewport's flip, scissors, blits and
++// reads of the default framebuffer) follow the current mode. The depth/stencil surface is left as it is (the render target's tiles
++// address it), as vglSwapResolution has always done. Off by default: nothing calls these unless the host does.
++
++static int vgl_display_mode_find(int w, int h) {
++	for (int i = 0; i < vgl_display_modes_n; i++)
++		if (vgl_display_modes[i].w == w && vgl_display_modes[i].h == h)
++			return i;
++	return -1;
++}
++static void vgl_display_modes_init(void) {
++	if (vgl_display_modes_n == 0) {
++		vgl_display_modes[0].w = DISPLAY_WIDTH;
++		vgl_display_modes[0].h = DISPLAY_HEIGHT;
++		vgl_display_modes[0].rt = gxm_render_target;
++		vgl_display_modes_n = 1;
++		vgl_display_mode_cur = 0;
++		vgl_display_alloc_w = DISPLAY_WIDTH;
++		vgl_display_alloc_h = DISPLAY_HEIGHT;
++	}
++}
++// Makes the mode ready (a render target of its size). Call at start-up, after vglInit*, before the first switch: creating the target
++// in play would cost a frame. GL_FALSE: not one of the console's modes, larger than the allocation, multisampling or the system
++// application mode on, or the target could not be made.
++GLboolean vglPrepareDisplayMode(int w, int h) {
++	THREAD_SAFE()
++	vgl_display_modes_init();
++	if (vgl_display_mode_find(w, h) >= 0)
++		return GL_TRUE;
++	GLboolean known = (w == 960 && h == 544) || (w == 720 && h == 408) || (w == 640 && h == 368) || (w == 480 && h == 272);
++	if (!known || w > vgl_display_alloc_w || h > vgl_display_alloc_h || msaa_mode != SCE_GXM_MULTISAMPLE_NONE || system_app_mode ||
++		vgl_display_modes_n >= VGL_DISPLAY_MODES_MAX || NEW_DISPLAY_WIDTH)
++		return GL_FALSE;
++	SceGxmRenderTarget *rt = NULL;
++	if (setup_render_target(&rt, w, h, gxm_display_rt_size) != 0 || !rt)
++		return GL_FALSE;
++	vgl_display_modes[vgl_display_modes_n].w = w;
++	vgl_display_modes[vgl_display_modes_n].h = h;
++	vgl_display_modes[vgl_display_modes_n].rt = rt;
++	vgl_display_modes_n++;
++	return GL_TRUE;
++}
++// Switches the display to a prepared mode NOW (for the next display scene and every flip queued after this call). GL_FALSE and nothing
++// changed when the mode is not prepared, or when a display scene of the picture in progress has begun (it is the swap that ends it), or a
++// cheap colour load is armed for the display. GL_TRUE when it is the mode already.
++GLboolean vglSetDisplayMode(int w, int h) {
++	THREAD_SAFE()
++	vgl_display_modes_init();
++	int m = vgl_display_mode_find(w, h);
++	if (m < 0 || NEW_DISPLAY_WIDTH) {
++		vgl_display_refusals++;
++		return GL_FALSE;
++	}
++	if (m == vgl_display_mode_cur)
++		return GL_TRUE;
++	if (vgl_display_scene_open || vgl_color_skip_display_idx >= 0 || vgl_color_skip_armed) {
++		vgl_display_refusals++;
++		return GL_FALSE;
++	}
++	DISPLAY_WIDTH = w;
++	DISPLAY_HEIGHT = h;
++	DISPLAY_WIDTH_FLOAT = w * 1.0f;
++	DISPLAY_HEIGHT_FLOAT = h * 1.0f;
++	DISPLAY_STRIDE = VGL_ALIGN(w, 64);
++	gxm_render_target = vgl_display_modes[m].rt;
++	for (int i = 0; i < gxm_display_buffer_count; i++)
++		sceGxmColorSurfaceInit(&gxm_color_surfaces[i], SCE_GXM_COLOR_FORMAT_A8B8G8R8, SCE_GXM_COLOR_SURFACE_LINEAR, SCE_GXM_COLOR_SURFACE_SCALE_NONE,
++			SCE_GXM_OUTPUT_REGISTER_SIZE_32BIT, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_STRIDE, gxm_color_surfaces_addr[i]);
++	// (clear_vertices stay as they are: a full-target quad in local space is (-1, 1, 1, -1) at any size)
++	vgl_display_mode_cur = m;
++	vgl_display_switches++;
++	return GL_TRUE;
++}
++void vglGetDisplayMode(int *w, int *h) {
++	if (w) *w = DISPLAY_WIDTH;
++	if (h) *h = DISPLAY_HEIGHT;
++}
++uint32_t vglGetDisplayModeSwitches(void) { return vgl_display_switches; }
++uint32_t vglGetDisplayModeRefusals(void) { return vgl_display_refusals; }
++uint32_t vglGetDisplayModeFlips(int w, int h) {
++	int m = vgl_display_mode_find(w, h);
++	return m < 0 ? 0 : vgl_display_flips[m];
++}
++#endif
++
+ void vglSetDisplayBufferCount(int count) {
+ #ifndef SKIP_ERROR_HANDLING
+ 	if (count < 0) {
+@@ -1537,6 +1649,13 @@
+ #endif
+ 		struct display_queue_callback_data queue_cb_data;
+ 		queue_cb_data.addr = gxm_color_surfaces_addr[gxm_back_buffer_index];
++#ifdef VP27_DISPLAY_MODE
++		queue_cb_data.width = DISPLAY_WIDTH;
++		queue_cb_data.height = DISPLAY_HEIGHT;
++		queue_cb_data.pitch = DISPLAY_STRIDE;
++		vgl_display_scene_open = GL_FALSE; // (this picture is queued: the mode may change now)
++		vgl_display_flips[vgl_display_mode_cur]++;
++#endif
+ #ifdef HAVE_PROFILING
+ 		tick = sceKernelGetProcessTimeLow();
+ #endif
+@@ -1561,6 +1680,14 @@
+ 				vgl_free(gxm_color_surfaces_addr[i]);
+ 			}
+ 		}
++#ifdef VP27_DISPLAY_MODE
++		// (patch 0029: vglSwapResolution remakes everything: the prepared modes end here, the extra targets are destroyed)
++		for (int i = 0; i < vgl_display_modes_n; i++)
++			if (vgl_display_modes[i].rt != gxm_render_target)
++				sceGxmDestroyRenderTarget(vgl_display_modes[i].rt);
++		vgl_display_modes_n = 0;
++		vgl_display_mode_cur = 0;
++#endif
+ 		DISPLAY_WIDTH = NEW_DISPLAY_WIDTH;
+ 		DISPLAY_HEIGHT = NEW_DISPLAY_HEIGHT;
+ 		DISPLAY_WIDTH_FLOAT = DISPLAY_WIDTH * 1.0f;
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -128,7 +128,12 @@
+ extern SceGxmShaderPatcher *gxm_shader_patcher; // sceGxmShaderPatcher shader patcher instance
+ 
+ // sceDisplay callback data struct
++#ifdef VP27_DISPLAY_MODE
++// (patch 0029) the geometry travels with the entry: a flip queued in one display mode is shown in that mode after the mode was changed
++struct display_queue_callback_data { void *addr; uint32_t width, height, pitch; }; // width 0: the current DISPLAY_* (splash screen)
++#else
+ struct display_queue_callback_data { void *addr; };
++#endif
+ 
+ // Texture object status enum
+ enum {
+--- a/source/splashscreen.c
++++ b/source/splashscreen.c
+@@ -6495,6 +6495,9 @@
+ 		// Sending new frame to display queue
+ 		struct display_queue_callback_data queue_cb_data;
+ 		queue_cb_data.addr = gxm_color_surfaces_addr[gxm_back_buffer_index];
++#ifdef VP27_DISPLAY_MODE
++		queue_cb_data.width = queue_cb_data.height = queue_cb_data.pitch = 0; // (the current mode)
++#endif
+ 		sceGxmDisplayQueueAddEntry(gxm_sync_objects[gxm_front_buffer_index], gxm_sync_objects[gxm_back_buffer_index], &queue_cb_data);
+ 		gxm_front_buffer_index = gxm_back_buffer_index;
+ 		gxm_back_buffer_index = (gxm_back_buffer_index + 1) % gxm_display_buffer_count;
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1400,6 +1400,12 @@
+ uint32_t vglGetColorLoadFromFailures(void); /* VP26_LOADFROM_INIT builds (patch 0028) */
+ uint32_t vglGetColorSurfaceRefusals(void); /* VP26_SURFACE_RETRY builds (patch 0028) */
+ uint32_t vglGetSceneBeginFailures(void); /* VP26_SURFACE_RETRY builds (patch 0028) */
++GLboolean vglPrepareDisplayMode(int w, int h); /* VP27_DISPLAY_MODE builds (patch 0029): 960x544, 720x408, 640x368, 480x272 within the start-up size */
++GLboolean vglSetDisplayMode(int w, int h); /* between pictures; GL_FALSE and unchanged when refused */
++void vglGetDisplayMode(int *w, int *h);
++uint32_t vglGetDisplayModeSwitches(void);
++uint32_t vglGetDisplayModeRefusals(void);
++uint32_t vglGetDisplayModeFlips(int w, int h);
+ // ---- GPU timers (builds with GPU_TIMERS only: source/rt_gpu.c; the names follow the Strikers port's vitaGL) ----
+ #define VGL_RT_GPU_TIMERS 0x8 // a fragment notification per scene and a watcher thread (priority, affinity): GPU completion of every scene
+ void vglRtSetup(uint32_t flags, int watcher_priority, int watcher_affinity);

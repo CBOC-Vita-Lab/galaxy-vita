@@ -2,6 +2,7 @@
 #include "Game/Demo/ReturnDemoRailMove.hpp"
 #include "Game/LiveActor/ModelObj.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/MP/MpSelfPuppet.hpp"
 #include "Game/MapObj/PowerStar.hpp"
 #include "Game/MapObj/SpinDriverPathDrawer.hpp"
 #include "Game/NameObj/NameObjArchiveListCollector.hpp"
@@ -171,7 +172,7 @@ void StarReturnDemoStarter::tryStartStageResult() {
 void StarReturnDemoStarter::tryStartResultWait() {
     if (MR::isBckOneTimeAndStoppedPlayer()) {
         MR::startBckPlayer("ResultWait");
-    } else if (mHair != nullptr) {
+    } else if (mHair != nullptr && !MpSelfPuppet::hideLocalBody()) {
         if (mFrame == ::cCapHideStartStep) {
             MR::hidePlayerJoint("Cap0");
         }
@@ -314,7 +315,7 @@ void StarReturnDemoStarter::exeLand() {
         MR::startAllAnim(lumaModel, playerAnimName());
 
         LiveActor* hairModel = mHair;
-        if (hairModel != nullptr) {
+        if (hairModel != nullptr && !MpSelfPuppet::hideLocalBody()) {
             hairModel->appear();
             MR::startAllAnim(hairModel, playerAnimName());
         }

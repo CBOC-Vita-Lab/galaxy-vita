@@ -4,6 +4,9 @@
 #include "Game/Util/MapUtil.hpp"
 #include "Game/Util/MathUtil.hpp"
 #include <algorithm>
+#ifdef TARGET_PC
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF, logic23: bind() timed as "binder", its collision queries included)
+#endif
 
 void Binder_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -89,6 +92,9 @@ bool Binder::compSensor(const HitInfo* pPlane1, const HitInfo* pPlane2) {
 // checks our movement in small steps, pushes the sphere out of overlapping geometry, then slides the remaining movement along the contact surface
 // records ground, wall, and roof contacts, stores our push-out vector, and optionally follows moving ground before returning the result
 const TVec3f Binder::bind(const TVec3f& rVelocity) {
+#ifdef TARGET_PC
+    PORT_LOGIC_SYS(PORT_LS_BINDER);
+#endif
     const bool stopAtFirstHit = _1EC._5 != 0;
     _1EC._5 = false;
     clear();

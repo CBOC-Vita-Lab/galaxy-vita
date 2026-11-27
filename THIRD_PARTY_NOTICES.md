@@ -415,7 +415,46 @@ The original notices below remain intact. The Vita renderer also carries
 its Aurora, stb and xxHash notices under `platform/vgx/third_party/`.
 The linked vitaGL library is GPL-3.0; its text is in
 `licenses/GPL-3.0.txt`, and the exact recipe that builds it (upstream
-revision, patches and options) is in `tools/vitagl/`. The computer-side
+revision, patches and options) is in `tools/vitagl/`. Patches 0033 to 0035 in `tools/vitagl/patches/` contain hunks copied or adapted from upstream vitaGL commits 6647b18, 53cc00f and 74c5a4a
+(Copyright Rinnegatamante / Alessio Tosto, licensed LGPL-3.0-or-later like the rest of vitaGL); the patch headers name each commit.
+The computer-side
 helper `tools/check-files.py` is MIT licensed (`licenses/CBOC-tools-MIT.txt`).
 The root Unlicense does not relicense those dependencies or the game's assets.
 
+
+## Multiplayer network stack (`net/`, Super Mario Galaxy 3.0)
+
+`net/` is the online and local-link stack that the 3.0 multiplayer uses. It is the lab's own code, carried over from
+Strikers Charged 1.3 (same project, same root licence); what changed for Galaxy is listed in
+[net/GALAXY-CHANGES.txt](net/GALAXY-CHANGES.txt). Its third-party parts are listed here.
+
+## Mbed TLS
+
+The HTTPS client of `net/` (`net/src/np_https*`) uses Mbed TLS 3.6.8, pinned in
+[net/deps/lock.json](net/deps/lock.json). Mbed TLS is dual-licensed "Apache-2.0 OR GPL-2.0-or-later"; this project uses it
+under the **Apache License 2.0** (text in [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt), and above). Only the
+file-level notices of the upstream files are kept; the library is built from an unmodified checkout into a private prefix
+by [tools/mp/build-mbedtls.py](tools/mp/build-mbedtls.py) with the client profile
+[net/deps/mbedtls/np_user_config.h](net/deps/mbedtls/np_user_config.h). No source patches are required for 3.6.8 (see
+[net/deps/mbedtls/patches/README.md](net/deps/mbedtls/patches/README.md); the earlier non-PSA TLS 1.3 cleanup backport
+`afa648aa44c698f6f01b1dd653edc3dfbe140355` is included upstream).
+
+## Monocypher
+
+The session encryption (`net/src/online/np_crypto.*`) uses Monocypher 4.0.3, vendored in
+`net/src/online/third_party/monocypher/`. Monocypher is dual-licensed, BSD-2-Clause or CC0 1.0 Universal, and this project
+uses it under the **BSD 2-Clause** licence. The full licence text is in
+[licenses/Monocypher-LICENCE.md](licenses/Monocypher-LICENCE.md) (copied unchanged from the vendored folder).
+
+## Other code in `net/`
+
+- `net/src/online/np_hash.cpp` (MD5, SHA-1, HMAC-SHA1) was written for this project from RFC 1321, RFC 3174 and RFC 2104. Its
+  author dedicated it to the public domain (CC0 1.0).
+- The Vita system libraries (SceNet and SceNetCtl) are used through the VitaSDK, see the VitaSDK entry in
+  [CREDITS.md](CREDITS.md). Nothing from them is copied into this repository.
+- No code from Halo CE Vita (GPL-3.0) is in `net/` or `platform/src/mp/`. Only the lessons from its public work were used,
+  as described in the comments.
+
+The opt-in instrumented console build (`VITA_PGO_GENERATE=1`, never the release eboot) links the profile runtime of LLVM
+compiler-rt 18.1.3 from `vita/pgo/compiler-rt/` (Apache-2.0 with LLVM exceptions, `licenses/LLVM-compiler-rt-LICENSE.TXT`;
+origin and file list in `vita/pgo/compiler-rt/SOURCE.txt`).

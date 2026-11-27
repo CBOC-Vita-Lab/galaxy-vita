@@ -25,6 +25,20 @@ bool DecodeTextureFast(const uint8_t* src, uint32_t width, uint32_t height, uint
 // I4/I8 replicate intensity into alpha too. Invalid format/size/pointer returns false
 // without writing; source and destination must hold a padded GX level and 2*w*h bytes.
 bool DecodeTextureLA88(const uint8_t* src, uint32_t width, uint32_t height, uint32_t fmt, uint8_t* dstLA);
+// g30 Wave 5 (GXV_LA88=2): I4/I8 only: width*height 1-byte intensity texels, sampling as (I,I,I,I).
+// Invalid format (> 1)/size/pointer returns false without writing; dstI8 must hold w*h bytes.
+bool DecodeTextureI8(const uint8_t* src, uint32_t width, uint32_t height, uint32_t fmt, uint8_t* dstI8);
+// GXV_LA88_MIPS (revisit23): n LA88 pairs back to the RGBA8 texels (L, L, L, A) DecodeTexture makes for the same I/IA level.
+inline void ExpandLA88ToRGBA8(const uint8_t* la, size_t n, uint8_t* d) {
+    for (size_t i = 0; i < n; ++i, la += 2, d += 4) {
+        d[0] = d[1] = d[2] = la[0];
+        d[3] = la[1];
+    }
+}
+// g30 Wave 5: n 1-byte intensity texels back to the RGBA8 texels (I, I, I, I) DecodeTexture makes for the same I4/I8 level.
+inline void ExpandI8ToRGBA8(const uint8_t* i8, size_t n, uint8_t* d) {
+    for (size_t i = 0; i < n; ++i, d += 4) d[0] = d[1] = d[2] = d[3] = i8[i];
+}
 // CMPR is S3TC DXT1 in another byte and block order: converts one level (8x8 tiles of four
 // big-endian sub-blocks) into ((w + 3) / 4) * ((h + 3) / 4) DXT1 blocks, row-major, as
 // GL_COMPRESSED_RGBA_S3TC_DXT1_EXT takes them. Returns false (dst unusable) when the level

@@ -3,6 +3,7 @@
 #include "Game/Util/MemoryUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/ScreenUtil.hpp"
+#include "Game/Util/SceneUtil.hpp"
 #include <JSystem/JKernel/JKRExpHeap.hpp>
 #include <JSystem/JUtility/JUTTexture.hpp>
 #include <JSystem/JUtility/JUTVideo.hpp>
@@ -23,6 +24,26 @@ void CaptureScreenDirector::captureIfAllow(const char* pName) {
     const TimingInfo* pInfo = findFromName(pName);
 
     if (getUsingTiming() == pInfo && (getUsingTiming()->_C == 0 || _18)) {
+#ifdef TARGET_PC
+        // gpu23 (GXV_INDCAP_SKIP, vgx_draw.cpp MarkTransientCopies): the "Indirect" capture with no other timing asked for is read
+        // only by this picture's draws after it; the front end leaves it out when there are none (the marker is written only with
+        // the switch on).
+        if (_C == nullptr && pInfo != nullptr && strcmp(pInfo->mName, "Indirect") == 0) {
+            // (round 2: tagged with the stage, a 16-bit hash of its name and scenario, never 0: the front end keeps every capture of a
+            // stage in which a draw read an earlier picture's capture, IndDummy materials and particles before the capture among them)
+            u32 h = 2166136261u;
+            const char* pStage = MR::getCurrentStageName();
+            for (const char* q = pStage != nullptr ? pStage : ""; *q != 0; ++q) {
+                h = (h ^ static_cast< u8 >(*q)) * 16777619u;
+            }
+            h = (h ^ static_cast< u32 >(MR::getCurrentScenarioNo())) * 16777619u;
+            u32 tag = (h ^ (h >> 16)) & 0xFFFFu;
+            if (tag == 0) {
+                tag = 1;
+            }
+            port_gx_marker(PORT_GX_MARK_TRANSIENT_COPY | (tag << 8));
+        }
+#endif
         capture();
 
         _18 = false;

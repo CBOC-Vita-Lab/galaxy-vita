@@ -1,0 +1,1 @@
+{"action": "batch", "steps": [{"action": "vc", "cmd": "release all", "wait": 1}, {"action": "close"}, {"sleep": 4}, {"action": "pull_logs"}, {"action": "ls", "path": "ux0:data/smg"}, {"action": "clear_input"}, {"action": "put", "src": "env-user.txt", "path": "ux0:data/smg/env.txt"}]}

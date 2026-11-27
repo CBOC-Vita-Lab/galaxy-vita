@@ -1,0 +1,21 @@
+# checks83 (14 Nov): the host's part of scenarios/skip_vote_two_consoles.yaml. With two players one vote is 1 of 2 and the rule (MpFlowLogic.hpp) needs every
+# eligible player (or, after 5 s, a strict majority: have*2 > need, which 1 of 2 is not), so the host holds A too, 4 s after the guest began (guest: skip_vote_guest.txt). Same marks as the guest's.
+# scnfix (14 Nov): NAV = the first lines below are file2_observatory.txt's menu path (title -> Single Player -> file 2 -> Play This File -> the Observatory); an SMG_MP_AUTO console only opens its session once it is IN PLAY, so a script that starts at the barrier mark never got there (final run: the guest never joined, no barrier). The host's nav is shifted +30 s, like @file2_observatory+30.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+38-38.5:A|B
+entry+33-33.2:A
+single+45-53:PX=0.25|PY=0.3
+single+48-48.2:A
+single+61-69:PX=0.52|PY=0.78
+single+64-64.2:A
+# scnfix (14 Nov, second finding): on a galaxy the save has visited, ONE tap of A skips the intro camera natively (GameSceneScenarioOpeningCameraState::trySkipTrigger:
+# testSystemPadTriggerDecide, a single-player rule that holds in a session too). The old script held A from the camera on: that first press tapped the camera away on its console only,
+# the console was then in the fly-in (a different skip kind) with A still held (a hold from before a scene does not count), and the other console voted for the camera: no vote ever matched.
+# So: both consoles TAP A once in the camera (alone, no vote), then each HOLDS A in the fly-in (kind "fly-in", the vote of skip_vote). Votes per kind; guest first, host 1.5 s later.
+mark play /flow barrier release serial=1 / ~150
+mark intro /skip: intro camera playing/ ~155
+mark flyin /skip: fly-in playing/ ~158
+intro+1-1.2:A
+flyin+2.5-11.5:A

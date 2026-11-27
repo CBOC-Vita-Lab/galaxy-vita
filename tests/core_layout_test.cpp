@@ -107,11 +107,13 @@ int main() {
 
     // ---- the system core: who may ask
     {
-        Switches off, io;
+        Switches off, io, ioDisc;
         io.core3Io = true;
+        ioDisc.core3Io = ioDisc.core3Disc = true;
+        Require(!MayUseSystemCore(io, IoKind::DiscReader, 0), "core3-36: GXV_CORE3_IO alone leaves the disc worker on cores 1-2");
         Require(!MayUseSystemCore(off, IoKind::DiscReader, 0), "switch off: the disc worker does not ask");
         Require(!MayUseSystemCore(off, IoKind::MovieDecoder, 2), "switch off: no decoder asks");
-        Require(MayUseSystemCore(io, IoKind::DiscReader, 0), "switch on: the disc read-ahead worker asks");
+        Require(MayUseSystemCore(ioDisc, IoKind::DiscReader, 0), "GXV_CORE3_DISC=1: the disc read-ahead worker asks");
         Require(!MayUseSystemCore(io, IoKind::MovieDecoder, 0) && !MayUseSystemCore(io, IoKind::MovieDecoder, 1), "switch on: decoders 0 and 1 stay on cores 1-2");
         Require(MayUseSystemCore(io, IoKind::MovieDecoder, 2), "switch on: the third decoder asks");
         Require(!MayUseSystemCore(io, IoKind::MovieDecoder, 3), "no fourth lane");
@@ -120,7 +122,7 @@ int main() {
     // ---- placing a thread
     {
         Switches off, io;
-        io.core3Io = true;
+        io.core3Io = io.core3Disc = true;
         FakeKernel k;
         k.mask = 0x40000;
         Placement p = PlaceIoThread(k, off, IoKind::DiscReader, 0);
@@ -160,7 +162,7 @@ int main() {
 
         // With the helper cores off and the switch on, a refused thread goes back to where it was.
         Switches odd;
-        odd.core3Io = true;
+        odd.core3Io = odd.core3Disc = true;
         odd.helperCores = false;
         k = FakeKernel{};
         k.mode = FakeKernel::Refuse;
@@ -175,7 +177,7 @@ int main() {
 
         // The two ways to be on a user core never include the system core, and a core-0-alone layout never puts a thread back on core 0.
         Switches both;
-        both.core3Io = both.core0Alone = true;
+        both.core3Io = both.core3Disc = both.core0Alone = true;
         both.helperCores = false;
         k = FakeKernel{};
         k.mode = FakeKernel::Refuse;
@@ -188,12 +190,18 @@ int main() {
     {
         gEnv.clear();
         Switches s = ReadSwitches(Get);
+        Require(!s.core3Disc, "nothing set: the disc worker is off the system core (core3-36)");
         Require(!s.core3Io && s.core3Audio == 2 && !s.core3Split, "nothing set: IO off in code (entry.cpp sets it), audio output only, no split");
         Require(!s.core3Shaders, "nothing set: no shader compile worker (GXV_ASYNC_SHADERS is off by default since 2.1)");
         gEnv["GXV_ASYNC_SHADERS"] = "1";
         s = ReadSwitches(Get);
-        Require(s.core3Shaders && Core3Uses(s, Core3Part::ShaderWorker, true) && !Core3Uses(s, Core3Part::ShaderWorker, false),
-                "GXV_ASYNC_SHADERS=1: the shader compile worker asks for a proven core (delay-tolerant work)");
+        Require(!s.core3Shaders && !Core3Uses(s, Core3Part::ShaderWorker, true) && !Core3Uses(s, Core3Part::ShaderWorker, false),
+                "GXV_ASYNC_SHADERS=1: the shader compile worker never asks for the system core (hitch33 11)");
+        gEnv["GXV_CORE3_SHADERS"] = "1";
+        gEnv["GXV_CORE3"] = "1";
+        s = ReadSwitches(Get);
+        Require(!s.core3Shaders && !Core3Uses(s, Core3Part::ShaderWorker, true), "GXV_CORE3=1 GXV_CORE3_SHADERS=1 GXV_ASYNC_SHADERS=1: still never (hitch33 11)");
+        gEnv.erase("GXV_CORE3");
         gEnv["GXV_CORE3_SHADERS"] = "0";
         Require(!ReadSwitches(Get).core3Shaders, "GXV_CORE3_SHADERS=0: the shader worker stays on cores 1-2");
         gEnv.erase("GXV_CORE3_SHADERS"); gEnv.erase("GXV_ASYNC_SHADERS");
@@ -209,6 +217,14 @@ int main() {
         gEnv["GXV_CORE3"] = "1";
         s = ReadSwitches(Get);
         Require(s.core3Io && s.core3Audio == 1 && s.core3Split, "GXV_CORE3=1: every part");
+        Require(!s.core3Disc && !MayUseSystemCore(s, IoKind::DiscReader, 0), "GXV_CORE3=1 does not move the disc worker (core3-36)");
+        gEnv["GXV_CORE3_DISC"] = "1";
+        s = ReadSwitches(Get);
+        Require(s.core3Disc && MayUseSystemCore(s, IoKind::DiscReader, 0), "GXV_CORE3_DISC=1 (with IO): the disc worker asks");
+        gEnv["GXV_CORE3"] = "0";
+        Require(!ReadSwitches(Get).core3Disc && !MayUseSystemCore(ReadSwitches(Get), IoKind::DiscReader, 0), "GXV_CORE3=0 beats GXV_CORE3_DISC=1");
+        gEnv["GXV_CORE3"] = "1";
+        gEnv.erase("GXV_CORE3_DISC");
         Require(Core3Uses(s, Core3Part::AudioOutput, true) && Core3Uses(s, Core3Part::AudioMixer, true) && Core3Uses(s, Core3Part::SplitFinisher, true),
                 "GXV_CORE3=1, proven: every part asks");
         for (Core3Part part : {Core3Part::AudioOutput, Core3Part::AudioMixer, Core3Part::SplitFinisher})
@@ -223,7 +239,7 @@ int main() {
         Require(!s.core3Shaders && !Core3Wanted(s), "GXV_CORE3=1 with every other part at 0 and no GXV_ASYNC_SHADERS: no probe");
         gEnv["GXV_ASYNC_SHADERS"] = "1";
         s = ReadSwitches(Get);
-        Require(s.core3Shaders && Core3Wanted(s), "GXV_CORE3=1 with every other part at 0: the shader worker (GXV_ASYNC_SHADERS=1) still wants the core");
+        Require(!s.core3Shaders && !Core3Wanted(s), "GXV_CORE3=1 with every other part at 0: the shader worker (GXV_ASYNC_SHADERS=1) does not want the core (hitch33 11): no probe");
         gEnv["GXV_CORE3_SHADERS"] = "0";
         s = ReadSwitches(Get);
         Require(!Core3Wanted(s), "GXV_CORE3=1 with every part at 0: no probe");
@@ -393,6 +409,36 @@ int main() {
         Require(!off.Feed(50.0, 300) && !off.Feed(50.0, 300) && !off.Feed(50.0, 300), "GXV_CORE3_SPLIT_GUARD_MS=0: never");
         SplitGuard at{3.0, 0};
         Require(!at.Feed(3.0, 300) && !at.Feed(3.0, 300), "exactly at the limit is not over it");
+    }
+
+    // ---- sched24: GXV_HELPER_CORE / GXV_CLOCK_CORE narrow the helpers' (clock class) mask to one user core; unset or unknown = cores 1-2 as before
+    {
+        gEnv.clear();
+        Switches s = ReadSwitches(Get);
+        Require(s.helperCore == 0 && s.clockCore == 0, "both unset: 0");
+        Require(HelperMask(s) == kHelpers && ClockMask(s) == kHelpers && HelpersMask(s) == kHelpers, "defaults: cores 1-2 for every helper, as before the switches");
+        gEnv["GXV_HELPER_CORE"] = "1";
+        s = ReadSwitches(Get);
+        Require(HelperMask(s) == kUser1 && ClockMask(s) == kUser1 && SweepTarget([&] { Switches a = s; a.core0Alone = true; return a; }(), 0) == kUser1,
+                "GXV_HELPER_CORE=1: helpers, clocks and the sweep use core 1 alone");
+        gEnv["GXV_CLOCK_CORE"] = "2";
+        s = ReadSwitches(Get);
+        Require(HelperMask(s) == kUser1 && ClockMask(s) == kUser2, "GXV_CLOCK_CORE=2: the clocks only move");
+        gEnv["GXV_HELPER_CORE"] = "3";
+        gEnv["GXV_CLOCK_CORE"] = "0";
+        s = ReadSwitches(Get);
+        Require(s.helperCore == 0 && s.clockCore == 0 && HelperMask(s) == kHelpers, "values other than 1 and 2 are ignored");
+        gEnv["GXV_HELPER_CORE"] = "2";
+        gEnv["GXV_HELPER_CORES"] = "0";
+        s = ReadSwitches(Get);
+        Require(HelperMask(s) == 0 && ClockMask(s) == 0, "GXV_HELPER_CORES=0 still means 'leave the thread where it is'");
+        gEnv["GXV_CORE0_ALONE"] = "1";
+        s = ReadSwitches(Get);
+        Require(HelperMask(s) == kUser2 && ClockMask(s) == kUser2, "GXV_CORE0_ALONE overrides GXV_HELPER_CORES=0 and the narrowed core stands");
+        gEnv["GXV_CORE3"] = "0";
+        s = ReadSwitches(Get);
+        Require(s.helperCore == 2, "read even when GXV_CORE3=0 returns early");
+        gEnv.clear();
     }
 
     std::puts("PASS: core layout policy: switches, helper masks, sweep, system-core placement with read-back and fallback, fourth-core "

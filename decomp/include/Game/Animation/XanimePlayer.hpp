@@ -41,6 +41,9 @@ public:
     void changeInterpoleFrame(s32);
     bool changeTrackWeight(u32, f32);
     void calcAnm(u16);
+#ifdef TARGET_PC
+    void portLeaveOut();  // (blendfix31, GXV_POSE_BLENDFIX: this turn's calcAnm left out by a pose cut: its inputs recorded, the latch released)
+#endif
     void setModel(J3DModel*);
     void overWriteMtxCalc(u16);
     void clearMtxCalc(u16);

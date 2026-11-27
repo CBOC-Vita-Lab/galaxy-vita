@@ -5,3 +5,6 @@
 *.png binary
 *.jpg binary
 *.ttf binary
+# A unified diff represents unchanged blank lines with a literal space.
+tools/emu_hitch/vita3k-92bda548.patch whitespace=-blank-at-eol,-blank-at-eof
+tools/emu_hitch/long_trace/vita3k-92bda548-trace.patch whitespace=-blank-at-eol,-blank-at-eof

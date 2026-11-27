@@ -39,21 +39,45 @@ inline void J3DGDWrite_f32(f32 data) {
 }
 
 static inline void J3DGDWriteBPCmd(u32 regval) {
+#ifdef TARGET_PC
+    // Raw J3D writers have no overflow callbacks; publish the complete command's cursor once.
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 0x61;
+    dl->ptr = __PortGDWriteBE32(p + 1, regval);
+#else
     J3DGDWrite_u8(0x61);
     J3DGDWrite_u32(regval);
+#endif
 }
 
 inline void J3DGDWriteXFCmd(u16 addr, u32 val) {
+#ifdef TARGET_PC
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 0x10;
+    __PortGDWriteBE32(p + 1, addr);
+    dl->ptr = __PortGDWriteBE32(p + 5, val);
+#else
     J3DGDWrite_u8(0x10);
     J3DGDWrite_u16(0);
     J3DGDWrite_u16(addr);
     J3DGDWrite_u32(val);
+#endif
 }
 
 static inline void J3DGDWriteXFCmdHdr(u16 addr, u8 len) {
+#ifdef TARGET_PC
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 0x10;
+    const u32 count = static_cast<u16>(len - 1);
+    dl->ptr = __PortGDWriteBE32(p + 1, (count << 16) | addr);
+#else
     J3DGDWrite_u8(0x10);
     J3DGDWrite_u16(len - 1);
     J3DGDWrite_u16(addr);
+#endif
 }
 
 inline void J3DGXCmd1f32ptr(f32* data) {
@@ -70,9 +94,17 @@ inline void J3DGXCmd1f32(f32 data) {
 }
 
 inline void J3DGDWriteCPCmd(u8 reg, u32 value) {
+#ifdef TARGET_PC
+    GDLObj* const dl = __GDCurrentDL;
+    u8* const p = dl->ptr;
+    p[0] = 8;
+    p[1] = reg;
+    dl->ptr = __PortGDWriteBE32(p + 2, value);
+#else
     J3DGDWrite_u8(8);
     J3DGDWrite_u8(reg);
     J3DGDWrite_u32(value);
+#endif
 }
 
 void J3DGDSetGenMode(u8 texGenNum, u8 colorChanNum, u8 tevStageNum, u8 IndTexStageNum, GXCullMode cullMode);

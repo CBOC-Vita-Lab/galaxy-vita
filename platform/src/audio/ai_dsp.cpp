@@ -9,6 +9,7 @@
 //   0x81/0x8E etc.  -> 0xDCD10004, 0xF355<word0 >> 16> (DspFinishWork)
 // Mixing is delegated to port_dsp_mix_frame (silence until the mixer lands).
 #include <stdint.h>
+#include "port/core3_budget.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #include <pthread.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -23,6 +25,7 @@
 #include <vector>
 
 #include "port/heap_routing.h"
+#include "port/host_vector.h"  // (heap36: PORT_HEAP_GUARD)
 #include "port/port.h"
 #include "port/diagnostics.h"
 #include "port/qemu_hooks.h"
@@ -46,6 +49,7 @@ static std::mutex sMailMutex;
 static std::deque<u32> sMailFromDsp;
 
 static std::vector<u32> sPacket;
+PORT_HEAP_GUARD(sPacket);  // (heap36: grown by the game's audio thread under DSPSendMailToDSP's PortHostAllocScope; GXV_HEAP_GUARD=1 now checks that it stays host memory)
 static u32 sPacketExpected = 0;
 static bool sWaitingCount = true;
 static u32 sVaramBase = 0;
@@ -165,6 +169,7 @@ static void* mixThreadMain(void*) {
     if (port_vita_audio_mixer_boost) {
         port_vita_audio_mixer_boost();
     }
+    port::core3::Worker meter(port::core3::RegisterThread("dsp-mixer"));  // (core3-38: metered only while the thread is on core 3; a job is ~0.1 ms, never cut)
     for (;;) {
         MixJob job;
         {
@@ -173,7 +178,9 @@ static void* mixThreadMain(void*) {
             job = sJob;
             sJobPending = false;
         }
+        meter.Wake();
         mixOne(job);
+        meter.Sleep();
         sMixThreadJobs.fetch_add(1, std::memory_order_relaxed);
         // The mail first, then the "free" flag: whoever sees the flag clear queues its own mail behind this one.
         queueMail(0xDCD10004, 0xF355FF00);
@@ -369,6 +376,13 @@ static std::atomic<u32> sDmaAddr{0};
 static std::atomic<u32> sDmaLen{0};
 static std::atomic<u32> sDmaLatched{0};  // AIInitDMA calls so far
 static std::atomic<bool> sDmaRunning{false};
+// thr24 GXV_AI_EVENT=1 (default 0 = the 500 us poll as before): while the clock waits for the game to latch the next block it sleeps on this condition variable, which
+// AIInitDMA signals, and wakes by itself when the device queue would reach kLow (the moment the block would be called late). Only a signal that changes
+// what the clock does moves it earlier: the block is played the moment the game latches it instead of up to 500 us later (never later), and the late verdict is
+// reached at the same queue level, at most 1 ms later (the device holds 22 ms or more then: the margin to the verdict is kLow, the margin to an underrun 22 ms more). The playing, the silence on a late block and the queue levels are the code below unchanged.
+static std::mutex& sAiEvMutex = *new std::mutex;
+static std::condition_variable& sAiEvCv = *new std::condition_variable;
+static std::atomic<bool> sAiEvent{false};
 static std::atomic<u32> sSampleRate{32000};
 static bool sAiThreadStarted;
 
@@ -406,8 +420,10 @@ extern "C" void port_audio_note_dsp_hold(void) {
 // and what it cost the game thread on core 0, with the sound's health over the same 5 s.  Weak: the host tests that link this file without
 // the scheduler have no counts.
 extern "C" int __attribute__((weak)) port_audio_cpu_stats(int64_t ns[7], unsigned n[8]);
+extern "C" int __attribute__((weak)) port_mutex_gate_fast_count(unsigned* n);  // (defaults48, GXV_MUTEX_GATE_FAST: os_thread.cpp)
+extern "C" int __attribute__((weak)) port_audio_gate_census(uintptr_t* addr, unsigned* n, int cap, unsigned* other);  // (imp45: os_thread.cpp)
 // The basic log (ux0:data/smg/log.txt): port_log reaches it only in builds with runtime diagnostics. Weak for the host tests.
-extern "C" void __attribute__((weak)) port_log_summary(const char* fmt, ...);
+extern "C" void __attribute__((weak, format(printf, 1, 2))) port_log_summary(const char* fmt, ...);
 // (the AI clock thread, after each block; `blocks5`/`late5` are its counts since the last line, cleared here)
 static void audioCpuLine(u32& blocks5, u32& late5) {
     static int64_t last = 0;
@@ -451,6 +467,24 @@ static void audioCpuLine(u32& blocks5, u32& late5) {
              ns[2] / 1e6, ns[3] / 1e6, n[5], n[6], n[7], blocks5, late5, dspLate, underruns - lastUnderruns);
     lastUnderruns = underruns;
     blocks5 = late5 = 0;
+    if (port_mutex_gate_fast_count) {  // (defaults48, GXV_MUTEX_GATE_FAST=1)
+        unsigned fast = 0;
+        if (port_mutex_gate_fast_count(&fast) == 0)
+            port_log_summary("audio cpu gate: mutex: %.1f s, %u locks and unlocks of the model calc's material mutex made without shutting the gate (GXV_MUTEX_GATE_FAST=1)", secs, fast);
+    }
+    if (port_audio_gate_census) {  // (imp45, GXV_AUDIO_GATE_CENSUS=1: the callers of the interrupt-disable sections that shut the gate in a window)
+        uintptr_t addr[8];
+        unsigned cnt[8], other = 0;
+        const int got = port_audio_gate_census(addr, cnt, 8, &other);
+        if (got >= 0) {
+            char line[400];
+            int o = snprintf(line, sizeof line, "audio cpu gate: %.1f s, OSDisableInterrupts callers that shut the open gate (return address x count):", secs);
+            for (int i = 0; i < got && o < static_cast<int>(sizeof line) - 40; ++i)
+                o += snprintf(line + o, sizeof line - o, " 0x%08lx x %u", static_cast<unsigned long>(addr[i]), cnt[i]);
+            if (o < static_cast<int>(sizeof line) - 24) snprintf(line + o, sizeof line - o, "; others %u", other);
+            port_log_summary("%s", line);
+        }
+    }
 }
 
 static void aiIrq() {
@@ -498,6 +532,8 @@ static void aiClock() {
     u32 answered = sDmaLatched.load();
     u32 blocks = 0, late = 0, lateRun = 0, lateRunMax = 0;
     u32 blocks5 = 0, late5 = 0;  // (the 5 s audio cpu line)
+    u32 clockWaits = 0, clockSignals = 0;  // (thr24: waits for the game's latch in the 10 s window; those ended by AIInitDMA's signal)
+    static const bool aiEvent = [] { const char* e = getenv("GXV_AI_EVENT"); const bool on = e && *e && atoi(e) == 1; sAiEvent.store(on); return on; }();
     int64_t reportAt = next + 10000000000ll, minQueued = INT64_MAX, maxQueued = -1;
     static const bool logAlways = getenv("PETARI_AUDIOLOG") != nullptr;
     // How long this thread goes between two passes of its loop (it sleeps 4 ms at most): a long gap is the scheduler keeping
@@ -544,6 +580,17 @@ static void aiClock() {
         if (sDmaLatched.load() == answered) {
             bool slack = queued >= 0 ? queued > kLow : now < next + dur / 2;
             if (slack) {
+                ++clockWaits;
+                if (aiEvent && queued >= 0) {
+                    // (queued - kLow: the time until this would be a late block; never under 1 ms (the console's condition wait counts whole milliseconds), never over 4 ms: the device's level is read again at every pass)
+                    int64_t w = queued - kLow;
+                    w = w < 1000000 ? 1000000 : (w > 4000000 ? 4000000 : w);
+                    std::unique_lock<std::mutex> lk(sAiEvMutex);
+                    if (sDmaLatched.load() == answered) {
+                        if (sAiEvCv.wait_for(lk, std::chrono::nanoseconds(w)) == std::cv_status::no_timeout) ++clockSignals;
+                    }
+                    continue;
+                }
                 port_host_sleep_ns(500000);
                 continue;
             }
@@ -634,14 +681,15 @@ static void aiClock() {
                 } else {
                     snprintf(spk, sizeof(spk), "; remote speaker off");
                 }
-                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held)%s%s%s",
+                port_log("audio: %u blocks, %u replayed (game late), %d device underruns, queued %.1f-%.1f ms; peak %d; mixer %u sub-frames, %.2f ms avg %.2f ms max; clock thread gap max %.1f ms, %u over 10 ms, %u over 20 ms; late blocks are played as silence, longest run %u blocks; %u DSP late (held); clock waited %u times for the game's latch (GXV_AI_EVENT=%d: %u ended by the signal)%s%s%s",
                          blocks, late, underruns - lastUnderruns, minQueued / 1e6, maxQueued / 1e6, peak, mixes, mixes ? mixNs / 1e6 / mixes : 0.0, mixMax / 1e6,
-                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, spk, mt, hold);
+                         gapMax / 1e6, gapsOver, gapsOverLong, lateRunMax, dspHolds, clockWaits, aiEvent ? 1 : 0, clockSignals, spk, mt, hold);
             }
             lastUnderruns = underruns;
             gapMax = 0;
             gapsOver = gapsOverLong = 0;
             late = blocks = lateRunMax = 0;
+            clockWaits = clockSignals = 0;
             minQueued = INT64_MAX;
             maxQueued = -1;
             reportAt = now + 10000000000ll;
@@ -671,6 +719,10 @@ void AIInitDMA(u32 addr, u32 length) {
     sDmaAddr.store(addr);
     sDmaLen.store(length);
     sDmaLatched++;
+    if (sAiEvent.load(std::memory_order_relaxed)) {  // (thr24 GXV_AI_EVENT: the mutex makes the clock either see the new count before it waits or be in the wait)
+        { std::lock_guard<std::mutex> lk(sAiEvMutex); }
+        sAiEvCv.notify_one();
+    }
 }
 
 void AIStartDMA(void) { sDmaRunning.store(true); }

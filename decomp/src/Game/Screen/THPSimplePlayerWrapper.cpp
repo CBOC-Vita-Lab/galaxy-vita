@@ -14,6 +14,13 @@
 #ifdef TARGET_PC
 // (platform/src/sdk/thp_video.cpp: the decoder copies the compressed picture for its worker threads and needs its length)
 extern "C" void port_thp_frame_size(u32 size);
+extern "C" void port_thp_movie_closed(void);  // (the decoder writes the movie's summary line to the log)
+extern "C" void port_thp_no_frame(void);      // (that line's count of the turns that found no frame read from the card)
+extern "C" void port_thp_ring_note(int valid, int have, int soundOnly);  // (movie47: frames read ahead / none read, for the second summary line)
+#include "port/diagnostics.h"
+#include "port/hot_knob.h"
+#include "port/port.h"
+#include <cstdlib>
 #endif
 
 static u16 VolumeTable[] = {0,     2,     8,     18,    32,    50,    73,    99,    130,   164,   203,   245,   292,   343,   398,   457,
@@ -26,6 +33,50 @@ static u16 VolumeTable[] = {0,     2,     8,     18,    32,    50,    73,    99,
                             25484, 25941, 26402, 26868, 27337, 27810, 28288, 28769, 29255, 29744, 30238, 30736, 31238, 31744, 32254, 32768};
 
 static s32 WorkBuffer[16] __attribute__((aligned(32)));
+#ifdef TARGET_PC
+// PETARI_MOVIE_INHAND (MoviePlayerSimple::exePlaying; from Producdevity's fork, 4c7d7e4): decode() on the game thread for a frame's
+// sound only, its picture left out (decodeAudioOnly).
+static bool sAudioOnly = false;
+// GXV_MOVIE_HOLD (movie36; read once; default 1, 0 = as the original): a turn without a new picture shows the picture of
+// the turn before again. The player decodes into two texture sets in turn and drawCurrentFrame() draws the set the next
+// picture will go to and then switches sets, whether or not a picture was decoded since the last draw. On a turn that took
+// no frame the set it draws therefore still holds the picture BEFORE the one on the screen: the movie steps one picture
+// back for a turn (N, N-1, N+1). The original only has such turns when a frame was not read in time; here they are regular:
+// the player takes no frame while 8 frames of sound are in hand (PETARI_MOVIE_INHAND), which the console's 60.1 turns a
+// second against the movie's 59.94 make happen about every 6 seconds, and a movie of 29.97 pictures a second takes a
+// frame every other turn. With the switch such a turn draws the set drawn last and does not switch sets, and reports that
+// set's frame number (the newest: a frame whose picture was left out is counted on it too, so the end of the movie is seen).
+static bool sPictureSinceDraw = false;
+static bool movieHoldOn() {
+    return PORT_HOT_KNOB(bool, [] {
+        const char* e = getenv("GXV_MOVIE_HOLD");
+        return !(e && *e && atoi(e) == 0);
+    }());
+}
+#endif
+#if defined(TARGET_PC) && PORT_RUNTIME_DIAGNOSTICS
+// "movie:" every 10 s while a movie plays: the frames not read in time and the blocks of sound the movie had nothing for. (The audio
+// log line sees the mixed blocks arrive on time, not that a movie left them silent.) Counted on the game thread and the mixer's
+// thread without a lock: a diagnostic.
+static struct {
+    u32 turns, decoded, noFrame, blocks, silent;
+    s64 at;
+} sMovieLog;
+void port_movie_log_turn(s32 result) {
+    sMovieLog.turns++;
+    sMovieLog.decoded += result == 0;
+    sMovieLog.noFrame += result == 2;
+    const s64 now = port_host_time_ns();
+    if (now - sMovieLog.at >= 10000000000ll) {
+        if (sMovieLog.at != 0) {
+            port_log("movie: %u turns, %u frames, %u not read in time; %u blocks of sound, %u silent", sMovieLog.turns, sMovieLog.decoded,
+                     sMovieLog.noFrame, sMovieLog.blocks, sMovieLog.silent);
+        }
+        sMovieLog = {};
+        sMovieLog.at = now;
+    }
+}
+#endif
 
 // One stereo frame of s16 samples.  The original clears with sizeof(s16*),
 // which is the same 4 bytes on the Wii but overruns the mix buffer on 64-bit.
@@ -271,6 +322,10 @@ bool THPSimplePlayerWrapper::loadStop() {
 
         mTextureSet[0].frameNumber = -1;
         mTextureSet[1].frameNumber = -1;
+#ifdef TARGET_PC
+        sPictureSinceDraw = false;
+        port_thp_movie_closed();
+#endif
         mCurOffset = mHeader.movieDataOffsets;
         mReadSize = mHeader.firstFrameSize;
         mReadIndex = 0;
@@ -291,6 +346,16 @@ bool THPSimplePlayerWrapper::loadStop() {
 s32 THPSimplePlayerWrapper::decode(s32 audio) {
     PORT_AUDIO_TOUCH();
     bool isValid = mReadBuffer[mNextDecodeIndex].isValid == true;
+#ifdef TARGET_PC
+    {
+        // movie47: how far ahead of the player the card is (a count for the movie's summary; nothing changes)
+        int valid = 0;
+        for (int i = 0; i < 20; i++) {
+            valid += mReadBuffer[i].isValid == true;
+        }
+        port_thp_ring_note(valid, isValid ? 1 : 0, sAudioOnly ? 1 : 0);
+    }
+#endif
     if (isValid) {
         u32* compSize = (u32*)mReadBuffer[mNextDecodeIndex].ptr + 2;
         u8* ptr = mReadBuffer[mNextDecodeIndex].ptr + mFrameComp.numComponents * 4 + 8;
@@ -306,6 +371,12 @@ s32 THPSimplePlayerWrapper::decode(s32 audio) {
                     case 0:
 #ifdef TARGET_PC
                         port_thp_frame_size(*compSize);
+                        if (sAudioOnly) {
+                            // (PETARI_MOVIE_INHAND: the frame's picture is left out; the picture last decoded stays on screen under
+                            // this frame's number, so the end of the movie is still seen)
+                            mTextureSet[_310].frameNumber = mReadBuffer[mNextDecodeIndex].frameNumber;
+                            break;
+                        }
 #endif
                         if (!videoDecode(ptr)) {
                             return 1;
@@ -356,10 +427,47 @@ s32 THPSimplePlayerWrapper::decode(s32 audio) {
         return 0;
     }
 
+#ifdef TARGET_PC
+    port_thp_no_frame();
+#endif
     return 2;
 }
 
+#ifdef TARGET_PC
+// The frames of sound decoded and not played yet; -1: this movie has no sound.
+s32 THPSimplePlayerWrapper::audioFramesInHand() const {
+    if (!mAudioExist) {
+        return -1;
+    }
+    s32 frames = 0;
+    for (s32 i = 0; i < 20; i++) {
+        frames += mAudioBuffer[i].validSample != 0;
+    }
+    return frames;
+}
+
+// The next frame's sound, its picture left out.
+s32 THPSimplePlayerWrapper::decodeAudioOnly(s32 audio) {
+    sAudioOnly = true;
+    const s32 result = decode(audio);
+    sAudioOnly = false;
+    return result;
+}
+#endif
+
 s32 THPSimplePlayerWrapper::drawCurrentFrame(_GXRenderModeObj* rmode, u32 x, u32 y, u32 polyW, u32 polyH) {
+#ifdef TARGET_PC
+    if (movieHoldOn() && !sPictureSinceDraw && mTextureSet[_310 ^ 1].frameNumber >= 0) {
+        // (GXV_MOVIE_HOLD: no picture was decoded since the last draw; the set drawn then is drawn again, the sets stay as they are)
+        const u32 shown = _310 ^ 1;
+        THPGXYuv2RgbSetup(rmode);
+        THPGXYuv2RgbDraw(mTextureSet[shown].ytexture, mTextureSet[shown].utexture, mTextureSet[shown].vtexture, x, y, mVideoInfo.xSize,
+                         mVideoInfo.ySize, polyW, polyH);
+        THPGXRestore();
+        return mTextureSet[shown].frameNumber;
+    }
+    sPictureSinceDraw = false;
+#endif
     if (mTextureSet[_310].frameNumber < 0) {
         return -1;
     }
@@ -404,6 +512,9 @@ bool THPSimplePlayerWrapper::videoDecode(u8* pFile) {
     }
 
     mTextureSet[_310].frameNumber = mReadBuffer[mNextDecodeIndex].frameNumber;
+#ifdef TARGET_PC
+    sPictureSinceDraw = true;
+#endif
     return true;
 }
 
@@ -556,6 +667,9 @@ void THPSimplePlayerWrapper::setupParams() {
     mLoop = 0;
     mOpen = 1;
     _310 = 0;
+#ifdef TARGET_PC
+    sPictureSinceDraw = false;
+#endif
     resetAudioParams();
 }
 
@@ -723,6 +837,9 @@ void THPSimplePlayerWrapper::mixAudio(s16* pDest, u32 sample) {
     u16 attenuation;
 
     if (isAudioProcessValid()) {
+#if defined(TARGET_PC) && PORT_RUNTIME_DIAGNOSTICS
+        sMovieLog.blocks++;
+#endif
         if (_2F0) {
             _2F0 = 0;
             _2F4 = 0.0f;
@@ -736,6 +853,9 @@ void THPSimplePlayerWrapper::mixAudio(s16* pDest, u32 sample) {
                 return;
             }
         } else if (!mAudioBuffer[(mAudioOutputIndex + 1) % 0x14].validSample) {
+#if defined(TARGET_PC) && PORT_RUNTIME_DIAGNOSTICS
+            sMovieLog.silent++;
+#endif
             MR::zeroMemory(pDest, sample * kStereoFrameBytes);
             return;
         }

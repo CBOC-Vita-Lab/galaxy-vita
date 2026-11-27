@@ -24,6 +24,11 @@ int sceCtrlGetControllerPortInfo(SceCtrlPortInfo* out) { *out={}; out->port[0]=S
 int sceMotionStartSampling() { return -1; }
 int sceMotionStopSampling() { return 0; }
 int sceMotionGetState(SceMotionState*) { return -1; }
+int sceMotionGetSensorState(SceMotionSensorState*, int) { return -1; }
+// (fix32: input.cpp's later hooks into the Settings code, which this test does not link; a tap presses A as in the default Settings > Controls)
+int port_tap_jump_enabled(void) { return 1; }
+int port_settings_hint_visible(void) { return 0; }
+void port_settings_open_request(void) {}
 int sceTouchGetPanelInfo(SceUInt32 port, SceTouchPanelInfo* out) {
     *out={}; out->maxDispX=1919; out->maxDispY=port==SCE_TOUCH_PORT_FRONT ? 1087 : 889; return 0;
 }

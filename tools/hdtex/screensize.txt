@@ -1,0 +1,38 @@
+# How big the object a pack texture is on appears on the 960x544 screen, in pixels along its longer side: the author's estimates, from the game's
+# camera at the default zoom (about 0.66 px per game unit at 1000 units: Mario, 140 units tall, is about 90 px high) and from what the game shows in
+# its cutscenes. Check them with paused pictures (tools/hdtex/README.md, "Checking a pack on the console") and correct this file.
+# Used by build_pack.py (manifest.tsv columns detail_px, typical_px, closeup_px, screen) and `build_pack.py --report`: a 2x texture only shows more
+# than the game's own when the object is larger than 0.7 x the original's long side in pixels (see hdtex_model.py).
+# Columns: regular expression over "Archive:texture" (the first line that matches one of a texture's names wins), usual size, close-up size.
+^Koopa:KoopaEye           30  140
+^KoopaJr:.*Eye            18   90
+^Tico.*:.*Eye             10   60
+(?i)^[A-Za-z]*:.*(eyeball|eye_?lid|eye\.)   9   70
+(?i):.*eye                 9   70
+# Mario, Luigi and their forms (the whole model is about 90 px high in play, 400 px in the close-ups of cutscenes and the star-get pose)
+:MarioFace                24  190
+:MarioCap                 28  120
+:MarioHair                22  100
+:MarioBody                90  420
+^TeresaMario:Teresa.*Body 90  420
+^(Luigi|LuigiNPC|BeeLuigi|TeresaLuigi):  90  420
+^BeeMario:                90  420
+# Peach and Rosalina stand in cutscenes and in the Observatory
+^(Peach|PeachHair):      130  420
+^(Rosetta|RosettaReading):  150  450
+# Lumas, Toads
+^(TicoFat|TicoComet|TicoBaby):  90  300
+^TicoShop:                80  300
+^(SpinTico|Tico):         35  160
+^Kinopio:.*Face            24  150
+^(Kinopio|Kinopi):         80  260
+# Bowser and Bowser Jr. fill much of the screen in their fights
+^Koopa:KoopaBody         380  540
+^Koopa:KoopaShell        200  400
+^Koopa:KoopaHair         150  400
+^Koopa:                   90  400
+^KoopaJr:                150  420
+# key items (the Power Star is 40 px in the world and a large sparkling one in the star-get close-up)
+^PowerStar:               45  250
+^(PowerUp[A-Za-z]*|Kinoko[A-Za-z]*):  40  200
+^(SuperSpinDriver|SpinDriver|InvincibleMarioMat):  40  160

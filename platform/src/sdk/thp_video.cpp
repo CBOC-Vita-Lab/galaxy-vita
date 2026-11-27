@@ -21,6 +21,9 @@
 // Optionally (Vita only, GXV_THPHW=1, default off; see "Hardware path") a worker hands the frame to the console's JPEG
 // decoder instead: thpToStandardJpeg() turns the THP stream into a standard JPEG (byte stuffing put back, restart markers
 // put back, end-of-image appended), and the decoder's planar YCbCr output is re-tiled into the same GX I8 planes.
+// movie36 (full-size movies, the ones a player did not re-encode): pictures are shown a few calls after they were submitted
+// (GXV_THP_DELAY, see "Pipeline"), so one slow picture no longer costs a repeated one; the re-tiling reads the hardware
+// decoder's uncached output 16 bytes at a load (GXV_THPHW_LOAD16); and each movie ends with a summary line in the log.
 #ifdef THP_STANDALONE  // host-side test build (tools/thp_test)
 #include <stdint.h>
 typedef uint8_t u8;
@@ -36,6 +39,12 @@ typedef int BOOL;
 #include "revolution.h"
 #include "revolution/thp.h"
 #endif
+#ifndef THP_STANDALONE
+#include "port/core3_budget.h"  // (core3-38: the core-3 meter and yield cap)
+#else
+namespace port { namespace core3 { struct Worker { explicit Worker(int) {} void Wake() {} void Checkpoint() {} void Sleep() {} }; inline int RegisterThread(const char*) { return -1; } } }
+#endif
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,9 +73,47 @@ extern "C" int port_vita_pin_core(int core) __attribute__((weak));
 extern "C" int port_vita_thread_class(int cls) __attribute__((weak));
 extern "C" int port_vita_thread_io(int kind, int index) __attribute__((weak));  // GXV_CORE3_IO (vita/runtime/memory.cpp)
 extern "C" int64_t port_thread_cpu_us(void) __attribute__((weak));  // CPU time of the calling thread (the console)
-extern "C" void port_log(const char* fmt, ...) __attribute__((weak));
+extern "C" void port_log(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));  // (the basic log: reaches log.txt in a player build too)
+extern "C" void port_movie_awake_note(void) __attribute__((weak));  // (movie47: vita/vgx-game/entry.cpp; absent on the host)
 
 namespace {
+
+// movie44, TEST ONLY: the movie lines (the decoder's start, the 600-turn progress line, the hardware path's lines and each movie's
+// summary with its "movie33 pace") are port_log lines, and port_log is empty in a player build (PORT_RUNTIME_DIAGNOSTICS=0: the
+// console's log.txt is the basic log), so a console run of a test build could not show that a movie had played. With one of the
+// movie test keys set (PETARI_MOVIE, PETARI_MOVIE_DIR, or PETARI_MOVIE_LOG=1 alone; PETARI_MOVIE_LOG=0 turns it off) these lines go to the
+// basic log (port_log_summary) instead. No key (the default): exactly as before.
+bool thpLogBasic() {
+    static const bool on = [] {
+        if (!port_log_summary) return false;
+        const char* l = getenv("PETARI_MOVIE_LOG");
+        if (l && *l) return l[0] != '0';
+        const char* m = getenv("PETARI_MOVIE");
+        const char* d = getenv("PETARI_MOVIE_DIR");
+        return (m && *m) || (d && *d);
+    }();
+    return on;
+}
+bool thpLogOn() {
+    return port_log != nullptr || thpLogBasic();
+}
+void thpLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void thpLog(const char* fmt, ...) {
+    if (!thpLogOn()) return;
+    static std::mutex mu;    // (a few lines a movie, from the game thread and the decoder's workers)
+    static char line[1400];  // (static: the workers' stacks are small)
+    std::lock_guard<std::mutex> lock(mu);
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(line, sizeof line, fmt, args);
+    va_end(args);
+    if (thpLogBasic()) {
+        port_log_summary("%s", line);
+    } else {
+        port_log("%s", line);
+    }
+}
 
 enum : s32 {
     kErrBadSyntax = 3,
@@ -952,6 +999,23 @@ Decoder sDec;  // the calling thread's own decoder (synchronous mode)
 // keep up at all) as pictures that are shown twice, never as a stutter of the game or its sound.  Pictures are
 // independent (every frame is a JPEG), so any worker can take any slot, and the workers take the newest job first: when
 // they are behind they spend their time on the pictures the game is about to ask for, not on ones nobody will show.
+//
+// The delay line (movie36, GXV_THP_DELAY=<calls>, 0..5; default 4 on the Vita, 0 elsewhere; 0 = the rules above, as before).
+// What limits a full-size (not re-encoded) movie is not the average decode time but its spread: twice the bytes to fix up
+// and to decode, a card read or another thread in the way, and a picture misses its turn. The rules above show a picture
+// one call after it was submitted, so a picture that takes longer than one turn (16.7 ms at 59.94 pictures a second) is
+// late, the picture before it is shown twice, and from then on everything is one turn older (up to kMaxLag). With the delay
+// line the call that submits picture N shows picture N - delay: every picture has `delay` turns (66 ms) to be decoded in,
+// the workers take the pictures in the order they are due (thpPickJob), and a picture that still misses its call is passed
+// over for the one that is due at the next (thpChooseShow), so the movie never drifts from its sound and never stutters
+// for the decoder. No memory is added: the ring's eight slots hold the pictures in flight either way.
+// It also puts the picture nearer its sound: the player keeps 6 to 8 frames of sound in hand (PETARI_MOVIE_INHAND), so the
+// sound of a frame is heard 100 ms or more after the frame was taken, while its picture was on the screen about 35 ms
+// after; four calls later is still a little before the sound, never after it. The last `delay` pictures of a movie are not
+// shown (the player stops at the last frame's number; its sound in hand is cut there too).
+// Log (basic log): "THP: N decoder thread(s), picture delay D" at the first movie; the summary line of each movie
+// ("THP movie ended: ...", written when the player closes it) says how many pictures were shown on the call they were due
+// at, how many were passed over, the bytes a picture and where the decode time went.
 // ---------------------------------------------------------------------------
 constexpr int kRing = 8;
 constexpr int kMaxWorkers = 3;
@@ -972,6 +1036,94 @@ struct Slot {
 int envInt(const char* name, int fallback) {
     const char* e = getenv(name);
     return e && *e ? atoi(e) : fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers of the pipeline and of the hardware path (no state, no clock: tests/thp_pacing.cpp runs them on the host).
+// ---------------------------------------------------------------------------
+[[maybe_unused]] inline u8 tileTexel(const u8* tiles, u32 width, u32 x, u32 y) {
+    const u32 tilesPerRow = (width + 7) / 8;
+    return tiles[((size_t)(y >> 2) * tilesPerRow + (x >> 3)) * 32 + (y & 3) * 8 + (x & 7)];
+}
+
+// A linear plane (`stride` bytes a row) into the GX I8 tiles of a w x h plane, clipped at the picture's edge.
+// `wide` (GXV_THPHW_LOAD16, see hwConvert): the source is read 16 bytes at a load where NEON is there. The hardware decoder's
+// output lies in memory the processor does not cache, where every load is a bus access of its own, so half as many loads for
+// the same bytes; the bytes written are the same either way, and no load reaches past the row's `w` bytes.
+[[maybe_unused]] void linearToTiles(const u8* src, u32 stride, u32 w, u32 h, u8* dst, bool wide) {
+    const u32 tilesPerRow = (w + 7) / 8;
+    for (u32 row = 0; row < h; row++) {
+        const u8* s = src + (size_t)row * stride;
+        u8* t = dst + ((size_t)(row >> 2) * tilesPerRow) * 32 + (row & 3) * 8;
+        u32 x = 0;
+#ifdef THP_NEON
+        if (wide) {
+            for (; x + 16 <= w; x += 16, t += 64) {
+                const uint8x16_t v = vld1q_u8(s + x);
+                vst1_u8(t, vget_low_u8(v));
+                vst1_u8(t + 32, vget_high_u8(v));
+            }
+        }
+#else
+        (void)wide;
+#endif
+        for (; x + 8 <= w; x += 8, t += 32) {
+            memcpy(t, s + x, 8);
+        }
+        if (x < w) {
+            memcpy(t, s + x, w - x);
+        }
+    }
+}
+
+// The delay line (GXV_THP_DELAY, see "Pipeline"): the picture that is due at the call that submits picture `seq` of a movie
+// whose first picture is `base`. Until `delay` calls have passed it is the first picture.
+inline u64 thpDue(u64 base, u64 seq, u64 delay) { return seq >= base + delay ? seq - delay : base; }
+
+// Which finished picture the call that submits `seq` shows. `seqs[i]` / `done[i]` describe the ring's slots (done: decoded
+// without error); returns a slot index, or -1 when there is nothing to show.
+//   1. the newest finished picture that is not after the due one and not before the one shown last (so a picture that
+//      comes late is passed over for the one that is due: the movie never falls behind its sound, and never steps back);
+//   2. else the picture shown last, again (the decoder is behind, or the movie has only begun);
+//   3. else the oldest finished picture after the due one (nothing else is left in the ring: early is better than nothing).
+[[maybe_unused]] int thpChooseShow(const u64* seqs, const bool* done, int n, u64 base, u64 seq, u64 delay, bool anyShown, u64 lastShown) {
+    const u64 due = thpDue(base, seq, delay);
+    int best = -1, same = -1, early = -1;
+    for (int i = 0; i < n; i++) {
+        if (!done[i] || seqs[i] < base || seqs[i] > seq) continue;
+        if (anyShown && seqs[i] < lastShown) continue;
+        if (anyShown && seqs[i] == lastShown) same = i;
+        if (seqs[i] <= due) {
+            if (best < 0 || seqs[i] > seqs[best]) best = i;
+        } else if (early < 0 || seqs[i] < seqs[early]) {
+            early = i;
+        }
+    }
+    if (best >= 0) return best;
+    if (same >= 0) return same;
+    return early;
+}
+
+// A queued picture nobody will show on time any more: it is older than the picture due at the NEXT call (`calls` is that
+// call's number), or not after the one shown last. A worker drops it instead of decoding it.
+[[maybe_unused]] inline bool thpJobStale(u64 jobSeq, u64 base, u64 calls, u64 delay, bool anyShown, u64 lastShown) {
+    return jobSeq < thpDue(base, calls, delay) || (anyShown && jobSeq <= lastShown);
+}
+
+// Which queued picture a worker takes: the OLDEST one that can still be finished before the call it is due at (earliest
+// deadline first), and when none can, the newest (the one with the most time left). Picture s is due at call s + delay; the
+// last call was number calls - 1, `usSinceCall` microseconds ago, and calls come every `periodUs`; a decode takes `needUs`.
+// With a decoder that keeps up this is simply "in order"; with one that does not, the pictures it can no longer make are
+// left (and dropped as stale a call later) and the shown ones are spread evenly instead of in bursts.
+[[maybe_unused]] int thpPickJob(const u64* seqs, int n, u64 calls, u64 delay, int64_t usSinceCall, int64_t periodUs, int64_t needUs) {
+    int oldestOk = -1, newest = -1;
+    for (int i = 0; i < n; i++) {
+        if (newest < 0 || seqs[i] > seqs[newest]) newest = i;
+        const int64_t callsAhead = (int64_t)(seqs[i] + delay + 1) - (int64_t)calls;
+        const int64_t slackUs = callsAhead * periodUs - usSinceCall;
+        if (slackUs >= needUs && (oldestOk < 0 || seqs[i] < seqs[oldestOk])) oldestOk = i;
+    }
+    return oldestOk >= 0 ? oldestOk : newest;
 }
 
 #if defined(THP_HW)
@@ -999,7 +1151,7 @@ int envInt(const char* name, int fallback) {
 // ---------------------------------------------------------------------------
 #define THP_LOG(...)             \
     do {                         \
-        if (port_log) port_log(__VA_ARGS__); \
+        thpLog(__VA_ARGS__);                 \
     } while (0)
 
 struct HwCtx {
@@ -1049,7 +1201,7 @@ bool hwEnsureInit() {
     const int r = sceJpegInitMJpeg(1);
     if (r < 0) {
         gHw.initFailed = true;
-        THP_LOG("THP hardware JPEG: sceJpegInitMJpeg failed 0x%08x", (unsigned)r);
+        THP_LOG("THP hardware JPEG: step sceJpegInitMJpeg(1) failed, error 0x%08x; software decoding", (unsigned)r);
         gHw.state.store(2);
         return false;
     }
@@ -1088,14 +1240,28 @@ bool hwEnsureMemory(HwCtx& ctx, u32 w, u32 h) {
     const SceKernelMemBlockType type = memType == 0 ? SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW : SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_NC_RW;
     const SceUID uid = sceKernelAllocMemBlock("thp_jpeg", type, size, nullptr);
     void* base = nullptr;
-    if (uid < 0 || sceKernelGetMemBlockBase(uid, &base) < 0 || !base) {
+    int baseErr = 0;
+    if (uid >= 0) {
+        baseErr = sceKernelGetMemBlockBase(uid, &base);
+    }
+    if (uid < 0 || baseErr < 0 || !base) {
         if (uid >= 0) {
             sceKernelFreeMemBlock(uid);
         }
         ctx.failed = true;
         if (!gHw.loggedMem.exchange(true)) {
-            THP_LOG("THP hardware JPEG: cannot allocate %u KiB of codec memory (type %d, error 0x%08x); software decoding for this worker", size / 1024,
-                    memType, (unsigned)uid);
+            // Precise: which step, which error (0x80024302 = SCE_KERNEL_ERROR_NO_FREE_PHYSICAL_PAGE: the physically contiguous pool is empty,
+            // e.g. vitaGL took all of it; GXV_THPHW_PHYCONT_MIB in the vitaGL start-up leaves a share), and what the system has left.
+            SceKernelFreeMemorySizeInfo fi;
+            memset(&fi, 0, sizeof(fi));
+            fi.size = sizeof(fi);
+            const int fr = sceKernelGetFreeMemorySize(&fi);
+            if (port_log_summary) port_log_summary("THP hardware JPEG: codec memory failed at step %s: %s %u KiB (type %d = %s), error 0x%08x%s; free now user %d, cdram %d, phycont %d KiB (query %d); "
+                    "software decoding for this worker",
+                    uid < 0 ? "sceKernelAllocMemBlock" : "sceKernelGetMemBlockBase", "block", size / 1024, memType,
+                    memType == 0 ? "USER_MAIN_PHYCONT_NC_RW" : "USER_MAIN_NC_RW", (unsigned)(uid < 0 ? uid : baseErr),
+                    (unsigned)(uid < 0 ? uid : baseErr) == 0x80024302u ? " (NO_FREE_PHYSICAL_PAGE)" : "", fi.size_user / 1024, fi.size_cdram / 1024,
+                    fi.size_phycont / 1024, fr);
         }
         return false;
     }
@@ -1112,27 +1278,6 @@ bool hwEnsureMemory(HwCtx& ctx, u32 w, u32 h) {
     THP_LOG("THP hardware JPEG: %ux%u: codec block %u KiB (jpeg %u, coefficients %u, output %u)", w, h, size / 1024, inCap / 1024, coefCap / 1024,
             outCap / 1024);
     return true;
-}
-
-inline u8 tileTexel(const u8* tiles, u32 width, u32 x, u32 y) {
-    const u32 tilesPerRow = (width + 7) / 8;
-    return tiles[((size_t)(y >> 2) * tilesPerRow + (x >> 3)) * 32 + (y & 3) * 8 + (x & 7)];
-}
-
-// A linear plane (`stride` bytes a row) into the GX I8 tiles of a w x h plane, clipped at the picture's edge.
-void linearToTiles(const u8* src, u32 stride, u32 w, u32 h, u8* dst) {
-    const u32 tilesPerRow = (w + 7) / 8;
-    for (u32 row = 0; row < h; row++) {
-        const u8* s = src + (size_t)row * stride;
-        u8* t = dst + ((size_t)(row >> 2) * tilesPerRow) * 32 + (row & 3) * 8;
-        u32 x = 0;
-        for (; x + 8 <= w; x += 8, t += 32) {
-            memcpy(t, s + x, 8);
-        }
-        if (x < w) {
-            memcpy(t, s + x, w - x);
-        }
-    }
 }
 
 // Chroma plane geometry of a layout.
@@ -1170,11 +1315,15 @@ u32 hwBytes(const HwLayout& L) {
 
 void hwConvert(HwCtx& ctx, const HwLayout& L, Slot& s) {
     const u32 w = L.w, h = L.h, cw = (w + 1) / 2, ch = (h + 1) / 2;
-    linearToTiles(ctx.out, L.strideY, w, h, s.y.data());
+    // GXV_THPHW_LOAD16 (default 1; 0 = 8 bytes a load, as before movie36): the re-tiling reads the decoder's output, which
+    // lies in uncached memory, 16 bytes at a load (linearToTiles). Same bytes out; the "re-tiling" time of the
+    // "THP hardware JPEG: N pictures" line and of the movie's summary line says what it gains on the console.
+    static const bool wide = envInt("GXV_THPHW_LOAD16", 1) != 0;
+    linearToTiles(ctx.out, L.strideY, w, h, s.y.data(), wide);
     const HwChroma c = hwChroma(ctx.out, L);
     if (c.step == 1) {
-        linearToTiles(c.u, c.stride, cw, ch, s.u.data());
-        linearToTiles(c.v, c.stride, cw, ch, s.v.data());
+        linearToTiles(c.u, c.stride, cw, ch, s.u.data(), wide);
+        linearToTiles(c.v, c.stride, cw, ch, s.v.data(), wide);
     } else {
         ctx.tmpU.resize((size_t)cw * ch);
         ctx.tmpV.resize((size_t)cw * ch);
@@ -1188,8 +1337,8 @@ void hwConvert(HwCtx& ctx, const HwLayout& L, Slot& s) {
                 dv[x] = sv[x * 2];
             }
         }
-        linearToTiles(ctx.tmpU.data(), cw, cw, ch, s.u.data());
-        linearToTiles(ctx.tmpV.data(), cw, cw, ch, s.v.data());
+        linearToTiles(ctx.tmpU.data(), cw, cw, ch, s.u.data(), false);
+        linearToTiles(ctx.tmpV.data(), cw, cw, ch, s.v.data(), false);
     }
 }
 
@@ -1233,7 +1382,7 @@ double hwScore(const u8* o, u32 outCap, const HwLayout& L, const Slot& s, double
 
 // The first hardware picture of a size: decode the same frame in software (this is the picture that is shown), find the
 // layout of the codec's output.  Returns true (the slot is filled, `status` is the software decoder's).
-bool hwProbe(HwCtx& ctx, Decoder& d, Slot& s, u32 fixSize, s32& status) {
+bool hwProbe(HwCtx& ctx, Decoder& d, Slot& s, u32 fixSize, s32& status, int decodeResult) {
     {
         std::lock_guard<std::mutex> lock(gHw.mu);
         if (gHw.probing) {
@@ -1259,10 +1408,17 @@ bool hwProbe(HwCtx& ctx, Decoder& d, Slot& s, u32 fixSize, s32& status) {
         if (ir >= 0 && info.pitch[0].x >= s.width && info.pitch[0].x <= 4096) {
             infoPitch = info.pitch[0].x;
         }
-        u32 strides[5] = {s.width, alignUp(s.width, 16), alignUp(s.width, 32), alignUp(s.width, 64), infoPitch};
-        u32 rows[3] = {s.height, alignUp(s.height, 16), alignUp(s.height, 32)};
-        for (int si = 0; si < 5; si++) {
-            for (int ri = 0; ri < 3; ri++) {
+        // movie33: what the decode call itself returned (Vita3K's module, written from the console's behaviour: a positive result is
+        // the luma pitch in its high 16 bits and the luma rows in its low 16) is one more candidate; the picture comparison below
+        // still decides, so a wrong guess costs nothing.
+        const u32 retPitch = decodeResult > 0 ? ((u32)decodeResult >> 16) : 0, retRows = decodeResult > 0 ? ((u32)decodeResult & 0xFFFF) : 0;
+        THP_LOG("THP hardware JPEG: decode call returned 0x%08x (luma pitch %u, rows %u if it is the pitch word)", (unsigned)decodeResult, retPitch, retRows);
+        u32 strides[6] = {s.width, alignUp(s.width, 16), alignUp(s.width, 32), alignUp(s.width, 64), infoPitch,
+                          retPitch >= s.width && retPitch <= 4096 ? retPitch : 0};
+        u32 rows[4] = {s.height, alignUp(s.height, 16), alignUp(s.height, 32), retRows >= s.height && retRows <= 2048 ? retRows : 0};
+        for (int si = 0; si < 6; si++) {
+            for (int ri = 0; ri < 4; ri++) {
+                if (!rows[ri]) continue;
                 for (int order = 0; order < 4; order++) {
                     HwLayout L;
                     L.w = s.width;
@@ -1353,7 +1509,7 @@ bool hwDecode(HwCtx& ctx, Decoder& d, Slot& s, u32 w, u32 h, s32& status) {
         return false;
     }
     if (state == 0 || L.w != w || L.h != h) {
-        return hwProbe(ctx, d, s, fixSize, status);
+        return hwProbe(ctx, d, s, fixSize, status, r);
     }
     hwConvert(ctx, L, s);
     const auto t3 = Clock::now();
@@ -1392,9 +1548,46 @@ struct Pipeline {
     double waitMs = 0, decodeMs = 0, decodeCpuMs = 0;
     u64 lastShownSeq = 0;
     bool anyShown = false;
+    // counters at the start of the current movie (for the one-line summary of the movie that just ended)
+    u64 mvShown0 = 0, mvRepeated0 = 0, mvSkipped0 = 0, mvFresh0 = 0, mvDropped0 = 0;
+    // movie36: the delay line (GXV_THP_DELAY) and what the summary line says about it
+    u64 delay = 0;             // calls between a picture's submission and its showing; 0 = the rules before movie36
+    double periodUs = 16683.0; // running mean of the time between two calls (one movie frame)
+    double needUs = 0.0;       // running mean of one picture's decode on a worker (wall time, its wait for the hardware included)
+    bool closed = false;       // the player closed the movie (port_thp_movie_closed): the next call starts a new one
+    u64 onTime = 0, passed = 0, held = 0, bytesSum = 0, bytesN = 0;
+    u32 bytesMax = 0, restartInterval = 0;
+    u64 mvOnTime0 = 0, mvPassed0 = 0, mvHeld0 = 0, mvDecoded0 = 0;
+    double mvDecodeMs0 = 0;
+    u64 hwFrames0 = 0, hwFix0 = 0, hwCall0 = 0, hwConv0 = 0, hwSoft0 = 0;
+    // movie33: how evenly the new pictures came, in wall time. A picture is "late" when it follows the one before by more than 1.5
+    // call periods (the decoder, a preempted game thread or a slow card: the eye sees a held picture), "double" when it follows
+    // by less than half a period (two pictures within one turn: a burst after a hold). Counted per movie (summary line).
+    std::chrono::steady_clock::time_point lastFreshAt;
+    bool haveFreshAt = false;
+    u64 gapLate = 0, gapDouble = 0, gapN = 0, mvGapLate0 = 0, mvGapDouble0 = 0, mvGapN0 = 0;
+    double gapMaxMs = 0, periodSumMs = 0;
+    // movie47: the gap statistics leave out the ONE gap the delay line makes by construction: the first picture of a movie is the due
+    // picture for the first `delay` + 1 calls (thpDue), so the second new picture comes delay + 1 calls after the first (5 calls, 80-84 ms,
+    // with GXV_THP_DELAY=4). Console, 22 Nov: PrologueB "longest gap 80.4 ms", PrologueA "80.9 ms": the same number in two movies, and
+    // the only criterion either failed. It is reported on its own (startHoldMs). Also: the late gaps by length in calls, and where the
+    // longest one was, so a log says whether a movie ever stood for three calls.
+    double startHoldMs = 0;
+    u64 gapBy[3] = {0, 0, 0};  // 2 calls (1.5-2.5 periods), 3 calls (2.5-3.5), 4 or more
+    u64 gapMaxAtCall = 0;
+    u64 periodN = 0, mvPeriodN0 = 0;
+    double mvPeriodSum0 = 0;
+    u32 sizeOver = 0;  // frames larger than kFrameCap (cut: they cannot be decoded)
 };
 
 Pipeline* gPipe = nullptr;
+std::atomic<u32> gNoFrame{0};  // (port_thp_no_frame: the player asked for a frame the card had not delivered)
+// movie47 (port_thp_ring_note; the game thread only, as movieSummary): how many frames the player had read ahead each time it took one,
+// and the turns it found none, apart for a picture and for the sound-only frame of PETARI_MOVIE_INHAND, with the calls of the first eight.
+u32 gRingMin = ~0u, gRingN = 0, gNoFrameMain = 0, gNoFrameSound = 0, gNoFrameAtN = 0;
+u64 gRingSum = 0;
+u32 gNoFrameAt[8];
+u32 gNoFrame0 = 0;
 std::mutex gPipeInitMu;
 bool gPipeInitDone = false;
 u32 gFrameSizeHint = 0;
@@ -1418,7 +1611,8 @@ void pinWorker(int index) {
     // GXV_CORE3_IO=1 (default 0): the third decoder tries the system core, a spare lane for movie frames; it sleeps on a condition
     // variable between pictures. The other two stay on the cores the movie leaves free.
     if (port_vita_thread_io) {
-        port_vita_thread_io(1, index);
+        const int m = port_vita_thread_io(1, index);
+        if (index == 2) port::core3::MarkOnCore3(port::core3::RegisterThread("thp-dec3"), m == 0x80000);  // (core3-38: metered; one frame is one call, so it naps after it, not inside it)
     }
 #else
     (void)index;
@@ -1429,6 +1623,7 @@ void workerMain(Pipeline* p, int index) {
     pinWorker(index);
     Decoder& d = p->decoders[index];
     memset(&d, 0, sizeof(d));
+    port::core3::Worker c3(index == 2 ? port::core3::RegisterThread("thp-dec3") : -1);
     std::unique_lock<std::mutex> lock(p->mu);
     for (;;) {
         p->work.wait(lock, [p] { return p->quit || p->queued > 0; });
@@ -1441,7 +1636,9 @@ void workerMain(Pipeline* p, int index) {
         // is about to ask for, so a slow decoder shows a lower rate of fresh pictures instead of none.
         for (int i = 0; i < p->queued;) {
             Slot& old = p->slots[p->queue[i]];
-            if (old.seq + (u64)(kRing - 2) < p->calls || (p->anyShown && old.seq < p->lastShownSeq)) {
+            const bool stale = p->delay ? thpJobStale(old.seq, p->base, p->calls, p->delay, p->anyShown, p->lastShownSeq)
+                                        : (p->anyShown && old.seq < p->lastShownSeq);
+            if (old.seq + (u64)(kRing - 2) < p->calls || stale) {
                 old.state = kSkipped;
                 p->skipped++;
                 p->queue[i] = p->queue[--p->queued];
@@ -1454,8 +1651,17 @@ void workerMain(Pipeline* p, int index) {
             continue;
         }
         int best = 0;
-        for (int i = 1; i < p->queued; i++) {
-            if (p->slots[p->queue[i]].seq > p->slots[p->queue[best]].seq) best = i;
+        if (p->delay) {
+            // (GXV_THP_DELAY) the oldest picture that can still be finished before the call it is due at; see thpPickJob
+            u64 seqs[kRing];
+            for (int i = 0; i < p->queued; i++) seqs[i] = p->slots[p->queue[i]].seq;
+            const int64_t usSinceCall =
+                (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - p->lastCall).count();
+            best = thpPickJob(seqs, p->queued, p->calls, p->delay, usSinceCall, (int64_t)p->periodUs, (int64_t)(p->needUs * 1.25));
+        } else {
+            for (int i = 1; i < p->queued; i++) {
+                if (p->slots[p->queue[i]].seq > p->slots[p->queue[best]].seq) best = i;
+            }
         }
         const int idx = p->queue[best];
         p->queue[best] = p->queue[--p->queued];
@@ -1465,6 +1671,7 @@ void workerMain(Pipeline* p, int index) {
         // The planes are sized from the picture's own header (done on first use of the slot).
         s32 status = 0;
         double decodeMsLocal = 0, decodeCpuLocal = 0;
+        c3.Wake();
         static const int testDelayUs = envInt("PETARI_THP_TEST_DELAY_US", 0);  // (tests: a slow decoder)
         if (testDelayUs > 0) {
             std::this_thread::sleep_for(std::chrono::microseconds(testDelayUs));
@@ -1509,10 +1716,17 @@ void workerMain(Pipeline* p, int index) {
                 status = kErrBadSyntax;
             }
         }
+        c3.Checkpoint();  // (core 3 only: a frame is one call; after it the thread naps if it ran over the budget)
+        c3.Sleep();
         lock.lock();
         p->decoded++;
         p->decodeMs += decodeMsLocal;
         p->decodeCpuMs += decodeCpuLocal;
+        if (status == 0) {
+            const double us = decodeMsLocal * 1000.0;
+            p->needUs = p->needUs > 0.0 ? p->needUs + (us - p->needUs) / 8.0 : us;
+            p->restartInterval = d.restartInterval;  // (the summary line: a stream with restart intervals costs the fix-up a walk of its symbols)
+        }
         s.status = status;
         s.state = status == 0 ? kDone : kSkipped;
         p->done.notify_all();
@@ -1536,6 +1750,18 @@ void initPipeline() {
 #endif
         Pipeline* p = new Pipeline();
         p->workers = n;
+        // GXV_THP_DELAY=<calls> (0..5; default 4 on the Vita, 0 elsewhere): the call that submits picture N shows picture
+        // N - delay, so a picture has that many turns to be decoded in; 0 = shown as soon as it is finished, as before
+        // movie36. See "Pipeline" above. (The ring has 8 slots: 5 is the most it can hold in flight with room to spare.)
+#if defined(__vita__) && !defined(THP_STANDALONE)
+        const int defaultDelay = 4;
+#else
+        const int defaultDelay = 0;
+#endif
+        int delay = envInt("GXV_THP_DELAY", defaultDelay);
+        if (delay < 0) delay = 0;
+        if (delay > kRing - 3) delay = kRing - 3;
+        p->delay = (u64)delay;
         for (int i = 0; i < kRing; i++) {
             p->slots[i].in.assign(kFrameCap + 64, 0);
         }
@@ -1543,7 +1769,7 @@ void initPipeline() {
         for (int i = 0; i < n; i++) {
             p->threads[i] = std::thread(workerMain, p, i);
         }
-        if (port_log) port_log("THP: %d decoder thread(s)", n);
+        thpLog("THP: %d decoder thread(s), picture delay %d (GXV_THP_DELAY)", n, delay);
         gPipe = p;
     }
 }
@@ -1558,23 +1784,123 @@ Pipeline* pipeline() {
     return gPipe;
 }
 
+// One line for the movie that has just ended (p->mu held), then the counters of the next one start here. Written when the
+// player closes the movie (port_thp_movie_closed), or by the next movie's first picture when it did not.
+// How to read it (movie36): "new pictures" of "turns" is the share of calls that had a picture of their own; "shown again
+// (decoder behind)" are calls whose due picture was not finished; "on time" are pictures shown at the very call they were
+// due at (with GXV_THP_DELAY; all of the new ones when the decoder keeps up); "passed over" were never shown; "held at the
+// start" are the delay line's first calls. Then what the pictures cost: bytes a picture (a full-size movie: about 40 KB,
+// a re-encoded one about half), the restart interval (not 0: the hardware fix-up walks every symbol), the workers' time a
+// picture, and of the hardware pictures the fix-up, the decoder call (with its wait for the one decoder) and the re-tiling;
+// last, how often the player found no frame read from the card (port_thp_no_frame).
+void movieSummary(Pipeline* p) {
+    const u64 turns = p->shown - p->mvShown0;
+    if (turns && thpLogOn()) {
+        const u64 decoded = p->decoded - p->mvDecoded0;
+        double hwFix = 0, hwCall = 0, hwConv = 0;
+        u64 hwN = 0, hwSoft = 0;
+        const u64 periods = p->periodN - p->mvPeriodN0;
+        const double callMs = periods ? (p->periodSumMs - p->mvPeriodSum0) / (double)periods : 0.0;
+#if defined(THP_HW)
+        hwN = gHw.frames.load() - p->hwFrames0;
+        hwSoft = gHw.softFrames.load() - p->hwSoft0;
+        if (hwN) {
+            hwFix = (double)(gHw.usFix.load() - p->hwFix0) / 1000.0 / (double)hwN;
+            hwCall = (double)(gHw.usCall.load() - p->hwCall0) / 1000.0 / (double)hwN;
+            hwConv = (double)(gHw.usConv.load() - p->hwConv0) / 1000.0 / (double)hwN;
+        }
+#endif
+        thpLog("THP movie ended: %u turns, %u new pictures, %u shown again (decoder behind), %u not decoded in time, %u not submitted; "
+                 "delay %u: %u on time, %u passed over, %u held at the start; %u bytes a picture (largest %u), restart interval %u; "
+                 "%u decoded, %.2f ms each; hardware %u (fix-up %.2f, decoder %.2f, re-tiling %.2f ms), left to software %u; "
+                 "%u times no frame was read yet; "
+                 "movie33 pace: calls every %.2f ms (%.2f a second), %u of %u gaps between new pictures late (over 1.5 calls), "
+                 "%u double (under half a call), longest gap %.1f ms",
+                 (unsigned)turns, (unsigned)(p->fresh - p->mvFresh0), (unsigned)(p->repeated - p->mvRepeated0),
+                 (unsigned)(p->skipped - p->mvSkipped0), (unsigned)(p->dropped - p->mvDropped0), (unsigned)p->delay,
+                 (unsigned)(p->onTime - p->mvOnTime0), (unsigned)(p->passed - p->mvPassed0), (unsigned)(p->held - p->mvHeld0),
+                 (unsigned)(p->bytesN ? p->bytesSum / p->bytesN : 0), (unsigned)p->bytesMax, (unsigned)p->restartInterval,
+                 (unsigned)decoded, decoded ? (p->decodeMs - p->mvDecodeMs0) / (double)decoded : 0.0, (unsigned)hwN, hwFix, hwCall, hwConv,
+                 (unsigned)hwSoft, (unsigned)(gNoFrame.load() - gNoFrame0), callMs, callMs > 0 ? 1000.0 / callMs : 0.0,
+                 (unsigned)(p->gapLate - p->mvGapLate0), (unsigned)(p->gapN - p->mvGapN0),
+                 (unsigned)(p->gapDouble - p->mvGapDouble0), p->gapMaxMs);
+        // movie47 (a second line: the first one is read by movieread.awk as it is)
+        {
+            char at[96] = "";
+            int o = 0;
+            for (u32 i = 0; i < gNoFrameAtN && i < 8 && o < (int)sizeof at - 12; i++) o += snprintf(at + o, sizeof at - o, "%s%u", i ? ", " : "", gNoFrameAt[i]);
+            thpLog("THP movie, gaps and reads: the first picture stayed %.1f ms while the picture delay filled (by design: not counted in the gaps above); late gaps "
+                   "of 2 / 3 / 4+ calls: %u / %u / %u, the longest at call %u of %u; frames read ahead when a frame was taken: least %u, mean %.1f (of 20); "
+                   "no frame read yet: %u times for a picture%s%s%s, %u times for a sound-only frame; turns that took no frame because 8 frames of sound "
+                   "were in hand are not calls",
+                   p->startHoldMs, (unsigned)p->gapBy[0], (unsigned)p->gapBy[1], (unsigned)p->gapBy[2], (unsigned)p->gapMaxAtCall, (unsigned)turns,
+                   gRingN ? gRingMin : 0u, gRingN ? (double)gRingSum / (double)gRingN : 0.0, gNoFrameMain, gNoFrameAtN ? " (at calls " : "", at,
+                   gNoFrameAtN ? (gNoFrameMain > gNoFrameAtN ? ", ...)" : ")") : "", gNoFrameSound);
+        }
+    }
+    p->startHoldMs = 0;
+    p->gapBy[0] = p->gapBy[1] = p->gapBy[2] = 0;
+    p->gapMaxAtCall = 0;
+    gRingMin = ~0u;
+    gRingSum = 0;
+    gRingN = 0;
+    gNoFrameMain = gNoFrameSound = 0;
+    gNoFrameAtN = 0;
+    gNoFrame0 = gNoFrame.load();
+    p->mvGapLate0 = p->gapLate;
+    p->mvGapDouble0 = p->gapDouble;
+    p->mvGapN0 = p->gapN;
+    p->gapMaxMs = 0;
+    p->mvPeriodN0 = p->periodN;
+    p->mvPeriodSum0 = p->periodSumMs;
+    p->mvShown0 = p->shown;
+    p->mvRepeated0 = p->repeated;
+    p->mvSkipped0 = p->skipped;
+    p->mvFresh0 = p->fresh;
+    p->mvDropped0 = p->dropped;
+    p->mvOnTime0 = p->onTime;
+    p->mvPassed0 = p->passed;
+    p->mvHeld0 = p->held;
+    p->mvDecoded0 = p->decoded;
+    p->mvDecodeMs0 = p->decodeMs;
+    p->bytesSum = p->bytesN = 0;
+    p->bytesMax = 0;
+#if defined(THP_HW)
+    p->hwFrames0 = gHw.frames.load();
+    p->hwFix0 = gHw.usFix.load();
+    p->hwCall0 = gHw.usCall.load();
+    p->hwConv0 = gHw.usConv.load();
+    p->hwSoft0 = gHw.softFrames.load();
+#endif
+}
+
 s32 decodePipelined(Pipeline* p, const void* file, void* tileY, void* tileU, void* tileV) {
     using Clock = std::chrono::steady_clock;
     const auto now = Clock::now();
     std::unique_lock<std::mutex> lock(p->mu);
 
     // A pause of more than a quarter second means a new movie (or a seek): start over, discarding what is in flight.
-    if (std::chrono::duration<double>(now - p->lastCall).count() > 0.25) {
+    // (movie36: so does the player's closing of the movie before, however soon the next one follows.)
+    const double sinceCall = std::chrono::duration<double>(now - p->lastCall).count();
+    if (sinceCall <= 0.25 && !p->closed) {
+        p->periodUs += (sinceCall * 1e6 - p->periodUs) / 16.0;  // (the delay line's clock: one movie frame)
+        p->periodSumMs += sinceCall * 1000.0;
+        p->periodN++;
+    }
+    if (sinceCall > 0.25 || p->closed) {
+        p->closed = false;
         for (;;) {
             bool busy = false;
             for (int i = 0; i < kRing; i++) busy |= p->slots[i].state == kBusy;
             if (!busy) break;
             p->done.wait_for(lock, std::chrono::milliseconds(20));
         }
+        movieSummary(p);  // (nothing when the player's close has written it already)
         p->queued = 0;
         for (int i = 0; i < kRing; i++) p->slots[i].state = kFree;
         p->base = p->calls;
         p->anyShown = false;
+        p->haveFreshAt = false;
     }
     p->lastCall = now;
 
@@ -1593,9 +1919,17 @@ s32 decodePipelined(Pipeline* p, const void* file, void* tileY, void* tileU, voi
             }
         }
         u32 size = gFrameSizeHint ? gFrameSizeHint : kFrameCap;
-        if (size > kFrameCap) size = kFrameCap;
+        if (size > kFrameCap) {
+            size = kFrameCap;  // (cut: such a frame does not decode; the picture before it is held)
+            if (p->sizeOver++ == 0) thpLog("THP: a frame of %u bytes is larger than %u: it cannot be decoded (movie33)", gFrameSizeHint, kFrameCap);
+        }
         memcpy(s.in.data(), file, size);
         memset(s.in.data() + size, 0, 64);
+        if (gFrameSizeHint) {  // (the summary line's bytes a picture)
+            p->bytesSum += size;
+            p->bytesN++;
+            if (size > p->bytesMax) p->bytesMax = size;
+        }
         s.inSize = size;
         s.seq = seq;
         s.state = kQueued;
@@ -1609,6 +1943,15 @@ s32 decodePipelined(Pipeline* p, const void* file, void* tileY, void* tileU, voi
     // new, the last one again.
     constexpr u64 kMaxLag = 4;
     auto choose = [&]() {
+        if (p->delay) {  // (GXV_THP_DELAY: the picture that is due, see thpChooseShow)
+            u64 seqs[kRing];
+            bool done[kRing];
+            for (int i = 0; i < kRing; i++) {
+                seqs[i] = p->slots[i].seq;
+                done[i] = p->slots[i].state == kDone;
+            }
+            return thpChooseShow(seqs, done, kRing, p->base, seq, p->delay, p->anyShown, p->lastShownSeq);
+        }
         int oldestNew = -1, newest = -1, same = -1;
         for (int i = 0; i < kRing; i++) {
             const Slot& t = p->slots[i];
@@ -1633,9 +1976,37 @@ s32 decodePipelined(Pipeline* p, const void* file, void* tileY, void* tileU, voi
         return kErrNoInput;  // the player retries on its next turn
     }
     const Slot& src = p->slots[use];
+    const bool dueIsReal = seq >= p->base + p->delay;  // (GXV_THP_DELAY: false during the first `delay` calls of a movie)
     if (p->anyShown && src.seq == p->lastShownSeq) {
-        p->repeated++;
+        if (p->delay && thpDue(p->base, seq, p->delay) <= p->lastShownSeq) {
+            p->held++;  // (the due picture is the one on the screen: the first, until the delay line has filled; not the decoder's doing)
+        } else {
+            p->repeated++;
+        }
     } else {
+        if (p->delay) {
+            if (p->anyShown && src.seq > p->lastShownSeq + 1) p->passed += src.seq - p->lastShownSeq - 1;
+            if (dueIsReal && src.seq == seq - p->delay) p->onTime++;
+        }
+        if (p->haveFreshAt) {
+            const double gapUs = std::chrono::duration<double, std::micro>(now - p->lastFreshAt).count();
+            if (p->delay && p->anyShown && p->lastShownSeq == p->base && seq <= p->base + p->delay + 1) {
+                p->startHoldMs = gapUs / 1000.0;  // (movie47: the delay line filling: the first picture's own hold, not a gap)
+            } else {
+                p->gapN++;
+                if (gapUs > p->periodUs * 1.5) {
+                    p->gapLate++;
+                    p->gapBy[gapUs > p->periodUs * 3.5 ? 2 : gapUs > p->periodUs * 2.5 ? 1 : 0]++;
+                }
+                if (gapUs < p->periodUs * 0.5) p->gapDouble++;
+                if (gapUs / 1000.0 > p->gapMaxMs) {
+                    p->gapMaxMs = gapUs / 1000.0;
+                    p->gapMaxAtCall = seq - p->base;
+                }
+            }
+        }
+        p->lastFreshAt = now;
+        p->haveFreshAt = true;
         p->fresh++;
         p->lagSum += seq - src.seq;
         p->lastShownSeq = src.seq;
@@ -1649,8 +2020,8 @@ s32 decodePipelined(Pipeline* p, const void* file, void* tileY, void* tileU, voi
     port_gpu_memory_written(tileY, (u32)src.y.size());
     port_gpu_memory_written(tileU, (u32)src.u.size());
     port_gpu_memory_written(tileV, (u32)src.v.size());
-    if ((p->shown % 600) == 0 && port_log) {
-        port_log("THP: %llu turns, %llu new pictures (on average %.1f turns old), %llu shown again (decoder behind), %llu not decoded in time, "
+    if ((p->shown % 600) == 0 && thpLogOn()) {
+        thpLog("THP: %llu turns, %llu new pictures (on average %.1f turns old), %llu shown again (decoder behind), %llu not decoded in time, "
                  "%llu decoded (%.2f ms each, %.2f ms of processor time), %llu not submitted",
                  (unsigned long long)p->shown, (unsigned long long)p->fresh, p->fresh ? (double)p->lagSum / (double)p->fresh : 0.0,
                  (unsigned long long)p->repeated, (unsigned long long)p->skipped, (unsigned long long)p->decoded,
@@ -1669,10 +2040,46 @@ BOOL THPInit(void) { return TRUE; }
 // The size of the video component about to be decoded (the movie player knows it; the SDK's decoder did not need it).
 void port_thp_frame_size(u32 size) { gFrameSizeHint = size; }
 
+// The movie player found no frame to decode (THPSimplePlayerWrapper::decode returned 2: the card has not delivered it; for
+// the sound-only frame of PETARI_MOVIE_INHAND too). Counted for the movie's summary line: with a full-size movie this is
+// what says whether the card's reads keep up (see also the "dvd: movie reads" line).
+void port_thp_no_frame(void) { gNoFrame.fetch_add(1, std::memory_order_relaxed); }
+
+// movie47: the player is about to take a frame (THPSimplePlayerWrapper::decode): `valid` of its 20 read buffers hold a frame, `have`: the
+// one it wants is there, `soundOnly`: this is the extra sound-only frame. For the second summary line.
+void port_thp_ring_note(int valid, int have, int soundOnly) {
+    if (have) {
+        const u32 v = valid < 0 ? 0u : (u32)valid;
+        if (v < gRingMin) gRingMin = v;
+        gRingSum += v;
+        gRingN++;
+    } else if (soundOnly) {
+        gNoFrameSound++;
+    } else {
+        if (gNoFrameAtN < 8) gNoFrameAt[gNoFrameAtN++] = gPipe ? (u32)(gPipe->calls - gPipe->base) : 0u;
+        gNoFrameMain++;
+    }
+}
+
+// The movie player closed its movie (THPSimplePlayerWrapper::loadStop): the movie's summary line is written now, not at
+// the next movie's first picture (the last movie of a session had none), and the next call starts a new movie.
+void port_thp_movie_closed(void) {
+    Pipeline* p = gPipe;  // (not pipeline(): a movie that was never decoded has nothing to say, and no threads are made for it)
+    if (!p) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(p->mu);
+    movieSummary(p);
+    p->closed = true;
+}
+
 // `file` is one frame's video component.  The THP player passes the size of
 // the whole frame buffer only implicitly, so without a size hint the scan is bounded by the
 // largest THP frame the SDK accepts.
 s32 THPVideoDecode(void* file, void* tileY, void* tileU, void* tileV, void* work) {
+    // movie47: a movie is being played (a picture a turn). On the Vita the pad thread keeps the console awake while these calls come
+    // (vita/vgx-game/entry.cpp): a movie is up to 169 s without a press, and the system's automatic standby would stop the game in it.
+    if (port_movie_awake_note) port_movie_awake_note();
     if (!file) {
         return kErrNoInput;
     }

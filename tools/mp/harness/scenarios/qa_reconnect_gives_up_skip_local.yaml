@@ -1,0 +1,48 @@
+# final run (14 Nov), reconnect case g (lodgate): a reconnect that GIVES UP. The guest's Wi-Fi is cut 1 s after the Good Egg intro starts for 20 s; SMG_MP_TEST_RECONNECT_MS=6000 (desktop-only
+# hook, mp_core.cpp) shortens the silent-link rejoin window from 75 s to 6 s, so the guest gives up ~6 s after "connection lost", inside the intro (the link is back only after
+# that). The guest holds A from 1 s after "connection lost" (inputs/skip_giveup_guest.txt):
+#   - while reconnecting (session held, not active) the full hold WAITS: no skip of the intro before "reconnect: gave up";
+#   - once it gave up nothing is held any more (the per-console speed gates reopen: SessionHeld is false), and the SAME hold skips the intro LOCALLY: "skip: intro camera" without
+#     "(players voted)", no "flow skip decided" on the guest, no "reconnected".
+# Gate-line re-arming (port_mpgate_idle) shows only in a later session, which the autopilot cannot start (the "rejoin offered" menu has no autopilot): not asserted; the local skip
+# is the observable proof that the hold is released. The host removes the silent guest (slot 1 left).
+# TIMING RISK (not run yet): the intro must still be playing ~13 s after it started (5 s to "connection lost" + 6 s window + the skip). If it is shorter the 'after gave up' skip rule
+# fails: that is the finding, not a reason to weaken it.
+name: qa_reconnect_gives_up_skip_local
+description: "guest cut off 20 s in the intro with a 6 s rejoin window: its skip hold waits, the reconnect gives up, the hold then skips locally"
+seconds: 300
+shot_size: 960x544
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_RECONNECT_MS]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_BACKEND: vgx}
+link:
+  profile: home_wifi
+  events:
+    - {'on': 'guest /skip: (intro camera|fly-in) playing/', delay: 1, outage_s: 20, who: guest}
+processes:
+  - name: host
+    input: "@skip_giveup_host"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+  - name: guest
+    input: "@skip_giveup_guest"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2, SMG_MP_TEST_RECONNECT_MS: 6000}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect * /\[mp\] flow barrier release serial=1/'
+  - 'expect guest /skip: (intro camera|fly-in) playing/'
+  - 'expect guest /\[mp\] connection lost reason=\S+/'
+  - 'expect guest /\[mp\] ui: reconnecting/'
+  - 'expect guest /\[mp\] reconnect: gave up \(no-wifi\)/ within 30ws after guest /\[mp\] connection lost/'
+  - 'absent guest /\[mp\] reconnected after=/'
+  # the hold waited while the session was held ...
+  - 'absent guest /skip: (intro camera|fly-in)(?! playing| following| \(players voted\))/ before guest /\[mp\] reconnect: gave up/'
+  # ... and skipped locally after the give-up (no vote)
+  - 'expect guest /skip: (intro camera|fly-in)(?! playing| following| \(players voted\))/ after guest /\[mp\] reconnect: gave up/'
+  - 'absent guest /skip: (intro camera|fly-in) \(players voted\)/'
+  - 'absent guest /\[mp\] flow skip decided/'
+  - 'expect guest /skip: fast-forward ended after \d+ updates/'
+  - 'expect host /\[mp\] slot 1 left reason=\S+/'

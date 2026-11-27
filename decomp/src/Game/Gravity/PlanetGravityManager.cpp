@@ -4,6 +4,9 @@
 extern "C" void port_logic_count(int what, unsigned n);  // (logic12: logging builds' per-turn counts, platform/src/port/perf.cpp)
 #include "port/move_prof.h"  // (hivelogic: GXV_ANIM_PROF=1/3 times the gravity queries, "move-sys:" in the basic log)
 #include "port/grav_memo.h"
+#include "port/logic_grid.h"  // (GXV_GRAV_GRID, logic23)
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF, logic23: "gravity" / "gravity-walk" systems, gravities visited)
+#include "port/obj_cut.h"     // (PortOcDue: the verify line's clock)
 #include "port/diagnostics.h"
 #include "port/hot_knob.h"
 #include <cstring>
@@ -22,6 +25,7 @@ extern "C" int port_on_frame_thread(void);
 uint32_t port_grav_gen = 1;
 
 namespace {
+int GravGridMode();  // (GXV_GRAV_GRID, logic23: below)
 int GravMemoMode() {
     return PORT_HOT_KNOB(int, [] {
         const char* e = getenv("GXV_MO_GRAVMEMO");
@@ -100,6 +104,7 @@ void GravityCullVerified(bool accepted) {
 }  // namespace
 
 bool PlanetGravityManager::calcTotalGravityVector(TVec3f* pGravity, GravityInfo* pInfo, const TVec3f& rPosition, u32 gravityType, u32 host) const {
+    PORT_LOGIC_SYS(PORT_LS_GRAVITY);
     const int mode = GravMemoMode();
     if (mode == 0 || !port_on_frame_thread()) {
         return calcTotalGravityVectorRaw(pGravity, pInfo, rPosition, gravityType, host);
@@ -127,7 +132,12 @@ bool PlanetGravityManager::calcTotalGravityVector(TVec3f* pGravity, GravityInfo*
     const TVec3f pos(rPosition);  // (rPosition may alias *pGravity or a field the caller's info points into)
     GravityInfo info;
     TVec3f gravity;
-    const bool ret = calcTotalGravityVectorRaw(&gravity, &info, pos, gravityType, host);
+    // GXV_GRAV_GRID (below): the walk over only the gravities whose reach can hold the position (pos, info and gravity are this
+    // query's own: nothing aliases them)
+    int gridUsed = 0;
+    const bool ret = GravGridMode() != 0 ? portGridWalk(&gravity, &info, pos, gravityType, host, &gridUsed)
+                                          : calcTotalGravityVectorRaw(&gravity, &info, pos, gravityType, host);
+    (void)gridUsed;
     if (hit) {  // (mode 2)
         ++sGravHits;
         if (e.ret != static_cast< uint32_t >(ret) || !SameVec(e.gravity, gravity) || !SameVec(e.infoVector, info.mGravityVector) ||
@@ -166,12 +176,205 @@ bool PlanetGravityManager::calcTotalGravityVector(TVec3f* pGravity, GravityInfo*
     }
     return ret;
 }
+
+// GXV_GRAV_GRID (logic23, 8 Nov; default 0; exact; port/logic_grid.h): a memo miss walks every registered gravity (Honeyhive ~21, Good
+// Egg ~110 a query) though only the few whose reach sphere holds the position can answer (PETARI_GRAVITY_CULL turns the others away
+// one by one, each a cache miss on its object). The grid files every gravity with a reach sphere that no follower moves into the cells
+// of the sphere's box; a query walks the gravities of its cell merged with the moving / sphere-less ones, in the array's order, with
+// the walk's own body (validity, type, host, the priority stop, the sphere test, calcGravity), unchanged.
+// Why exact (with PETARI_GRAVITY_CULL=1, the only cull mode the grid runs with):
+//  - A gravity left out holds the position outside its box, so outside its sphere (box = centre +- sqrt(R2) (1 + 1e-5) + 1, in
+//    double, rounded outward; a position with fl(d2) <= R2 has |p_i - c_i| <= sqrt(R2) (1 + 3u) per axis, see logic_grid.h for the
+//    cells). The original walk skips such a gravity at the cull test without a calcGravity: it changes no state.
+//  - The original walk stops (break) at the first valid, matching gravity whose priority is below the largest found so far, and it
+//    makes that test BEFORE the sphere test: a gravity the grid leaves out could be such a stop. The array is sorted by priority,
+//    highest first (registerGravity; the grid checks it at each build, and setPriority makes it check again), so every later valid
+//    matching gravity is a stop too: the grid's walk stops at the next one it meets, or ends, and no calcGravity runs after the stop
+//    in either walk.
+//  - Positions with a coordinate beyond 1e18 or not finite, a sphere centre beyond 1e18, an unsorted array, the cull off or in its
+//    verify mode, another thread: the whole walk, as before.
+//  - What the grid is built from moves port_grav_geo_gen (port/grav_memo.h lists the writers); a stale grid is never used.
+//   0  off.
+//   1  on.
+//   2  verify: every grid walk is also made the original way; the vector bits, the result and the GravityInfo are compared (a
+//      difference is counted and logged; the original's answer is used). Lines about every 5 s (every build):
+//      grav-grid: Q walks, G through the grid (V of N gravities visited), B builds, F whole walks; mismatches X
+uint32_t port_grav_geo_gen = 1;
+namespace {
+int GravGridMode() {
+    return PORT_HOT_KNOB(int, [] {
+        const char* e = getenv("GXV_GRAV_GRID");
+        const int v = e && *e ? static_cast< int >(strtol(e, nullptr, 0)) : 0;
+        return v < 0 ? 0 : v > 2 ? 2 : v;
+    }());
+}
+struct GravGridState {
+    const PlanetGravityManager* mgr = nullptr;
+    uint32_t gen = 0;
+    port::lgrid::Grid grid;
+    port::lgrid::Box boxes[128];
+    uint8_t isStatic[128];
+    uint32_t walks = 0, gridWalks = 0, visitsGrid = 0, visitsAll = 0, builds = 0, whole = 0, mismatches = 0, tick = 0;
+    int64_t last = 0;
+};
+GravGridState sGravGrid;
+void GravGridLog() {
+    if (!PortOcDue(sGravGrid.last, sGravGrid.tick)) return;
+    port_log_summary("grav-grid: %u walks, %u through the grid (%u of %u gravities visited), %u builds, %u whole walks; mismatches %u "
+                     "(GXV_GRAV_GRID=%d)",
+                     sGravGrid.walks, sGravGrid.gridWalks, sGravGrid.visitsGrid, sGravGrid.visitsAll, sGravGrid.builds, sGravGrid.whole,
+                     sGravGrid.mismatches, GravGridMode());
+    sGravGrid.walks = sGravGrid.gridWalks = sGravGrid.visitsGrid = sGravGrid.visitsAll = sGravGrid.builds = sGravGrid.whole = 0;
+}
+}  // namespace
+
+bool PlanetGravityManager::portGridWalk(TVec3f* pGravity, GravityInfo* pInfo, const TVec3f& rPosition, u32 gravityType, u32 host, int* pUsed) const {
+    *pUsed = 0;
+    GravGridState& st = sGravGrid;
+    ++st.walks;
+    GravGridLog();
+    if (GravityCullMode() != 1 || !port_on_frame_thread() || !port::lgrid::Finite3(rPosition.x, rPosition.y, rPosition.z, 1e18f)) {
+        ++st.whole;
+        return calcTotalGravityVectorRaw(pGravity, pInfo, rPosition, gravityType, host);
+    }
+    if (st.mgr != this || st.gen != port_grav_geo_gen || st.grid.count != mNumGravities) {
+        st.mgr = this;
+        st.gen = port_grav_geo_gen;
+        ++st.builds;
+        bool sorted = true;
+        for (s32 i = 0; i < mNumGravities; i++) {
+            const PlanetGravity* g = mGravities[i];
+            if (i > 0 && g->mPriority > mGravities[i - 1]->mPriority) {
+                sorted = false;
+            }
+            const f32 r2 = g->mReachSquared;
+            const TVec3f& c = g->mReachCentre;
+            st.isStatic[i] = !g->mPortMoving && r2 >= 0.0f && r2 <= 1e36f && port::lgrid::Finite3(c.x, c.y, c.z, 1e18f) ? 1 : 0;
+            if (st.isStatic[i]) {
+#ifndef PORT_LGRID_NEG
+                const double r = std::sqrt(static_cast< double >(r2)) * (1.0 + 1e-5) + 1.0;
+#else
+                const double r = std::sqrt(static_cast< double >(r2)) * 0.75;  // (host test's negative control: too small)
+#endif
+                const double cc[3] = {c.x, c.y, c.z};
+                for (int a = 0; a < 3; a++) {
+                    st.boxes[i].lo[a] = std::nextafter(static_cast< f32 >(cc[a] - r), -HUGE_VALF);
+                    st.boxes[i].hi[a] = std::nextafter(static_cast< f32 >(cc[a] + r), HUGE_VALF);
+                }
+            }
+        }
+        if (!sorted || !st.grid.Build(st.boxes, st.isStatic, mNumGravities, 16, 16384)) {
+            st.grid.usable = false;
+            st.grid.count = mNumGravities;
+        }
+    }
+    if (!st.grid.usable) {
+        ++st.whole;
+        return calcTotalGravityVectorRaw(pGravity, pInfo, rPosition, gravityType, host);
+    }
+    *pUsed = 1;
+    ++st.gridWalks;
+    PORT_LOGIC_COUNT(PORT_LC_GRAV_GRID, 1);
+    PORT_LOGIC_SYS(PORT_LS_GRAVITY_WALK);
+
+    // calcTotalGravityVectorRaw's walk (cull mode 1), over the candidates in the array's order: keep the two the same
+    TVec3f totalGravity;
+    totalGravity.z = 0.0f;
+    totalGravity.y = 0.0f;
+    totalGravity.x = 0.0f;
+    bool hasCalculated = false;
+    if (pInfo) {
+        pInfo->init();
+    }
+    f32 largestScalar = -1.0f;
+    s32 largestPriority = -1;
+    port_logic_count(3, 1);
+    unsigned visits = 0;
+    const uint16_t* sb;
+    const uint16_t* se;
+    st.grid.Cell(rPosition.x, rPosition.y, rPosition.z, &sb, &se);
+    port::lgrid::ForEachAscending(st.grid, sb, se, [&](int index) -> bool {
+        PlanetGravity* const pG = mGravities[index];
+        ++visits;
+        bool validGravity = false;
+        if (pG->mActivated && pG->mValidFollower && pG->mAppeared) {
+            validGravity = true;
+        }
+        if (validGravity && ((gravityType & pG->mGravityType) != 0) && (host != (u32)pG->mHost)) {
+            s32 priority = pG->mPriority;
+            if (priority < largestPriority) {
+                return true;  // (break)
+            }
+            if (pG->isOutOfSphere(rPosition)) {
+                return false;
+            }
+            TVec3f gravityVec;
+            if (pG->calcGravity(&gravityVec, rPosition)) {
+                bool storeInfo = false;
+                f32 scalar = gravityVec.length();
+                if (priority == largestPriority) {
+                    totalGravity += gravityVec;
+                    hasCalculated = true;
+                    if (largestScalar < scalar) {
+                        storeInfo = true;
+                    }
+                } else if (priority > largestPriority) {
+                    largestPriority = priority;
+                    hasCalculated = true;
+                    storeInfo = true;
+                    totalGravity = gravityVec;
+                }
+                if (pInfo && storeInfo) {
+                    largestScalar = scalar;
+                    pInfo->mGravityVector = gravityVec;
+                    pInfo->mLargestPriority = largestPriority;
+                    pInfo->mGravityInstance = pG;
+                }
+            }
+        }
+        return false;
+    });
+    port_logic_count(4, visits);
+    PORT_LOGIC_COUNT(PORT_LC_GRAV_VISITS, visits);
+    st.visitsGrid += visits;
+    st.visitsAll += static_cast< uint32_t >(mNumGravities);
+    if (pGravity) {
+        MR::normalizeOrZero(&totalGravity);
+        *pGravity = totalGravity;
+    }
+    if (GravGridMode() == 2) {
+        // (verify: the original walk into scratch; its answer is the one returned)
+        GravityInfo info;
+        TVec3f gravity;
+        const bool ret = calcTotalGravityVectorRaw(&gravity, &info, rPosition, gravityType, host);
+        const bool same = ret == hasCalculated && (!pGravity || SameVec(gravity, *pGravity)) &&
+                          (!pInfo || (SameVec(info.mGravityVector, pInfo->mGravityVector) && info.mLargestPriority == pInfo->mLargestPriority &&
+                                      info.mGravityInstance == pInfo->mGravityInstance));
+        if (!same) {
+            if (st.mismatches < 16) {
+                port_log_summary("grav-grid: MISMATCH at (%g %g %g) type %u: grid %d (%g %g %g) walk %d (%g %g %g)", rPosition.x, rPosition.y,
+                                 rPosition.z, gravityType, hasCalculated ? 1 : 0, pGravity ? pGravity->x : 0.0f, pGravity ? pGravity->y : 0.0f,
+                                 pGravity ? pGravity->z : 0.0f, ret ? 1 : 0, gravity.x, gravity.y, gravity.z);
+            }
+            ++st.mismatches;
+        }
+        if (pInfo) {
+            *pInfo = info;
+        }
+        if (pGravity) {
+            *pGravity = gravity;
+        }
+        return ret;
+    }
+    return hasCalculated;
+}
 #endif
 
 PlanetGravityManager::PlanetGravityManager(const char* pName) : NameObj(pName) {
     mNumGravities = 0;
 #ifdef TARGET_PC
     PortGravBump();  // (GXV_MO_GRAVMEMO: a new scene's gravity world)
+    PortGravGeoBump();  // (GXV_GRAV_GRID)
 #endif
 }
 
@@ -200,6 +403,8 @@ bool PlanetGravityManager::calcTotalGravityVector(TVec3f* pGravity, GravityInfo*
 #ifdef TARGET_PC
     const int cullMode = GravityCullMode();
     PORT_MOVE_SYS(0);
+    PORT_LOGIC_SYS(PORT_LS_GRAVITY_WALK);
+    PORT_LOGIC_COUNT(PORT_LC_GRAV_VISITS, static_cast< unsigned >(mNumGravities));  // (an upper bound, as below)
     port_logic_count(3, 1);
     port_logic_count(4, static_cast< unsigned >(mNumGravities));  // (an upper bound: the priority cut can stop it earlier)
 #endif
@@ -283,6 +488,7 @@ void PlanetGravityManager::registerGravity(PlanetGravity* pGravity) {
     pGravity->mIsRegistered = true;
 #ifdef TARGET_PC
     PortGravBump();  // (GXV_MO_GRAVMEMO)
+    PortGravGeoBump();  // (GXV_GRAV_GRID: the array changes)
     pGravity->updateReach();  // (PETARI_GRAVITY_CULL: the stage-load settings are all in by now)
 #endif
     int index = mNumGravities++;

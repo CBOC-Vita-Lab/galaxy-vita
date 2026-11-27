@@ -1,4 +1,5 @@
 #include "Game/NPC/PenguinRacer.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/Binder.hpp"
 #include "Game/LiveActor/LodCtrl.hpp"
 #include "Game/LiveActor/Nerve.hpp"
@@ -53,6 +54,9 @@ namespace NrvPenguinRacer {
 };  // namespace NrvPenguinRacer
 
 PenguinRacer::PenguinRacer(const char* pName) : NPCActor(pName), mRaceDisabled(0), mMoveSpeed(0.0f), mSpeed(1.0f), mRailPointNo(0) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
 }
 
 void PenguinRacer::init(const JMapInfoIter& rIter) {

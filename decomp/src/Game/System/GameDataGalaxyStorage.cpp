@@ -14,6 +14,55 @@ namespace {
         *static_cast< u16* >(pData) = value;
         return sizeof(value);
     }
+
+    // MP3: the offset BinaryDataContentAccessor::getPointer would return for an attribute (its first match), -1 when missing.
+    s32 findAttributeOffset(const u8* pHeader, const char* pName) {
+        const u16 hash = static_cast< u16 >(MR::getHashCode(pName));
+        const u16 attributeNum = *reinterpret_cast< const u16* >(pHeader);
+        for (s32 idx = 0; idx < attributeNum; idx++) {
+            const u8* pPair = pHeader + 4 + idx * 4;
+            if (*reinterpret_cast< const u16* >(pPair) == hash) {
+                return *reinterpret_cast< const u16* >(pPair + 2);
+            }
+        }
+        return -1;
+    }
+
+    // MP3: GameDataAllGalaxyStorage::deserialize reads raw pointers: the header, every record and every attribute it reads must
+    // lie inside the chunk, and mGalaxyName must exist (getPointer returns null without it, which was dereferenced). The data
+    // the game writes always passes (initHeaderSerializer's four attributes, getGalaxyNum records).
+    bool isGalaxyChunkInBounds(const u8* pData, u32 dataSize) {
+        if (dataSize < 6) {
+            return false;
+        }
+
+        const u32 galaxyNum = *reinterpret_cast< const u16* >(pData + 0);
+        const u8* pHeader = pData + 2;
+        const u32 headerSize = *reinterpret_cast< const u16* >(pHeader) * 4 + 4;
+        const u32 recordSize = *reinterpret_cast< const u16* >(pHeader + 2);
+        if (2 + headerSize > dataSize || galaxyNum * recordSize > dataSize - 2 - headerSize) {
+            return false;
+        }
+
+        static const struct {
+            const char* mName;
+            u32 mSize;
+            bool mRequired;
+        } cAttributes[] = {
+            {"mGalaxyName", sizeof(u16), true},
+            {"mPowerStarFlag", sizeof(u8), false},
+            {"mFirstPlayFlag", sizeof(u8), false},
+            {"mMaxCoinNum", sizeof(u16) * 8, false},
+        };
+        for (u32 i = 0; i < sizeof(cAttributes) / sizeof(*cAttributes); i++) {
+            const s32 offset = findAttributeOffset(pHeader, cAttributes[i].mName);
+            if (offset < 0 ? cAttributes[i].mRequired : static_cast< u32 >(offset) + cAttributes[i].mSize > recordSize) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 };  // namespace
 
 bool GameDataSomeScenarioAccessor::hasPowerStar() const {
@@ -171,6 +220,11 @@ u32 GameDataAllGalaxyStorage::getSignature() const {
 }
 
 s32 GameDataAllGalaxyStorage::deserialize(const u8* pData, u32 dataSize) {
+    // MP3: bounds of the header, the records and their attributes (see isGalaxyChunkInBounds); 2 = a failed chunk
+    if (!isGalaxyChunkInBounds(pData, dataSize)) {
+        return 2;
+    }
+
     s32 attributeNum = *(u16*)(pData + 0);
     const char* name;
     BinaryDataContentAccessor accessor((u8*)(pData + 2));

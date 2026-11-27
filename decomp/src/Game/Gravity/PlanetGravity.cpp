@@ -32,6 +32,7 @@ void PlanetGravity::setPriority(s32 priority) {
     mPriority = priority;
 #ifdef TARGET_PC
     PortGravBump();
+    PortGravGeoBump();  // (GXV_GRAV_GRID: the grid checks the array's order again)
 #endif
 }
 
@@ -128,6 +129,9 @@ void PlanetGravity::updateIdentityMtx() {
 
 #ifdef TARGET_PC
 void PlanetGravity::updateReach() {
+    if (!mPortMoving) {
+        PortGravGeoBump();  // (GXV_GRAV_GRID: a filed sphere changes; a moving one is never filed)
+    }
     mReachSquared = -1.0f;  // (no sphere while the centre is rewritten)
     TVec3f centre(0.0f, 0.0f, 0.0f);
     const f32 reach = calcReach(&centre);

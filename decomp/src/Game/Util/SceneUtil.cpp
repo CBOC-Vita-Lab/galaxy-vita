@@ -412,4 +412,52 @@ namespace MR {
     const char* getCurrentPlacementZoneName() {
         return getZoneNameFromZoneId(getCurrentPlacementZoneId());
     }
+
+#ifdef TARGET_PC
+    // routes25 (10 Nov): PETARI_SURVEY (GameScene.cpp, end of file) reads the stage's placement data: the Mario start entries (the
+    // "MarioNo" a restart id selects) and the GeneralPos entries. Debug only; nothing calls these without the switch.
+    // pPos / pDir: world position and rotation (degrees) as the placement code computes them (zone transform applied).
+    bool portSurveyStart(int idx, int* pMarioNo, int* pZone, int* pCamera, f32* pPos, f32* pDir) {
+        JMapInfoIter iter = getStageDataHolder()->getStartJMapInfoIterFromStartDataIndex(idx);
+        if (!iter.isValid()) {
+            return false;
+        }
+        s32 v = -1;
+        *pMarioNo = iter.getValue< s32 >("MarioNo", &v) ? v : -1;
+        v = -1;
+        *pCamera = iter.getValue< s32 >("Camera_id", &v) ? v : -1;
+        const StageDataHolder* pHolder = getStageDataHolder()->findPlacedStageDataHolder(iter);
+        *pZone = pHolder != nullptr ? pHolder->mZoneID : -1;
+        TVec3f pos(0.0f, 0.0f, 0.0f);
+        TVec3f dir(0.0f, 0.0f, 0.0f);
+        if (pHolder != nullptr) {
+            getJMapInfoTrans(iter, &pos);
+            getJMapInfoRotate(iter, &dir);
+        }
+        pPos[0] = pos.x;
+        pPos[1] = pos.y;
+        pPos[2] = pos.z;
+        pDir[0] = dir.x;
+        pDir[1] = dir.y;
+        pDir[2] = dir.z;
+        return true;
+    }
+
+    bool portSurveyGeneralPos(int idx, const char** ppName, f32* pPos) {
+        JMapInfoIter iter = getStageDataHolder()->getGeneralPosInfoFromDataIndex(idx);
+        if (!iter.isValid()) {
+            return false;
+        }
+        const char* pName = nullptr;
+        *ppName = iter.getValue("PosName", &pName) && pName != nullptr ? pName : "";
+        TVec3f pos(0.0f, 0.0f, 0.0f);
+        if (getStageDataHolder()->findPlacedStageDataHolder(iter) != nullptr) {
+            getJMapInfoTrans(iter, &pos);
+        }
+        pPos[0] = pos.x;
+        pPos[1] = pos.y;
+        pPos[2] = pos.z;
+        return true;
+    }
+#endif
 };  // namespace MR

@@ -24,4 +24,8 @@ public:
 private:
     /* 0x04 */ u32 mDisplayListSize;
     /* 0x08 */ void* mDisplayList;
+#ifdef TARGET_PC
+    // (2.3 port, GXV_RETAINED) the shape's handle for the front end: a number no other shape ever gets (J3DShapeDraw.cpp)
+    u32 mPortHandle;
+#endif
 };

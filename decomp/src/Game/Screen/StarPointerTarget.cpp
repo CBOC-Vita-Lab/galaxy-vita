@@ -78,6 +78,32 @@ bool StarPointerTarget::isPointing(const TVec2f& rPointerPos, f32 zMargin, f32 r
 }
 
 #ifdef TARGET_PC
+// The sphere selector's pointing (the dome's galaxy map: MR::isStarPointerPointing1PWithoutCheckZ). Like isPointing, but a target whose
+// CENTRE is outside the picture is still pointed at while its circle reaches the pointer (the pointer itself is always inside the picture).
+// The game rejects an off-picture centre, so a big planet (Bowser's) half past the edge could not be picked until it rotated inward.
+// Nothing entirely outside the picture can match: the pointer is clamped to the picture and must lie within the circle.
+bool StarPointerTarget::isPointingEdge(const TVec2f& rPointerPos, f32 zMargin, f32 radiusMargin) const {
+    TVec3f worldPos, viewPos;
+    calcPosition(&worldPos);
+    PSMTXMultVec(MR::getStarPointerViewMtx(), &worldPos, &viewPos);
+
+    if (-viewPos.z <= 0.0f) {
+        return false;
+    }
+    if (zMargin + mRadius3d + ::hZCheckAddDepth < -viewPos.z) {
+        return false;
+    }
+
+    f32 radius = calcRadius2d(mRadius3d, radiusMargin, -viewPos.z);
+    TVec2f screenPos;
+    if (!calcScreenPositionFromView(&screenPos, viewPos, true)) {
+        return false;
+    }
+    return rPointerPos.squared(screenPos) < radius * radius;
+}
+#endif
+
+#ifdef TARGET_PC
 // The port's Star Bit reach (from Producdevity's fork, 77119d3): like isPointing, without the depth limit and with the screen radius
 // scaled (no VR ray: port_star_bit_reach is 1 there).
 bool StarPointerTarget::isPointingScaled(const TVec2f& rPointerPos, f32 radiusMargin, f32 scale) const {
@@ -135,14 +161,14 @@ f32 StarPointerTarget::calcRadius2d(f32 radius3d, f32 margin, f32 z) const {
     return radius2d + margin;
 }
 
-bool StarPointerTarget::calcScreenPositionFromView(TVec2f* pScreenPos, const TVec3f& rViewPos) const {
+bool StarPointerTarget::calcScreenPositionFromView(TVec2f* pScreenPos, const TVec3f& rViewPos, bool allowOffscreen) const {
     TProj3f mtx;
     mtx.setInline(MR::getStarPointerProjMtx());
     TVec3f pos;
     multProj(mtx, rViewPos, pos);
     pos.y = -pos.y;
 
-    if (1.0f < MR::abs(pos.x) || 1.0f < MR::abs(pos.y)) {
+    if (!allowOffscreen && (1.0f < MR::abs(pos.x) || 1.0f < MR::abs(pos.y))) {
         return false;
     }
 

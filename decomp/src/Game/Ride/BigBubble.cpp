@@ -1,4 +1,5 @@
 #include "Game/Ride/BigBubble.hpp"
+#include "Game/MP/MpBubble.hpp"   // MP3 puppetprep: isWarmBubble
 #include "Game/AreaObj/BigBubbleGoalArea.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/Nerve.hpp"
@@ -658,10 +659,12 @@ void BigBubble::exeAppear() {
         mSpawnPosition = mPosition;
         MR::invalidateHitSensors(this);
         MR::getRandomVector(&mMoment, ::sAppearAddMoment);
-        MR::startSound(this, "SE_OJ_BIG_BUBBLE_APPEAR");
+        if (!MpBubble::isWarmBubble(this)) {   // MP3 puppetprep: the warm-up bubble is silent from its first step (review2 #14)
+            MR::startSound(this, "SE_OJ_BIG_BUBBLE_APPEAR");
+        }
     }
 
-    f32 scale = MR::calcNerveValue(this, ::sAppearTime, 0.01f, mAppearRadius);
+    f32 scale = MpBubble::isWarmBubble(this) ? 0.001f : MR::calcNerveValue(this, ::sAppearTime, 0.01f, mAppearRadius);
     setScale(scale);
 
     mPosition.set(mSpawnPosition + mGravity * (-scale * getBaseRadius()));

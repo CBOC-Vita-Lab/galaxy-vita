@@ -1,0 +1,50 @@
+# PREPARED: runs once core (SMG_MP_AUTO*) is in the binary; skipped before. Log lines: core / flow / puppet / save as merged
+# in mp-int (1bdfbc9) and core 99b5887.
+# Both games load file 1 into the Observatory; the host hosts a Same Wi-Fi room by itself (SMG_MP_AUTO=host), the guest
+# scans and joins the first compatible room (SMG_MP_AUTO=join); the host starts with 2 players.
+name: mp_join
+description: auto-host / auto-join Play Together over the POSIX UDP link on 127.0.0.1; snapshot, puppets, save guard
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_LOOK: 0, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=48 /'
+  - 'expect * /\[mp\] link: udp port \d+ up/ within 150s'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=wifi/ within 150s'
+  - 'expect guest /\[mp\] auto: joining host/ within 30s after host /\[mp\] hosting session=/'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 .*players=2/ within 15s after guest /\[mp\] auto: joining/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] flow session start role=(host|guest)/'
+  - 'absent guest /\[mp\] session ended reason=host-left/ before shutdown'
+  # progress snapshot: host sends, guest receives the same bytes and crc, host hears it was delivered, the guest's game applies it
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 15s'
+  - 'order guest /\[mp\] snapshot received bytes=\d+ crc=([0-9a-f]+) ok=1/ before host /\[mp\] snapshot delivered slot=1 crc=$1/ within 5s'
+  # (the autopilot now opens its session once both consoles are IN PLAY (SMG_MP_AUTO_GO_FILE), so the guest is not at its file select when the snapshot arrives and no
+  #  'save snapshot applied' follows: that line belongs to the menu path, mp_entry_join / mp_smoke. The host's move to Good Egg (PETARI_STAGE) gives the barrier and the puppets.)
+  # puppets: each side sees the other as soon as states arrive
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/ within 10s after guest /\[mp\] flow barrier release serial=\d+/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 10s after guest /\[mp\] flow barrier release serial=\d+/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  # netlog: the net timing knobs are logged once with their effective values (defaults: nothing set in this scenario), the choppiness numbers
+  # come per remote player and per link, and the screen keep-awake (the Vita's sceKernelPowerTick; desktop: a stub that only logs) engages in the session and stops after
+  - 'expect * /\[mp\] net: tune sendms=22 delaymin=75\.0 delaymax=333\.3 delayextra=25\.0 delaypct=95 extrapms=200\.0 keepalive=50 bundle=10 heartbeat=500 poll=5 logsec=5 changed=none/'
+  - 'expect * /\[mp\] net: slot=\d+ rx \d+\.\d\/s gap \d+\.\d\/\d+ ms \(mean\/max\) buf \d+\/\d+ ms \(mean\/max, target \d+\) late=\d+ dup=\d+ stall100=\d+ interp=\d+ extrap=\d+ hold=\d+ snap=\d+/ within 60s after guest /\[mp\] flow barrier release serial=\d+/'
+  - 'expect * /\[mp\] net: link udp tx \d+\.\d\/s \d+\.\d kB\/s fail=\d+ rx \d+\.\d\/s \d+\.\d kB\/s gapmax=\d+ ms ring_full=\d+/'
+  - 'expect * /\[mp\] watch: keep-awake on/ within 150s'
+  - 'order host /\[mp\] watch: keep-awake on/ before host /\[mp\] watch: keep-awake off/'
+  - 'order guest /\[mp\] watch: keep-awake on/ before guest /\[mp\] watch: keep-awake off/'
+  - '?metric * rss_mib <= 2500'

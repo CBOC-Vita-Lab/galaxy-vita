@@ -43,6 +43,9 @@ public:
     void resetScale();
 
     bool tryStop();
+#ifdef TARGET_PC
+    bool portIsStopped() const;  // (GXV_IDLE25: in the Stop nerve with nothing pending: updateNerve() is then a step count and nothing else)
+#endif
 
     void exeAnim();
     inline void exeStop();

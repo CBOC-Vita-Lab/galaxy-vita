@@ -1,6 +1,12 @@
 #include "Game/LiveActor/ClippingJudge.hpp"
 #include "Game/LiveActor/ClippingDirector.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "port/popin.h"  // (popin24, GXV_POPIN_CLIPPAD)
+#include "port/lockstep.h"  // (fmt32)
+extern "C" float port_hrw_clip_pad(void);  // (hrw27, GXV_HRW: vgx_galaxy.cpp; 1 = none)
+extern "C" float port_popin_clip_pad(float fovyDeg);  // (popin25, GXV_POPIN_LEAD: LodCtrl.cpp; 1 = none)
+#endif
 
 void ClippingJudge_FORCE_MATCH_SDATA2() {
     0.0f;
@@ -40,6 +46,16 @@ __attribute__((noinline)) void calcFarPlaneLikeCalcViewingVolume(THex3f* pVolume
 
 void ClippingJudge::movement() {
     calcViewingVolume(&mFrustum, MR::getFarZ());
+#ifdef TARGET_PC
+    // (zoomclip23) the picture's frustum, while the handheld zoom narrows the picture (see the header)
+    {
+        const f32 pictureFovy = MR::getFovy();
+        mPortPictureZoomed = MR::getFovyForLogic() > pictureFovy;
+        if (mPortPictureZoomed) {
+            calcViewingVolumeFovy(&mPortPictureFrustum, MR::getFarZ(), pictureFovy);
+        }
+    }
+#endif
 
 #if defined(__vita__) && defined(__arm__) && defined(GXV_SHARED_CLIP_PREP) && GXV_SHARED_CLIP_PREP
     TPos3f cameraMtx;
@@ -71,17 +87,45 @@ bool ClippingJudge::isJudgedToClipFrustum(const TVec3f& rVec, f32 a2, s32 index)
     return (!index) ? !mFrustum.mayIntersectBall3(rVec, a2) : !mClipFrustums[index].mayIntersectBall3(rVec, a2);
 }
 
+#ifdef TARGET_PC
+// (zoomclip23) Outside the picture's frustum (the zoomed view; the game's own while no zoom is in force). Only for decisions that change
+// what is drawn, never the game's logic.
+bool ClippingJudge::isJudgedToClipPictureFrustum(const TVec3f& rVec, f32 radius) const {
+    return mPortPictureZoomed ? !mPortPictureFrustum.mayIntersectBall3(rVec, radius) : !mFrustum.mayIntersectBall3(rVec, radius);
+}
+
+// The game's viewing volume: GXV_ZOOM_LOGIC_VIEW (MR::getFovyForLogic, CameraUtil.cpp) gives the game's own field of view.
 void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
+    calcViewingVolumeFovy(pVolume, farClip, MR::getFovyForLogic());
+}
+
+void ClippingJudge::calcViewingVolumeFovy(THex3f* pVolume, f32 farClip, f32 fovy) {
+#else
+void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
+#endif
     f32 nearClip = 500.0f;
     if (MR::isSubjectiveCameraOnForObjClipping()) {
         nearClip = 100.0f;
     }
 
     f32 aspect = MR::getAspect();
+#ifndef TARGET_PC
     f32 fovy = MR::getFovy();
+#endif
     TPos3f cameraMtx;
     cameraMtx.setPositionFromLookAt(MR::getCameraViewMtx());
     f32 height = nearClip * static_cast< f32 >(tan(fovy * (JGeometry::TUtil< f32 >::PI() / 360.0f)));
+#ifdef TARGET_PC
+    // (fmt32: this is the frustum the game's own clipping judges with, and a clipped actor stops moving: in a lockstep session it is the game's, without the three pads, whose
+    // size depends on this console's switches, on how fast its camera turns and on whether it is making picture pairs)
+    if (!port::lockstep::On()) {
+        height *= port::popin::ClipPadFactor();  // (popin24, GXV_POPIN_CLIPPAD: the side planes moved out; 1 = as the game)
+        if (port::popin::LeadTurns() > 0.0f) {
+            height *= port_popin_clip_pad(fovy);  // (popin25, GXV_POPIN_LEAD: a turning camera's sides, 1 when it is not turning)
+        }
+        height *= port_hrw_clip_pad();  // (hrw27, GXV_HRW: the second picture of a pair turns up to the guard band away from the first: what it will see is drawn in the first)
+    }
+#endif
     f32 width = aspect * height;
 #ifdef TARGET_PC
     {

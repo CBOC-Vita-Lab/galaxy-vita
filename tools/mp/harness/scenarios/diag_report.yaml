@@ -1,0 +1,33 @@
+# Beta diagnostics (Galaxy 3.0 betadiag): Having Trouble? on the Multiplayer menu, Check Connection (STUN + the TURN relay loopback), Send a Problem Report
+# (consent, note, a refused send, a sent one with its id), the one-time offer after an ended-with-error session. ONE console, the local fake online service
+# in front of tools/mp/harness/diag_stub.mjs (the tree's service has neither /v1/report nor /v1/turn/check yet: the stub answers them, and is a STUN + TURN
+# server on 127.0.0.1:3478 for the loopback). RUN IT WITH tools/mp/harness/run_diag.sh (starts the stub, seeds the account and the "last session ended in
+# an error" state, runs, then checks what the stub received: tools/mp/harness/diag_check.py). NOT proven here: a real session ending with an error sets the
+# offer (core -> mp_diag_session_end): that is the unit side (the state file is seeded); the real service's /v1/report and /v1/turn/check.
+name: diag_report
+description: "Having Trouble?: Check Connection (relay loopback) and Send a Problem Report (consent, note, 429 then 201 with id), the after-error offer once"
+seconds: 220
+min_speed: 0.4
+requires: {strings: [SMG_ONLINE_URL, SMG_MP_STUN], files: ['{HARNESS}/diag_stub.mjs']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 1000, PETARI_HANDHELD_UI: 1, SMG_ONLINE_URL: "http://127.0.0.1:18797", SMG_MP_STUN: "127.0.0.1:3478",
+      PETARI_DATA_DIR: /home/claude/g3/hruns/diag-beta/data, SMG_ONLINE_DIR: /home/claude/g3/hruns/diag-beta/online, SMG_MP_NAME: Alex,
+      SMG_KEYBOARD_TEXT: "it froze after the star"}
+processes:
+  - name: host
+    input: "@diag_report"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] ui: report offered after an error/'
+  - 'count host /\[mp\] ui: report offered after an error/ == 1'
+  - 'expect host /\[mp\] ui: screen help/'
+  - 'expect host /\[mp\] diag: check nat=\w+ stun_ms=\d+ relay=ok relay_rtt_ms=\d+/'
+  - 'expect host /\[mp\] diag: check .* probe_src=different/'
+  - 'expect host /\[mp\] ui: check result nat=\w+ stun=\d+ relay=ok/'
+  - 'expect host /\[mp\] ui: screen report/'
+  - 'expect host /\[mp\] ui: report note set \(23 bytes\)/'
+  - 'order host /\[mp\] ui: report result 7/ before host /\[mp\] ui: report result 1 id=K7QM2XPA/'
+  - 'count host /\[mp\] ui: report result 1 id=K7QM2XPA/ == 1'
+  - 'count host /\[mp\] ui: screen main/ >= 2'

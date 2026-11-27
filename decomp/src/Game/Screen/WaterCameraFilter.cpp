@@ -21,6 +21,9 @@
 #include <revolution/gx/GXRegs.h>
 #include <revolution/gx/GXStruct.h>
 #include <revolution/gx/GXTransform.h>
+#ifdef TARGET_PC
+#include <stdlib.h>
+#endif
 
 namespace NrvWaterCameraFilter {
     NEW_NERVE(WaterCameraFilterNrvAir, WaterCameraFilter, Air);
@@ -61,8 +64,29 @@ namespace {
     }
 }  // namespace
 
+#ifdef TARGET_PC
+// dive27 (GXV_WATER_HALFCAP, default 0; PROPOSED 1 in Performance only): the underwater filter's screen capture at half size (480x272 from the 960x544 picture, box-filtered by the copy
+// unit). What the filter draws is the capture warped by a 5 % indirect offset, tinted and blended: a soft low-frequency picture, read back bilinear at full size. Decided once when the
+// stage's filter is made (the texture is made then): no switch-over in play, so nothing to fade; a stage loaded after a mode change picks the new value.
+extern "C" int port_water_halfcap_mode(void) __attribute__((weak));
+static bool WaterHalfCap() {
+    if (port_water_halfcap_mode) {
+        return port_water_halfcap_mode() != 0;
+    }
+    const char* e = getenv("GXV_WATER_HALFCAP");
+    return e != nullptr && atoi(e) != 0;
+}
+#endif
+
 void WaterCameraFilter::initScreenTex() {
     MR::CurrentHeapRestorer restorer(MR::getSceneHeapGDDR3());
+#ifdef TARGET_PC
+    if (WaterHalfCap()) {
+        mHalfCap = true;
+        mScreenTex = new JUTTexture(::getFrameBufferWidth() / 2, ::getScreenHeight() / 2, GX_TF_RGB565);
+        return;
+    }
+#endif
     mScreenTex = new JUTTexture(::getFrameBufferWidth(), ::getScreenHeight(), GX_TF_RGB565);
 }
 
@@ -110,10 +134,37 @@ void WaterCameraFilter::draw() const {
     if (isNerve(GET_NERVE(WaterCameraFilter, WaterCameraFilterNrvAir))) {
         return;
     }
+#ifdef TARGET_PC
+    // dive27 (exact): the effect alpha is 0 on the first frame of AirToWater (the nerve changes in the update before its first step adds 20). The blend is SRCALPHA / INVSRCALPHA
+    // with alpha-compare "greater than 0" on that constant alpha, so a draw at alpha 0 writes no colour, no alpha and no depth (z write is off): the capture and the quad were wasted.
+    // Nothing the draw would have loaded (projection, view) is read by a later draw type: each executor sets its own state.
+    if (static_cast< u8 >(mWaterAlpha) == 0) {
+        return;
+    }
+#endif
+    drawBody();
+}
 
+#ifdef TARGET_PC
+// dive27 (GXV_REHEARSE, decomp Game/System/PortRehearse.cpp): the whole draw, at a made-up alpha, inside the renderer's warm-up scope behind the closed wipe: the capture (the copy target
+// of this texture's size and format is made then), the material (program, the filter texture's upload) and the quad. Everything it touches is restored by the driver (GXData) and the
+// alpha here; the scope records no draw.
+void WaterCameraFilter::rehearse() {
+    const f32 alpha = mWaterAlpha;
+    mWaterAlpha = 128.0f;
+    drawBody();
+    mWaterAlpha = alpha;
+}
+#endif
+
+void WaterCameraFilter::drawBody() const {
     GXRenderModeObj* pRenderMode = JUTVideo::getManager()->getRenderMode();
     GXSetCopyFilter(GX_FALSE, pRenderMode->sample_pattern, GX_FALSE, pRenderMode->vfilter);
+#ifdef TARGET_PC
+    mScreenTex->capture(0, 0, GX_TF_RGB565, mHalfCap, 0);  // (GXV_WATER_HALFCAP: the source is twice the texture, box-filtered)
+#else
     mScreenTex->capture(0, 0, GX_TF_RGB565, false, 0);
+#endif
     GXSetCopyFilter(GX_FALSE, pRenderMode->sample_pattern, GX_TRUE, pRenderMode->vfilter);
     loadMaterial();
     TVec2f pos;

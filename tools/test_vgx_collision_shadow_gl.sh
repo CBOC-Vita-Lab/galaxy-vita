@@ -7,7 +7,7 @@ out=${2:?private output directory}
 mkdir -p "$out"
 src="$renderer/platform/vgx/src"
 units=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync
-       vgx_shadergen vgx_texcache vgx_texdecode vgx_stats vgx_backend_gl vgx_autoq)
+       vgx_shadergen vgx_texcache vgx_texdecode vgx_texcomp vgx_stats vgx_backend_gl vgx_autoq)
 args=()
 for unit in "${units[@]}"; do args+=("$src/$unit.cpp"); done
 "${CXX:-clang++}" -std=c++20 -O1 -g -I"$src" -I"$renderer/platform/vgx/third_party" \

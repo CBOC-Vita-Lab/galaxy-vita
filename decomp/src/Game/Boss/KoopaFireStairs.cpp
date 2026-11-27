@@ -51,6 +51,9 @@ void KoopaFireStairs::init(const JMapInfoIter& rIter) {
 
     initSound(4, false);
     MR::initShadowVolumeSphere(this, 60.0f);
+#ifdef TARGET_PC
+    MR::portMarkProjectileShadow(this);  // (boss23, PETARI_BOSS_PSHADOW)
+#endif
     initNerve(GET_NERVE(KoopaFireStairs, KoopaFireStairsNrvFly));
 
     MR::invalidateClipping(this);

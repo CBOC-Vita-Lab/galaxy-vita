@@ -1,0 +1,27 @@
+# gamefix2 (11 Nov): both players run out of lives in FactoryGalaxy:1 ("Everyone was caught", move type 5: the same scene serial is placed
+# twice). The host CRC stored for the first placement must not be judged against the second one; and since wsfix (the lazily created shared pools,
+# CoinHolder's coins, are no row's actors) the second placement has the SAME registry CRC as the first: no "world regcrc mismatch" line,
+# object sync stays on, one CRC per console, the same on both.
+name: mp_regcrc_reload
+description: everyone caught -> checkpoint reload of the same serial; no false regcrc mismatch
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE, 'regcrc']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "FactoryGalaxy:1", SMG_MP_TEST_DIE: "40:abyss", SMG_MP_TEST_LIVES: "0"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "40:abyss", SMG_MP_TEST_LIVES: "0"}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'distinct host /\[mp\] world reg n=\d+ crc=([0-9a-f]+) / == 1'   # the same placement gives the same registry CRC after the reload
+  - 'distinct guest /\[mp\] world reg n=\d+ crc=([0-9a-f]+) / == 1'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect * /\[mp\] world reg n=\d+ crc=[0-9a-f]+ .*serial=\d+/'
+  - '?expect * /Everyone was caught|all caught|restart/'
+  - 'absent * /world regcrc mismatch/'

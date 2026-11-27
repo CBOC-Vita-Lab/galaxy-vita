@@ -14,6 +14,9 @@ namespace NrvPeachLetter {
 };  // namespace NrvPeachLetter
 
 PeachLetter::PeachLetter(const char* pName) : LayoutActor(pName, true), mAButtonIcon(nullptr) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 void PeachLetter::init(const JMapInfoIter&) {

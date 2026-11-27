@@ -1,5 +1,6 @@
 #include "audio.h"
 #include "port/core_layout.h"
+#include "port/core3_budget.h"
 #include "port/settings_lifecycle.h"
 
 #include <atomic>
@@ -13,9 +14,12 @@
 #endif
 
 extern "C" void port_log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2)));
 // The fourth core (port/core_layout.h; vita/runtime/memory.cpp): part 1 the output thread, 2 the DSP mixer. Weak: the host tests that
 // build this file have no such function, and then nothing moves.
 extern "C" int port_vita_thread_core3(int part, int planned) __attribute__((weak));
+extern "C" int port_vita_core3_available(void) __attribute__((weak));  // (the fourth core, proven once; vita/runtime/memory.cpp)
+extern "C" void port_thread_register(const char* name) __attribute__((weak));  // (the "cores-5s:" lines' thread names, vita/runtime/memory.cpp)
 
 namespace {
 const int kFrames = 512;
@@ -28,6 +32,8 @@ const int kOutputBuffers = 3;
 alignas(64) int16_t sOutput[kOutputBuffers][kFrames * 2];
 // The audio output and the AI clock stay off core 0 (GXV_HELPER_CORES=0 leaves them to the scheduler, GXV_CORE0_ALONE=1 overrides that).
 int HelperMask() { return port::cores::HelperMask(port::cores::ReadSwitches([](const char* name) { return getenv(name); })); }
+// (the AI clock is a clock-class thread: GXV_CLOCK_CORE, port/core_layout.h)
+int ClockMask() { return port::cores::ClockMask(port::cores::ReadSwitches([](const char* name) { return getenv(name); })); }
 int sAudioPort = -1;
 SceUID thread = -1;
 PortVitaAudioDrain drainAudio;
@@ -42,28 +48,53 @@ alignas(64) const int16_t sSilence[kFrames * 2] = {};
 
 // Resume reports.  The system tells a running application that the console woke up from sleep (or came back from the Home
 // menu) through a power callback; the callback only counts it.  The disc reader and the audio output read the count
-// (port/resume.h) and open their files and the output port afresh.  The watcher is only started with GXV_RESUME_RESET=1 (read
-// once, default off): the recovery from errors needs none (platform/src/dvd/dvd.cpp, platform/src/audio/aaudio_out.cpp).
+// (port/resume.h) and open their files and the output port afresh.  The watcher is started unless GXV_RESUME_RESET=0 (read
+// once; on by default since 3.0, issue 7): the recovery from errors alone did not bring the music back (platform/src/dvd/dvd.cpp, platform/src/audio/aaudio_out.cpp).
 std::atomic<unsigned> sResumeGeneration{0};
+std::atomic<unsigned> sAppResumeGeneration{0};   // fix33 (A2): the application came back (PS button) without a system resume report
+std::atomic<unsigned> sPendingPowerFlags{0};     // keepawake33: callback records flags atomically; powerThread logs outside callback
 #if defined(__vita__)
 int powerCallback(int, int, int arg, void*) {
-    const unsigned resumed = SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME;
-    if (static_cast<unsigned>(arg) & resumed) sResumeGeneration.fetch_add(1, std::memory_order_acq_rel);
+    // fix33 (A2): a system resume (the console slept) resets the disc reader and the audio port at once; a plain PS-button return
+    // (APP_RESUME alone) only opens the resume window: the reset is made if something then fails (no audio gap when nothing did).
+    // keepawake33: lock-free atomic record only inside Sony's ScePower callback; powerThread logs via port_log_summary outside it.
+    const unsigned flags = static_cast<unsigned>(arg);
+    const unsigned suspended = SCE_POWER_CB_APP_SUSPEND | SCE_POWER_CB_SYSTEM_SUSPEND | SCE_POWER_CB_THERMAL_SUSPEND | SCE_POWER_CB_LOW_BATTERY_SUSPEND;
+    const unsigned slept = SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME;
+    const unsigned interesting = suspended | slept | SCE_POWER_CB_SYSTEM_RESUMING | SCE_POWER_CB_APP_RESUME;
+    if (flags & slept) sResumeGeneration.fetch_add(1, std::memory_order_acq_rel);
+    else if (flags & SCE_POWER_CB_APP_RESUME) sAppResumeGeneration.fetch_add(1, std::memory_order_acq_rel);
+    if (flags & interesting) sPendingPowerFlags.fetch_or(flags, std::memory_order_release);
     return 0;
 }
 int powerThread(SceSize, void*) {
     const int callback = sceKernelCreateCallback("galaxy_power", 0, powerCallback, nullptr);
     const int registered = callback >= 0 ? scePowerRegisterCallback(callback) : callback;
+    if (registered < 0 && callback >= 0) sceKernelDeleteCallback(callback);
     port_log("audio: resume watcher: callback 0x%08X, registered 0x%08X", static_cast<unsigned>(callback), static_cast<unsigned>(registered));
-    for (;;) sceKernelDelayThreadCB(500000);  // (callbacks run inside this wait)
+    if (registered < 0) return 0;
+    const unsigned suspended = SCE_POWER_CB_APP_SUSPEND | SCE_POWER_CB_SYSTEM_SUSPEND | SCE_POWER_CB_THERMAL_SUSPEND | SCE_POWER_CB_LOW_BATTERY_SUSPEND;
+    const unsigned slept = SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME | SCE_POWER_CB_SYSTEM_RESUMING;
+    for (;;) {
+        sceKernelDelayThreadCB(500000);  // (callbacks run inside this wait)
+        const unsigned pf = sPendingPowerFlags.exchange(0, std::memory_order_acq_rel);
+        if (!pf) continue;
+        auto logPow = [](const char* kind, unsigned bits) {
+            if (port_log_summary) port_log_summary("power: %s callback (0x%08X)", kind, bits);
+            else port_log("power: %s callback (0x%08X)", kind, bits);
+        };
+        if (pf & suspended) logPow("suspend", pf);
+        if (pf & slept) logPow("system resume", pf);
+        else if (pf & SCE_POWER_CB_APP_RESUME) logPow("app resume", pf);
+    }
     return 0;
 }
 void startResumeWatcher() {
     static bool started = false;
     const char* e = getenv("GXV_RESUME_RESET");
-    if (started || !(e && e[0] == '1')) return;
+    if (started || (e && e[0] == '0')) return;  // (default on since 3.0)
     started = true;
-    const SceUID watcher = sceKernelCreateThread("galaxy_power", powerThread, 0xA0, 4 * 1024, 0, 0, nullptr);
+    const SceUID watcher = sceKernelCreateThread("galaxy_power", powerThread, 0xA0, 16 * 1024, 0, 0, nullptr); // (16 KiB: port_log formats into a 1100-byte line on this stack, plus the C library's vfprintf frame)
     if (watcher >= 0) sceKernelStartThread(watcher, 0, nullptr);
 }
 #else
@@ -74,7 +105,16 @@ int audioThread(SceSize, void*) {
     // GXV_CORE3_AUDIO=1 or 2 (2 is the default when GXV_CORE3 is not set) with a proven fourth core: this thread runs there; refused or
     // not honoured, it goes back to the helper cores it was made on. It shares no lock with the game's threads (the ring it drains is
     // lock-free), so a late slice on the system core can only cost a device underrun (counted in the audio line), not a game stall.
-    if (port_vita_thread_core3) port_vita_thread_core3(1, HelperMask());
+    const bool outOnCore3 = port_vita_thread_core3 && port_vita_thread_core3(1, HelperMask()) == 0x80000;
+    // core3-38: the meter slot (the busy time of the drain: the mix of one buffer), and GXV_CORE3_AUDIO_PRIO (default 0 = off): lower than 0x40 while on the system core.
+    const int meterSlot = port::core3::RegisterThread("galaxy_audio");
+    port::core3::MarkOnCore3(meterSlot, outOnCore3);
+    if (const int want = port::core3::AudioPriority(port::core3::ThePolicy(), false, outOnCore3, sceKernelGetThreadCurrentPriority())) {
+        const unsigned before = static_cast<unsigned>(sceKernelGetThreadCurrentPriority());
+        const int rc = sceKernelChangeThreadPriority(0, want);
+        port_log("audio: output thread on core 3 priority 0x%X -> 0x%X (GXV_CORE3_AUDIO_PRIO): 0x%08X", before, static_cast<unsigned>(want), static_cast<unsigned>(rc));
+    }
+    port::core3::Worker meter(meterSlot);
     unsigned next = 0;
     unsigned heldGeneration = 0, silentOutputs = 0;
     const unsigned myGeneration = sThreadGeneration.load(std::memory_order_acquire);
@@ -88,7 +128,9 @@ int audioThread(SceSize, void*) {
         const int16_t* samples = sSilence;
         if (!hold) {
             samples = sOutput[next];
+            meter.Wake();
             drainAudio(sOutput[next], kFrames);
+            meter.Sleep();
             next = (next + 1) % buffers;
         }
         int loud = 0;
@@ -114,6 +156,7 @@ int audioThread(SceSize, void*) {
 }
 
 extern "C" unsigned port_resume_generation(void) { return sResumeGeneration.load(std::memory_order_acquire); }
+extern "C" unsigned port_resume_app_generation(void) { return sAppResumeGeneration.load(std::memory_order_acquire); }
 // (what the power callback does; also how a host test reports a resume)
 extern "C" void port_resume_note(void) { sResumeGeneration.fetch_add(1, std::memory_order_acq_rel); }
 
@@ -149,7 +192,7 @@ extern "C" void port_vita_audio_clock_boost(void) {
         return;
     }
     const int r = sceKernelChangeThreadPriority(0, 0x40);
-    { const int helperMask = HelperMask(); if (helperMask) sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), helperMask); }  // (off core 0; GXV_CORE0_ALONE overrides GXV_HELPER_CORES=0)
+    { const int helperMask = ClockMask(); if (helperMask) sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), helperMask); }  // (off core 0; GXV_CORE0_ALONE overrides GXV_HELPER_CORES=0)
     port_log("audio: AI clock thread priority 0x%X -> 0x40: 0x%08X (cpu mask 0x%X)", static_cast<unsigned>(before), static_cast<unsigned>(r),
              static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
 }
@@ -173,7 +216,11 @@ extern "C" void port_vita_audio_mixer_boost(void) {
     // GXV_CORE3_AUDIO=1 (or GXV_CORE3=1) with a proven fourth core: the mixer moves on there from the place chosen above, and goes back to
     // that place if the system refuses it. Not the default: the mixer takes locks the game thread also takes (the job and mail mutexes, the
     // interrupt raise), and on the system core it can be preempted while it holds one; the game thread would then wait for it.
-    if (port_vita_thread_core3) port_vita_thread_core3(2, 0);  // (0: back to the mask it has now, the one chosen above)
+    const bool mixOnCore3 = port_vita_thread_core3 && port_vita_thread_core3(2, 0) == 0x80000;  // (0: back to the mask it has now, the one chosen above)
+    // core3-38: the meter (ai_dsp.cpp wraps each job) and GXV_CORE3_AUDIO_PRIO (default 0 = off): the mixer 0x10 below the output thread's new priority.
+    port::core3::MarkOnCore3(port::core3::RegisterThread("dsp-mixer"), mixOnCore3);
+    if (const int want = port::core3::AudioPriority(port::core3::ThePolicy(), true, mixOnCore3, sceKernelGetThreadCurrentPriority()))
+        port_log("audio: DSP mixer on core 3 priority -> 0x%X (GXV_CORE3_AUDIO_PRIO): 0x%08X", static_cast<unsigned>(want), static_cast<unsigned>(sceKernelChangeThreadPriority(0, want)));
     port_log("audio: DSP mixer thread priority 0x%X -> 0x50: 0x%08X, cpu mask 0x%X requested -> 0x%08X (now 0x%X)", static_cast<unsigned>(before),
              static_cast<unsigned>(pr), static_cast<unsigned>(mask), static_cast<unsigned>(ar),
              static_cast<unsigned>(sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId())));
@@ -185,15 +232,41 @@ extern "C" void port_vita_audio_mixer_boost(void) {
 // work) is not cut by the mix of the sub-frame it has just released, so it ends sooner (the game thread may be waiting for it to enter
 // a critical section) and the mix follows.  Above the renderer threads.  Its runs on the game's CPU (when the game thread sleeps, or
 // outside the windows) run there too: the game thread then waits for it either way.
+//
+// GXV_AUDIO_CPU1_CORE (sched24, read once, default 0 = follow GXV_AUDIO_THREAD_CORE as above): 1 or 2 that core alone; 3 the fourth core, only when it
+// is proven (port_vita_core3_available) and the system keeps the thread there (it is put back on core 1 otherwise), where the DSP mixer and the output
+// thread already are by default: this thread hands each sub-frame to the mixer and waits for it, so on the same core the hand-over needs no
+// cross-core wake-up; the price is a core that is not always ours (the 5 s "audio cpu:" line shows the game thread's waits for it). GXV_AUDIO_PRIO
+// (sched24, 0x40-0xBF, default 0x4F) is its priority.
 extern "C" int port_vita_audio_cpu1_boost(int* priority) {
     static const long wanted = [] {
         const char* e = getenv("GXV_AUDIO_THREAD_CORE");
         return e && *e ? strtol(e, nullptr, 0) : 0L;
     }();
-    sceKernelChangeThreadPriority(0, 0x4F);
+    static const long own = [] {
+        const char* e = getenv("GXV_AUDIO_CPU1_CORE");
+        return e && *e ? strtol(e, nullptr, 0) : 0L;
+    }();
+    static const long prio = [] {
+        const char* e = getenv("GXV_AUDIO_PRIO");
+        const long v = e && *e ? strtol(e, nullptr, 0) : 0x4F;
+        return v >= 0x40 && v <= 0xBF ? v : 0x4F;
+    }();
+    sceKernelChangeThreadPriority(0, static_cast<int>(prio));
+    if (port_thread_register) port_thread_register("jas-audio");  // (this host thread is the game's audio thread: it was named "guest" at its start)
     const int kBoth = 0x60000;  // SCE_KERNEL_CPU_MASK_USER_1 | SCE_KERNEL_CPU_MASK_USER_2
-    const int mask = wanted == 1 ? 0x20000 : wanted == 2 ? 0x40000 : kBoth;
-    int ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);
+    const long core = own >= 1 && own <= 3 ? own : wanted == 3 ? 0L : wanted;  // (GXV_AUDIO_THREAD_CORE=3 is the mixer's: this thread keeps its old plan)
+    int mask = core == 1 ? 0x20000 : core == 2 ? 0x40000 : kBoth;
+    int ar;
+    if (core == 3 && port_vita_core3_available && port_vita_core3_available()) {
+        // (the fourth core: asked for on the thread itself and kept only when the mask reads back as asked, as PlaceOnSystemCore does)
+        ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), 0x80000);
+        if (ar >= 0 && sceKernelGetThreadCpuAffinityMask(sceKernelGetThreadId()) == 0x80000) mask = 0x80000;
+        else { mask = 0x20000; ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask); }
+    } else {
+        if (core == 3) mask = 0x20000;  // (not proven: core 1, the render thread's)
+        ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), mask);
+    }
     if (ar < 0 && mask != kBoth) ar = sceKernelChangeThreadCpuAffinityMask(sceKernelGetThreadId(), kBoth);
     // (the caller writes the basic log's line; port_log would not reach log.txt in a build without runtime diagnostics)
     if (priority) *priority = sceKernelGetThreadCurrentPriority();

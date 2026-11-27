@@ -1,0 +1,88 @@
+--- a/source/utils/gxm_utils.c
++++ b/source/utils/gxm_utils.c
+@@ -368,6 +368,61 @@
+ 		dst += align_size; \
+ 	}
+ 
++#ifdef VP23_F16_FAST
++// VP23_F16_FAST (Galaxy vp23, patch 0023): float -> half for F16 uniforms (a half-precision fragment shader's u_tev array, glUniform4fv)
++// without libgcc. The compiler turns `__fp16 = float` into one call of __gnu_f2h_ieee per component (no half conversion instruction
++// with -mfpu=neon): about 100 instructions each through libgcc's generic 64-bit routine, ~4-8 us for a 9..28 vec4 u_tev upload.
++// vgl_f32_to_f16 gives the same 16 bits as __gnu_f2h_ieee for every one of the 2^32 inputs (host test tools/test_f16.c, exhaustive):
++// round to nearest even; overflow to infinity; float subnormals to a signed zero; NaN to a quiet NaN that keeps the top 9 payload bits.
++#include <arm_neon.h>
++static __attribute__((noinline)) uint16_t vgl_f32_to_f16(uint32_t x) {
++	const uint32_t sign = (x >> 16) & 0x8000u;
++	const uint32_t a = x & 0x7fffffffu;
++	if (a >= 0x47800000u) // |x| >= 65536 (rounds to infinity), infinity, NaN
++		return (uint16_t)(sign | (a > 0x7f800000u ? (0x7e00u | ((a & 0x7fffffu) >> 13)) : 0x7c00u));
++	if (a >= 0x38800000u) // half normal: rebias the exponent, round the 13 dropped bits to nearest even (a carry may give infinity)
++		return (uint16_t)(sign | ((a - 0x38000000u + 0xfffu + ((a >> 13) & 1u)) >> 13));
++	if (a < 0x33000000u) // |x| < 2^-25 (float subnormals too): zero
++		return (uint16_t)sign;
++	// half subnormal: the 24-bit significand shifted right by 126 - exponent (14..24), rounded to nearest even
++	const uint32_t m = (a & 0x7fffffu) | 0x800000u;
++	const uint32_t sh = 126u - (a >> 23);
++	return (uint16_t)(sign | ((m + (1u << (sh - 1)) - 1u + ((m >> sh) & 1u)) >> sh));
++}
++// count vec4s, F32 in, F16 out (8 bytes each, contiguous). NEON for lanes that are zero or in the half normal range (what TEV colours,
++// konst colours and the other u_tev values are); if any lane of any vec4 is outside that, the whole array is converted again by
++// vgl_f32_to_f16 (one NEON -> core transfer per call, not per vec4). Both give the bits of __gnu_f2h_ieee.
++static void vgl_f32x4_to_f16x4_array(uint16_t *dst, const float *src, uint32_t count) {
++	const uint32x4_t absmask = vdupq_n_u32(0x7fffffffu);
++	const uint32x4_t signmask = vdupq_n_u32(0x80000000u);
++	const uint32x4_t lo = vdupq_n_u32(0x38800000u);
++	const uint32x4_t span = vdupq_n_u32(0x47800000u - 0x38800000u);
++	const uint32x4_t rebias = vdupq_n_u32(0x38000000u - 0xfffu);
++	const uint32x4_t one = vdupq_n_u32(1u);
++	uint32x4_t bad = vdupq_n_u32(0u);
++	uint16_t *d = dst;
++	const uint32_t *s = (const uint32_t *)src;
++	for (uint32_t i = 0; i < count; i++, s += 4, d += 4) {
++		const uint32x4_t x = vld1q_u32(s);
++		const uint32x4_t a = vandq_u32(x, absmask);
++		const uint32x4_t sign = vshrq_n_u32(vandq_u32(x, signmask), 16);
++		const uint32x4_t nz = vtstq_u32(a, a);                      // lane is not +-0
++		const uint32x4_t out = vcgeq_u32(vsubq_u32(a, lo), span);   // lane is not in [2^-14, 65536)
++		bad = vorrq_u32(bad, vandq_u32(nz, out));
++		const uint32x4_t odd = vandq_u32(vshrq_n_u32(a, 13), one);
++		uint32x4_t r = vshrq_n_u32(vaddq_u32(vsubq_u32(a, rebias), odd), 13);
++		r = vorrq_u32(vandq_u32(r, nz), sign);
++		vst1_u16(d, vmovn_u32(r));
++	}
++	const uint32x2_t b2 = vorr_u32(vget_low_u32(bad), vget_high_u32(bad));
++	if (__builtin_expect((vget_lane_u32(b2, 0) | vget_lane_u32(b2, 1)) != 0, 0)) {
++		const uint32_t *t = (const uint32_t *)src;
++		for (uint32_t i = 0; i < count * 4; i++)
++			dst[i] = vgl_f32_to_f16(t[i]);
++	}
++}
++#endif
++
+ // Allowing for fast load/store on small copies where this would be faster than sceClibMemcpy
+ static __attribute__((noinline)) void vgl_fast_uniform_copy(void *dst, const void *src, size_t size) {
+ 	switch (size) {
+@@ -532,7 +587,23 @@
+ 			break;
+ 		case SCE_GXM_PARAMETER_TYPE_F16:
+ 			if (input_type == SCE_GXM_PARAMETER_TYPE_F32) {
++#ifdef VP23_F16_FAST
++				// (the same layout as decode_unif_component_simple(4, float, __fp16): element i at 8 * i bytes, componentCount halves)
++				if (componentCount == 4) {
++					vgl_f32x4_to_f16x4_array((uint16_t *)uniformBuffer, (const float *)sourceData, count);
++				} else {
++					const uint32_t *src = (const uint32_t *)sourceData;
++					uint16_t *dst = (uint16_t *)uniformBuffer;
++					for (int i = 0; i < count; i++) {
++						for (int j = 0; j < componentCount; j++)
++							dst[j] = vgl_f32_to_f16(src[j]);
++						src += componentCount;
++						dst += 4;
++					}
++				}
++#else
+ 				decode_unif_component_simple(4, float, __fp16)
++#endif
+ 			} else {
+ 				decode_unif_component_simple(4, int32_t, __fp16)
+ 			}

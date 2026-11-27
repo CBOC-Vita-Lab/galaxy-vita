@@ -1,0 +1,55 @@
+# Drop-in character (dropin agent): the host (Mario) is alone in Beach Bowl; a guest drops in mid-scene and is assigned Luigi.
+# The host must draw the joiner as Luigi at once (a spare made at scene init, bound at the join), never as a second Mario; the
+# joiner stays hidden to the host until it has warped beside him; the late joiner does not wait out the scene barrier.
+# A third console drops in later as Toad (SMG_MP_LOOK=2): the engine-drawn Toad spare on both earlier consoles.
+name: mp_dropin_char
+description: mid-scene joiner drawn with his own character (Luigi) on the host; arrives beside the host; no barrier wait
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, 'puppet spare character']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "HeavenlyBeachGalaxy:1"}
+  - name: guest
+    delay: 110
+    seconds: 170
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+  - name: toad
+    delay: 150
+    seconds: 140
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] flow move type=0 galaxy=HeavenlyBeachGalaxy/'
+  # the host's Beach Bowl scene made spares (Luigi among them) before anyone joined
+  - 'expect host /\[mp\] puppet spare character=Luigi/'
+  - 'expect host /\[mp\] puppet heap init napa=\d+ .*spares=[1-9]/'
+  - 'expect host /\[mp\] slot 1 joined name=guest .*look=1/ after host /\[mp\] flow barrier release serial=1 /'
+  # bound to the Luigi spare at the join; drawn as Luigi; never a Mario puppet for slot 1 in that scene
+  - 'expect host /\[mp\] puppet slot=1 bind character=Luigi \(drop-in\)/ within 5s after host /\[mp\] slot 1 joined/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 60s after host /\[mp\] slot 1 joined/'
+  - 'absent host /\[mp\] puppet slot=1 appear model=Mario/'
+  - 'absent host /\[mp\] puppet slot=1 (bind|standin) character=(Mario|Cosmic)/'
+  # the joiner knows it dropped in, arrives beside the host, and does not wait out the barrier (mp-int 55d2cba); since bubble2 the
+  # arrival is a bubble beside the host (MpDropInHooks handler: "arrive handler"), the plain warp when no bubble can be made
+  - 'expect guest /\[mp\] puppet dropin self serial=\d+/'
+  - 'expect guest /\[mp\] puppet dropin arrive (warp to=0|handler to=0|stay reason=\w+)/'
+  - 'expect guest /\[mp\] puppet dropin arrive (warp to=0 pos=|handler to=0)/'
+  - 'expect guest /\[mp\] flow barrier release serial=\d+ waited=\d{1,4}ms/'
+  # seen only once beside the host: the host's first sight of him follows the warp
+  - 'order guest /\[mp\] puppet dropin arrive (warp|handler)/ before host /\[mp\] puppet slot=1 arrive shown model=Luigi standin=0/ within 5s'
+  - 'absent host /\[mp\] puppet slot=1 arrive shown/ before guest /\[mp\] puppet dropin arrive/'
+  # the Toad: bound to the Toad spare on the host and on the Luigi console, shown as Toad (Kinopio), arrives beside the host
+  - 'expect host /\[mp\] puppet slot=2 bind character=Toad \(drop-in\)/'
+  - 'expect guest /\[mp\] puppet slot=2 bind character=Toad \(drop-in\)/'
+  - 'expect host /\[mp\] puppet slot=2 arrive shown model=Kinopio standin=0/'
+  - 'expect toad /\[mp\] puppet dropin arrive (warp to=0 pos=|handler to=0)/'
+  - 'absent * /\[mp\] flow warp failed/'

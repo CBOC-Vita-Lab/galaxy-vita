@@ -1,0 +1,61 @@
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -390,6 +390,9 @@
+ 	GLuint attr_highest_idx;
+ 	GLboolean has_unaligned_attrs;
+ 	GLboolean is_fbo_float;
++#ifdef VP24_NATIVE_COLOR
++	GLboolean native_color; // vglProgramNativeColor: the fragment program blends itself (__nativecolor): patched with no blend info
++#endif
+ #ifdef FBO_MSAA
+ 	SceGxmMultisampleMode msaa; // the mode fprog was patched for
+ #endif
+@@ -574,6 +577,26 @@
+ 	p->ring_gen_v = p->ring_gen_f = 0;
+ }
+ 
++#ifdef VP24_NATIVE_COLOR
++// vglProgramNativeColor (patch 0025, VP24_NATIVE_COLOR): a program whose fragment shader is a __nativecolor Cg program (it reads the
++// colour surface through a FRAGCOLOR input and writes the surface's own bytes: programmable blending) has no fixed-function blending
++// or colour mask to apply; its fragment program is patched with no blend info (as vitaGL's own clear and blit programs are), whatever
++// the GL blend state is. Set it before the program's first draw; the memo of patched programs is emptied.
++void vglProgramNativeColor(GLuint prog, GLboolean on) {
++	if (!prog || prog > MAX_CUSTOM_PROGRAMS)
++		return;
++	program *p = &progs[prog - 1];
++	p->native_color = on ? GL_TRUE : GL_FALSE;
++	vgl_reset_draw_caches(p);
++	p->blend_info.raw = ~blend_info.raw; // (patched again at its next draw)
++}
++#undef rebuild_frag_shader
++#ifdef FBO_MSAA
++#define rebuild_frag_shader(x, y, z, w) patch_fragment_program(x, w, cur_msaa, p->native_color ? NULL : &blend_info.info, z, y)
++#else
++#define rebuild_frag_shader(x, y, z, w) patch_fragment_program(x, w, msaa_mode, p->native_color ? NULL : &blend_info.info, z, y)
++#endif
++#endif
+ static inline __attribute__((always_inline)) void vgl_patch_frag_program(program *p, SceGxmOutputRegisterFormat fmt) {
+ 	if (!(vgl_drawcache_flags & VGL_DRAWCACHE_FRAGMEMO)) {
+ 		rebuild_frag_shader(p->fshader->id, &p->fprog, (SceGxmProgram *)p->vshader->prog, fmt);
+@@ -2580,6 +2603,9 @@
+ 			progs[i].vertex_layout_version = ++vertex_program_layout_current_ver;
+ #endif
+ 			progs[i].attr_num = 0;
++#ifdef VP24_NATIVE_COLOR
++			progs[i].native_color = GL_FALSE;
++#endif
+ 			vgl_memset(progs[i].direct_key, 0, sizeof(progs[i].direct_key));
+ 			vgl_memset(progs[i].direct_vprog, 0, sizeof(progs[i].direct_vprog));
+ 			progs[i].direct_next = 0;
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1135,6 +1135,9 @@
+ #define VGL_DRAWCACHE_UNIREUSE 2
+ void vglSetDrawCaches(uint32_t flags);
+ void vglGetDrawCacheStats(uint32_t *stats);
++// VP24_NATIVE_COLOR (patch 0025): the program's fragment shader is a __nativecolor Cg program (programmable blending: it reads the
++// colour surface with a FRAGCOLOR input); its fragment program is patched with no blend info. Call before its first draw.
++void vglProgramNativeColor(GLuint prog, GLboolean on);
+ // vgx uniform shadows (custom_shaders.c; Galaxy GXV_UNI_SHADOW): vglGetUniformShadow gives, for a data uniform of program prog
+ // that is an F32 vec4 (or a vec4 array, or a mat4), the address of its values in the program's vertex and fragment default
+ // uniform shadow buffers (NULL for a stage that does not have it) and how many bytes from there belong to it; GL_FALSE for

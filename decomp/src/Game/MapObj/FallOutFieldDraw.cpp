@@ -119,6 +119,13 @@ void FallOutFieldDraw::draw() const {
         return;
     }
 
+#if defined(TARGET_PC)
+    // PETARI_CLIPCHAIN_ONEPASS / PETARI_CLIPCHAIN_SKIPEMPTY (clipblur25, ImageEffectLocalUtil.cpp): 0 / 0 (the default) is the code below as it was.
+    const int onePass = ImageEffectLocalUtil::portClipOnePassMode();
+    const bool emptyMask = ImageEffectLocalUtil::portClipSkipEmpty(_C != 0);
+    ImageEffectLocalUtil::portClipNote(onePass != 0, emptyMask);
+    ImageEffectLocalUtil::portClipSetDry(emptyMask);  // (no volume drew and the mask is the "inside" one: every GX state call is made, no capture, no vertex)
+#endif
     ImageEffectLocalUtil::setupDrawTexture();
 
     JUTTexture* pScreenAlphaTexture2 = MR::getScreenAlphaTexture(2);
@@ -155,6 +162,20 @@ void FallOutFieldDraw::draw() const {
     GXSetDstAlpha(GX_FALSE, 0);
     GXSetZScaleOffset(0.0f, 0.0f);
 
+#if defined(TARGET_PC)
+    // (PETARI_CLIPCHAIN_HALFRATE: the soft edge's chain left out on the second of two pictures while the camera is still; the edge below is drawn from
+    // texture 4 as the previous picture made it. The chain writes only the EFB's alpha in its tiles (colour update is off), and the edge draw clears it.)
+    const bool reuseChain = onePass != 1 && ImageEffectLocalUtil::portClipChainReuse(this);
+    if (onePass == 2 && !reuseChain) {
+        // (PETARI_CLIPCHAIN_ONEPASS=2: the tile the blur drew into gets the thresholded taps of the mask in one draw, no blend; tex3 and the quarter draw are gone)
+        ImageEffectLocalUtil::portClipTapsSetup(pScreenAlphaTexture2, _C != 0, 0);
+        GXSetBlendMode(GX_BM_NONE, GX_BL_ZERO, GX_BL_ZERO, GX_LO_CLEAR);
+        ImageEffectLocalUtil::sendTextureVertex(4, 4);
+        ImageEffectLocalUtil::portClipTapsEnd();
+        ImageEffectLocalUtil::capture(pScreenAlphaTexture4, 4, 4, GX_CTF_A8, false, 0);
+    }
+    if (onePass == 0 && !reuseChain) {
+#endif
     ImageEffectLocalUtil::drawTexture(pScreenAlphaTexture2, 2, 0, 255, ImageEffectLocalUtil::TexDrawType_0);
     ImageEffectLocalUtil::capture(pScreenAlphaTexture3, 2, 0, GX_CTF_A8, true, 0);
 
@@ -165,8 +186,35 @@ void FallOutFieldDraw::draw() const {
 
     ImageEffectLocalUtil::blurTexture(pScreenAlphaTexture3, 4, 4, 5, 0.004f, 1.0f);
     ImageEffectLocalUtil::capture(pScreenAlphaTexture4, 4, 4, GX_CTF_A8, false, 0);
+#if defined(TARGET_PC)
+    }
+#endif
+#if defined(TARGET_PC)
+    if (onePass == 1) {
+        // (PETARI_CLIPCHAIN_ONEPASS=1: the edge draw reads the mask itself at K offsets; stage K multiplies by the edge colour's alpha as setUpEdgeAndClearAlpha does)
+        const int taps = ImageEffectLocalUtil::portClipTapsSetup(pScreenAlphaTexture2, _C != 0, 1);
+        const GXTevStageID last = static_cast< GXTevStageID >(GX_TEVSTAGE0 + taps);
+        GXSetTevColor(GX_TEVREG1, ::sEdgeColor);
+        GXSetTevOrder(last, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR_NULL);
+        GXSetTevColorIn(last, GX_CC_C1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO);
+        GXSetTevColorOp(last, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+        GXSetTevAlphaIn(last, GX_CA_ZERO, GX_CA_A1, GX_CA_APREV, GX_CA_ZERO);
+        GXSetTevAlphaOp(last, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+        GXSetColorUpdate(GX_TRUE);
+        GXSetAlphaUpdate(GX_TRUE);
+        GXSetDstAlpha(GX_TRUE, 0);
+        GXSetChanMatColor(GX_COLOR0A0, Color8(255, 255, 255, 255));
+        GXSetChanAmbColor(GX_COLOR0A0, Color8(0, 0, 0, 255));
+        GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+        ImageEffectLocalUtil::sendTextureVertex(1, 0);
+        ImageEffectLocalUtil::portClipTapsEnd();
+    } else {
+#endif
     setUpEdgeAndClearAlpha();
     ImageEffectLocalUtil::drawTexture(pScreenAlphaTexture4, 1, 0, 255, ImageEffectLocalUtil::TexDrawType_2);
+#if defined(TARGET_PC)
+    }
+#endif
     MR::loadScreenAlphaTexture(2, GX_TEXMAP0);
     setUpFillScreen();
 
@@ -179,6 +227,9 @@ void FallOutFieldDraw::draw() const {
     GXSetAlphaUpdate(GX_TRUE);
     GXSetDstAlpha(GX_TRUE, 0);
     GXSetZScaleOffset(1.0f, 0.0f);
+#if defined(TARGET_PC)
+    ImageEffectLocalUtil::portClipSetDry(false);
+#endif
 }
 
 namespace MR {

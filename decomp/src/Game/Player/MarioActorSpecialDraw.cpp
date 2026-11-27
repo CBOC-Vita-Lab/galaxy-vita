@@ -1,4 +1,5 @@
 #include "Game/LiveActor/HitSensor.hpp"
+#include "Game/MP/MpSelfPuppet.hpp"
 #include "Game/Player/DLchanger.hpp"
 #include "Game/Player/J3DModelX.hpp"
 #include "Game/Player/MarioActor.hpp"
@@ -957,7 +958,17 @@ bool MarioActor::drawDarkMask() const {
 void MarioActor::showBeeFur() {
     if (mMario->isPlayerModeBee()) {
         _9E8->appear();
-        _9EC->onDraw(-1);
+        if (MpSelfPuppet::hideLocalBody()) {
+            MR::hideModelAndOnCalcAnim(_9E8);
+            if (_9EC != nullptr) {
+                _9EC->offDraw(-1);
+            }
+        } else {
+            MR::showModel(_9E8);
+            if (_9EC != nullptr) {
+                _9EC->onDraw(-1);
+            }
+        }
     }
 
     if (getCarrySensor() != nullptr) {

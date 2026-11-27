@@ -1,11 +1,16 @@
+#include "Game/LiveActor/Spine.hpp"
 #include "Game/MapObj/Coin.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/MP/MpGame.hpp"  // MP3: shared purple coins
 #include "Game/MapObj/CoinHolder.hpp"
 #include "Game/MapObj/CoinRotater.hpp"
 #include "Game/MapObj/PurpleCoinHolder.hpp"
 #include "Game/NameObj/NameObjArchiveListCollector.hpp"
 #include "Game/Util.hpp"
 #include <JSystem/JMath/JMath.hpp>
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 void Coin_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -97,6 +102,9 @@ void Coin::init(const JMapInfoIter& rIter) {
     }
 
     MR::useStageSwitchSleep(this, rIter);
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 2);  // (GXV_ALOD, actorlod23: family 2, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void Coin::initAfterPlacement() {
@@ -548,6 +556,9 @@ void Coin::noticeGetCoin() {
     }
 
     if (mIsPurpleCoin) {
+        if (mp_active()) {  // MP3: shared world: tell the others (no-op while a remote get is applied)
+            MpWorldSync::onPurpleCoin(this);
+        }
         MR::incPurpleCoin();
         MR::startSystemSE("SE_SY_PURPLE_COIN");
     } else {
@@ -555,6 +566,19 @@ void Coin::noticeGetCoin() {
         MR::startSystemSE("SE_SY_COIN");
         mHostInfo->_C++;
     }
+}
+
+// MP3: shared purple coins: the same steps as a local ItemGet (count, "CoinGet" effect, kill), only if the coin is alive here.
+bool Coin::mpRemoteGet() {
+    if (MR::isDead(this)) {
+        return false;
+    }
+
+    noticeGetCoin();
+    MR::emitEffect(this, "CoinGet");
+    mFlashCtrl->end();
+    kill();
+    return true;
 }
 
 void Coin::setLife(s32 life) {
@@ -684,3 +708,25 @@ namespace MR {
         return coin;
     }
 };  // namespace MR
+
+#ifdef TARGET_PC
+// GXV_IDLE25 (ActorTurnLod.cpp): the nerve a marked coin is in. 1 Fix, 2 FixHide, 3 NonActive, each with no change pending (their execute functions do
+// something only on the first step, or every step when _B9 is set: the caller checks both); 0 anything else.
+extern "C" int port_idle25_coin_nerve(const void* pActor) {
+    const Coin* p = static_cast< const Coin* >(pActor);
+    const Spine* s = p->mSpine;
+    if (s == nullptr || s->mNextNerve != nullptr) {
+        return 0;
+    }
+    if (s->mCurrNerve == GET_NERVE(Coin, CoinNrvFix)) {
+        return 1;
+    }
+    if (s->mCurrNerve == GET_NERVE(Coin, CoinNrvFixHide)) {
+        return 2;
+    }
+    if (s->mCurrNerve == GET_NERVE(Coin, CoinNrvNonActive)) {
+        return 3;
+    }
+    return 0;
+}
+#endif

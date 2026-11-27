@@ -1,0 +1,21 @@
+# flow (one door, 12 Nov): the owner's screenshot set of the new multiplayer screens, two consoles, Vita button pictures (the harness
+# sets PETARI_HANDHELD_UI=1 + PETARI_BACKEND=vgx), 960x544. Inputs: inputs/door_host.txt, inputs/door_guest.txt.
+name: door_code_long
+description: "the gathering screen with the LONG fallback code (no service reachable), the three-row layout"
+seconds: 190
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@door_host"
+    env: {SMG_MP_NAME: Alex, SMG_KEYBOARD_NAME: Alex, SMG_MP_LOOK: 0}
+  - name: guest
+    input: "@door_guest"
+    env: {SMG_MP_NAME: Luigi64, SMG_KEYBOARD_NAME: Luigi64, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] ui: screen gather/'
+  - 'expect guest /\[mp\] ui: screen gather/'
+  - 'expect host /\[mp\] ui: far-away code shown/'

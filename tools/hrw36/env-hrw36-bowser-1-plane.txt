@@ -1,0 +1,8 @@
+# env-hrw36-bowser-1-plane.txt (warp36, 14 Nov 2026): GXV_HRW36_PLANE=1 alone: the scene re-projected on the ground plane under him. Bowser's Star Reactor (KoopaBattleVs1Galaxy:1). Run the first long path and the stairs without stopping, through the coins, 2-3 minutes. Look at the path's texture and the coins near him while he runs. Expect: the path and the coins on it single and sharp while running; look also at what is NOT ground near him (the void beside the path, far walls): it must not swim.
+# Performance mode (its table sets GXV_HRW=5, depth mode 4 and the rest); needs a build with commit 'warp36:'. Judge on the 'hrw: warp36' line (every 5 s): ground parallax mean / max / bins, 'pairs on his ground plane', 'shaped boxes'; beside it 'fps:', 'even:', 'hrw: warp' (warp pass ms, fell back by reason).
+GXV_CHARAA_AUTO=0
+GXV_SHADERPACK=1
+GXV_PICTURE_MODE=60
+PETARI_STAGE=KoopaBattleVs1Galaxy:1
+PETARI_STAGE_HOLD=0
+GXV_HRW36_PLANE=1

@@ -75,5 +75,6 @@ public:
 #ifdef TARGET_PC
     f32 mReachSquared;    // (isOutOfSphere; negative: no sphere)
     TVec3f mReachCentre;
+    bool mPortMoving = false;  // (GXV_GRAV_GRID, logic23) a follower moves it: never filed in the grid (port/grav_memo.h)
 #endif
 };

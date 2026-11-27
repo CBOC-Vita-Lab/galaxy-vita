@@ -248,6 +248,9 @@ public:
     static void executeDrawBufferListNormalOpa();
     static void executeDrawBufferListNormalXlu();
     static void executeDrawListOpa();
+#ifdef TARGET_PC
+    static int executeDrawFreshPlayer();  // (hrw27, GXV_HRW: Mario's draws alone, for the second picture of a half-rate pair)
+#endif
     static void executeDrawListXlu();
     static void executeDrawSilhouetteAndFillShadow();
     static void executeDrawAlphaShadow();

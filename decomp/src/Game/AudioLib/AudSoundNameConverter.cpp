@@ -2,6 +2,26 @@
 #include <JSystem/JAudio2/JAUSoundTable.hpp>
 #include <JSystem/JGadget/hashcode.hpp>
 #include <cstring>
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include "port/host_vector.h"
+#include "port/logic_prof.h"
+#include "port/name_index.h"
+// GXV_UPD_SNDNAME (update25, 11 Nov; exact; default 0; platform/src/port/perf.cpp port_upd_sndname_mode): getSoundID's scan of the name table
+// from the category's first entry, as a hash index (port/name_index.h) over the same entries: the first entry at or after the start whose hash
+// and name match, which is what the scan returns. Built from the table the first time it is asked once the table is complete (every entry
+// written: mNumNameDatas == mNumItems) and again if the table's storage or size changes. 1: on. 2: verify (both ways, the scan's answer is used;
+// "snd-name:" lines count the calls, the entries the scans looked at, and any difference). Every mode counts for GXV_LOGIC_PROF's counts line
+// (the lookups of a sampled turn and the entries the scan would look at: that is what the index saves).
+extern "C" int port_upd_sndname_mode(void);
+extern "C" int port_on_frame_thread(void);  // (platform/src/port/perf.cpp: the index and the counters are the game thread's; others scan as before)
+namespace {
+port::NameIndex< PortHostVector< uint16_t > > sSndIdx;
+const AudSoundNameData* sSndIdxData = nullptr;
+s32 sSndIdxN = -1;
+unsigned sSndAsks = 0, sSndBad = 0;
+}  // namespace
+#endif
 
 namespace {
     static const char* sCategoryNamePrefix[] = {
@@ -65,6 +85,73 @@ JAISoundID AudSoundNameConverter::getSoundID(const char* pName, u32 hash) const 
     }
 #endif
 
+#ifdef TARGET_PC
+    const int mode = port_upd_sndname_mode();
+    if ((mode != 0 || ::port::LogicProfOn()) && port_on_frame_thread()) {
+        s32 found = -1;
+        s32 scanned = 0;
+        if (mode != 2 && mode != 1) {
+            // (census only: the scan, counted)
+            s32 i = startingOffset;
+            for (; i < mNumItems; i++) {
+                const AudSoundNameData& data = mSoundNameData[i];
+                if (hash == data.mHash && strcmp(pName, data.mName) == 0) {
+                    found = i;
+                    break;
+                }
+            }
+            scanned = (found >= 0 ? found + 1 : mNumItems) - startingOffset;
+            PORT_LOGIC_COUNT(PORT_LC_SND_CALLS, 1);
+            PORT_LOGIC_COUNT(PORT_LC_SND_SCAN, scanned > 0 ? static_cast< unsigned >(scanned) : 0);
+            return found >= 0 ? mSoundNameData[found].mID : JAISoundID(-1);
+        }
+        const bool whole = mNumNameDatas == mNumItems && mSoundNameData != nullptr;
+        if (whole && (!sSndIdx.built || sSndIdxData != mSoundNameData || sSndIdxN != mNumItems)) {
+            const AudSoundNameData* d = mSoundNameData;
+            sSndIdx.Build(mNumItems, [d](int i) { return static_cast< uint32_t >(d[i].mHash); });
+            sSndIdxData = mSoundNameData;
+            sSndIdxN = mNumItems;
+        }
+        const bool useIdx = whole && sSndIdx.built;
+        s32 viaIdx = -2;
+        if (useIdx) {
+            const AudSoundNameData* d = mSoundNameData;
+            viaIdx = sSndIdx.Find(hash, startingOffset, [d](int i) { return static_cast< uint32_t >(d[i].mHash); },
+                                  [d, pName](int i) { return strcmp(pName, d[i].mName) == 0; });
+        }
+        if (!useIdx || mode == 2) {
+            s32 i = startingOffset;
+            for (; i < mNumItems; i++) {
+                const AudSoundNameData& data = mSoundNameData[i];
+                if (hash == data.mHash && strcmp(pName, data.mName) == 0) {
+                    found = i;
+                    break;
+                }
+            }
+            scanned = (found >= 0 ? found + 1 : mNumItems) - startingOffset;
+            if (useIdx) {
+                ++sSndAsks;
+                if (viaIdx != found) {
+                    ++sSndBad;
+                    if (sSndBad <= 8) {
+                        port_log_summary("snd-name: MISMATCH \"%s\" from entry %d: scan %d, index %d", pName, static_cast< int >(startingOffset),
+                                         static_cast< int >(found), static_cast< int >(viaIdx));
+                    }
+                }
+                if ((sSndAsks & 0x3FFFu) == 0) {
+                    port_log_summary("snd-name: %u asks answered both ways, %u mismatches (GXV_UPD_SNDNAME=2)", sSndAsks, sSndBad);
+                }
+            }
+        } else {
+            found = viaIdx;
+            // (what the scan would have looked at, for the census)
+            scanned = (found >= 0 ? found + 1 : mNumItems) - startingOffset;
+        }
+        PORT_LOGIC_COUNT(PORT_LC_SND_CALLS, 1);
+        PORT_LOGIC_COUNT(PORT_LC_SND_SCAN, scanned > 0 ? static_cast< unsigned >(scanned) : 0);
+        return found >= 0 ? mSoundNameData[found].mID : JAISoundID(-1);
+    }
+#endif
     for (s32 i = startingOffset; i < mNumItems; i++) {
         const AudSoundNameData& data = mSoundNameData[i];
         if (hash == data.mHash && strcmp(pName, data.mName) == 0) {

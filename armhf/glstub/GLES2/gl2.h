@@ -33,7 +33,7 @@ typedef ptrdiff_t GLsizeiptr, GLintptr;
 enum {
     GL_FALSE = 0, GL_TRUE = 1, GL_NO_ERROR = 0, GL_ZERO = 0, GL_ONE = 1,
     GL_POINTS = 0, GL_LINES = 1, GL_TRIANGLES = 4, GL_TRIANGLE_STRIP = 5,
-    GL_DEPTH_BUFFER_BIT = 0x100, GL_COLOR_BUFFER_BIT = 0x4000,
+    GL_DEPTH_BUFFER_BIT = 0x100, GL_STENCIL_BUFFER_BIT = 0x400, GL_COLOR_BUFFER_BIT = 0x4000,
     GL_NEVER = 0x200, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS,
     GL_SRC_COLOR = 0x300, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA, GL_DST_COLOR,
     GL_ONE_MINUS_DST_COLOR,
@@ -41,7 +41,7 @@ enum {
     GL_CULL_FACE = 0xB44, GL_DEPTH_TEST = 0xB71, GL_BLEND = 0xBE2, GL_DITHER = 0xBD0, GL_SCISSOR_TEST = 0xC11,
     GL_UNPACK_ALIGNMENT = 0xCF5, GL_PACK_ALIGNMENT = 0xD05, GL_TEXTURE_2D = 0xDE1,
     GL_UNSIGNED_BYTE = 0x1401, GL_UNSIGNED_SHORT = 0x1403, GL_UNSIGNED_INT = 0x1405, GL_FLOAT = 0x1406,
-    GL_DEPTH_COMPONENT = 0x1902, GL_RGB = 0x1907, GL_RGBA = 0x1908, GL_LUMINANCE_ALPHA = 0x190A,
+    GL_DEPTH_COMPONENT = 0x1902, GL_RED = 0x1903, GL_RGB = 0x1907, GL_RGBA = 0x1908, GL_LUMINANCE_ALPHA = 0x190A,
     GL_UNSIGNED_SHORT_4_4_4_4 = 0x8033, GL_UNSIGNED_SHORT_5_5_5_1 = 0x8034, GL_UNSIGNED_SHORT_5_6_5 = 0x8363,
     GL_VENDOR = 0x1F00, GL_RENDERER, GL_VERSION, GL_EXTENSIONS,
     GL_NEAREST = 0x2600, GL_LINEAR = 0x2601, GL_NEAREST_MIPMAP_NEAREST = 0x2700, GL_LINEAR_MIPMAP_NEAREST, GL_NEAREST_MIPMAP_LINEAR,
@@ -53,7 +53,11 @@ enum {
     GL_FRAGMENT_SHADER = 0x8B30, GL_VERTEX_SHADER = 0x8B31, GL_COMPILE_STATUS = 0x8B81, GL_LINK_STATUS = 0x8B82, GL_ACTIVE_UNIFORMS = 0x8B86,
     GL_FRAMEBUFFER_COMPLETE = 0x8CD5, GL_COLOR_ATTACHMENT0 = 0x8CE0, GL_DEPTH_ATTACHMENT = 0x8D00, GL_FRAMEBUFFER = 0x8D40,
     GL_RENDERBUFFER = 0x8D41,
+    /* (pgotool31, 18 Nov 2026: what the back end has used since keepdepth / the shadow stencil / the attribute formats; GLES 2 values) */
+    GL_OUT_OF_MEMORY = 0x505, GL_STENCIL_TEST = 0xB90, GL_BYTE = 0x1400, GL_SHORT = 0x1402,
+    GL_KEEP = 0x1E00, GL_REPLACE = 0x1E01, GL_INCR = 0x1E02, GL_DECR = 0x1E03, GL_STENCIL_ATTACHMENT = 0x8D20,
 };
+#define GL_INTENSITY 0x8049
 
 /* The functions that answer with a value are the driver's own symbols too (armhf/glue/vgl_stub.cpp): defined in this file, the compiler
  * would learn things about their results (that they never are undefined, a constant) which it cannot about the driver's, and
@@ -149,7 +153,7 @@ VGX_STUB_FN void glTexImage2D(GLenum, GLint level, GLint, GLsizei w, GLsizei h, 
     const unsigned t = vgx_stub_curTex_;
     if (t == 0 || t >= VGX_STUB_MAXN) return;
     if (level == 0) {
-        vgx_stub_base_[t] = (uint32_t)w * (uint32_t)h * (format == GL_LUMINANCE_ALPHA || (type != GL_UNSIGNED_BYTE && type != GL_FLOAT && type != GL_UNSIGNED_INT) ? 2u : 4u); // (GXV_TEX16: 16-bit types)
+        vgx_stub_base_[t] = (uint32_t)w * (uint32_t)h * (format == GL_RED ? 1u : (format == GL_LUMINANCE_ALPHA || (type != GL_UNSIGNED_BYTE && type != GL_FLOAT && type != GL_UNSIGNED_INT)) ? 2u : 4u); // (GXV_TEX16 + TF_I8)
         vgx_stub_set(t, format == GL_DEPTH_COMPONENT ? VGX_STUB_RT_DEPTH : data ? (format == GL_LUMINANCE_ALPHA ? VGX_STUB_TEX_LA : VGX_STUB_TEX_RGBA) : VGX_STUB_RT_COLOR, vgx_stub_base_[t]);
     } else {
         vgx_stub_set(t, vgx_stub_kind_[t], (uint64_t)vgx_stub_base_[t] * 4u / 3u);
@@ -194,6 +198,7 @@ VGX_STUB_FN void glFrontFace(GLenum) {}
 VGX_STUB_FN void glLineWidth(GLfloat) {}
 VGX_STUB_FN void glClearColor(GLfloat, GLfloat, GLfloat, GLfloat) {}
 VGX_STUB_FN void glClearDepthf(GLfloat) {}
+VGX_STUB_FN void glClearStencil(GLint) {}
 VGX_STUB_FN void glClear(GLbitfield) {}
 VGX_STUB_FN void glBindBuffer(GLenum target, GLuint name) { vgx_stub_curBuf_[target == GL_ELEMENT_ARRAY_BUFFER] = name; }
 VGX_STUB_FN void glBufferData(GLenum target, GLsizeiptr size, const GLvoid*, GLenum usage) {
@@ -208,16 +213,19 @@ VGX_STUB_FN void glDrawElements(GLenum, GLsizei, GLenum, const GLvoid*) {}
 VGX_STUB_FN void glDrawArrays(GLenum, GLint, GLsizei) {}
 VGX_STUB_FN void glReadPixels(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, GLvoid*) {}
 VGX_STUB_FN void glFinish(void) {}
+VGX_STUB_FN void glStencilFunc(GLenum, GLint, GLuint) {}
+VGX_STUB_FN void glStencilMask(GLuint) {}
+VGX_STUB_FN void glStencilOp(GLenum, GLenum, GLenum) {}
 
 #ifdef __VGX_VITA__
 /* The harness compiles the back end as the console build does (-D__VGX_VITA__, so that a profile recorded here describes the same
  * control flow): what that code asks of vitaGL itself beyond GLES 2. The few vitaGL entry points the back end reaches
  * through weak declarations are in armhf/glue/vgl_stub.cpp. */
-enum { VGL_MEM_VRAM = 0 };
+enum { VGL_MEM_VRAM = 0, VGL_MEM_RAM, VGL_MEM_PHYCONT, VGL_MEM_BUDGET, VGL_MEM_EXTERNAL, VGL_MEM_ALL };   /* (vitaGL.h's order) */
 extern "C" {
 size_t vglMemFree(int);
 size_t vglMemTotal(int);
-const void* vglGetTexDataPointer(GLenum);
+void* vglGetTexDataPointer(GLenum);   /* (as vitaGL.h declares it) */
 }
 /* The console's GLES2/gl2.h wraps glDrawElements, glDrawArrays and glClear in the mask guard's test (platform/vgx/vita/include/GLES2/gl2.h):
  * two branches the back end's control flow contains, so they are here too.  The guard is off (GXV_VITA_MASK_GUARD), as by default. */

@@ -1,0 +1,15 @@
+# 8136 P1: pop-in P1: the game's own pops: budget off, governors pinned, presets file; Honeyhive 200 s (the fly-in first) then Beach Bowl 80 s
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=12000
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_POPIN_CENSUS=1
+GXV_PERF_BUDGET=0
+GXV_CPULOD=0
+GXV_FE_GOV=0
+GXV_GAME_GOV=0
+GXV_CPUGOV=0
+GXV_STAGE_PRESETS_FILE=ux0:data/smg/popin31-p1-presets.txt

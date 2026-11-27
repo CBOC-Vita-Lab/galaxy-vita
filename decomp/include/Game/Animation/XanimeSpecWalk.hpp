@@ -40,6 +40,10 @@
 // J3DJoint::recursiveCalc) the original copies the joint's matrix into a TPos3f, scales its columns (MR::preScaleMtx by the
 // actor's AnimScaleController::_C, passed in Input::cbScale), and copies the result into the joint matrix and J3DSys::mCurrentMtx;
 // at timing 1 the delegator has no after-child function (nothing). The callback's unregistering is done by the caller (ModelManager.cpp).
+// GXV_PAR_ANIM_CB2 (gamecpu23, 8 Nov): Input::cbKind 2 is KoteBug::calcJoint registered through JointControlDelegator< KoteBug > (no
+// after-child function): at timing 0 the joint matrix is copied into a TPos3f, concatenated on the right with TPos3f::makeQuat of the
+// actor's posture (passed in Input::cbQuat, KoteBug::mPosture's x y z w), and copied into the joint matrix and J3DSys::mCurrentMtx
+// (calcJoint returns true): the same functions on the same values.
 
 #include "Game/Animation/XanimeCore.hpp"
 #include <JSystem/J3DGraphAnimator/J3DAnimation.hpp>
@@ -105,6 +109,7 @@ struct Input {
     u8 cbKind;              // (GXV_PAR_ANIM_CB) 0 none, 1 NPCActor::calcJointScale on joint cbJoint
     u16 cbJoint;
     Vec cbScale;            // (kind 1) AnimScaleController::_C
+    f32 cbQuat[4];          // (kind 2, GXV_PAR_ANIM_CB2) KoteBug::mPosture (x, y, z, w)
 };
 
 struct Output {
@@ -538,6 +543,21 @@ inline void Walk(Ctx& c, J3DJoint* first) {
             MR::preScaleMtx(mtx.toMtxPtr(), reinterpret_cast< const TVec3f& >(c.in->cbScale));
             PSMTXCopy(mtx, pJointMtx);
             PSMTXCopy(mtx, c.cur);
+        } else if (c.in->cbKind == 2 && pJoint->getJntNo() == c.in->cbJoint && pJoint->getJntNo() < c.in->jointNum) {
+            // JointController::calcJointMatrixAndSetSystem -> KoteBug::calcJoint (returns true)
+            MtxPtr pJointMtx = c.out->anm[pJoint->getJntNo()];
+            TPos3f mtx;
+            PSMTXCopy(pJointMtx, mtx);
+            TQuat4f posture;
+            posture.x = c.in->cbQuat[0];
+            posture.y = c.in->cbQuat[1];
+            posture.z = c.in->cbQuat[2];
+            posture.w = c.in->cbQuat[3];
+            TPos3f rotation;
+            rotation.makeQuat(posture);
+            mtx.concat(mtx, rotation);
+            PSMTXCopy(mtx, pJointMtx);
+            PSMTXCopy(mtx, c.cur);
         }
         if (pJoint->getChild() != nullptr) {
             Walk(c, pJoint->getChild());
@@ -551,7 +571,7 @@ inline void Walk(Ctx& c, J3DJoint* first) {
 // J3DModel::calcAnmMtx + calcWeightEnvelopeMtx for a qualifying model, into `out`. false: something the checks should have kept
 // out (the result must not be used).
 inline bool Run(const Input& in, Output& out) {
-    if (in.root == nullptr || in.trackCount == 0 || in.trackCount > kMaxTracks || in.type4 > 2 || (in.mode6 != 0 && in.mode6 != 3) || in.cbKind > 1 ||
+    if (in.root == nullptr || in.trackCount == 0 || in.trackCount > kMaxTracks || in.type4 > 2 || (in.mode6 != 0 && in.mode6 != 3) || in.cbKind > 2 ||
         (in.prev == nullptr && (in.blend1C < 1.0f || in.blend20 != 1.0f || in.freeze29 != 0)) || (in.prev != nullptr && out.full == nullptr)) {
         return false;
     }

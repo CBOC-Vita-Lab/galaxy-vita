@@ -32,7 +32,7 @@ listed in [inputs.json](inputs.json). `all` runs the stages in order:
 | `source` | the 1,834 game units (the Petari decompilation) with Clang: `vita-source/` and its compile database |
 | `lto` | the same units as ThinLTO bitcode, linked by `ld.lld -r --lto-O2` into one object: `vita-source-lto/libgalaxy_vita_sources.a` (about 12 % less game-thread work) |
 | `runtime` | the Vita runtime and the vgx renderer (renderer at `-O3`): `vita-vgx-runtime/libgalaxy_vita_runtime_vgx.a` |
-| `link` | `vita-vgx-game/eboot.bin`, linked with VitaSDK GCC against `VGL_DEPS` |
+| `link` | `vita-vgx-game/eboot.bin`, linked with VitaSDK GCC against `VGL_DEPS`; then `tools/check_weak_links.py` (`logs/link-check.log`): every name of `tools/vita_must_define.txt` defined strongly, and no weak-only reference to code a link input has (a weak reference never pulls an archive member). A failure stops the build |
 
 Each stage is incremental and keeps its compiler log under `<build>/logs`. The first `source` and
 `lto` runs take a while (the game is about 1,800 files); after a change outside `decomp/`, only
@@ -59,7 +59,9 @@ LiveArea pictures are present; see [docs/BUILDING.md](../../docs/BUILDING.md#pac
 
 The driver never changes the source, the SDK or the dependency folder. It refuses a build directory
 inside the source tree (other than `build-vgx`), output symlinks (except the case shim's read-only
-header aliases) and paths with spaces. It creates no VPK on its own and never talks to a Vita.
+header aliases) and paths with spaces. It never talks to a Vita, and creates a VPK only when asked: `link --seed <seed VPK or shadercache
+folder>` (fix31) makes `<build-dir>/Galaxy-Vita.vpk` from the CMake `smg-vgx.vpk` and the seed's `shadercache/`, with the stage list tagged by
+`tools/seedrun/stagetags.py package`, and fails unless `stagetags.py checkvpk` passes on the result.
 
 The runtime generator, report and include-case helper (`vita_runtime_gen_vgx.py`,
 `vita_runtime_report_vgx.py`, `make_case_shim.py`) are the port's own build helpers.

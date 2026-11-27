@@ -28,6 +28,7 @@ extern "C" {
 extern volatile PPCWGPipe gxfifo : 0xCC008000;
 #else
 #include "port/gx_fifo.h"
+#include "port/gx_dedup.h"  // (GXV_GX_DEDUP, GXV_GX_DEDUP_CENSUS: in a PORT_GX_DEDUP_BUILD=1 build the register writes below go through its gate)
 #endif
 extern volatile void* __piReg;
 extern volatile void* __cpReg;
@@ -119,6 +120,18 @@ extern volatile void* __memReg;
         GX_WRITE_U32(CP_XF_LOADREGS((addr), (cnt)));                                                                                                 \
         GX_WRITE_U32((data));                                                                                                                        \
     }
+#elif defined(PORT_GX_DEDUP_BUILD) && PORT_GX_DEDUP_BUILD
+/* The same bytes as one batched command (GXV_FIFO_BATCH, port/gx_fifo.h); each argument once (no call site has side effects).
+ * Through the gate of GXV_GX_DEDUP (port/gx_dedup.h; this build has it): with the switches 0, a byte load and the same write. */
+#define GX_WRITE_CP_STRM_REG(addr, vtxfmt, data)                                                                                                     \
+    {                                                                                                                                                \
+        __PortGXWriteCP((u8)CP_STREAM_REG((vtxfmt), (addr)), (u32)(data));                                                                          \
+    }
+
+#define GX_WRITE_XF_REG(addr, data, cnt)                                                                                                             \
+    {                                                                                                                                                \
+        __PortGXWriteXF((u32)CP_XF_LOADREGS((addr), (cnt)), (u32)(data));                                                                           \
+    }
 #else
 /* The same bytes as one batched command (GXV_FIFO_BATCH, port/gx_fifo.h); each argument once (no call site has side effects). */
 #define GX_WRITE_CP_STRM_REG(addr, vtxfmt, data)                                                                                                     \
@@ -135,11 +148,19 @@ extern volatile void* __memReg;
 #define GX_WRITE_XF_MEM_U32(addr, data) GX_WRITE_U32(data)
 #define GX_WRITE_XF_MEM_F32(addr, data) GX_WRITE_F32(data)
 
+#if defined(__MWERKS__) || !(defined(PORT_GX_DEDUP_BUILD) && PORT_GX_DEDUP_BUILD)
 #define GX_WRITE_RA_REG(reg)                                                                                                                         \
     {                                                                                                                                                \
         GX_WRITE_U8(CP_OPCODE(1, 0xC));                                                                                                              \
         GX_WRITE_U32((reg));                                                                                                                         \
     }
+#else
+/* (GXV_GX_DEDUP, port/gx_dedup.h, in a PORT_GX_DEDUP_BUILD=1 build: the same two elements, behind its gate) */
+#define GX_WRITE_RA_REG(reg)                                                                                                                         \
+    {                                                                                                                                                \
+        __PortGXWriteBP((u32)(reg));                                                                                                                 \
+    }
+#endif
 
 #ifdef __MWERKS__
 #define GX_DEFINE_GX_READ_COUNTER(unit)                                                                                                              \

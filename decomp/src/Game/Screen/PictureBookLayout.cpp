@@ -95,6 +95,9 @@ PictureBookLayout::PictureBookLayout(s32 chapterMin, s32 chapterMax, bool isRose
     : LayoutActor("\x8a\x47\x96\x7b\x83\x8c\x83\x43\x83\x41\x83\x45\x83\x67", true), mChapterMin(chapterMin), mChapterMax(chapterMax), mChapterRosettaMax(chapterMax), mChapterNo(1), mPageNo(),
       mTextIndex(), mNotReadedChapterNo(-1), mNotReadedPageNo(-1), mNotReadedTextIndex(-1), _44(), _48(), mTitleTexMap(), mCoverFrontTexMap(),
       mCoverBackTexMap(), mNextItemDir(1), mIsNextItemFast(), mIconAButton(), mContentsButtonPaneController(), mCloseButton() {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
     if (!isRosettaReading) {
         mContentsButtonPaneController = new ButtonPaneController*[getChapterMax()];
     }

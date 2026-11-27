@@ -364,12 +364,24 @@ static inline __attribute__((always_inline)) void* gameAlloc(size_t size, int al
     return JKRHeap::alloc(size, align, pHeap);
 }
 
+extern "C" {
+extern volatile uintptr_t gPortPipeStackLo __attribute__((weak));
+extern volatile uintptr_t gPortPipeStackSpan __attribute__((weak));
+void port_drawpipe_guest_call(void* from) __attribute__((weak));
+}
 static inline void gameFree(void* pData) {
     if (pData == nullptr) {
         return;
     }
     if (!port_is_game_heap_ptr(pData)) {
         port_host_free(pData);
+        return;
+    }
+    // (pipefix26, GXV_DRAWPIPE / GXV_PIPE25: the draw helper is no guest thread. Freeing a game-heap block from it would change the heap's
+    // lists beside the game thread: the free is left out, reported (port_drawpipe_guest_call: counted, logged once, the pipeline turned off
+    // after the join) and the block stays allocated until the heap is destroyed.)
+    if (__builtin_expect(&gPortPipeStackSpan != nullptr && gPortPipeStackSpan != 0, 0) && reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) - gPortPipeStackLo < gPortPipeStackSpan) {
+        if (port_drawpipe_guest_call) port_drawpipe_guest_call(__builtin_return_address(0));
         return;
     }
     JKRHeap::free(pData, nullptr);

@@ -1,0 +1,41 @@
+# PROPOSED (emu): TYPED MESSAGES UNDER LOSS. mp_chat's pair (host takes both to Good Egg 1, the guest sends phrases and typed text), on a link that loses 10 % in the
+# guest->host direction and 3 % the other way, with bursts. Chat travels on the reliable channel, so every message must arrive exactly once and in order;
+# the number of balloons/toasts equals the number sent. SMG_MP_TEST_CHAT is desktop-only (the binary must contain it).
+name: emu_typed_loss
+description: "typed messages and phrases over a lossy link: each arrives once, in order, nothing hangs"
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_CHAT]}
+link:
+  profile: home_wifi
+  burst_enter_pct: 1
+  burst_len: 4
+  directions:
+    "guest>host": {loss_pct: 10}
+    "host>guest": {loss_pct: 3}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_CHAT: "16@1:5"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1,
+          SMG_MP_TEST_CHAT: "10@1:7,20@1:text:Meet me by the big tree,26@1:text:Can you see this?,32@1:text:Third message here,38@1:6"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect guest /\[mp\] chat test: 7/ within 150s after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order guest /\[mp\] ui: chat sent id=7 / before host /\[mp\] ui: chat shown from=1 kind=phrase id=7$/ within 15s'
+  - 'order guest /\[mp\] ui: chat sent id=text chars=23 / before host /\[mp\] ui: chat shown from=1 kind=text chars=23/ within 15s'
+  - 'order guest /\[mp\] ui: chat sent id=text chars=17 / before host /\[mp\] ui: chat shown from=1 kind=text chars=17/ within 15s'
+  - 'order guest /\[mp\] ui: chat sent id=text chars=18 / before host /\[mp\] ui: chat shown from=1 kind=text chars=18/ within 15s'
+  - 'order guest /\[mp\] ui: chat sent id=6 / before host /\[mp\] ui: chat shown from=1 kind=phrase id=6$/ within 15s'
+  - 'order host /\[mp\] ui: chat sent id=5 / before guest /\[mp\] ui: chat shown from=0 kind=phrase id=5$/ within 15s'
+  - 'count host /\[mp\] ui: chat shown from=1 / == 5'      # five sent by the guest, five shown: none lost, none twice
+  - 'count guest /\[mp\] ui: chat shown from=0 / == 1'
+  - 'absent * /\[mp\] (chat drop |ui: chat dropped|ui: chat NOT sent|ui: chat not sent)/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left))/ before shutdown'

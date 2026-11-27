@@ -363,7 +363,48 @@ bool XanimePlayer::changeTrackWeight(u32 track, f32 weight) {
     return true;
 }
 
+#ifdef TARGET_PC
+// The frame ratio calcAnm gives the core (in *ratio; false: it leaves the core's as it is). blendfix31: also the ratio a left-out calcAnm would have given
+// (portLeaveOut): one body for both.
+static inline bool PortCalcAnmRatio(const XanimePlayer* p, f32* ratio) {
+    if (p->_80) {
+        return false;
+    }
+    f32 currentFrame;
+    if (p->_20->checkState(1) != 0) {
+        currentFrame = p->_20->getEnd();
+    } else if (p->_88) {
+        currentFrame = p->_84;
+    } else {
+        currentFrame = p->_20->getFrame();
+    }
+
+    if (p->mCurrentAnimation != nullptr && p->mCurrentAnimation->_20[0] != nullptr) {
+        s16 maxFrame = static_cast< J3DAnmTransform* >(p->mCurrentAnimation->_20[0])->getFrameMax();
+        if (static_cast< J3DAnmTransform* >(p->mCurrentAnimation->_20[0])->getFrameMax() == 0) {
+            maxFrame = 1;
+        }
+
+        *ratio = currentFrame / maxFrame;
+        return true;
+    }
+    return false;
+}
+
+// blendfix31 (GXV_POSE_BLENDFIX, XanimeCore.hpp): this turn's calcAnm is left out by a pose cut. Its inputs are recorded in the core (the frame ratio it
+// would have set, from the latch as it is now), then the latch is released as calcAnm releases it (the BCK clock keeps its pace, as before).
+void XanimePlayer::portLeaveOut() {
+    f32 ratio = mCore->mFrameRatio;
+    PortCalcAnmRatio(this, &ratio);
+    mCore->portLeaveOut(ratio);
+    _88 = false;
+}
+#endif
+
 void XanimePlayer::calcAnm(u16 arg) {
+#ifdef TARGET_PC
+    PortCalcAnmRatio(this, &mCore->mFrameRatio);
+#else
     if (!_80) {
         f32 currentFrame;
         if (_20->checkState(1) != 0) {
@@ -383,6 +424,7 @@ void XanimePlayer::calcAnm(u16 arg) {
             mCore->mFrameRatio = currentFrame / maxFrame;
         }
     }
+#endif
 
     mCore->updateFrame();
     mModelData->mJointTree.mJointNodePointer[arg]->mMtxCalc = mCore;

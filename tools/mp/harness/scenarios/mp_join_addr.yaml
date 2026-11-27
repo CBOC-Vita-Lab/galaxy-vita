@@ -1,0 +1,41 @@
+# netx: internet play by address on the desktop. Both games load file 1 into the Observatory; the host opens a room by address
+# (SMG_MP_AUTO_CONN=direct: one UDP socket on SMG_MP_DIRECT_PORT, its router asked for a port mapping: here nobody answers the
+# search, so the lobby falls back to the LAN address); the guest joins by typing the address (SMG_MP_AUTO=join_addr:<ip:port>).
+# No STUN (SMG_MP_STUN=0: no internet in a host test). Same session checks as mp_join (snapshot, puppets, save guard).
+name: mp_join_addr
+description: host by address / join by address (MP_CONN_DIRECT) over UDP on 127.0.0.1; UPnP search fails cleanly; snapshot, puppets
+seconds: 240
+requires: {strings: [SMG_MP_DIRECT_PORT]}
+link: false
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, SMG_MP_STUN: "0", SMG_MP_UPNP_SSDP: "127.0.0.1:9", SMG_NET_LOCAL_IP: "127.0.0.1"}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_CONN: direct, SMG_MP_DIRECT_PORT: "@DIRECT_PORT@", SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together,
+          SMG_MP_AUTO_START: 2, SMG_MP_LOOK: 0, SMG_MP_NAME: host, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: "join_addr:127.0.0.1:@DIRECT_PORT@", SMG_MP_LOOK: 1, SMG_MP_NAME: guest}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] direct: host on UDP port (\d+)/ within 150s'   # (the port is leased per run: run_pair.sh puts it in @DIRECT_PORT@)
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=direct/ within 150s'
+  - 'expect host /\[mp\] upnp: failed: no UPnP router answered/ within 10s after host /\[mp\] hosting session=/'
+  - 'expect host /\[mp\] direct: address 127\.0\.0\.1:\d+ source=lan/ within 10s after host /\[mp\] upnp: failed/'
+  - 'expect guest /\[mp\] join start conn=direct addr=127\.0\.0\.1:\d+/'
+  # (no order rule host-port-before-guest-dial: both autopilots open at the same go-file, so the guest may dial 1 s before the host's socket
+  # is open; the join retries and the snapshot/puppet rules below prove it connected to the host's port)
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 .*players=2/ within 30s after host /\[mp\] hosting session=/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 15s'
+  - 'expect guest /\[mp\] save snapshot applied slot=/ within 30s after guest /\[mp\] snapshot received/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/ within 10s after guest /\[mp\] flow barrier release serial=\d+/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 10s after guest /\[mp\] flow barrier release serial=\d+/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - '?metric * rss_mib <= 2500'

@@ -1,0 +1,224 @@
+DEPLOY-SMG.txt - deploying the Galaxy 3.0 online service (smg-online). The deploy steps themselves have NOT been run (only the dry-run bundle check and local tests).
+=================================================================================================
+
+What it is
+----------
+The Strikers server code (this folder) deployed a SECOND time as its own Worker, "smg-online", with its own Durable Object
+namespace (so its own SQLite database), its own secrets and its own URL. It never touches msc-online: different worker name,
+different config file (wrangler.smg.toml), different DO namespace (a namespace belongs to the Worker that declares it), different
+ADMIN_TOKEN. The game is chosen by the variable SERVICE_GAME = "smg" in wrangler.smg.toml (on Cloudflare the name GAME is taken by
+the Durable Object binding; the local fake and the tests read GAME=smg).
+
+ALWAYS pass --config wrangler.smg.toml. A wrangler command without it acts on wrangler.toml, the Strikers service.
+
+Prerequisites (once)
+--------------------
+1. The same Cloudflare account as Strikers is fine (free plan: Workers + SQLite Durable Objects). `cd server && npm ci`
+   (Node >= 22.5).
+2. Log in: `npx wrangler login`, or headless `export CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=...` (token template
+   "Edit Cloudflare Workers"). (Do not run `wrangler whoami` in a log you keep: it prints the account name and an e-mail address; the deploy script checks the account id without storing that output.)
+3. Optional TURN: dashboard -> Realtime -> TURN -> create a key (a separate key gives Galaxy its own budget). Without it set
+   TURN_PROVIDER = "" in wrangler.smg.toml (rooms then work only where hole punching works).
+4. Tests first (nothing is contacted; ~1 minute): `npm test` (all suites: Strikers and Galaxy core, the Galaxy abuse / HTTP suites
+   smg-abuse and smg-http-e2e, and the workerd suites). Last run: see the test count printed by npm test. The client side: `bash tests/mp/service_test.sh`
+   from the repository root (the client against the local fake and against a deliberately broken server).
+
+3b. The beta's D1 database ALREADY EXISTS on the account (database galaxy-beta-reports, database_id 272224ff-51e9-4ad0-8575-a5ab999e8358, the id in
+   wrangler.smg.toml): never run `wrangler d1 create` by hand, and never run any wrangler command without --config wrangler.smg.toml (a command without it acts
+   on wrangler.toml, the Strikers service). The tables are created by the Worker on first use. The deploy script refuses a wrangler.smg.toml that lacks this
+   single [[d1_databases]] binding (REPORTS_DB), that holds any other resource table (kv_namespaces, r2_buckets, queues, vectorize, hyperdrive, workflows ...: wrangler
+   would CREATE a binding without an id), or that lacks the Workers Logs keys ([observability] enabled = true, head_sampling_rate = 1;
+   [observability.logs] invocation_logs = false; [observability.traces] enabled = false).
+
+Deploying with the script (corrected procedure, service review 11 Nov; replaces the hand commands)
+---------------------------------------------------------------------------------------------------
+Why: the deploy on 11 Nov waited only 5 s after `wrangler secret put ADMIN_TOKEN` before checking an admin route, saw 404 (a new
+secret takes a while to reach every Cloudflare location; until then the Worker has no ADMIN_TOKEN and answers 404 "no such
+endpoint") and reported a failure that was not one. The old hand command also printed the new token (tee /dev/stderr).
+
+  cd server
+  # first time only: make a token (mode 600, never printed) and set it with the deploy
+  scripts/deploy-smg-online.sh --account-id <32 hex> --admin-token-file ~/.smg-admin-token --new-admin-token
+  # every later deploy (the token file must hold the token the service has)
+  scripts/deploy-smg-online.sh --account-id <32 hex> --admin-token-file ~/.smg-admin-token
+  # check what is live, change nothing
+  scripts/deploy-smg-online.sh --account-id <32 hex> --admin-token-file ~/.smg-admin-token --expect-subdomain <workers.dev subdomain> --verify-only
+
+--account-id <32 hex> is REQUIRED: the script exports it as CLOUDFLARE_ACCOUNT_ID for every wrangler call and refuses unless
+`wrangler whoami` lists that id (and refuses a wrong format). The id pin is what prevents acting on a wrong account: the config
+names the Worker, but without the pin the account would be whoever is logged in. --url defaults to https://galaxy.psvita.dev (the Worker custom domain, attached ONCE by the owner in the Cloudflare dashboard: Workers, smg-online, Settings, Domains and Routes; wrangler.smg.toml declares NO route and NO custom domain, and the script refuses a config that has any, because wrangler's deploy would replace an existing DNS record or another Worker's binding of that name without asking, and would remove domains that are not in the config. Removing the custom domain is a dashboard step too); the old https://smg-online.<subdomain>.workers.dev is still accepted as --url. --expect-subdomain <name> (e.g. cboc-vita;
+default: taken from a workers.dev --url) says which workers.dev subdomain is right: every workers.dev URL wrangler reports, after the dry
+run and after the real deploy, must be exactly https://smg-online.<name>.workers.dev, and wrangler must report NO psvita.dev name at all (else stop, before any secret). --verify-only and the live checks run against the custom domain and,
+while wrangler.smg.toml has workers_dev = true and the subdomain is known, against workers.dev too (workers_dev OFF at release, after the hardware test passes on the new address).
+The zone's security rules (WAF rule, rate limit) are NOT in this script: scripts/setup-psvita-zone.sh (docs/ONLINE-DOMAIN-SETUP.md; offline test test/deploy/zone-script-test.sh). The first check that can truly SEE the subdomain is the deploy
+output (a dry run does not always print a URL), so a wrong subdomain is caught before the deploy only when the dry run shows it;
+otherwise it is caught right after, loudly, with the deploy already done. --print-plan prints exactly what would be run (ids and
+the account id shown as its last 4 characters; the token file is not opened) and exits 0 without contacting or writing anything. --self-check verifies that no
+wrangler call exists outside the script's wr() function.
+Privacy of the logs: `wrangler whoami` output (account name, e-mail) is never stored or printed (the log holds OK or the reason;
+only the account ids are read from it); every other wrangler output is filtered (e-mail addresses and account rows removed) before
+it is written to deploy-logs. The admin token is never written anywhere: curl reads it as a config line on stdin (`curl -K -`),
+and the kept request files show "Authorization: Bearer [REDACTED]".
+
+What it does, in order: refuses unless wrangler.smg.toml names smg-online with SERVICE_GAME = "smg" and the URL is not msc-online;
+`wrangler whoami`; the secret names; the current deployment; the local suites (core + worker-smg; they contact nothing; --skip-tests skips them); `wrangler deploy --dry-run`;
+`wrangler deploy`; `wrangler secret put ADMIN_TOKEN` (only with --new-admin-token / --set-admin-token; the value goes on stdin);
+then the live checks: GET /v1/info (200, game smg), GET /times (200), GET /v1/rank/get (404: no Strikers routes), and the admin
+check GET /v1/admin/stats, retried every 10 s for up to 2 minutes WHILE the answer is 404 or no answer at all, and stopped at once
+on any other answer (200 = done; 401 = the file's token is not the service's; 429 = the admin brake after wrong tokens).
+PROOF BEFORE THE TOKEN: before EVERY request that carries the admin token (the admin check and the relay self-check), to the address it goes to, the script makes a fresh
+random nonce (openssl rand -hex 16), asks GET /v1/prove?n=<nonce> (no token) and checks that the answer's proof equals HMAC-SHA256(key = the admin token, "smg-online prove v1\n" +
+the address's host name + "\n" + the nonce); the check runs in one node process that gets the token in its environment only, and compares in constant time. Only an address whose proof
+matches gets the token: `<address> prove: ok (the service holds the admin token; host bound)`; otherwise `<address> prove: FAILED (...): the admin token is not sent there` and no admin request
+is made there. A public GET /v1/info never decides where the token goes. No DNS tool (dig, host, nslookup) is needed: the script does no DNS check; the dashboard refuses conflicts when the domain is attached.
+Every wrangler call carries --config wrangler.smg.toml. No secret is printed, logged or put on a command line (curl reads the
+Authorization header from a temporary mode-600 file). Every reply is kept with the request that produced it, numbered, in
+deploy-logs/<UTC time>/ (NN-name.request / .status / .headers / .body / .curl-error; wrangler output in NN-wrangler-*.txt;
+summary.txt). Exit 0 = all checks passed. Offline test of the script itself: bash test/deploy/deploy-script-test.sh (stubs, no network; 56 ok).
+
+TURN secrets (only with TURN_PROVIDER = "cloudflare"), by hand, values on stdin:
+  # (by hand: always with WRANGLER_WRITE_LOGS=false, or wrangler writes a debug log holding the account name and e-mail under ~/.wrangler/logs)
+  WRANGLER_WRITE_LOGS=false npx wrangler secret put TURN_KEY_ID --config wrangler.smg.toml
+  WRANGLER_WRITE_LOGS=false npx wrangler secret put TURN_KEY_API_TOKEN --config wrangler.smg.toml
+
+Launch week and after (wrangler.smg.toml; change, then run the script)
+----------------------------------------------------------------------
+  REGISTER_MAX_PER_DAY   launch week 10000, afterwards 2000. A safety valve against abuse, not a gate: the per-address limits and the
+                         proof of work do the anti-abuse work. When reached, new consoles read "Online is busy right now. Please try
+                         again later." until 00:00 UTC; existing accounts and all offline / local play are never affected.
+  DAILY_REQUEST_BUDGET   45000 (the code default for Galaxy). The free plan's 100,000 requests a day belong to the whole ACCOUNT and
+                         are shared with msc-online: Strikers takes 45,000, so the two sums stay at 90,000 or less and 10,000 are left for abuse the layers do not stop. On the paid plan raise it (see the report's
+                         table); there is no spending cap on Paid, so this budget is the cost limit.
+                         svc3 (Nov 12): it counts requests ADMITTED; ones refused for abuse are counted apart. LIVE_RESERVE_PCT 20 keeps a
+                         fifth of it for rooms already in play (new sessions stop at 48,000). ADDR_DAILY_OPEN 1000 / ADDR_DAILY_PLAYER 3000 /
+                         ADDR_DAILY_LIVE 10000 / PID_DAILY_MAX 4000 are the per-address and per-account ceilings of a UTC day.
+  MAX_PLAYERS 50000, ACCOUNT_EXPIRE_DAYS 365, REGISTER_POW_BITS 15, REGISTER_NET_PER_DAY 60.
+
+Smoke test
+----------
+  URL=https://galaxy.psvita.dev
+  curl -s $URL/v1/info                       # "game":"smg", features.rooms/quick/friends/times true, ranked/ranking false
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST $URL/v1/rank/get        # 404: no DWC ranking here
+  curl -s -X POST -H 'content-type: application/json' -H 'x-msc-app: 3.0.0' -d '{"name":"x"}' $URL/v1/register
+                                             # 400 game_mismatch (no X-Msc-Game: smg) - Strikers clients are refused
+  curl -s $URL/times | head -5               # the public Star Race page
+  ADMIN_TOKEN=... ; curl -s -H "Authorization: Bearer $ADMIN_TOKEN" $URL/v1/admin/stats
+
+Client
+------
+* The game builds default to https://galaxy.psvita.dev (cmake/MpBuildDefs.cmake NP_ONLINE_URL; build.py --online-url; "none" = no service) and never fall back to
+  workers.dev (accounts are per address). SMG_APP_VERSION (default "3.0.0") must be >= MIN_APP_VERSION; SMG_TIME_BUILD (default = SMG_APP_VERSION) must be in
+  SMG_TIME_BUILDS. A console can be pointed at another service without a rebuild: `server = https://...` in ux0:data/smg/mp/mp.cfg (the player's
+  own file; https only, host[:port] only) or SMG_ONLINE_URL=https://... in ux0:data/smg/env.txt. Accounts are per address (online.dat for the build's
+  own, online_<hash>.dat for another): the token of one service is never sent to another. See README.md "Galaxy service".
+* TLS roots: as README.md "Deploying" step 9 (workers.dev chains end in GTS / ISRG roots); the np_https root bundle is the
+  net agent's.
+
+Never set these on the real service (tests only): ALLOW_TEST_CLOCK (lets a request choose the clock and its address) and
+RATE_LIMIT_SCALE (switches rate limits off). Neither is in wrangler.smg.toml; leave it that way. REGISTER_POW_BITS is now ON (15): the
+3.0 client solves it (platform/src/mp/mp_pow.h); a build from before 11 Nov evening cannot register (it can still use an existing account). TURN_PROVIDER = "cloudflare" without
+the two TURN secrets means POST /v1/turn answers 503 turn_unavailable (rooms still work wherever punching does).
+
+What the service enforces on its own (so you know what to expect in the logs and from players)
+------------------------------------------------------------------------------------------------
+  * Names ASCII only (nothing user-typed can carry markup; the /times page also uses textContent and a hash-only CSP).
+  * Star times: floor per star from the shipped table src/core/smg_floors.js (see "Star floors" below), else SMG_TIME_FLOOR_FRAMES
+    (600 = 10 s); SMG_STAR_FLOORS overrides single stars; 30 a player an hour; a new best > 25 % faster than the old one is hidden and
+    flagged for review. A time under the floor is refused (400 bad_time, reason too_fast), so it never reaches a board. The service
+    cannot tell whether a galaxy/star pair exists. Times are only "verified" when other members of a started room confirm them; solo
+    and unverified times can still be false.
+  * Rooms: a host silent 15 s is replaced by the lowest slot; a guest silent 60 s loses its slot; open rooms live 10 min,
+    joined/ready 20 min, started 3 h. After a deploy the first calls give every member a fresh 15 s / 60 s grace period.
+  * Wrong tokens: 20 per 10 minutes per address, then 429. Registration: per address and per day (README.md "Configuration").
+
+Configuration (wrangler.smg.toml [vars]; all optional)
+------------------------------------------------------
+  MIN_APP_VERSION / LATEST_APP_VERSION   version gate (defaults for smg: 3.0.0 / 3.0.0)
+  SMG_TIME_BUILDS        comma list of builds whose times are accepted (default 3.0.0). Add the new build at each release.
+  SMG_TIME_FLOOR_FRAMES  global floor (600 = 10 s);  SMG_STAR_FLOORS  {"<galaxy>:<star>":frames,...} per-star floors (wins over the table)
+  SMG_BLOCKS_MAX 200 (blocked players per player)
+  SMG_TIME_CAP_FRAMES    432000 (2 h);  SMG_TIMES_PER_HOUR 30;  SMG_TIME_JUMP_PCT 25;  SMG_VERIFY_FRAMES 2;  SMG_VERIFY_WINDOW_SEC 1800
+  SMG_FRIENDS_MAX 50;  SMG_ONLINE_SEC 60
+  plus everything in README.md "Configuration" that is not ranking/ranked (ROOM_*_TTL_SEC, LINK_*, PUNCH_*, TURN_*, REGISTER_*,
+  KILL_SWITCH, MAINTENANCE_MESSAGE, RATE_LIMIT_SCALE ...). Changing a var = `npx wrangler deploy --config wrangler.smg.toml`.
+
+Star floors (src/core/smg_floors.js)
+-------------------------------------
+  Keys "<galaxy>:<star>": galaxy = index in the client's race galaxy list (MpMessages.cpp kGalaxies, 0..41, the file lists the names),
+  star = scenario 1..8, values in 60 fps frames. Sources and caveats are in the file's header comment. In short: the only per-star
+  list that could be read was the SDA Knowledge Base "Super Mario Galaxy/Star Times" (old, mostly whole seconds, Mario and Luigi;
+  timing from control to the star, like the race from GO to the star). speedrun.com IL boards, the IL spreadsheets and MarioWiki
+  could not be read from here. So floor = 50 % of the fastest SDA time (FLOOR_FACTOR; 85 % would reject plausible modern runs
+  against 15-year-old times), at least 600. Stars with no SDA row (including every star of NO_DATA_GALAXIES) keep 600.
+  When a current IL table is at hand: put its times in BEST_SECONDS and raise FLOOR_FACTOR towards 0.85; the tests follow the table.
+  Nothing to deploy separately: it is part of the Worker bundle.
+
+Worker memo and the kill switch
+-------------------------------
+  GET /v1/public/times (and, for Strikers, /v1/public/leaderboard) is memoised 60 s in each Worker isolate. A memo hit now checks
+  the route's kill switch (KILL_SWITCH variable at once; the object's admin switches as seen within 5 s, at once in the isolate that
+  relayed the admin call) and the same 30-per-minute-per-address limit as the object before it is served (src/core/memo_guard.js).
+  Browsers may still show a copy for up to 60 s (Cache-Control max-age); that is not under server control.
+
+Operations
+----------
+  Emergency stop without a redeploy (names: all, register, rooms, turn, friends, quick, times):
+    curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+         -d '{"kill":["quick","times"],"message":"Back soon"}' $URL/v1/admin/switches        ('{"kill":[]}' clears)
+  Flagged times (a > 25 % jump): curl -H "Authorization: Bearer $ADMIN_TOKEN" "$URL/v1/admin/flags?kind=time_jump"
+    clear after review: -X POST -d '{"pid":100123,"kind":"time_jump"}' $URL/v1/admin/flags/clear  (the time shows again)
+  Ban: -X POST -d '{"pid":100123}' $URL/v1/admin/ban    (leaves every room; hidden from every board)
+  Roll back code: npx wrangler rollback --config wrangler.smg.toml
+  Never edit a shipped migration (src/core/schema.js); append a new one. Migration 4 (Galaxy tables) is additive and also runs
+  in msc-online the next time that worker is deployed with this code (it adds empty tables/columns; Strikers rows untouched).
+
+Backup and restore
+------------------
+  Backup (weekly is plenty; the file holds token hashes: keep it private):
+    ADMIN_TOKEN=<smg token> node scripts/backup.mjs $URL > smg-backup-$(date +%F).json
+    (all tables: profiles, rooms, room_members, friends, star_times, flags, ... - schema.js EXPORT_TABLES)
+  Restore (into the same or a fresh smg-online; rows are replaced by primary key):
+    ADMIN_TOKEN=<smg token> node scripts/restore.mjs $URL < smg-backup-YYYY-MM-DD.json
+  Never restore a Strikers backup into smg-online or the other way round (the format is the same; the data is not).
+  Not backed up on purpose: time_submits (2-day verification log), room_left (15-s rejoin memory), presence (memory).
+
+Local runs (no account, no network service)
+--------------------------------------------
+  GAME=smg node fake/server.mjs --no-https --http-port 8790          # http://127.0.0.1:8790, same code, in-memory SQLite
+  SMG_ONLINE_URL=http://127.0.0.1:8790 <desktop game or tests/mp/service_test.sh, which starts its own fake>
+  npx vitest run --project worker-smg                                 # smg-online inside workerd with wrangler.smg.toml
+
+
+Owner checklist after the security review (Nov 2026; nothing here has been deployed)
+-------------------------------------------------------------------------------------
+  * wrangler.smg.toml sets the sign-up and budget values listed in "Launch week and after" (11 Nov service review). Review before deploy.
+  * Migration 6 (galaxy_hardening) runs by itself at the first start: rooms.started_ms, room_members.src_ip / forced_relay, an index on profiles.last_seen_ms.
+  * The game build and the service go out together: the client polls every 8 s once a match has started and expects LINK_LOST_SEC=20 (the code default for smg).
+    An older 3.0 build against this service still works (it polls every 4 s). Race and co-op times without an online room are refused by this service.
+  * Optional: EDGE_IP_BURST / EDGE_IP_PER_SEC (edge bucket), SMG_PUBLIC_ROOMS_PER_IP, SMG_TIME_ROLLING_HOURS / SMG_TIME_FIRST_PCT / SMG_TIME_TOP_PCT / SMG_VERIFY_SLACK_SEC.
+  * Optional hardening: the Workers Rate Limiting binding (README.md). Keep a usage alert in the dashboard (requests, rows written, TURN).
+  * IMPORTANT (svc3): the edge bucket and the ceilings do NOT stop requests from counting against the account's 100,000 a day: a request that
+    reaches the Worker is counted by the platform whatever we answer. Only a custom domain with a WAF rate-limiting rule and a WAF custom rule can stop a flood before that.
+    Bot Fight Mode must stay OFF for the game's zone (it challenges the Vita's requests). README.md "Quota defence" has the dashboard list (domain, rule, route pattern, alerts).
+    Until it is done, treat one hostile address as able to spend up to its ceilings (about 1,000 + 3,000 + 10,000 object requests a day, and the
+    Worker's own 86,000 a day per isolate) and watch the Metrics page the first evenings.
+  * Check in the admin queue after launch: GET /v1/admin/flags (kinds time_jump / time_first / time_top) and clear what is honest.
+  * Backups hold private data: encrypt and delete old copies.
+
+
+Changes since the deployed package (built from mp-int 0f71a8e, 11 Nov 06:30; mp-perf's server/ is identical to it)
+------------------------------------------------------------------------------------------------------------------
+Branch service2 (this work) and core2 375fb87f. "Migration" = schema.js runs it by itself at the first start; all are additive.
+  change                                                              migration          old 3.0 builds (before these changes)
+  sign-up: PoW on (15 bits, rising per address), stored daily cap    no                 CANNOT register (no solver); existing accounts fine
+    2000 (toml 10000), per-network cap, display names (duplicates      (name_key gets
+    allowed), eviction of the longest-unseen when full, expiry 365 d   "#code" for new
+                                                                       rows only)
+  account_elsewhere (one account joined a room from elsewhere)       7 (room_left.reason) yes: they see a refusal and end the room as before
+  finding 13: unverified rows hidden, time_new_star flag, stricter    7 (board_bans)     yes; their race times verify only when a second
+    verification, SMG_TIMES_PER_DAY, per-address times limit,                            member vouches (as with new builds)
+    admin /v1/admin/times, /remove, /approve, /ban
+  held room polls (?wait=)                                            no                 yes (they send no wait: plain answers)
+  daily request budget (DAILY_REQUEST_BUDGET 45000)                  no                 yes (503 over_budget: they back off as for any 503)
+  core2 375fb87f: members[].code in the room view (members only)     no                 yes (an extra field)
+Rollback: `npx wrangler rollback --config wrangler.smg.toml` returns to the old code; migration 7 stays (harmless to the old code).

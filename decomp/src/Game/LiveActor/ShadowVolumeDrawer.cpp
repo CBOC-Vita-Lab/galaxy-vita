@@ -3,6 +3,10 @@
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Util/DrawUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
+#ifdef TARGET_PC
+#include <stdint.h>
+#include "port/gx_fifo.h"  // (imp45: the stream's write position, for the volume census)
+#endif
 
 namespace {
     static Color8 sShapeColor(0xC0, 0xC0, 0, 4);
@@ -78,7 +82,24 @@ bool ShadowVolumeDrawer::isDraw() const {
     return getController()->isDraw();
 }
 
+#ifdef TARGET_PC
+// imp45 (22 Nov): the census of the volume pass for the "turn-prof: shadows" line (GXV_TURN_PROF=2 / GXV_DRAW_PROF=2 only; platform/src/port/perf.cpp):
+// drawers asked, volumes drawn, the stream bytes and the time of one volume. Nothing changes without the profile.
+extern "C" int port_draw_part_on(void);
+extern "C" void port_shv_note(int drawn, unsigned bytes, long long ns);
+extern "C" int64_t port_host_time_ns(void);
+#endif
+
 void ShadowVolumeDrawer::draw() const {
+#ifdef TARGET_PC
+    const bool portProf = port_draw_part_on() != 0;
+    if (portProf && !isDraw()) {
+        port_shv_note(0, 0, 0);
+        return;
+    }
+    const unsigned char* const portP0 = portProf ? __PortGXFifoPtr : nullptr;
+    const int64_t portT0 = portProf ? port_host_time_ns() : 0;
+#endif
     if (isDraw()) {
         loadModelDrawMtx();
         GXColor shapeColor = reinterpret_cast< GXColor& >(::sShapeColor);
@@ -94,6 +115,12 @@ void ShadowVolumeDrawer::draw() const {
         GXSetCullMode(GX_CULL_NONE);
         GXSetColorUpdate(1);
         GXSetDstAlpha(1, 0);
+#ifdef TARGET_PC
+        if (portProf) {
+            const unsigned char* const p1 = __PortGXFifoPtr;
+            port_shv_note(1, p1 >= portP0 && p1 - portP0 < 65536 ? static_cast< unsigned >(p1 - portP0) : 0u, static_cast< long long >(port_host_time_ns() - portT0));
+        }
+#endif
     }
 }
 

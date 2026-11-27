@@ -13,6 +13,9 @@
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
 #include <cstdio>
+#ifdef TARGET_PC
+extern "C" void port_horizon_register(LiveActor* pActor, const char* pModelName);  // (horizon25, ClippingActorHolder.cpp)
+#endif
 
 namespace {
     const char* cFollowJointName = "Move";
@@ -58,6 +61,9 @@ void PlanetMap::init(const JMapInfoIter& rIter) {
         }
 
         MR::initCollisionParts(this, mModelName, getSensor("body"), jointMTX);
+#ifdef TARGET_PC
+        port_horizon_register(this, mModelName);  // (GXV_HORIZON: may become an occluder; nothing when the switch is off)
+#endif
     }
 
     MR::tryCreateCollisionMoveLimit(this, getSensor("body"));

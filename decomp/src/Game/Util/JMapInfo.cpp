@@ -63,7 +63,7 @@ bool JMapInfo::getValueFast(int entryIndex, int itemIndex, const char** pValueOu
     case JMAP_VALUE_TYPE_STRING_PTR:
         const char* pStringTable;
         pStringTable = getEntryAddress(mData, mData->mDataOffset, getNumEntries());
-        *pValueOut = pStringTable + *reinterpret_cast< const u32* >(valuePtr);
+        *pValueOut = pStringTable + readJMapScalar<u32>(valuePtr);
         break;
     default:
         *pValueOut = valuePtr;
@@ -81,10 +81,10 @@ bool JMapInfo::getValueFast(int entryIndex, int itemIndex, u32* pValueOut) const
     switch (item->mType) {
     case JMAP_VALUE_TYPE_LONG:
     case JMAP_VALUE_TYPE_LONG_2:
-        rawValue = *reinterpret_cast< const u32* >(valuePtr);
+        rawValue = readJMapScalar<u32>(valuePtr);
         break;
     case JMAP_VALUE_TYPE_SHORT:
-        rawValue = *reinterpret_cast< const u16* >(valuePtr);
+        rawValue = readJMapScalar<u16>(valuePtr);
         break;
     case JMAP_VALUE_TYPE_BYTE:
         rawValue = *reinterpret_cast< const u8* >(valuePtr);
@@ -108,13 +108,13 @@ bool JMapInfo::getValueFast(int entryIndex, int itemIndex, s32* pValueOut) const
     switch (item->mType) {
     case JMAP_VALUE_TYPE_LONG:
         if (item->mMask == 0xffffffff) {
-            *pValueOut = *reinterpret_cast< const s32* >(valuePtr);
+            *pValueOut = readJMapScalar<s32>(valuePtr);
             break;
         }
         goto FAIL;
     case JMAP_VALUE_TYPE_SHORT:
         if (item->mMask == 0xffff) {
-            *pValueOut = *reinterpret_cast< const s16* >(valuePtr);
+            *pValueOut = readJMapScalar<s16>(valuePtr);
             break;
         }
         goto FAIL;
@@ -170,11 +170,13 @@ JMapInfoIter MR::findJMapInfoElementNoCase(const JMapInfo* pInfo, const char* ke
 JMapInfoIter JMapInfo::findElementBinary(const char* key, const char* value) const {
     int low = 0;
     int high = getNumEntries();
-
-    const char* nextVal;
+    if (high <= 0) return end();
+    const s32 column = searchItemInfo(key);
+    if (column < 0 || !canSearchJMapField(mData->mItems[column], value)) return end();
     while (low < high) {
-        int mid = (low + high) / 2;
-        getValue< const char* >(mid, key, &nextVal);
+        int mid = low + (high - low) / 2;
+        const char* nextVal;
+        if (!getValueFast(mid, column, &nextVal)) return end();
         int comparison = strcmp(nextVal, value);
         if (comparison == 0) {
             return JMapInfoIter(this, mid);

@@ -9,6 +9,8 @@ namespace nw4r {
     namespace lyt {
         namespace detail {
 #ifdef TARGET_PC
+            int gPortWarmPass = 0;  // (common.h)
+
             // (pane lookups by name run every frame for the HUD and compare against most panes of a layout: the first
             // character settles most of them without a library call; the result is strncmp's)
             bool EqualsResName(const char* a1, const char* a2) {

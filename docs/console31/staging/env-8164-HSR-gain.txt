@@ -1,0 +1,10 @@
+# 8164 HSR-gain: only if the census frees a draw: ties 4 on (exact), 240 s
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=CannonFleetGalaxy:1
+PETARI_STAGE_HOLD=14400
+PETARI_FLOW_LOG=1
+GXV_HSR_ORDER=1
+GXV_HSR_ORDER_TIES=4
+GXV_HSR_GEO_BUDGET=30000
+GXV_HSR_GEO_KEEP_MB=24

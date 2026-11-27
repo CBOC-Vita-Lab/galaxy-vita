@@ -7,6 +7,30 @@
 #include "Game/Util/LayoutUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 
+#include "port/mp_bridge.h"  // MP3: the life counter follows the chosen character in a session
+#include "Game/MP/MpTeam.hpp"  // MP3 celebrate: the party strip follows this counter's appear / hide
+#include "Game/Screen/LayoutManager.hpp"  // MP3 ingame: the picture pane's place
+
+namespace {
+    // MP3: in a session the counter shows the chosen character's family (Luigi / Cosmic Luigi: Luigi's head, the others Mario's;
+    // the layout has no other head); single player: the game's own rule
+    bool counterShowsLuigi() {
+        if (mp_active()) {
+            const MpLook look = mp_slot_look(mp_local_slot());
+            return look == MP_LOOK_LUIGI || look == MP_LOOK_COSMIC_LUIGI;
+        }
+        return MR::isPlayerLuigi();
+    }
+
+    // touches / ingame: Toad, Yellow Toad, Cosmic Mario and Cosmic Luigi have no picture in this layout (Mario and Luigi only): the
+    // game's picture is hidden and the party strip draws the character's own head where it was (MpPartyLogic::counterPane)
+    bool counterHeadFromStrip() {
+        if (!mp_active()) return false;
+        return MpTeam::counterOwnHead();
+    }
+}  // namespace
+
+
 namespace NrvPlayerLeft {
     NEW_NERVE(PlayerLeftNrvHide, PlayerLeft, Hide);
     NEW_NERVE(PlayerLeftNrvAppear, PlayerLeft, Appear);
@@ -22,12 +46,13 @@ void PlayerLeft::init(const JMapInfoIter& rIter) {
     initLayoutManager("PlayerLeft", 3);
     MR::createAndAddPaneCtrl(this, "Counter", 1);
     MR::hidePaneRecursive(this, "CenterPlayerLeft");
+    if (counterHeadFromStrip()) MR::hidePaneRecursive(this, "PicMario");   // touches: the strip draws the player's own head there
 
     mLayoutAppearer = new CounterLayoutAppearer(this, TVec2f(-50.0f, 0.0f));
     mPaneRumbler = new CountUpPaneRumbler(this, "Counter");
     mPlayerLeft = MR::getPlayerLeft();
 
-    if (MR::isPlayerLuigi()) {
+    if (counterShowsLuigi()) {
         MR::startAnim(this, "Luigi", 2);
     }
 
@@ -70,6 +95,27 @@ void PlayerLeft::control() {
     updateCounter();
     mLayoutAppearer->update();
     mPaneRumbler->update();
+
+    // MP3 celebrate: the party strip slides in and out with this counter (shown = not in the Hide nerve)
+    if (mp_active()) {
+        MpTeam::noteHud(!isNerve(GET_NERVE(PlayerLeft, PlayerLeftNrvHide)));
+        // ingame: exactly one head: the game's picture hidden whenever the character has its own (a change of character mid-scene
+        // included), and its place and bounce handed to the strip, which draws the head there
+        const bool own = counterHeadFromStrip();
+        if (own != MR::isHiddenPane(this, "PicMario")) {
+            if (own) MR::hidePaneRecursive(this, "PicMario");
+            else MR::showPaneRecursive(this, "PicMario");
+        }
+        if (own) {
+            nw4r::lyt::Pane* pic = getLayoutManager()->getPane("PicMario");
+            if (pic != nullptr) {
+                TVec2f at;
+                MR::copyPaneTrans(&at, this, "PicMario");
+                const f32 sx = pic->mGlbMtx._00, sy = pic->mGlbMtx._10;
+                MpTeam::noteCounterPane(at.x, at.y, __builtin_sqrtf(sx * sx + sy * sy));
+            }
+        }
+    }
 }
 
 void PlayerLeft::updateCounter() {

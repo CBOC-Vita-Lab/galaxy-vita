@@ -5,6 +5,8 @@
 #include <mem.h>
 #include "revolution/gx.h"
 #include "revolution/gx/GXRegs.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 #define __GX_FLUSH_TEX_STATE() __GXFlushTextureState()
 
@@ -416,6 +418,7 @@ u32 GXGetTexObjTlut(const GXTexObj* tex_obj) {
 }
 
 void GXLoadTexObjPreLoaded(const GXTexObj* obj, const GXTexRegion* region, GXTexMapID id) {
+    PORT_GXCAP_ABANDON(GXLoadTexObjPreLoaded);
     GXTlutRegionInt* tlr;
     u32 m0, m1, img0, img1, img2, img3;
     GX_SETUP_ALL_TEXOBJS(t, obj, r, region)
@@ -454,6 +457,7 @@ void GXLoadTexObjPreLoaded(const GXTexObj* obj, const GXTexRegion* region, GXTex
 }
 
 void GXLoadTexObj(const GXTexObj* obj, GXTexMapID id) {
+    PORT_GXCAP(GXLoadTexObj, (obj, id));
     GXTexRegion* r;
     r = (gx->texRegionCallback)(obj, id);
     GXLoadTexObjPreLoaded(obj, r, id);
@@ -469,6 +473,7 @@ void GXInitTlutObj(GXTlutObj* tlut_obj, void* lut, GXTlutFmt fmt, u16 n_entries)
 }
 
 void GXLoadTlut(const GXTlutObj* tlut_obj, u32 tlut_name) {
+    PORT_GXCAP(GXLoadTlut, (tlut_obj, tlut_name));
     GXTlutRegionInt* r;
     u32 tlut_offset;
     GX_SETUP_TLUTOBJ(t, tlut_obj);
@@ -569,6 +574,7 @@ void GXInitTlutRegion(GXTlutRegion* region, u32 tmem_addr, GXTlutSize tlut_size)
 }
 
 void GXInvalidateTexAll(void) {
+    PORT_GXCAP(GXInvalidateTexAll, ());
     u32 reg0, reg1;
     reg0 = TX_INVALTAGS(0, 8, 0x66);
     reg1 = TX_INVALTAGS(256, 8, 0x66);
@@ -578,19 +584,60 @@ void GXInvalidateTexAll(void) {
     __GX_FLUSH_TEX_STATE();
 }
 
+#if defined(TARGET_PC)
+// (GX capture, port/gx_capture.h) The region callbacks GXInit sets: while they are the ones in place, GXLoadTexObj / GXLoadTlut call
+// no game code, and the TLUT region a name selects is the library's own table entry.
+static GXTexRegionCallback sPortTexRegionFirst;
+static GXTlutRegionCallback sPortTlutRegionFirst;
+int __PortGXRegionDefault(void) {
+    return gx->texRegionCallback == sPortTexRegionFirst && gx->tlutRegionCallback == sPortTlutRegionFirst;
+}
+// What GXLoadTexObjPreLoaded writes into the caller's texture object (the register ids of the map), for a load the capture records.
+void __PortGXTexObjSetIds(GXTexObj* obj, GXTexMapID id) {
+    GX_SETUP_TEXOBJ(t, obj);
+    SC_TX_SETMODE0_SET_RID(t->mode0, GXTexMode0Ids[id]);
+    SC_TX_SETMODE1_SET_RID(t->mode1, GXTexMode1Ids[id]);
+    SC_TX_SETIMAGE0_SET_RID(t->image0, GXTexImage0Ids[id]);
+    SC_TX_SETIMAGE3_SET_RID(t->image3, GXTexImage3Ids[id]);
+}
+// What GXLoadTlut writes into the caller's TLUT object (the TMEM offset of the region `tlut_name` selects). 0: not answerable here.
+int __PortGXTlutObjSetOffset(GXTlutObj* tlut_obj, u32 tlut_name) {
+    GXTlutRegionInt* r;
+    GX_SETUP_TLUTOBJ(t, tlut_obj);
+    if (!__PortGXRegionDefault()) {
+        return 0;
+    }
+    r = (GXTlutRegionInt*)(gx->tlutRegionCallback)(tlut_name);
+    if (!r) {
+        return 0;
+    }
+    SC_TX_SETTLUT_SET_TMEM_OFFSET(t->tlut, TX_LOADTLUT1_GET_TMEM_OFFSET(r->loadTlut1));
+    return 1;
+}
+#endif
+
 GXTexRegionCallback GXSetTexRegionCallback(GXTexRegionCallback f) {
+    PORT_GXCAP_ABANDON(GXSetTexRegionCallback);
+#if defined(TARGET_PC)
+    if (!sPortTexRegionFirst) sPortTexRegionFirst = f;
+#endif
     GXTexRegionCallback oldcb = gx->texRegionCallback;
     gx->texRegionCallback = f;
     return oldcb;
 }
 
 GXTlutRegionCallback GXSetTlutRegionCallback(GXTlutRegionCallback f) {
+    PORT_GXCAP_ABANDON(GXSetTlutRegionCallback);
+#if defined(TARGET_PC)
+    if (!sPortTlutRegionFirst) sPortTlutRegionFirst = f;
+#endif
     GXTlutRegionCallback oldcb = gx->tlutRegionCallback;
     gx->tlutRegionCallback = f;
     return oldcb;
 }
 
 void GXSetTexCoordScaleManually(GXTexCoordID coord, GXBool enable, u16 ss, u16 ts) {
+    PORT_GXCAP(GXSetTexCoordScaleManually, (coord, enable, ss, ts));
     gx->tcsManEnab = gx->tcsManEnab & ~(1 << coord) | (enable << coord);
 
     if (enable) {

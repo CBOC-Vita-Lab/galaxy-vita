@@ -1,0 +1,105 @@
+Patch 0038 (gt3vgl hardening, Carbon B2 + S6, post-fbo_msaa): check sceGxmReserve*DefaultUniformBuffer return/NULL at glClear, update_scissor_test, and glBlitFramebuffer with capped logging (first 8 failures per site). Applies AFTER fbo_msaa.py.
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index 544a5b8..48983f0 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -925,13 +925,21 @@ void glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLin
+ 		texcoord.w = (DISPLAY_HEIGHT_FLOAT - (float)srcY0) / DISPLAY_HEIGHT_FLOAT;
+ 	}
+ 
+-	void *vertex_buffer;
+-	sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer);
+-	vglSetUniformData((uint8_t *)vertex_buffer + blit_position_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, &position.x, SCE_GXM_PARAMETER_TYPE_F32);
+-	vglSetUniformData((uint8_t *)vertex_buffer + blit_texcoord_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, &texcoord.x, SCE_GXM_PARAMETER_TYPE_F32);
++	// (patch 0038: GT3 Revisited's reserve checks)
++	void *vertex_buffer = NULL;
++	if (sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer) < 0 || !vertex_buffer) {
++		static int ulog = 0;
++		if (ulog < 8) {
++			ulog++;
++			vgl_log("%s:%d %s: no scene to reserve uniforms in (sceGxmBeginScene failed?): draw skipped.\n", __FILE__, __LINE__, __func__);
++		}
++	} else {
++		vglSetUniformData((uint8_t *)vertex_buffer + blit_position_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, &position.x, SCE_GXM_PARAMETER_TYPE_F32);
++		vglSetUniformData((uint8_t *)vertex_buffer + blit_texcoord_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, &texcoord.x, SCE_GXM_PARAMETER_TYPE_F32);
+ 
+-	// Draw read framebuffer on top of write framebuffer
+-	sceGxmDrawPrecomputed(gxm_context, &blit_draw_state);
++		// Draw read framebuffer on top of write framebuffer
++		sceGxmDrawPrecomputed(gxm_context, &blit_draw_state);
++	}
+ 
+ 	// Restore all invalidated configurations
+ 	if (readFramebuffer) {
+diff --git a/source/misc.c b/source/misc.c
+index 987dcde..bffd0e8 100644
+--- a/source/misc.c
++++ b/source/misc.c
+@@ -678,12 +678,21 @@ void glClear(GLbitfield mask) {
+ 	sceGxmSetFragmentProgram(gxm_context, is_fbo_float ? clear_fragment_program_float_patched : clear_fragment_program_patched);
+ #endif
+ 
+-	sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vbuffer);
+-	sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &clear_vertices->x);
+-	sceGxmSetUniformDataF(vbuffer, clear_depth, 0, 1, &clear_depth_value);
+-
+-	sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fbuffer);
+-	sceGxmSetUniformDataF(fbuffer, clear_color, 0, 4, &clear_rgba_val.r);
++	// (patch 0038: GT3 Revisited's reserve checks; a failed reserve leaves the pointer unset, the draw below is then skipped)
++	vbuffer = fbuffer = NULL;
++	const GLboolean reserved = sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vbuffer) >= 0 && vbuffer &&
++		sceGxmReserveFragmentDefaultUniformBuffer(gxm_context, &fbuffer) >= 0 && fbuffer;
++	if (reserved) {
++		sceGxmSetUniformDataF(vbuffer, clear_position, 0, 4, &clear_vertices->x);
++		sceGxmSetUniformDataF(vbuffer, clear_depth, 0, 1, &clear_depth_value);
++		sceGxmSetUniformDataF(fbuffer, clear_color, 0, 4, &clear_rgba_val.r);
++	} else {
++		static int ulog = 0;
++		if (ulog < 8) {
++			ulog++;
++			vgl_log("%s:%d %s: no scene to reserve uniforms in (sceGxmBeginScene failed?): draw skipped.\n", __FILE__, __LINE__, __func__);
++		}
++	}
+ 
+ 	// Disable fragment program if not clearing color buffer. Depth and stencil clears are unaffected.
+ 	if (!(mask & GL_COLOR_BUFFER_BIT)) {
+@@ -722,7 +731,8 @@ void glClear(GLbitfield mask) {
+ 		sceGxmSetBackStencilRef(gxm_context, stencil_value & 0xFF);
+ 	}
+ 
+-	sceGxmDrawPrecomputed(gxm_context, &clear_draw_state);
++	if (reserved)
++		sceGxmDrawPrecomputed(gxm_context, &clear_draw_state);
+ 
+ 	validate_depth_test();
+ 	change_depth_write((depth_mask_state && depth_test_state) ? SCE_GXM_DEPTH_WRITE_ENABLED : SCE_GXM_DEPTH_WRITE_DISABLED);
+diff --git a/source/tests.c b/source/tests.c
+index 7a77310..05509b4 100644
+--- a/source/tests.c
++++ b/source/tests.c
+@@ -351,12 +351,20 @@ void update_scissor_test() {
+ 		SCE_GXM_STENCIL_OP_KEEP,
+ 		0, 0);
+ 
+-	void *vertex_buffer;
+-	sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer);
+-	vglSetUniformData((uint8_t *)vertex_buffer + clear_position_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, scissor_test_state ? &scissor_test_vertices->x : &clear_vertices->x, SCE_GXM_PARAMETER_TYPE_F32);
+-	vglSetUniformData((uint8_t *)vertex_buffer + clear_depth_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 1, &scissor_depth, SCE_GXM_PARAMETER_TYPE_F32);
++	// (patch 0038: GT3 Revisited's reserve checks)
++	void *vertex_buffer = NULL;
++	if (sceGxmReserveVertexDefaultUniformBuffer(gxm_context, &vertex_buffer) < 0 || !vertex_buffer) {
++		static int ulog = 0;
++		if (ulog < 8) {
++			ulog++;
++			vgl_log("%s:%d %s: no scene to reserve uniforms in (sceGxmBeginScene failed?): draw skipped.\n", __FILE__, __LINE__, __func__);
++		}
++	} else {
++		vglSetUniformData((uint8_t *)vertex_buffer + clear_position_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 4, scissor_test_state ? &scissor_test_vertices->x : &clear_vertices->x, SCE_GXM_PARAMETER_TYPE_F32);
++		vglSetUniformData((uint8_t *)vertex_buffer + clear_depth_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 1, &scissor_depth, SCE_GXM_PARAMETER_TYPE_F32);
+ 
+-	sceGxmDrawPrecomputed(gxm_context, &clear_draw_state);
++		sceGxmDrawPrecomputed(gxm_context, &clear_draw_state);
++	}
+ 
+ 	// Restoring viewport and culling
+ 	validate_viewport();

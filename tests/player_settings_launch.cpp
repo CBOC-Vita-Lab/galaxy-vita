@@ -1,4 +1,7 @@
 #include "port/settings_launch.h"
+#include "port/stage_knob.h"
+#include "port/mode_keys.h"
+#include "port/perf_defaults.h"
 #include <cassert>
 #include <cstdlib>
 #include <iostream>
@@ -26,25 +29,25 @@ int main() {
     auto c=DefaultConfig(port::controls::GetControlApi());c.fpsLimit=30;c.autoQuality=AutoQuality::Enabled;c.language="French";
     assert(ApplyStartup(c,false).empty() && !getenv("GXV_FPS_LIMIT") && selected.empty());
     languages={"English","French"};
-    assert(ApplyStartup(c,true).empty());assert(std::string(getenv("GXV_FPS_LIMIT"))=="30");assert(std::string(getenv("GXV_AUTOQ"))=="1");assert(selected=="French");
+    assert(ApplyStartup(c,true).empty());assert(std::string(getenv("GXV_FPS_LIMIT"))=="30");assert(!getenv("GXV_AUTOQ"));assert(selected=="French");   // (the hidden Dynamic resolution row sets nothing)
     for(auto key:keys)setenv(key,"developer",1);
     auto overrides=ApplyStartup(c,true);assert(overrides.size()==6);
     for(auto key:keys)assert(std::string(getenv(key))=="developer");
     for(auto key:keys)unsetenv(key);
     selected="";c.language="Italian";ApplyStartup(c,true);assert(selected.empty());
     for(auto key:keys)unsetenv(key);
-    // (Picture mode Quality, the default, runs under the fixed 30 cap: GXV_FPS_LIMIT=30, as Locked 30 does)
-    auto clearMode=[]{for(auto k:{"GXV_FPS_LIMIT","GXV_AUTOQ_TARGET","GXV_AUTOQ_EDGESTEP","GXV_AUTOQ_LOCKED30_FLOOR","GXV_AUTOQ_LOCKED30_START","GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_FXHALF"})unsetenv(k);};
-    clearMode();c.autoQuality=AutoQuality::Default;c.fpsLimit=0;ApplyStartup(c,true);assert(!getenv("GXV_AUTOQ")&&std::string(getenv("GXV_FPS_LIMIT"))=="30");
-    assert(!getenv("GXV_PACE")&&!getenv("GXV_AUTOQ_TARGET")&&!getenv("GXV_FXHALF"));clearMode();c.fpsLimit=kSteady30;ApplyStartup(c,true);
+    // (modes26: the 30 mode (Quality) runs under the fixed 30 cap: GXV_FPS_LIMIT=30; the 60 mode (Performance) sets GXV_FPS_LIMIT=0)
+    auto clearMode=[]{for(auto k:{"GXV_FPS_LIMIT","GXV_AUTOQ_TARGET","GXV_AUTOQ_EDGESTEP","GXV_AUTOQ_LOCKED30_FLOOR","GXV_AUTOQ_LOCKED30_START","GXV_AUTOQ_MAX","GXV_AUTOQ_MIN","GXV_AUTOQ_MSAA","GXV_FXHALF",
+                                  "GXV_STEADY30","GXV_PERF_BUDGET","GXV_EDGE_AA_NATIVE","GXV_PACE23_LOCKED_EDGE","GXV_SMOOTH60","GXV_PICTURE_MODE","GXV_AUTOQ_FXSTEP"})unsetenv(k);};
+    clearMode();c.autoQuality=AutoQuality::Default;c.fpsLimit=0;c.performance60=false;ApplyStartup(c,true);assert(!getenv("GXV_AUTOQ")&&std::string(getenv("GXV_FPS_LIMIT"))=="30");   // (the old Quality state reads as the 30 mode)
+    assert(!getenv("GXV_PACE")&&!getenv("GXV_FXHALF"));clearMode();c.fpsLimit=kSteady30;ApplyStartup(c,true);
     assert(!getenv("GXV_PACE")&&std::string(getenv("GXV_FPS_LIMIT"))=="30"&&std::string(getenv("GXV_AUTOQ_TARGET"))=="30"&&!getenv("GXV_FXHALF"));
     clearMode();
-    // The start-up default GXV_AUTOQ_TARGET=30 (the 30 FPS floor) is not reported as an override; another value is (but 60 agrees with Performance).
-    setenv("GXV_AUTOQ_TARGET","30",1);c.fpsLimit=0;assert(ApplyStartup(c,true).empty());
+    // The start-up default GXV_AUTOQ_TARGET=30 is not reported as an override in the 30 mode; 60 is one there, and 30 is one in the 60 mode.
+    setenv("GXV_AUTOQ_TARGET","30",1);c.fpsLimit=0;c.performance60=false;assert(ApplyStartup(c,true).empty());
     clearMode();setenv("GXV_AUTOQ_TARGET","60",1);assert(ApplyStartup(c,true).size()==1);
-    clearMode();setenv("GXV_AUTOQ_TARGET","60",1);c.performance60=true;assert(ApplyStartup(c,true).empty()&&!getenv("GXV_FPS_LIMIT"));c.performance60=false;clearMode();
-    // (Performance mode below: it leaves GXV_FPS_LIMIT unset, and what it sets agrees with it, so these repeated start-ups in one process do
-    // not see Quality's own cap from the call before as env.txt's)
+    clearMode();setenv("GXV_AUTOQ_TARGET","60",1);c.performance60=true;assert(ApplyStartup(c,true).empty()&&!getenv("GXV_FPS_LIMIT"));clearMode();
+    // (the 60 mode below: what it sets agrees with it, so repeated start-ups in one process do not see the call before as env.txt's)
     c.performance60=true;
     // Reduced motion: the setting sets GXV_REDUCED_MOTION=1 (env.txt wins); only an env value that disagrees with the setting is an override.
     unsetenv("GXV_REDUCED_MOTION");c.reducedMotion=false;assert(ApplyStartup(c,true).empty()&&!getenv("GXV_REDUCED_MOTION"));
@@ -58,33 +61,34 @@ int main() {
     setenv("GXV_REDUCED_MOTION","",1);assert(ApplyStartup(c,true).empty());                                                  // empty reads as off
     c.reducedMotion=true;{auto o=ApplyStartup(c,true);assert(o.size()==1&&std::string(getenv("GXV_REDUCED_MOTION")).empty());} // empty is off: disagrees, kept
     unsetenv("GXV_REDUCED_MOTION");c.reducedMotion=false;
-    c.performance60=false;clearMode();
+    c.performance60=true;clearMode();
     // Picture and speed choices (Display page). Each maps to a start-up switch; the game's own defaults set nothing; env.txt wins and a
     // value that disagrees with the menu is reported as a developer override.
     {
         const char* all[]={"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_AUTOQ_FXSTEP","GXV_CHARAA_AUTO","GXV_DOF","GXV_CORE3_IO","GXV_CORE3","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_AUTOQ","GXV_FPS_LIMIT","GXV_REDUCED_MOTION",
                          "GXV_GC_CORE","GXV_AUDIO_THREAD_CORE","GXV_GXM_DIRECT","GXV_DRAWDONE_DEFER","GXV_DL_LAZY","GXV_ANIM_LOD","GXV_ANIM_LOD_DIST","GXV_SLIP","PETARI_FRAMESKIP",
-                         "GXV_AUTOQ_TARGET","GXV_AUTOQ_EDGESTEP","GXV_AUTOQ_LOCKED30_FLOOR","GXV_AUTOQ_LOCKED30_START"};
-        auto clear=[&]{for(auto k:all)unsetenv(k);};
+                         "GXV_AUTOQ_TARGET","GXV_AUTOQ_EDGESTEP","GXV_AUTOQ_LOCKED30_FLOOR","GXV_AUTOQ_LOCKED30_START",
+                         "GXV_AUTOQ_MIN","GXV_STEADY30","GXV_PERF_BUDGET","GXV_EDGE_AA_NATIVE","GXV_PACE23_LOCKED_EDGE","GXV_SMOOTH60","GXV_PICTURE_MODE","SMG_ATOMIC_SAVES"};
+        // (pace33 PATCH8) one process applies a mode once; this test applies many, so the per-mode table's keys and the pacing keys mode 5 owns are cleared too
+        auto clear=[&]{for(auto k:all)unsetenv(k);for(int i=0;i<port::modekeys::kRowCount;++i)unsetenv(port::modekeys::kRows[i].key);
+                       for(auto k:{"GXV_SKIP_PATTERN","GXV_PRESENT_SYNC","GXV_PACE","GXV_CPULOD","GXV_ACROSS","GXV_FARLOGIC","GXV_HRW_ALLOW50"})unsetenv(k);};
         auto startup=[&]{setenv("GXV_AUTOQ_TARGET","30",1);setenv("GXV_AUTOQ_FXSTEP","3",1);setenv("GXV_CHARAA_AUTO","1",1);setenv("GXV_CORE3_IO","1",1);
-                           setenv("GXV_AUDIO_THREAD_CORE","1",1);setenv("GXV_GXM_DIRECT","1",1);setenv("GXV_DRAWDONE_DEFER","2",1);setenv("GXV_SLIP","1",1);};  // what vita/vgx-game/entry.cpp sets before Settings runs
+                           setenv("GXV_AUDIO_THREAD_CORE","1",1);setenv("GXV_GXM_DIRECT","1",1);setenv("GXV_DRAWDONE_DEFER","2",1);setenv("GXV_SLIP","1",1);setenv("GXV_AUTOQ_MIN","0",1);setenv("GXV_STEADY30","1",1);setenv("GXV_SMOOTH60","0",1);};  // what vita/vgx-game/entry.cpp sets before Settings runs
         auto env=[&](const char* k)->std::string{const char* v=getenv(k);return v?v:"<unset>";};
         auto base=DefaultConfig(port::controls::GetControlApi());
-        // Best picture (the defaults): nothing is set and nothing is an override, but Picture mode Quality: the fixed 30 cap, starting at
-        // 960x544 (rung 6), the picture size giving way to the game's standard size (rung 2) at most; the 30 target of the start-up.
+        // The defaults (modes26: Performance, the 60 mode): nothing is an override. Rung 6 pinned (MIN = MAX = 6), no multisampling, the 60 target, no cap, the edge pass off at 1:1.
         clear();startup();assert(ApplyStartup(base,true).empty());
-        for(auto k:{"GXV_AUTOQ_MAX","GXV_AUTOQ_MSAA","GXV_SHARPEN","GXV_HDTEX","GXV_DOF","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_GC_CORE","GXV_DL_LAZY","GXV_ANIM_LOD","GXV_ANIM_LOD_DIST","GXV_CORE3"})assert(!getenv(k));
-        // (Quality: the present's edge smoothing is the first thing a GPU miss gives up, at 960x544 too: GXV_AUTOQ_HOLD30's edge rule)
-        assert(env("GXV_AUTOQ_EDGESTEP")=="1");
-        assert(env("GXV_FPS_LIMIT")=="30"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="0"&&env("GXV_AUTOQ_LOCKED30_START")=="6"&&env("GXV_AUTOQ_TARGET")=="30");
+        for(auto k:{"GXV_SHARPEN","GXV_HDTEX","GXV_DOF","GXV_TILT_GAIN","GXV_TILT_STICK","GXV_GC_CORE","GXV_DL_LAZY","GXV_ANIM_LOD","GXV_ANIM_LOD_DIST","GXV_CORE3","GXV_AUTOQ","SMG_ATOMIC_SAVES"})assert(!getenv(k));
+        assert(env("GXV_FPS_LIMIT")=="<unset>"&&env("GXV_AUTOQ_TARGET")=="60"&&env("GXV_STEADY30")=="0"&&env("GXV_PERF_BUDGET")=="1"&&env("GXV_AUTOQ_MIN")=="6"&&env("GXV_AUTOQ_MAX")=="6"&&env("GXV_EDGE_AA_NATIVE")=="0");
+        assert(env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_EDGESTEP")=="1"&&env("GXV_PICTURE_MODE")=="60"&&env("GXV_SMOOTH60")=="0"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="<unset>"&&env("GXV_PACE23_LOCKED_EDGE")=="<unset>");
         assert(env("GXV_SLIP")=="0"&&env("PETARI_FRAMESKIP")=="5");   // Game speed Full (the default)
         assert(env("GXV_AUDIO_THREAD_CORE")=="1"&&env("GXV_GXM_DIRECT")=="1"&&env("GXV_DRAWDONE_DEFER")=="4");   // Logic overlap Max (the default)
         assert(env("GXV_AUTOQ_FXSTEP")=="3"&&env("GXV_CHARAA_AUTO")=="1"&&env("GXV_CORE3_IO")=="1");
         // Each choice on its own.
         struct One {const char* what;void (*edit)(Config&);const char* key;const char* value;};
         const One ones[]={
-            {"sharper off",[](Config& c){c.aboveNative=false;},"GXV_AUTOQ_MAX","2"},
-            {"aa off",[](Config& c){c.antiAliasing=AntiAliasing::Off;},"GXV_AUTOQ_MSAA","0"},
+            {"sharper off (hidden: ignored)",[](Config& c){c.aboveNative=false;},"GXV_AUTOQ_MAX","6"},
+            {"aa off (hidden: ignored)",[](Config& c){c.antiAliasing=AntiAliasing::Off;},"GXV_AUTOQ_MSAA","0"},{"dynamic off (hidden: ignored)",[](Config& c){c.autoQuality=AutoQuality::Disabled;},"GXV_AUTOQ","<unset>"},
             {"sharpness off",[](Config& c){c.sharpness=Sharpness::Off;},"GXV_SHARPEN","off"},
             {"sharpness strong",[](Config& c){c.sharpness=Sharpness::Strong;},"GXV_SHARPEN","0.8"},
             {"hd off",[](Config& c){c.hdTextures=false;},"GXV_HDTEX","0"},
@@ -94,12 +98,13 @@ int main() {
             {"standard renderer",[](Config& c){c.gxmDirect=false;},"GXV_GXM_DIRECT","0"},{"overlap off",[](Config& c){c.logicOverlap=false;},"GXV_DRAWDONE_DEFER","1"},{"overlap on",[](Config& c){c.overlapMax=false;},"GXV_DRAWDONE_DEFER","2"},
             {"materials every turn",[](Config& c){c.lazyMaterials=false;},"GXV_DL_LAZY","0"},{"full far animation",[](Config& c){c.farAnimation=FarAnimation::Full;},"GXV_ANIM_LOD","0"},{"aggressive far animation",[](Config& c){c.farAnimation=FarAnimation::Aggressive;},"GXV_ANIM_LOD_DIST","1000"},
             {"smooth: slip",[](Config& c){c.fullSpeed=false;},"GXV_SLIP","1"},{"smooth: skips",[](Config& c){c.fullSpeed=false;},"PETARI_FRAMESKIP","<unset>"},
-            {"effects full",[](Config& c){c.effects=EffectsQuality::Full;},"GXV_AUTOQ_FXSTEP","0"},
-            {"mario off",[](Config& c){c.prioritizeMario=false;},"GXV_CHARAA_AUTO","0"},
+            {"effects full (hidden: ignored)",[](Config& c){c.effects=EffectsQuality::Full;},"GXV_AUTOQ_FXSTEP","3"},
+            {"mario off (hidden: ignored)",[](Config& c){c.prioritizeMario=false;},"GXV_CHARAA_AUTO","1"},
             {"tilt 1",[](Config& c){c.tiltLevel=1;},"GXV_TILT_GAIN","50"},{"tilt 2",[](Config& c){c.tiltLevel=2;},"GXV_TILT_GAIN","63"},{"tilt 3",[](Config& c){c.tiltLevel=3;},"GXV_TILT_GAIN","75"},
             {"tilt 4",[](Config& c){c.tiltLevel=4;},"GXV_TILT_GAIN","88"},{"tilt 6",[](Config& c){c.tiltLevel=6;},"GXV_TILT_GAIN","120"},{"tilt 7",[](Config& c){c.tiltLevel=7;},"GXV_TILT_GAIN","140"},
             {"tilt 8",[](Config& c){c.tiltLevel=8;},"GXV_TILT_GAIN","160"},{"tilt 9",[](Config& c){c.tiltLevel=9;},"GXV_TILT_GAIN","180"},{"tilt 10",[](Config& c){c.tiltLevel=10;},"GXV_TILT_GAIN","200"},
-            {"tilt stick",[](Config& c){c.tiltStick=true;},"GXV_TILT_STICK","1"}};
+            {"tilt stick",[](Config& c){c.tiltStick=true;},"GXV_TILT_STICK","1"},
+            {"safe saves",[](Config& c){c.safeSaves=true;},"SMG_ATOMIC_SAVES","1"}};
         for(const auto& one:ones) {
             clear();startup();auto c=base;one.edit(c);
             assert(ApplyStartup(c,true).empty());assert(env(one.key)==one.value);
@@ -110,39 +115,98 @@ int main() {
         {clear();startup();setenv("GXV_CORE3","1",1);auto o=ApplyStartup(base,true);assert(o.size()==1&&o[0].key=="GXV_CORE3"&&o[0].effectiveLabel=="Fourth core: every part, when available"&&env("GXV_CORE3")=="1");}
         {clear();startup();setenv("GXV_CORE3","0",1);auto c=base;c.coreHelp=false;assert(ApplyStartup(c,true).empty()&&env("GXV_CORE3")=="0");}
         {clear();startup();setenv("GXV_CORE3","0",1);auto o=ApplyStartup(base,true);assert(o.size()==1&&o[0].effectiveLabel=="Fourth core off");}
-        // Effects Full keeps Mario's edge smoothing; Mario off ends the whole Mario-first ladder (steps and smoothing).
-        {clear();startup();auto c=base;c.effects=EffectsQuality::Full;ApplyStartup(c,true);assert(env("GXV_CHARAA_AUTO")=="1"&&env("GXV_AUTOQ_FXSTEP")=="0");}
-        {clear();startup();auto c=base;c.prioritizeMario=false;ApplyStartup(c,true);assert(env("GXV_CHARAA_AUTO")=="0"&&env("GXV_AUTOQ_FXSTEP")=="0");}
-        // The presets: Balanced caps at the game's own rung, Performance adds no multisampling, no sharpening and no depth of field.
-        {clear();startup();auto c=base;ApplyPreset(c,Preset::Balanced);assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_MSAA")=="<unset>"&&env("GXV_SHARPEN")=="<unset>");}
-        {clear();startup();auto c=base;ApplyPreset(c,Preset::Performance);assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_SHARPEN")=="off"&&env("GXV_DOF")=="0"&&env("GXV_AUTOQ_FXSTEP")=="3");
-         assert(env("GXV_AUTOQ_TARGET")=="60"&&env("GXV_AUTOQ_EDGESTEP")=="1"&&env("GXV_FPS_LIMIT")=="<unset>");}   // (the Performance preset is Performance mode)
-        // Picture mode. Performance: the 60 target, sizes up to 960x544 with Sharper on (rung 6) but no multisampling, edge smoothing as the
-        // first step, no fixed cap; Mario and HD textures stay their own rows. Locked 30: the cap and the backend's own 960x544 floor and start.
-        {clear();startup();auto c=base;c.performance60=true;assert(ApplyStartup(c,true).empty());
-         assert(env("GXV_AUTOQ_TARGET")=="60"&&env("GXV_AUTOQ_MAX")=="6"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_EDGESTEP")=="1"&&env("GXV_FPS_LIMIT")=="<unset>");
-         assert(env("GXV_AUTOQ_LOCKED30_FLOOR")=="<unset>"&&env("GXV_AUTOQ_LOCKED30_START")=="<unset>"&&env("GXV_HDTEX")=="<unset>"&&env("GXV_AUTOQ_FXSTEP")=="3"&&env("GXV_CHARAA_AUTO")=="1");}
-        {clear();startup();auto c=base;c.performance60=true;c.aboveNative=false;c.hdTextures=false;c.prioritizeMario=false;ApplyStartup(c,true);
-         assert(env("GXV_AUTOQ_MAX")=="2"&&env("GXV_HDTEX")=="0"&&env("GXV_CHARAA_AUTO")=="0"&&env("GXV_AUTOQ_TARGET")=="60");}
-        {clear();startup();auto c=base;c.fpsLimit=30;assert(ApplyStartup(c,true).empty());
-         assert(env("GXV_FPS_LIMIT")=="30"&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="<unset>"&&env("GXV_AUTOQ_LOCKED30_START")=="<unset>"&&env("GXV_AUTOQ_MAX")=="<unset>"&&env("GXV_AUTOQ_EDGESTEP")=="<unset>");}
-        {clear();startup();auto c=base;c.fpsLimit=kSteady30;assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_FPS_LIMIT")=="30");}
-        // Quality with Sharper off: the floor and the start clamp to the game's standard size in the back end (the menu still asks for 2 and 6).
-        {clear();startup();auto c=base;c.aboveNative=false;ApplyStartup(c,true);assert(env("GXV_AUTOQ_MAX")=="2"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="0"&&env("GXV_FPS_LIMIT")=="30");}
+        // The hidden rows (Preset, Effects, Mario, Sharper, Anti-aliasing, Dynamic resolution) set nothing, whatever the file holds: a preset's rows change no switch in either mode.
+        {clear();startup();auto c=base;ApplyPreset(c,Preset::Performance);c.effects=EffectsQuality::Full;c.prioritizeMario=false;c.autoQuality=AutoQuality::Disabled;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_AUTOQ_MAX")=="6"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_FXSTEP")=="3"&&env("GXV_CHARAA_AUTO")=="1"&&env("GXV_AUTOQ")=="<unset>"&&env("GXV_SHARPEN")=="off"&&env("GXV_DOF")=="0");}
+        // The two picture modes. 60 is the default above. 30 (Quality): the fixed cap, the 30 target, Wave 4 GXV_Q30_MSAA=1 (via mode_keys.h) starts at rung 7 (2x MSAA) with floor rung 6,
+        // no steady-30 fallback, no far-detail budget, the edge smoothing kept everywhere (native on, no edge step, locked-30 edge rule off), no load steps, the ladder off.
+        {clear();startup();auto c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_FPS_LIMIT")=="30"&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_STEADY30")=="0"&&env("GXV_PERF_BUDGET")=="0"&&env("GXV_AUTOQ_MIN")=="6"&&env("GXV_AUTOQ_MAX")=="7"&&env("GXV_AUTOQ_MSAA")=="1");
+         assert(env("GXV_EDGE_AA_NATIVE")=="1"&&env("GXV_AUTOQ_EDGESTEP")=="0"&&env("GXV_PACE23_LOCKED_EDGE")=="0"&&env("GXV_AUTOQ_FXSTEP")=="0"&&env("GXV_SMOOTH60")=="0"&&env("GXV_PICTURE_MODE")=="30");
+         assert(env("GXV_AUTOQ_LOCKED30_FLOOR")=="6"&&env("GXV_AUTOQ_LOCKED30_START")=="7"&&env("GXV_HDTEX")=="<unset>"&&env("GXV_CHARAA_AUTO")=="1");}
+        // q30aa (GXV_Q30_MSAA): default 1 in Quality via mode_keys.h (rung 7 start, floor 6), opt-out via GXV_Q30_MSAA=0 (rung 6); empty string behaves as unset; Performance clears non-user GXV_Q30_MSAA.
+        {clear();startup();setenv("GXV_Q30_MSAA","1",1);auto c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_AUTOQ_MAX")=="7"&&env("GXV_AUTOQ_MSAA")=="1"&&env("GXV_AUTOQ_LOCKED30_START")=="7"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="6");
+         clear();startup();setenv("GXV_Q30_MSAA","0",1);c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_AUTOQ_MAX")=="6"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_LOCKED30_START")=="6"&&env("GXV_AUTOQ_LOCKED30_FLOOR")=="6");
+         clear();startup();setenv("GXV_Q30_MSAA","",1);c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_Q30_MSAA")=="1"&&env("GXV_AUTOQ_MAX")=="7"&&env("GXV_AUTOQ_MSAA")=="1"&&env("GXV_AUTOQ_LOCKED30_START")=="7");
+         clear();startup();port::modekeys::SnapshotUser([](const char*)->const char*{return nullptr;});c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty()&&env("GXV_Q30_MSAA")=="1");
+         unsetenv("GXV_PICTURE_MODE");(void)ApplyStartup(base,true);assert(env("GXV_Q30_MSAA")=="<unset>");
+         port::modekeys::Snapshotted()=false;port::modekeys::UserMask()=0;
+         clear();startup();setenv("GXV_Q30_MSAA","1",1);assert(ApplyStartup(base,true).empty());
+         assert(env("GXV_AUTOQ_MAX")=="6"&&env("GXV_AUTOQ_MSAA")=="0"&&env("GXV_AUTOQ_LOCKED30_START")=="<unset>");
+         unsetenv("GXV_Q30_MSAA");}
+        // (pace33 PATCH8) the Performance defaults: re-projected 60 with the fresh player, the drain and the pacing mode 5 owns; Quality gets none of it and keeps its cap
+        {clear();startup();port::perfdefaults::SnapshotUser([](const char*)->const char*{return nullptr;});   // (env.txt wrote no umbrella: entry.cpp's snapshot)
+         assert(ApplyStartup(base,true).empty());
+         assert(env("GXV_HRW")=="5"&&env("GXV_HRW_WARP_DEPTH")=="4"&&env("GXV_HRW_WARP_FRESH")=="1"&&env("GXV_DRAIN33")=="1"&&env("GXV_LATENCY24")=="1"&&env("GXV_SKIP_PATTERN")=="2"&&env("GXV_PRESENT_SYNC")=="2");
+         assert(env("GXV_FPS_LIMIT")!="30"&&env("GXV_CPULOD")=="2"&&env("GXV_ACROSS")=="1"&&port::settings::PerfDefaultsCensus().find("perfdefaults: Performance mode:")==0);
+         clear();startup();auto c=base;c.fpsLimit=30;c.performance60=false;assert(ApplyStartup(c,true).empty());
+         assert(env("GXV_HRW")=="<unset>"&&env("GXV_DRAIN33")=="<unset>"&&env("GXV_SKIP_PATTERN")=="<unset>"&&env("GXV_CPULOD")=="<unset>"&&env("GXV_FPS_LIMIT")=="30"&&port::settings::PerfDefaultsCensus().empty());
+         clear();startup();setenv("GXV_HRW","0",1);ApplyStartup(base,true);assert(env("GXV_HRW")=="0"&&env("GXV_SKIP_PATTERN")=="<unset>");unsetenv("GXV_HRW");port::perfdefaults::U()=port::perfdefaults::User{};clear();}
+        // setnat31: Settings "60 Assist" (Config::assist60, default on = c181). Off: GXV_HRW=0 in Performance; Quality untouched; env.txt's GXV_HRW wins.
+        {const auto has=[](const char* what){return port::settings::PerfDefaultsCensus().find(what)!=std::string::npos;};
+         auto unsnap=[]{port::modekeys::Snapshotted()=false;port::modekeys::UserMask()=0;};
+         clear();startup();assert(ApplyStartup(base,true).empty()&&env("GXV_HRW")=="5"&&!has("60 Assist"));   // on: exactly c181
+         clear();startup();auto c=base;c.assist60=false;assert(ApplyStartup(c,true).empty()&&env("GXV_HRW")=="0"&&has("GXV_HRW = 0 (Settings: 60 Assist off)"));
+         assert(env("GXV_SKIP_PATTERN")=="<unset>"&&env("GXV_PRESENT_SYNC")=="<unset>"&&env("GXV_FPS_LIMIT")!="30");   // (mode 5's pacing is not set up: the plain 60 target)
+         clear();startup();c=base;c.assist60=false;c.fpsLimit=30;c.performance60=false;ApplyStartup(c,true);assert(env("GXV_HRW")=="<unset>"&&env("GXV_FPS_LIMIT")=="30");   // (Full Detail: nothing)
+         clear();startup();c=base;c.assist60=false;setenv("GXV_HRW","5",1);ApplyStartup(c,true);assert(env("GXV_HRW")=="5"&&has("env.txt wins"));unsetenv("GXV_HRW");
+         // the console: entry.cpp sets GXV_HRW=0 itself before the Settings start-up; the mode-key snapshot (taken before) says env.txt had none
+         clear();startup();port::modekeys::SnapshotUser([](const char*)->const char*{return nullptr;});setenv("GXV_HRW","0",1);ApplyStartup(base,true);assert(env("GXV_HRW")=="5");unsnap();
+         clear();startup();port::modekeys::SnapshotUser([](const char*)->const char*{return nullptr;});setenv("GXV_HRW","0",1);c=base;c.assist60=false;ApplyStartup(c,true);
+         assert(env("GXV_HRW")=="0"&&has("60 Assist off"));unsnap();
+         clear();startup();port::modekeys::SnapshotUser([](const char* k)->const char*{return std::string(k)=="GXV_HRW"?"5":nullptr;});setenv("GXV_HRW","5",1);c=base;c.assist60=false;ApplyStartup(c,true);
+         assert(env("GXV_HRW")=="5"&&has("env.txt wins"));unsnap();
+         // c181's rule (pace33 PATCH8), now also with the console's snapshot: env.txt GXV_FPS_LIMIT=30 under Performance keeps the fixed 30 cap (GXV_HRW 0). Before setnat31 the
+         // entry.cpp default made "env.txt set GXV_HRW" always true on the console, so the rule never acted there and mode 5 cleared the cap.
+         clear();startup();port::modekeys::SnapshotUser([](const char*)->const char*{return nullptr;});setenv("GXV_HRW","0",1);setenv("GXV_FPS_LIMIT","30",1);
+         {const auto o=ApplyStartup(base,true);assert(o.size()==1&&o[0].key=="GXV_FPS_LIMIT");}
+         assert(env("GXV_HRW")=="0"&&env("GXV_FPS_LIMIT")=="30"&&has("env.txt GXV_FPS_LIMIT=30"));unsnap();
+         unsetenv("GXV_HRW");unsetenv("GXV_FPS_LIMIT");port::perfdefaults::U()=port::perfdefaults::User{};clear();}
+        {clear();startup();auto c=base;c.fpsLimit=30;c.performance60=true;ApplyStartup(c,true);assert(env("GXV_PICTURE_MODE")=="30"&&env("GXV_FPS_LIMIT")=="30");}   // (a lock wins over Performance, as every build reads the file)
+        {clear();startup();auto c=base;c.fpsLimit=kSteady30;assert(ApplyStartup(c,true).empty()&&env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_FPS_LIMIT")=="30"&&env("GXV_PICTURE_MODE")=="30");}
+        // Wave 4: Config::allow50 is retired from UI/startup (never sets GXV_HRW_ALLOW50); env.txt's GXV_HRW_ALLOW50 escape hatch stays untouched.
+        {const auto has=[](const char* what){return port::settings::PerfDefaultsCensus().find(what)!=std::string::npos;};
+         clear();startup();assert(ApplyStartup(base,true).empty()&&env("GXV_HRW_ALLOW50")=="<unset>"&&!has("in-between"));
+         clear();startup();auto c=base;c.allow50=true;assert(ApplyStartup(c,true).empty()&&env("GXV_HRW_ALLOW50")=="<unset>"&&!has("in-between")&&env("GXV_HRW")=="5");
+         clear();startup();c=base;c.allow50=true;c.fpsLimit=30;c.performance60=false;ApplyStartup(c,true);assert(env("GXV_HRW_ALLOW50")=="<unset>");
+         clear();startup();c=base;c.allow50=true;setenv("GXV_HRW_ALLOW50","1",1);ApplyStartup(c,true);assert(env("GXV_HRW_ALLOW50")=="1");
+         clear();startup();c=base;c.allow50=true;setenv("GXV_HRW_ALLOW50","0",1);ApplyStartup(c,true);assert(env("GXV_HRW_ALLOW50")=="0");
+         clear();startup();c=base;c.allow50=true;c.assist60=false;ApplyStartup(c,true);assert(env("GXV_HRW")=="0"&&env("GXV_HRW_ALLOW50")=="<unset>");
+         clear();}
+        // The old Quality state (neither Performance nor a lock) is the 30 mode too.
+        {clear();startup();auto c=base;c.performance60=false;ApplyStartup(c,true);assert(env("GXV_PICTURE_MODE")=="30"&&env("GXV_FPS_LIMIT")=="30");}
+        // (rate30: GXV_RATE_AUTO=1 keeps the steady-30 machinery on in Performance, whatever GXV_STEADY30 looks like; never in Quality)
+        {clear();startup();setenv("GXV_RATE_AUTO","1",1);ApplyStartup(base,true);assert(env("GXV_STEADY30")=="1"&&env("GXV_AUTOQ_TARGET")=="60");
+         clear();startup();auto c=base;c.performance60=false;ApplyStartup(c,true);assert(env("GXV_STEADY30")=="0");
+         clear();startup();setenv("GXV_RATE_AUTO","0",1);ApplyStartup(base,true);assert(env("GXV_STEADY30")=="0");unsetenv("GXV_RATE_AUTO");}
+        // q30-26: the Quality mode's umbrella levels: the stage-knob mode flag, the sprites' shield, the census line; Performance touches none of it
+        {clear();unsetenv("GXV_PROTECT_SPRITES");startup();auto c=base;c.performance60=false;ApplyStartup(c,true);
+         assert(port::stageknob::Quality()&&env("GXV_PROTECT_SPRITES")=="1"&&port::settings::Quality30Census().find("quality30: Quality (30)")==0);
+         clear();c=base;c.performance60=true;c.fpsLimit=0;startup();ApplyStartup(c,true);
+         assert(!port::stageknob::Quality()&&port::settings::Quality30Census().empty()&&env("GXV_PICTURE_MODE")=="60");
+         setenv("GXV_PROTECT_SPRITES","2",1);clear();c=base;c.performance60=false;ApplyStartup(c,true);assert(env("GXV_PROTECT_SPRITES")=="2");   // (env.txt's own value is kept)
+         clear();c=base;c.performance60=true;c.fpsLimit=0;startup();ApplyStartup(c,true);unsetenv("GXV_PROTECT_SPRITES");}
         // env.txt's GXV_FPS_LIMIT wins over Quality's cap and is reported.
-        {clear();startup();setenv("GXV_FPS_LIMIT","0",1);auto o=ApplyStartup(base,true);assert(o.size()==1&&o[0].key=="GXV_FPS_LIMIT"&&env("GXV_FPS_LIMIT")=="0");}
+        {clear();startup();setenv("GXV_FPS_LIMIT","30",1);auto o=ApplyStartup(base,true);assert(o.size()==1&&o[0].key=="GXV_FPS_LIMIT"&&env("GXV_FPS_LIMIT")=="30");}
         // Values that came from env.txt win. Agreeing values are not overrides, disagreeing ones are, and are kept.
         struct Env {const char* key;const char* value;void (*edit)(Config&);bool override;};
         const Env envs[]={
-            {"GXV_AUTOQ_MAX","2",[](Config& c){c.aboveNative=false;},false},{"GXV_AUTOQ_MAX","4",[](Config& c){c.aboveNative=false;},true},
-            {"GXV_AUTOQ_MAX","8",[](Config&){},false},{"GXV_AUTOQ_MAX","8",[](Config& c){c.aboveNative=false;},true},{"GXV_AUTOQ_MAX","6",[](Config&){},true},
-            {"GXV_AUTOQ_MSAA","0",[](Config& c){c.antiAliasing=AntiAliasing::Off;},false},{"GXV_AUTOQ_MSAA","0",[](Config&){},true},{"GXV_AUTOQ_MSAA","1",[](Config&){},false},
+            {"GXV_AUTOQ_MAX","2",[](Config& c){c.aboveNative=false;},true},{"GXV_AUTOQ_MAX","4",[](Config& c){c.aboveNative=false;},true},
+            {"GXV_AUTOQ_MAX","8",[](Config&){},true},{"GXV_AUTOQ_MAX","8",[](Config& c){c.aboveNative=false;},true},{"GXV_AUTOQ_MAX","6",[](Config&){},false},{"GXV_AUTOQ_MAX","7",[](Config& c){c.fpsLimit=30;},false},{"GXV_AUTOQ_MAX","6",[](Config& c){c.fpsLimit=30;},true},
+            {"GXV_AUTOQ_MSAA","0",[](Config& c){c.antiAliasing=AntiAliasing::Off;},false},{"GXV_AUTOQ_MSAA","0",[](Config&){},false},{"GXV_AUTOQ_MSAA","1",[](Config&){},true},
+            {"GXV_AUTOQ_MIN","6",[](Config&){},false},{"GXV_AUTOQ_MIN","4",[](Config&){},true},{"GXV_STEADY30","0",[](Config&){},false},{"GXV_STEADY30","2",[](Config&){},true},
+            {"GXV_PERF_BUDGET","1",[](Config&){},false},{"GXV_PERF_BUDGET","0",[](Config&){},true},{"GXV_PERF_BUDGET","0",[](Config& c){c.fpsLimit=30;},false},{"GXV_PERF_BUDGET","1",[](Config& c){c.fpsLimit=30;},true},
+            {"GXV_EDGE_AA_NATIVE","0",[](Config&){},false},{"GXV_EDGE_AA_NATIVE","1",[](Config&){},true},{"GXV_EDGE_AA_NATIVE","1",[](Config& c){c.fpsLimit=30;},false},{"GXV_PICTURE_MODE","60",[](Config&){},false},
+            {"GXV_PICTURE_MODE","30",[](Config&){},true},{"GXV_PICTURE_MODE","30",[](Config& c){c.fpsLimit=30;},false},{"GXV_PACE23_LOCKED_EDGE","0",[](Config& c){c.fpsLimit=30;},false},{"GXV_PACE23_LOCKED_EDGE","1",[](Config& c){c.fpsLimit=30;},true},
             {"GXV_SHARPEN","auto",[](Config&){},false},{"GXV_SHARPEN","off",[](Config& c){c.sharpness=Sharpness::Off;},false},{"GXV_SHARPEN","0.5",[](Config& c){c.sharpness=Sharpness::Strong;},true},
             {"GXV_SHARPEN","0.8",[](Config& c){c.sharpness=Sharpness::Strong;},false},{"GXV_SHARPEN","off",[](Config&){},true},
             {"GXV_HDTEX","1",[](Config&){},false},{"GXV_HDTEX","0",[](Config&){},true},{"GXV_HDTEX","0",[](Config& c){c.hdTextures=false;},false},{"GXV_HDTEX","2",[](Config&){},true},
             {"GXV_DOF","1",[](Config&){},false},{"GXV_DOF","0",[](Config&){},true},{"GXV_DOF","0",[](Config& c){c.depthOfField=false;},false},
-            {"GXV_AUTOQ_FXSTEP","1",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","2",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","3",[](Config&){},false},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.effects=EffectsQuality::Full;},false},{"GXV_AUTOQ_FXSTEP","1",[](Config& c){c.effects=EffectsQuality::Full;},true},
-            {"GXV_CHARAA_AUTO","0",[](Config&){},true},{"GXV_CHARAA_AUTO","2",[](Config&){},true},{"GXV_CHARAA_AUTO","1",[](Config&){},false},{"GXV_CHARAA_AUTO","0",[](Config& c){c.prioritizeMario=false;},false},
+            {"GXV_AUTOQ_FXSTEP","1",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","2",[](Config&){},true},{"GXV_AUTOQ_FXSTEP","3",[](Config&){},false},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.effects=EffectsQuality::Full;},true},{"GXV_AUTOQ_FXSTEP","0",[](Config& c){c.fpsLimit=30;},false},
+            {"GXV_CHARAA_AUTO","0",[](Config&){},true},{"GXV_CHARAA_AUTO","2",[](Config&){},true},{"GXV_CHARAA_AUTO","1",[](Config&){},false},{"GXV_CHARAA_AUTO","0",[](Config& c){c.prioritizeMario=false;},true},
             {"GXV_CORE3_IO","0",[](Config&){},true},{"GXV_CORE3_IO","0",[](Config& c){c.coreHelp=false;},false},
             {"GXV_GC_CORE","2",[](Config&){},true},{"GXV_GC_CORE","1",[](Config&){},false},{"GXV_GC_CORE","2",[](Config& c){c.coreHelp=false;},false},
             {"GXV_AUDIO_THREAD_CORE","0",[](Config&){},true},{"GXV_AUDIO_THREAD_CORE","0",[](Config& c){c.coreHelp=false;},false},
@@ -151,13 +215,13 @@ int main() {
             {"GXV_DL_LAZY","1",[](Config&){},true},{"GXV_DL_LAZY","2",[](Config&){},false},{"GXV_DL_LAZY","0",[](Config& c){c.lazyMaterials=false;},false},
             {"GXV_ANIM_LOD","0",[](Config&){},true},{"GXV_ANIM_LOD","1",[](Config&){},false},{"GXV_ANIM_LOD","0",[](Config& c){c.farAnimation=FarAnimation::Full;},false},
             {"GXV_SLIP","1",[](Config& c){c.fullSpeed=false;},false},{"PETARI_FRAMESKIP","3",[](Config&){},true},{"PETARI_FRAMESKIP","5",[](Config&){},false},{"PETARI_FRAMESKIP","3",[](Config& c){c.fullSpeed=false;},false},{"GXV_ANIM_LOD_DIST","5000",[](Config&){},true},
-            {"GXV_AUTOQ_TARGET","60",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_TARGET","60",[](Config&){},true},
+            {"GXV_AUTOQ_TARGET","60",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_TARGET","60",[](Config&){},false},{"GXV_AUTOQ_TARGET","60",[](Config& c){c.fpsLimit=30;},true},{"GXV_AUTOQ_TARGET","30",[](Config& c){c.fpsLimit=30;},false},
             {"GXV_AUTOQ_TARGET","0",[](Config&){},true},{"GXV_AUTOQ_TARGET","45",[](Config& c){c.performance60=true;},true},
             {"GXV_AUTOQ_MAX","6",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_MAX","8",[](Config& c){c.performance60=true;},true},{"GXV_AUTOQ_MSAA","0",[](Config& c){c.performance60=true;},false},
             {"GXV_AUTOQ_EDGESTEP","1",[](Config& c){c.performance60=true;},false},{"GXV_AUTOQ_EDGESTEP","0",[](Config& c){c.performance60=true;},true},{"GXV_AUTOQ_EDGESTEP","1",[](Config&){},false},
             {"GXV_AUTOQ_EDGESTEP","0",[](Config&){},true},{"GXV_AUTOQ_EDGESTEP","1",[](Config& c){c.fpsLimit=30;},true},{"GXV_AUTOQ_EDGESTEP","0",[](Config& c){c.fpsLimit=30;},false},
-            {"GXV_AUTOQ_LOCKED30_FLOOR","0",[](Config&){},false},{"GXV_AUTOQ_LOCKED30_FLOOR","4",[](Config&){},true},{"GXV_AUTOQ_LOCKED30_FLOOR","6",[](Config& c){c.fpsLimit=30;},false},
-            {"GXV_AUTOQ_LOCKED30_FLOOR","2",[](Config& c){c.fpsLimit=30;},true},{"GXV_AUTOQ_LOCKED30_START","6",[](Config&){},false},{"GXV_AUTOQ_LOCKED30_START","7",[](Config&){},true},
+            {"GXV_AUTOQ_LOCKED30_FLOOR","0",[](Config&){},true},{"GXV_AUTOQ_LOCKED30_FLOOR","4",[](Config&){},true},{"GXV_AUTOQ_LOCKED30_FLOOR","6",[](Config& c){c.fpsLimit=30;},false},{"GXV_AUTOQ_LOCKED30_FLOOR","5",[](Config& c){c.fpsLimit=30;},true},
+            {"GXV_AUTOQ_LOCKED30_FLOOR","2",[](Config& c){c.fpsLimit=30;},true},{"GXV_AUTOQ_LOCKED30_START","7",[](Config& c){c.fpsLimit=30;},false},{"GXV_AUTOQ_LOCKED30_START","6",[](Config& c){c.fpsLimit=30;},true},{"GXV_AUTOQ_LOCKED30_START","7",[](Config&){},false},
             {"GXV_TILT_GAIN","100",[](Config&){},false},{"GXV_TILT_GAIN","140",[](Config& c){c.tiltLevel=7;},false},
             {"GXV_TILT_GAIN","150",[](Config&){},true},{"GXV_TILT_GAIN","100",[](Config& c){c.tiltLevel=1;},true},{"GXV_TILT_GAIN","75",[](Config& c){c.tiltLevel=3;},false},{"GXV_TILT_GAIN","63",[](Config& c){c.tiltLevel=2;},false},{"GXV_TILT_GAIN","140",[](Config& c){c.tiltLevel=6;},true},
             {"GXV_TILT_STICK","1",[](Config& c){c.tiltStick=true;},false},{"GXV_TILT_STICK","1",[](Config&){},true},{"GXV_TILT_STICK","0",[](Config& c){c.tiltStick=true;},true},{"GXV_TILT_STICK","0",[](Config&){},false}};
@@ -165,6 +229,7 @@ int main() {
             clear();startup();setenv(e.key,e.value,1);auto c=base;e.edit(c);
             const auto o=ApplyStartup(c,true);
             size_t mine=0;for(const auto& x:o)mine+=x.key==e.key;
+            if((mine==1)!=e.override)std::fprintf(stderr,"override mismatch: %s=%s mine=%u want %d\n",e.key,e.value,(unsigned)mine,(int)e.override);
             assert((mine==1)==e.override);assert(env(e.key)==e.value);   // never changed
             if(e.override)for(const auto& x:o)if(x.key==e.key){assert(x.rawValue==e.value&&!x.effectiveLabel.empty());}
         }
@@ -175,6 +240,15 @@ int main() {
         {clear();startup();auto c=base;c.tiltLevel=10;c.tiltStick=true;setenv("GXV_TILT_GAIN","50",1);setenv("GXV_TILT_STICK","0",1);
          const auto o=ApplyStartup(c,true);assert(o.size()==2&&o[0].key=="GXV_TILT_GAIN"&&o[0].effectiveLabel=="Tilt sensitivity 50%"&&o[1].key=="GXV_TILT_STICK"&&o[1].effectiveLabel=="Tilt from the motion sensor");
          assert(env("GXV_TILT_GAIN")=="50"&&env("GXV_TILT_STICK")=="0");}
+        // 13 Nov: env.txt's GXV_PICTURE_MODE=30 with the menu on Performance is the whole 30 mode for the launch (the fan-out and the Quality row of port/mode_keys.h), listed as one override.
+        {clear();startup();for(int i=0;i<port::modekeys::kRowCount;++i)unsetenv(port::modekeys::kRows[i].key);
+         port::modekeys::Applied()=false;port::modekeys::Snapshotted()=false;setenv("GXV_PICTURE_MODE","30",1);
+         const auto o=ApplyStartup(base,true);
+         assert(o.size()==1&&o[0].key=="GXV_PICTURE_MODE");
+         assert(env("GXV_AUTOQ_TARGET")=="30"&&env("GXV_FPS_LIMIT")=="30"&&env("GXV_AUTOQ_EDGESTEP")=="0"&&env("GXV_PICTURE_MODE")=="30");
+         assert(env("GXV_BLOOM_FOLD")=="<unset>"&&env("GXV_DIRECT_DISPLAY")=="<unset>"&&env("GXV_STALL_FORGIVE")=="80"&&env("GXV_INDCAP_SKIP")=="1");   // Quality's row, not Performance's
+         assert(std::string(ModeKeysCensus()).find("Quality mode")!=std::string::npos);
+         for(int i=0;i<port::modekeys::kRowCount;++i)unsetenv(port::modekeys::kRows[i].key);unsetenv("GXV_FPS_LIMIT");}
         clear();
     }
     std::cout<<"launch: exact dispatch, Play precedence, regional catalogs, gates and overrides passed\n";

@@ -5,6 +5,7 @@
 #include "Game/Screen/StarPointerLayout.hpp"
 #include "Game/System/DrawSyncManager.hpp"
 #include "Game/System/GameSystem.hpp"
+#include "Game/System/GameSystemFunction.hpp"
 #include "Game/System/GameSystemObjHolder.hpp"
 #include "Game/Util/CameraUtil.hpp"
 #include "Game/Util/GamePadUtil.hpp"
@@ -19,8 +20,8 @@
 #include <revolution/gx/GXGet.h>
 
 StarPointerDirector::StarPointerDirector()
-    : mIsUpdateTransHolder(false), mIsAllowP1StarPieceShot(false), mIsAllowP2StarPieceShot(false), mControllers(nullptr),
-      mStarPointerLayouts(nullptr), mTransHolder(nullptr), mPeekZ(nullptr), mGuidance(nullptr), mNozzleAimPos(0.0f, 0.0f, 0.0f) {
+    : mIsUpdateTransHolder(false), mIsAllowP1StarPieceShot(false), mIsAllowP2StarPieceShot(false), mIsOSPointerMode(false), mControllers(nullptr),
+      mStarPointerLayouts(nullptr), mTransHolder(nullptr), mPeekZ(nullptr), mGuidance(nullptr), _18(0), mNozzleAimPos(0.0f, 0.0f, 0.0f) {
     mPeekZ = new StarPointerPeekZ();
     mTransHolder = new StarPointerTransformHolder();
     mControllers = new StarPointerController[StarPointerFunction::getNumStarPointer()];
@@ -30,7 +31,25 @@ StarPointerDirector::StarPointerDirector()
     }
 }
 
+#ifdef TARGET_PC
+// pillz32: one layout drawn right after the pointer guidance band (which GameSystem draws after the whole scene), kept alive by its
+// owner calling portPostGuidanceKeep every frame; a few frames without it and it is dropped (the owner's scene is gone).
+namespace {
+    LayoutActor* sPostGuidance = nullptr;
+    int sPostGuidanceTtl = 0;
+}
+void portPostGuidanceKeep(LayoutActor* pActor) {
+    sPostGuidance = pActor;
+    sPostGuidanceTtl = pActor ? 3 : 0;   // (nullptr: drop it now; GameSystemSceneController::destroyScene does this before the scene heap goes)
+}
+#endif
+
 void StarPointerDirector::update() {
+#ifdef TARGET_PC
+    if (sPostGuidanceTtl > 0 && --sPostGuidanceTtl == 0) {
+        sPostGuidance = nullptr;
+    }
+#endif
     if (MR::isStarPointerModeHomeButton() || MR::isStarPointerModeErrorWindow()) {
         mIsOSPointerMode = true;
         return;
@@ -71,6 +90,13 @@ void StarPointerDirector::draw() {
     if (mGuidance != nullptr) {
         mGuidance->draw();
     }
+
+#ifdef TARGET_PC
+    // rev32 F5: not over a closing/closed/opening scene wipe, nor under a system warning or error window (as GameSystem::update decides)
+    if (sPostGuidance != nullptr && !MR::isWipeActive() && !MR::isWipeBlank() && !GameSystemFunction::isOccurredSystemWarning()) {
+        sPostGuidance->draw();
+    }
+#endif
 
     if (mStarPointerLayouts != nullptr) {
         for (s32 channel = 0; channel < StarPointerFunction::getNumStarPointer(); channel++) {
@@ -138,10 +164,10 @@ void StarPointerDirector::createLayout() {
 }
 
 namespace {
-    static f32 mtx_identity[3][4] = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 0.0f}};
+    static f32 mtx_identity[4][4] = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
 };  // namespace
 
-StarPointerTransformHolder::StarPointerTransformHolder() : mViewMtx(mtx_identity), mProjMtx(mtx_identity) {
+StarPointerTransformHolder::StarPointerTransformHolder() : mViewMtx(mtx_identity), mProjMtx(mtx_identity), mFovy(45.0f), mFocalLength(1.0f) {
 }
 
 void StarPointerTransformHolder::movement() {

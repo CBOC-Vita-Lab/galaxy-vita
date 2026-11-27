@@ -1,0 +1,32 @@
+# Host migration: host + 2 guests in Good Egg 1; the host process is killed (SIGKILL, no BYE) 15 s after its scene barrier;
+# one guest takes over (lowest slot), the other follows; the session goes on; the guests' SP saves untouched.
+name: mp_migrate3
+description: 3 processes, kill -9 the host in a galaxy; slot 1 takes over, slot 2 follows, no crash or hang
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_KILL: 'flow barrier release serial=1 |15|9'}
+  - name: g1
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+  - name: g2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall g1,g2'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot [12] joined name=g[12] .*players=3/'
+  - 'expect host /harness: kill signal=9/'
+  - 'expect any /\[mp\] host lost: slot \d takes over epoch=\d+ \(old host 0\)/ within 30s after host /harness: kill signal=9/'
+  - 'expect any /\[mp\] following new host slot=\d epoch=\d+/ within 30s after host /harness: kill signal=9/'
+  - 'expect any /\[mp\] flow host now slot=\d epoch=\d+/ within 30s after host /harness: kill signal=9/'
+  - 'absent g1,g2 /\[mp\] session ended reason=(?!none \(shutdown\))/ before g1,g2 /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'exit g1,g2 == 0'

@@ -103,6 +103,9 @@ void DisplayInformationForResult::exeIdle() {
 
 StageResultInformer::StageResultInformer()
     : LayoutActor("\x83\x8a\x83\x55\x83\x8b\x83\x67\x92\xca\x92\x6d", true), mInformationDisplayer(), mSequenceChecker(), mIconAButton(), _30(), _31() {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
     mInformationDisplayer = new DisplayInformationForResult(this);
     mSequenceChecker = new StageResultSequenceChecker();
 }

@@ -72,8 +72,11 @@ void Step(UiState&, const UiInput&, uint64_t);
 void Draw(const UiState&, const SettingsSession&, Surface, uint64_t);
 // The Display page's rows, in order, and what each shows. The text is all static or built in the view's own buffer: drawing a
 // frame allocates nothing.
-constexpr unsigned kDisplayRows=18;
-enum DisplayRow : unsigned { RowPreset, RowRate, RowSpeed, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowSharpness, RowHdTextures, RowEffects, RowDepthOfField, RowCorePlan, RowRenderer, RowOverlap, RowMaterials, RowFarAnimation, RowMotion, RowLanguage };
+// (modes26: the rows shown are the first kDisplayRows of the enum, in order. The six after them, RowPreset .. RowEffects, are the old picture rows: no longer
+// shown or reachable, kept so their text and the file's keys stay (the two picture modes fix what they chose).)
+constexpr unsigned kDisplayRows=13;
+enum DisplayRow : unsigned { RowRate, RowSpeed, RowSharpness, RowHdTextures, RowDepthOfField, RowCorePlan, RowRenderer, RowOverlap, RowMaterials, RowFarAnimation, RowMotion, RowSafeSaves, RowLanguage,
+                             RowPreset, RowDynamic, RowSharper, RowMario, RowAntiAliasing, RowEffects };
 struct RowView { const char* label=""; char value[72]={}; const char* help1=""; const char* help2=""; };
 void DisplayRowView(const UiState&, unsigned row, RowView&);
 // Controls page rows: row 0 the profile, then one per action, then kControlExtras options: pointer aiming, Tilt with, Tilt sensitivity.

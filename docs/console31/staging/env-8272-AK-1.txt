@@ -1,0 +1,11 @@
+# 8272 AK-1: arrayskip AK-1, Quality: GXV_ARRAYSKIP=1 (a J3D array base the stream already holds is not written again; read the 'arrayskip:' line, writes and left out a picture); Honeyhive 120 s then Beach Bowl 120 s, scripted, turn profile on
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1,HeavenlyBeachGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+PETARI_SCRIPT_ANCHOR=play
+PETARI_SCRIPT_LOG=1
+GXV_PICTURE_MODE=30
+GXV_TURN_PROF=1
+GXV_ARRAYSKIP=1

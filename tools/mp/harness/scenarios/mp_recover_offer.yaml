@@ -1,0 +1,28 @@
+# The recovery OFFER (split out of mp_recover, where a soft rule for it never matched because the autopilot never opens the Multiplayer menu):
+# a guest is killed (SIGKILL) after a recovery checkpoint was written; the same console (guest3 = guest's saves and mp/ root) starts again, goes
+# Title -> entry screen -> Multiplayer, and the menu must offer the recovery file with the SAME star count as the last checkpoint.
+name: mp_recover_offer
+description: kill -9 a guest after a recovery checkpoint; the same console's Multiplayer menu offers that recovery (same stars)
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE, "desktop: input mark"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, HARNESS_KILL: 'save recovery written|5|9'}
+  - name: guest3
+    seconds: 90
+    input: "@entry_recover"
+    env: {HARNESS_AFTER: guest, HARNESS_CONTINUE: guest}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] save recovery written index=\d+ bytes=\d+ ms=\d+ ok=1/'
+  - 'expect guest3 /\[mp\] save recovery pending index=\d+ stars=\d+ galaxy=\S+/ within 90s'
+  - 'expect guest3 /\[mp\] ui: recovery offered stars=\d+/ within 90s'
+  # the stars the menu offers are the stars of the last checkpoint the killed console wrote (compared as values, not as a range)
+  - 'same guest,guest3 /(?:save recovery checkpoint session=\d+ seq=\d+ bytes=\d+ stars=|ui: recovery offered stars=)(\d+)/ last'
+  - 'absent guest3 /\[mp\] save recovery (unreadable|already saved)/'

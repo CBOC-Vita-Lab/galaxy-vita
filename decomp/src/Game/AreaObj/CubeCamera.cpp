@@ -86,6 +86,9 @@ void CubeCameraMgr::initAfterLoad() {
 }
 
 void CubeCameraMgr::sort() {
+#ifdef TARGET_PC
+    PortAreaGeoBump();  // (GXV_AREA_GRID, logic23: the order of the areas)
+#endif
     if (mArray.size() == 0) {
         return;
     }

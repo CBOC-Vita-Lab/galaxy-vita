@@ -22,10 +22,27 @@ void port_qemu_frame_stats(uint32_t frame, uint32_t prims, uint32_t verts, uint3
 #define PORT_QEMU_MARK(frame) port_qemu_mark(frame)
 #define PORT_QEMU_FRAME_STATS(f, p, v, t, d, s) port_qemu_frame_stats(f, p, v, t, d, s)
 #define PORT_QEMU_THREAD(name) port_qemu_thread(name)
+#define PORT_THREAD_NAME(name) port_qemu_thread(name)
 #define PORT_QEMU_OSTHREAD(entry, param) port_qemu_osthread((void*)(entry), (void*)(param))
+#elif defined(__vita__)
+// sched24: on the console the thread names go to the "cores-5s:" log lines (vita/runtime/memory.cpp port_thread_register, port/cores_report.h). Weak: a build
+// without the runtime (the host tests) has none.
+#ifdef __cplusplus
+extern "C" {
+#endif
+void port_thread_register(const char* name) __attribute__((weak));
+#ifdef __cplusplus
+}
+#endif
+#define PORT_QEMU_MARK(frame) ((void)(frame))
+#define PORT_QEMU_FRAME_STATS(f, p, v, t, d, s) ((void)0)
+#define PORT_QEMU_THREAD(name) do { if (port_thread_register) port_thread_register(name); } while (0)
+#define PORT_THREAD_NAME(name) PORT_QEMU_THREAD(name)
+#define PORT_QEMU_OSTHREAD(entry, param) ((void)0)
 #else
 #define PORT_QEMU_MARK(frame) ((void)(frame))
 #define PORT_QEMU_FRAME_STATS(f, p, v, t, d, s) ((void)0)
 #define PORT_QEMU_THREAD(name) ((void)0)
+#define PORT_THREAD_NAME(name) ((void)0)
 #define PORT_QEMU_OSTHREAD(entry, param) ((void)0)
 #endif

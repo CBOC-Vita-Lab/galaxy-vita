@@ -1,0 +1,29 @@
+# Pre-ship #15: a guest with a different disc file list (make_alt_data.py: one StageData size changed in fst.bin) is refused
+# with "different version" before anything starts; the host stays alone and fine.
+name: mp_version
+description: fingerprint mismatch refused at hello; no session, both keep running
+seconds: 130
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_AUTO_JOIN_ANY], files: [/home/claude/g3/hruns/.cache/cooked_alt/sys/fst.bin]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_AUTO_JOIN_ANY: 1, HARNESS_DATA: /home/claude/g3/hruns/.cache/cooked_alt}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect host /\[mp\] core data hash=aa3ddccb /'
+  - 'absent guest /\[mp\] core data hash=aa3ddccb /'
+  # the autopilot joins only compatible rooms: the guest keeps scanning, nobody joins, nobody crashes
+  - 'absent guest /\[mp\] (joined slot=|hello sent)/'
+  - 'absent host /\[mp\] slot \d joined/'
+  # what the player would see: the room listed as a different version, and the join refused with that error
+  - 'expect guest /\[mp\] scan: room host=host mode=1 players=\d+ compatible=0/'
+  - 'expect guest /\[mp\] join refused: room \d+ is a different version/'
+  - 'expect guest /\[mp\] auto: tried incompatible room host: refused error=6/'
+  - '?expect guest /\[mp\] ui: error shown 6 \(MP_ERR_VERSION\)/'

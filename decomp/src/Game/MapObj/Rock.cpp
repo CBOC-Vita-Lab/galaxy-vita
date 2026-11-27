@@ -20,6 +20,9 @@
 #include "Game/Util/StarPointerUtil.hpp"
 #include "math_types.hpp"
 #include <JSystem/JMath/JMATrigonometric.hpp>
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 namespace {
     inline f32 toDegree(f32 angle) {
@@ -123,6 +126,9 @@ void Rock::init(const JMapInfoIter& rIter) {
 
     initNerve(GET_NERVE(Rock, RockNrvAppear));
     makeActorDead();
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 7);  // (GXV_ALOD, actorlod23: family 7, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void Rock::appear() {

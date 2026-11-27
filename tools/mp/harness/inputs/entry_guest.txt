@@ -1,0 +1,12 @@
+# playtest (12 Nov): the ONE-DOOR menus. Title -> entry -> Multiplayer -> Play Together (first row; the pointer is NOT moved: a still pointer never chooses) -> character (first play only)
+# -> the gathering screen (no Host/Join: consoles find each other) -> the leader presses START -> falls question -> Which File? -> in play.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose multiplayer/ ~37.2
+mark chars /\[mp\] ui: screen chars/ ~42
+mark gather /\[mp\] ui: gathering mode=1/ ~48
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+chose+3-3.2:A      # Play Together (first row)
+chars+2-2.2:A     # character (keeps the preselected look)

@@ -47,6 +47,7 @@ public:
     }
     void exeGot();
     bool isGettable() const;
+    bool mpRemoteGet();  // MP3: shared star chips: another player got this chip (count it here, Got nerve; false if not gettable)
     static bool isNeedBubble(const JMapInfoIter&);
     static void makeArchiveList(NameObjArchiveListCollector*, const JMapInfoIter&);
 

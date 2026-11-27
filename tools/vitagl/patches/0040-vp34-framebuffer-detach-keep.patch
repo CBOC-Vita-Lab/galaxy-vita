@@ -1,0 +1,110 @@
+Patch 0040 (vp34, ported from Strikers 0062 + Carbon S4, GXV_VGL_FBO_KEEP): glFramebufferTexture2D(GL_COLOR_ATTACHMENT0, 0) keeps the framebuffer object's width, height, render target and depth surface while clearing fb->tex and fb->data; gxm.c scene_reset and *ReadPixels refuse a detached FBO cleanly.
+diff --git a/source/framebuffers.c b/source/framebuffers.c
+index 0417665..544a5b8 100644
+--- a/source/framebuffers.c
++++ b/source/framebuffers.c
+@@ -198,6 +198,15 @@ GLboolean _glReadPixels_gpu(GLint x, GLint y, GLsizei width, GLsizei height, GLe
+  * ------------------------------
+  */
+ 
++// patch 0040 (GXV_VGL_FBO_KEEP): see _glFramebufferTexture2D (shared.h). Default off: detach drops render target as before.
++GLboolean vgl_fb_detach_keep = GL_FALSE;
++void vglSetFramebufferDetachKeep(GLboolean on) {
++	vgl_fb_detach_keep = on ? GL_TRUE : GL_FALSE;
++}
++GLboolean vglGetFramebufferDetachKeep(void) {
++	return vgl_fb_detach_keep;
++}
++
+ inline __attribute__((always_inline)) void glGenFramebuffers(GLsizei n, GLuint *ids) {
+ 	THREAD_SAFE()
+ 
+@@ -585,6 +594,10 @@ void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLe
+ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
+ 	THREAD_SAFE()
+ 
++	// patch 0040: detached FBO has no colour texture/data
++	if (active_read_fb && (!active_read_fb->tex || !active_read_fb->data))
++		return;
++
+ 	/*
+ 	 * Callbacks are actually used to just perform down/up-sampling
+ 	 * between U8 texture formats. Reads are expected to give as result
+@@ -804,6 +817,9 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format
+ void vglReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *data) {
+ 	THREAD_SAFE()
+ 
++	if (active_read_fb && (!active_read_fb->tex || !active_read_fb->data)) // patch 0040
++		return;
++
+ 	GLboolean res = _glReadPixels_gpu(x, y, width, height, format, type, data, GL_TRUE);
+ #ifndef SKIP_ERROR_HANDLING
+ 	if (!res) {
+diff --git a/source/gxm.c b/source/gxm.c
+index 8d44fc0..c8900f9 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -817,8 +817,13 @@ GLboolean scene_reset(void) {
+ 			if (r)
+ 				return scene_begin_failed();
+ 		} else {
++			// patch 0040: an object whose colour texture was detached (vglSetFramebufferDetachKeep) has nothing to draw into: fail closed via scene_begin_failed().
++			if (!active_write_fb->tex) {
++				vgl_log("%s:%d Scene reset failed: framebuffer 0x%08X has no colour texture.\n", __FILE__, __LINE__, active_write_fb);
++				return scene_begin_failed();
++			}
+ 			// Double check that colorsurface and target texture are synced
+-			if (sceGxmColorSurfaceGetData(&active_write_fb->colorbuffer) != active_write_fb->tex->data) {
++			else if (sceGxmColorSurfaceGetData(&active_write_fb->colorbuffer) != active_write_fb->tex->data) {
+ 				_glFramebufferTexture2D(active_write_fb, GL_COLOR_ATTACHMENT0, active_write_fb->tex, 1);
+ 			}
+ 			
+diff --git a/source/shared.h b/source/shared.h
+index 1de0243..8056b21 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -1363,6 +1363,7 @@ static inline __attribute__((always_inline)) uint32_t get_color_from_texture(Sce
+ 	}
+ }
+ 
++extern GLboolean vgl_fb_detach_keep; // patch 0040 (framebuffers.c): detaching the colour texture (id 0) keeps the object's size, render target and depth surface
+ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(framebuffer *fb, GLenum attachment, texture *tex, GLuint tex_id) {
+ 	// Extracting texture data
+ 	int old_w = fb->width, old_h = fb->height;
+@@ -1371,6 +1372,21 @@ static inline __attribute__((always_inline)) void _glFramebufferTexture2D(frameb
+ 	// Detecting requested attachment
+ 	switch (attachment) {
+ 	case GL_COLOR_ATTACHMENT0:
++		// patch 0040: detaching (texture id 0) used to read the sizes of texture slot 0 into fb->width / fb->height BEFORE looking at tex_id and drop the render target at once.
++		// With vgl_fb_detach_keep the detach only releases the texture: width, height, target and depth surface stay for a later attach of the same size.
++		if (tex_id == 0 && vgl_fb_detach_keep) {
++			if (fb->tex) {
++				fb->tex->ref_counter--;
++				if (fb->tex->dirty && fb->tex->ref_counter == 0) {
++					gpu_free_texture(fb->tex);
++				}
++			}
++			fb->tex = NULL;
++			fb->data = NULL;
++			if (in_use_framebuffer == fb)
++				dirty_framebuffer = GL_TRUE;
++			return;
++		}
+ 		vglGetTexSizes(&tex->gxm_tex, &fb->width, &fb->height);
+ 		fb->stride = VGL_ALIGN(fb->width, 8) * tex_format_to_bytespp(fmt);
+ 		fb->data = vglGetTexData(&tex->gxm_tex);
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 9612689..9d9dfa7 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1400,6 +1400,10 @@ void vglSetAnisotropicFilter(uint32_t sceFilter); // builds with ANISO_SWITCH: 0
+ // Allows to set a preference on the kind of memory to use for the internal USSE buffers in sceGxm. By default vitaGL will not use VRAM memory.
+ void vglUseVramForUSSE(GLboolean usage);
+ 
++// patch 0040 (GXV_VGL_FBO_KEEP): glFramebufferTexture2D(GL_COLOR_ATTACHMENT0, 0) keeps width, height, render target and depth surface (default off).
++void vglSetFramebufferDetachKeep(GLboolean on);
++GLboolean vglGetFramebufferDetachKeep(void);
++
+ // Allows vitaGL to use newlib memory once all internal mempools are exhausted. Default value: GL_TRUE.
+ void vglUseExtraMem(GLboolean usage);
+ 

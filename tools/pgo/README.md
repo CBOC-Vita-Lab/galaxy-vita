@@ -35,10 +35,16 @@ Vita runtime flags, both instrumented; the rest of the platform layer is not):
 
 | route | what runs |
 | --- | --- |
-| `opening.txt` (135 s) | boot, strap screens, title, file select, storybook, Peach's letter, castle path |
+| `opening.txt` (140 s) | boot, strap screens, title, the 3.0 entry screen (Single Player), file select, storybook, Peach's letter, castle path |
 | `tour.txt` | AstroGalaxy (Comet Observatory), EggStarGalaxy (Good Egg) scenarios 1 and 2, HeavenlyBeachGalaxy (water), KoopaBattleVs3Galaxy |
 | `tour2.txt` | OceanRingGalaxy (water), SurfingLv1Galaxy, HoneyBeeKingdomGalaxy, IceVolcanoGalaxy, BattleShipGalaxy, FactoryGalaxy |
 | `tour3.txt`, `tour4.txt` | KoopaBattleVs1Galaxy; TamakoroExLv1Galaxy, StarDustGalaxy, FlipPanelExGalaxy, TriLegLv1Galaxy |
+| `tour5.txt` (335 s) | HoneyBeeKingdomGalaxy:1 alone for 90 s: with its 45 s in `tour2` the main benchmark carries three times the weight of an ordinary stage |
+| `tour6.txt` (565 s) | EggStarGalaxy:1, CosmosGardenGalaxy, PhantomGalaxy, SandClockGalaxy (45 s each) |
+| `tour7.txt` (685 s) | HellProminenceGalaxy, CannonFleetGalaxy, KoopaBattleVs2Galaxy, OceanPhantomCaveGalaxy, ReverseKingdomGalaxy (45 s each) |
+
+(`tour5` to `tour7` were written on 10 Nov 2026 for the next recording and have not been played yet: the durations are
+76 s + 115 s a stage, the measure of `tour2`/`tour4`; a boss that does not end holds a tour, as `tour3` showed.)
 
 Each tour stage is 45 s of gameplay with a wandering pad script (stick with turns, spin, jump, pointer sweeps and star-bit
 shots). The routes were merged with `--sparse`: a function that never ran has no record, so Clang treats it as unknown
@@ -57,6 +63,11 @@ Vita path) get no counts and are compiled normally.
 A profile goes stale when the game code changes: a function whose control flow changed loses its counts (a
 `-Wprofile-instr-out-of-date` warning in `logs/source.log`), everything else keeps them. Re-record for a release.
 
+0. Tools (Ubuntu 24.04; installed in the cloud workspace on 18 Nov 2026): `qemu-user-static` (its binary is `qemu-arm-static`; the
+   scripts take `qemu-arm` or, failing that, `qemu-arm-static`), `g++-arm-linux-gnueabihf`, `libc6-dev-armhf-cross`,
+   `libstdc++-13-dev-armhf-cross` (the sysroot `/usr/arm-linux-gnueabihf`), plus clang 18 / llvm-profdata-18 and VITASDK. Since 3.0 the
+   harness also takes the Vita SDK's `psp2/` headers for the back end (an overlay of links in the build directory, nothing else of the SDK).
+   `tools/pgo/record_all.sh <work-dir> <cooked-dir>` does steps 1 to 4 (`ROUTES="opening:140"` for one route).
 1. Profile runtime for armhf (the Ubuntu clang package ships only the x86 runtimes):
    `tools/pgo/build_profile_rt.sh <dir>` makes `<dir>/libclang_rt.profile-armhf.a` from the pinned LLVM 18.1.3 sources.
 2. Instrumented harness (the renderer is built the way the Vita builds it: the console's libstdc++ headers and GL header,
@@ -72,15 +83,26 @@ A profile goes stale when the game code changes: a function whose control flow c
    The build is the usual armhf one (about 40 min at `-j2`) with `-fprofile-generate` on the game units and, with
    `ARMHF_PGO_GEN_RENDERER`, on `platform/vgx/src` and `platform/src/gx`, plus `armhf/pgo/pgo_exit.cpp`, which writes the
    profile from `_exit` (the runner ends with it). `VITASDK` is needed for the console's libstdc++ headers.
-3. Run the routes under qemu-arm with the console's release environment (`tools/pgo/vita_env.sh`); the game data is read in
-   place, never copied. About 3 s of wall time per game second (qemu without the counting plugin):
+3. Run the routes under qemu-arm with the console's release environment (`tools/pgo/vita_env.sh`, which
+   `tools/pgo/gen_vita_env.py` writes from the defaults of `vita/vgx-game/entry.cpp`: run it again after every change of those
+   defaults; on 10 Nov 2026 the old file lacked 158 of the console's switches that are on by default). Since 18 Nov the generator
+   also applies the Settings start-up of a fresh console (`port::settings::ApplyStartup` with the default Config, built from
+   `tools/pgo/settings_env.cpp` on the host): the picture mode's fan-out changes about 40 switches and adds about 25 (Performance:
+   `GXV_PICTURE_MODE=60 GXV_AUTOQ_TARGET=60 GXV_HRW=5 GXV_CPULOD=2 GXV_FE_GOV=3 ...`), which entry.cpp's defaults alone do not show.
+   `--picture-mode 30` gives Quality ("Full Detail"), `--entry-only` the old file. The game data is read in place, never copied;
+   a tree in the Vita's bucket layout (`files/ObjectData/_bk00/...`, any tree the console build or Vita3K has run on) is read
+   through a flat view of links (`tools/pgo/flat_view.py <cooked> <view>`; `record_all.sh` makes it), since the harness's file
+   layer has no buckets. About 1.6 to 3 s of wall time per game second (qemu without the counting plugin):
    ```sh
    . tools/pgo/vita_env.sh; export EXTRA_ENV="$VITA_ENV" QEMU_ARM=<qemu-arm>
-   tools/pgo/run_route.sh <obj>/game <cooked-dir> tools/pgo/routes/opening.txt <runs>/opening 135
-   tools/pgo/run_route.sh <obj>/game <cooked-dir> tools/pgo/routes/tour.txt    <runs>/tour    480
+   tools/pgo/run_route.sh <obj>/game <cooked-dir> tools/pgo/routes/opening.txt <runs>/opening 140
+   tools/pgo/run_route.sh <obj>/game <cooked-dir> tools/pgo/routes/tour.txt    <runs>/tour    485
    ```
-   (`tour2.txt` 800, `tour3.txt` 520, `tour4.txt` 420.) The game runs on a virtual clock, so the counts do not depend on how
-   fast qemu is. `make_tour_route.py` writes the tour routes.
+   (`tour2.txt` 805, `tour3.txt` 525, `tour4.txt` 425, `tour5.txt` 335, `tour6.txt` 565, `tour7.txt` 685.) The game runs on a virtual clock, so the counts do not depend on how
+   fast qemu is. `make_tour_route.py` writes the tour routes. Since 3.0 an entry screen (Single Player / Multiplayer / Settings)
+   comes between the title and the file select: every route taps A on Single Player at 30 s (its cursor's start; a pointer moved
+   onto a pill would choose that pill) and everything after it is 5 s later than before. `run_route.sh` exits 1 when no picture
+   was saved (the routes save none); the route's own `#!env` lines win over `EXTRA_ENV`.
 4. Merge, make the source paths neutral, compress:
    ```sh
    llvm-profdata-18 merge --sparse -o all.profdata <runs>/*/route.profraw
@@ -103,6 +125,14 @@ A profile goes stale when the game code changes: a function whose control flow c
    ```
    (`--profile` of `match_report.py` takes the profile with the checkout's own paths, here before step 4's `sed`; the profile
    for `check_vita_profile.py` is the file `build.py` prepared.)
+
+## How stale is the profile
+
+`tools/pgo/scan_units.py` compiles every unit of the console build (the compile commands of `<build>/vita-source` and the runtime stage's
+`build.ninja`, read only, nothing kept) with `-fprofile-use` and records the functions each defines and Clang's hash-mismatch
+warnings; `tools/pgo/stale_report.py` turns that and the text form of the profile into the share of the profile's weight that still
+matches (game and renderer units apart) and the list of the hottest functions that lost their counts. `tools/pgo/record_all.sh` is the
+whole recording in one script (not yet run).
 
 ## Measure in the harness
 
@@ -145,3 +175,62 @@ this fit: the console's libstdc++ headers, GL header (mask-guard macros; the stu
 symbols, as the driver's are, since a result the compiler can see is folded into the caller's branches before a profile is
 instrumented), `__VGX_VITA__`, the quiet runtime defines, the console's release environment, and the stub answering the
 uniform queries from the shaders' source instead of a shortcut.
+
+Re-checked on 18 Nov 2026 (pgotool31) at integ-3.1 601336ad: the harness had drifted from the console build in three ways that each
+change the control flow a profile is keyed on, and a fresh harness profile still lost the counts of `EmitDraw`, `ClippingActorHolder::movement`,
+`KCollisionServer::checkSphereWalk`, `LiveActor::calcAnim`, `ModelManager::calcView` and so on: the console compiles with
+`-Xclang -no-enable-noundef-analysis` (InstCombine folds an i1 select into an and without it), the game units' port code now uses `std::`
+templates whose GCC 13 (cross) and GCC 15 (Vita SDK) forms differ (`std::find`), and the Vita's integer-type macros. `ARMHF_VITA_MATCH`
+(default ON with `ARMHF_VITA_RUNTIME_FLAGS`) adds them; the game and `platform/src/gx` units stay at -O2 (their Vita commands carry
+`-O3 ... -O2`, the last wins; at -O3 the pre-inliner decides differently). Measured with `scan_units.py` on 64 hot units (the 35 renderer
+units and 29 game units) with an opening-route profile: 192 hash mismatches before the option, 28 with it (26 renderer, 2 game), 1,846 of
+the 1,874 functions with counts matching. What is left is code that only one target compiles: `vgx_galaxy.cpp` (as above), the back
+end's `NowMs()` (`#ifdef __vita__`: `sceKernelGetProcessTimeWide`, inlined into `ExecuteFrame`, `StageNote`, `StageFrameBegin`),
+`BeginVertices` (`#if defined(__vita__)`), and the bounded waits of `port/wait_bound.h` (`AsyncBatch::Ensure`, `JpaPoolLock`), which
+nap with `std::this_thread` in the harness.
+
+## Record on the console (instrumented eboot)
+
+The profile above is stale (about 54 % of the renderer weight still matches) and cannot be re-recorded where there is no
+armhf toolchain, qemu or the game data. The other way is to build the console eboot itself with `-fprofile-generate`, play a
+tour on the console and bring the counters back. Nothing changes without the opt-in: the compile commands of every unit
+are identical (checked on all 1835 units of the source stage and on the link stage).
+
+Build (environment variable, read by CMake, `build.py` and `vita_runtime_gen_vgx.py`; it cannot be combined with
+`--pgo-profile` / `VITA_PGO_PROFILE`, which it ignores or refuses):
+
+    VITA_PGO_GENERATE=1 python3 -I tools/vgx_build/build.py all --build-dir <separate dir> --jobs 4
+
+Use a build directory of its own: every unit is compiled again, and the release build in `/build` needs a full rebuild after
+it otherwise. The link adds `vita/pgo/` (the profile runtime of LLVM 18.1.3 from `vita/pgo/compiler-rt/`, a platform layer
+for the section start/stop symbols, the writer thread) and `-DGXV_PGO_GENERATE=1`. Eboot about 11.9 MB (7.5), about 12 MB
+more RAM, about 2 to 3 times slower (estimates, to be confirmed by the first run).
+
+What it writes (ux0:data/smg/): `pgo/default-<n>.profraw` (last 3 kept, temp name then rename), `pgo.profraw` (the same
+bytes, the file to fetch), `pgo/last.txt`. Dump triggers: every `GXV_PGO_DUMP_S` seconds (default 120, 0 = never), when the
+file `ux0:data/smg/pgo.dump` exists (removed afterwards), and at exit / abort. The thread `smg_pgodump` has the lowest priority.
+The log (log.txt) has the lines `pgo: INSTRUMENTED build` and `pgo: dump`.
+
+Procedure, env files and the pad script: `agents/pgovita/jobs/README.txt` (stages per run: `env.run-a..f.txt`; pad script
+`input-wander.txt`, made by `tools/pgo/make_console_route.py`).
+
+Merge and use:
+
+    tools/pgo/merge_console.sh <dir> run-a.profraw run-b.profraw ...     # <dir>/smg.profdata.gz, paths as /source/...
+    python3 -I tools/pgo/scan_units.py <rewritten profile> scan.jsonl && python3 -I tools/pgo/stale_report.py scan.jsonl
+    cp <dir>/smg.profdata.gz tools/pgo/smg.profdata.gz    # then the usual docs/SOURCE-MANIFEST.json refresh
+
+Expect at least 95 % of the weight to match. Then build as usual with `--pgo-profile tools/pgo/smg.profdata.gz`.
+
+Build paths: the game units are compiled through the CMake cache path (`/source/source`), the runtime units through the
+resolved checkout, and clang keys static functions by `<source path>;<name>`. `build.py` now rewrites the game's profile
+for the cache path (`cmake_source_root`) and the runtime's for the resolved root; before, the first applied to both and the
+static functions of the other never matched (696 functions). Any script that compiles the runtime stage on its own
+(a script outside the tree that takes `build/pgo/bebd4ee0ec00.profdata`, the unrewritten one) has to pass the profile rewritten
+for the resolved root too.
+
+## Prove a profile build (strk31)
+
+The emulator's determinism check cannot judge a PGO build alone (pacing follows its wall clock). Galaxy's route is step-locked (game turns) and `GXV_UNDRAWN_LEAN_HASH` logs a state hash by turn:
+run plain, plain2 and PGO on the same route and read them with `tools/release_gates.py twin` (PASS / FAIL / DET INCONCLUSIVE, exit 2: not a pass). The other final-build gates, the PGO eboot's own, and the
+loop-unswitching note (clang, not GCC) are in `docs/RELEASE-3.0-CHECKLIST.md` sections 4b and 4c.

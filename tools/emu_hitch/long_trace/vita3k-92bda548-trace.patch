@@ -1,0 +1,191 @@
+diff --git a/vita3k/modules/SceGxm/SceGxm.cpp b/vita3k/modules/SceGxm/SceGxm.cpp
+index 3ed4fa06..f371e1b6 100644
+--- a/vita3k/modules/SceGxm/SceGxm.cpp
++++ b/vita3k/modules/SceGxm/SceGxm.cpp
+@@ -44,6 +44,7 @@
+ #include <util/align.h>
+ #include <util/bytes.h>
+ #include <util/log.h>
++#include <util/long_present_trace.h>
+ 
+ #include <util/tracy.h>
+ TRACY_MODULE_NAME(SceGxm);
+@@ -910,11 +911,12 @@ static void display_entry_thread(EmuEnvState &emuenv) {
+         SceGxmSyncObject *new_sync = display_callback->new_sync.get(emuenv.mem);
+ 
+         // sceGxmDisplayQueueAddEntry waits for both buffers to complete
+-        if (renderer::wishlist(old_sync, display_callback->old_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
++        long_present::Batch<> trace;
++        if (trace.call("display.wait_old", [&] { return renderer::wishlist(old_sync, display_callback->old_sync_timestamp); }) == renderer::SyncWaitResult::Shutdown) {
+             return;
+         }
+         if (old_sync != new_sync) {
+-            if (renderer::wishlist(new_sync, display_callback->new_sync_timestamp) == renderer::SyncWaitResult::Shutdown) {
++            if (trace.call("display.wait_new", [&] { return renderer::wishlist(new_sync, display_callback->new_sync_timestamp); }) == renderer::SyncWaitResult::Shutdown) {
+                 return;
+             }
+         }
+@@ -932,7 +934,7 @@ static void display_entry_thread(EmuEnvState &emuenv) {
+         emuenv.display.current_sync_object = display_callback->new_sync.address();
+ 
+         // Now run callback
+-        display_thread->run_guest_function(callback_address, display_callback->data);
++        trace.call("display.guest_callback", [&] { return display_thread->run_guest_function(callback_address, display_callback->data); });
+ 
+         // Notifies the renderer of the completion of the callback for the display_entry.
+         // The last_display of the entry, when pushed into the queue, is guaranteed to be timestamp_ahead + 1 at the time of the call.
+@@ -2243,6 +2245,8 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
+     if (!oldBuffer || !newBuffer)
+         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
+ 
++    long_present::Batch<> trace;
++    const auto entry_start = trace.start();
+     const Address address = alloc(emuenv.mem, emuenv.gxm.params.displayQueueCallbackDataSize, __FUNCTION__);
+     const Ptr<void> ptr(address);
+     memcpy(ptr.get(emuenv.mem), callbackData.get(emuenv.mem), emuenv.gxm.params.displayQueueCallbackDataSize);
+@@ -2268,7 +2272,7 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
+     emuenv.gxm.last_display_global = emuenv.gxm.global_timestamp.fetch_add(1, std::memory_order_relaxed);
+ 
+     // function may be blocking here (expected behavior)
+-    emuenv.gxm.display_queue.push(display_callback);
++    trace.call("gxm.push", [&] { emuenv.gxm.display_queue.push(display_callback); });
+ 
+     // TODO: I do this because the sync function does not have access to the display state, but this is not great
+     renderer::Context *active_renderer_context = nullptr;
+@@ -2284,8 +2288,9 @@ EXPORT(int, sceGxmDisplayQueueAddEntry, Ptr<SceGxmSyncObject> oldBuffer, Ptr<Sce
+ 
+     if (emuenv.gxm.params.displayQueueMaxPendingCount == 1)
+         // double buffering, not handled by the queue configuration
+-        emuenv.gxm.display_queue.wait_empty();
++        trace.call("gxm.double_buffer_wait_empty", [&] { emuenv.gxm.display_queue.wait_empty(); });
+ 
++    trace.returned("gxm.add_entry_inclusive", entry_start, 0);
+     return 0;
+ }
+ 
+diff --git a/vita3k/renderer/src/vulkan/screen_renderer.cpp b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+index bbc6ba97..cd3e8255 100644
+--- a/vita3k/renderer/src/vulkan/screen_renderer.cpp
++++ b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+@@ -19,6 +19,7 @@
+ 
+ #include "renderer/vulkan/state.h"
+ #include "util/log.h"
++#include <util/long_present_trace.h>
+ #include "vkutil/vkutil.h"
+ 
+ #include <cstdint>
+@@ -425,9 +426,10 @@ bool ScreenRenderer::acquire_swapchain_image() {
+         return false;
+     }
+ 
++    long_present::Batch<> trace;
+     if (swapchain)
+-        acquire_result = state.device.acquireNextImageKHR(swapchain,
+-            next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx);
++        acquire_result = trace.call("vk.acquire", [&] { return state.device.acquireNextImageKHR(swapchain,
++            next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx); });
+ 
+     const bool has_acquired_image = acquire_result == vk::Result::eSuccess || acquire_result == vk::Result::eSuboptimalKHR;
+     if (!has_acquired_image) {
+@@ -453,7 +455,7 @@ bool ScreenRenderer::acquire_swapchain_image() {
+         need_rebuild = !surface_matches_window_size();
+ 
+     // wait for the previous frame using this image to finish
+-    auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout);
++    auto result = trace.call("vk.swap_fence", [&] { return state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout); });
+     if (result != vk::Result::eSuccess) {
+         LOG_ERROR("Could not wait for fences.");
+         return false;
+@@ -542,7 +544,8 @@ void ScreenRenderer::swap_window() {
+     submit_info.setWaitDstStageMask(dst_masks);
+     submit_info.setSignalSemaphores(image_ready_semaphores[current_frame]);
+     submit_info.setCommandBuffers(current_cmd_buffer);
+-    state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
++    long_present::Batch<> trace;
++    trace.call("vk.screen_submit", [&] { return state.general_queue.submit(submit_info, fences[swapchain_image_idx]); });
+ 
+     // then present the surface
+     vk::PresentInfoKHR present_info{
+@@ -553,7 +556,7 @@ void ScreenRenderer::swap_window() {
+         .pImageIndices = &swapchain_image_idx,
+     };
+ 
+-    auto result = state.general_queue.presentKHR(&present_info);
++    auto result = trace.call("vk.present", [&] { return state.general_queue.presentKHR(&present_info); });
+     if (result == vk::Result::eSuboptimalKHR) {
+         need_rebuild = !surface_matches_window_size();
+     } else if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eErrorSurfaceLostKHR) {
+diff --git a/vita3k/util/include/util/long_present_trace.h b/vita3k/util/include/util/long_present_trace.h
+new file mode 100644
+index 00000000..a0b33a01
+--- /dev/null
++++ b/vita3k/util/include/util/long_present_trace.h
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include <util/log.h>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <string_view>
++#include <type_traits>
++
++namespace long_present {
++inline bool enabled() {
++    static const bool active = [] {
++        const char *val = std::getenv("VITA3K_LONG_PRESENT_TRACE");
++        const bool on = val && std::string_view(val) == "1";
++        if (on)
++            LOG_INFO("long-present: enabled threshold_us 50000; phases overlap");
++        return on;
++    }();
++    return active;
++}
++
++// Store only slow phases. Defer their logs until the enclosing operation is
++// done so a slow child's logging is not included in its parent's measurement.
++template<class Clock = std::chrono::steady_clock>
++class Batch {
++    using Stamp = typename Clock::time_point;
++    struct Event { const char *name; int64_t us; Stamp end; bool has_result; int64_t result; };
++    Event events[5];
++    unsigned count = 0;
++    const bool on = enabled();
++    void note(const char *name, Stamp begin, bool has_result, int64_t result) {
++        if (!on) return;
++        const auto end = Clock::now();
++        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
++        if (us > 50000 && count < 5)
++            events[count++] = {name, us, end, has_result, result};
++    }
++public:
++    Stamp start() const { return on ? Clock::now() : Stamp{}; }
++    void returned(const char *name, Stamp begin, int64_t result) {
++        note(name, begin, true, result);
++    }
++    template<class Operation>
++    auto call(const char *name, Operation op) {
++        if (!on) return op();
++        const auto begin = Clock::now();
++        if constexpr (std::is_void_v<decltype(op())>) {
++            op();
++            note(name, begin, false, 0);
++        } else {
++            auto result = op();
++            returned(name, begin, static_cast<int64_t>(result));
++            return result;
++        }
++    }
++    ~Batch() {
++        for (unsigned i = 0; i < count; ++i) {
++            const auto &e = events[i];
++            const auto lag = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - e.end).count();
++            if (e.has_result)
++                LOG_INFO("long-present: phase {} elapsed_us {} ended_ago_us {} result {}", e.name, e.us, lag, e.result);
++            else
++                LOG_INFO("long-present: phase {} elapsed_us {} ended_ago_us {} result void", e.name, e.us, lag);
++        }
++    }
++};
++} // namespace long_present

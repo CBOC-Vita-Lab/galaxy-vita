@@ -53,9 +53,9 @@ bool audioRetryOn() {
     static const bool on = [] { const char* e = getenv("GXV_AUDIO_RETRY"); return !(e && e[0] == '0'); }();
     return on;
 }
-// GXV_RESUME_RESET=1: the port is closed and opened afresh when the system reports a resume (default off, read once).
+// GXV_RESUME_RESET: the port is closed and opened afresh when the system reports a resume (default on since 3.0, 0 = off, read once).
 bool audioResumeResetOn() {
-    static const bool on = [] { const char* e = getenv("GXV_RESUME_RESET"); return e && e[0] == '1'; }();
+    static const bool on = [] { const char* e = getenv("GXV_RESUME_RESET"); return !(e && e[0] == '0'); }();
     return on;
 }
 unsigned sResumeSeen;

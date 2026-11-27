@@ -2,6 +2,9 @@
 
 #include <revolution/gd.h>
 #include <revolution/gx/GXVert.h>
+#ifdef TARGET_PC
+#include "port/gx_dedup.h"
+#endif
 
 #ifdef TARGET_PC
 // The same bytes as one batched command each (GXV_FIFO_BATCH, port/gx_fifo.h): the indexed matrix loads and CP array
@@ -11,12 +14,11 @@ inline void J3DFifoLoadXFCmdHdr(u16 addr, u8 len) {
 }
 
 inline void J3DFifoLoadCPCmd(u8 reg, u32 value) {
-    __PortGXFifo_op_u8_u32(0x08, reg, value);
+    __PortGXWriteCP(reg, value);  // (the same 6 bytes, batched; behind GXV_GX_DEDUP's gate, port/gx_dedup.h)
 }
 
 inline void J3DFifoLoadBPCmd(u32 regval) {  // (two elements: no gain from a batch)
-    GXCmd1u8(0x61);
-    GXCmd1u32(regval);
+    __PortGXWriteBP(regval);  // (GXV_GX_DEDUP's gate, port/gx_dedup.h: otherwise the same two elements)
 }
 
 inline void J3DFifoWriteXFCmdHdr(u16 addr, u8 len) {

@@ -15,4 +15,5 @@ SceUID sceKernelCreateThread(const char* name, SceKernelThreadEntry entry, int i
                              int cpuAffinityMask, const void* option);
 int sceKernelStartThread(SceUID thid, SceSize arglen, void* argp);
 int sceKernelGetThreadCurrentPriority(void);
+int sceKernelDelayThread(SceUInt delay);   // (hitch30: port/wait_bound.h NapUs)
 }

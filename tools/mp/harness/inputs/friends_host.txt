@@ -1,0 +1,35 @@
+# menus2 (12 Nov): the online screens against the local fake service (tools/mp/harness: friends_shots.yaml; the wrapper
+# wt/flow-scratch/menus2-friends.sh starts the fake and gives the account a few friends, requests and a block). Keys only; the pointer
+# sits in a corner, so the picture shows the screen and the one highlighted row. MARKS only (a mark fires once: later presses count from it).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark friends /ui: screen friends/ ~60
+mark requests /ui: screen requests/ ~80
+mark gather /ui: screen gather/ ~140
+mark board /ui: screen board/ ~170
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+1-300:PX=0.95|PY=-0.95
+main+6-6.3:SPIN            # Friends (Square)
+friends+10-10.2:A          # the first row (Requests)
+requests+6-6.2:DOWN
+requests+8-8.2:A           # a request
+requests+14-14.2:B
+requests+18-18.2:B         # the Friends list
+requests+22-22.2:DOWN
+requests+24-24.2:A         # a friend's page
+requests+30-30.2:B
+requests+34-34.2:UP
+requests+36-36.2:UP        # (the list wraps round to its last row: Blocked Players)
+requests+40-40.2:A
+requests+48-48.2:B
+requests+52-52.2:B         # the Multiplayer menu
+requests+58-58.2:DOWN      # Star Race
+requests+60-60.2:A         # the character select (the first time)
+requests+66-66.2:A         # Mario: the gathering screen (alone)
+gather+16-16.2:DOWN        # Leaderboards
+gather+18-18.2:A
+board+14-14.2:B
+board+18-18.2:B

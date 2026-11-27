@@ -7,6 +7,10 @@
 #include "Game/Util/JMapUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 
+#ifdef TARGET_PC
+bool PortClipPairSkipped();  // (ClippingActorHolder.cpp)
+#endif
+
 ClippingDirector::ClippingDirector() : NameObj("\x83\x4e\x83\x8a\x83\x62\x83\x73\x83\x93\x83\x4f\x8e\x77\x8a\xf6"), mJudge(nullptr), mActorHolder(nullptr), mGroupHolder(nullptr) {
     mJudge = new ClippingJudge("\x83\x4e\x83\x8a\x83\x62\x83\x73\x83\x93\x83\x4f\x94\xbb\x92\xe8\x8e\xd2");
     mJudge->initWithoutIter();
@@ -27,6 +31,11 @@ void ClippingDirector::endInitActorSystemInfo() {
 void ClippingDirector::movement() {
     mJudge->movement();
     mActorHolder->movement();
+#ifdef TARGET_PC
+    if (PortClipPairSkipped()) {
+        return;  // (cpu34g, GXV_CLIP_PAIR: no actor was judged this turn, so no group's answer can have changed)
+    }
+#endif
     mGroupHolder->movement();
 }
 

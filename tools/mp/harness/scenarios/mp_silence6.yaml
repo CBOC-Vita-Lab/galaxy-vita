@@ -1,0 +1,26 @@
+# the guest freezes (SIGSTOP) for 6 s in Good Egg and wakes up: no crash, the session goes on
+name: mp_silence6
+description: "guest silent for 6 s (SIGSTOP/SIGCONT), host keeps the slot or takes it back"
+seconds: 200
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, HARNESS_STOP: 'flow barrier release serial=1 |25|6'}
+rules:
+  # game finding (harness3, h3m/mp_silence6-223022): a guest frozen 6 s is removed by the host after 5.1 s (MP_ACK_STALL_MS=5000 'no acknowledgement'),
+  # not after MP_PEER_LOST_MS=15000, and the guest ends with MP_ERR_TIMEOUT instead of coming back. Hard until the game decides.
+  - 'absent host /\[mp\] slot 1 left reason=timeout/'
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'nostall host'
+  - 'expect guest /harness: SIGCONT/'
+  - 'expect host /\[mp\] puppet slot=1 appear/'
+  - 'absent * /Assertion|OSPanic|FATAL/'
+  - 'exit host,guest == 0'

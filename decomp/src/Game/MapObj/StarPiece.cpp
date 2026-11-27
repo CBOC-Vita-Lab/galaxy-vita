@@ -1,7 +1,13 @@
+#include "Game/LiveActor/Spine.hpp"
 #include "Game/MapObj/StarPiece.hpp"
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Map/HitInfo.hpp"
+#include "Game/MP/MpBubble.hpp"  // MP3: Play Together "Bubbles": a Star Bit shot pops a teammate's bubble
+#ifdef TARGET_PC
+#include "Game/MP/MpCoStar.hpp"   // MP3 costar: other players' pointers sweep Star Bits
+#include "Game/MP/MpStarBits.hpp"
+#endif
 #include "Game/MapObj/PowerStar.hpp"
 #include "Game/MapObj/StarPieceDirector.hpp"
 #include "Game/Util.hpp"
@@ -28,6 +34,9 @@
 #include <revolution/gx/GXEnum.h>
 #include <revolution/gx/GXStruct.h>
 #include <revolution/mtx.h>
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 const GXColor effectColors[] = {{0x00, 0x55, 0xff, 0xFF}, {0xFF, 0xFF, 0x00, 0xFF}, {0x55, 0xFF, 0x00, 0xFF}, {0x7F, 0x7F, 0x00, 0xFF}};
 const GXColor initColors[] = {{0x80, 0x00, 0x99, 0xFF}, {0xE6, 0xA0, 0x00, 0xFF}, {0x46, 0xA1, 0x08, 0xFF},
@@ -54,6 +63,7 @@ StarPiece::StarPiece(const char* pName)
       mReceiverInfo(0), mNumGift(1) {
 #ifdef TARGET_PC
     mThrownFromVr = false;
+    mMpRemoteSweep = false;
 #endif
     MR::incNumStarPieceNewed();
 
@@ -169,6 +179,9 @@ void StarPiece::init(const JMapInfoIter& rIter) {
     } else {
         makeActorDead();
     }
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 1);  // (GXV_ALOD, actorlod23: family 1, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void StarPiece::initAfterPlacement() {
@@ -205,6 +218,9 @@ void StarPiece::appearFromGroup() {
 
 void StarPiece::makeActorAppeared() {
     LiveActor::makeActorAppeared();
+#ifdef TARGET_PC
+    mMpRemoteSweep = false;
+#endif
     getSensor("attack")->invalidate();
     _C8 = -1;
 }
@@ -231,6 +247,9 @@ void StarPiece::kill() {
 
 void StarPiece::makeActorDead() {
     LiveActor::makeActorDead();
+#ifdef TARGET_PC
+    mMpRemoteSweep = false;
+#endif
     mTargetSensor = nullptr;
     mReceiverInfo = 0;
     _C8 = -1;
@@ -694,6 +713,15 @@ void StarPiece::exeThrow() {
     mVelocity.set(vec2);
     mVelocity -= vec1;
 
+#ifdef TARGET_PC
+    // MP3: Play Together: a shot that flies through a teammate's bubble this turn pops it (the bubble module sends the pop request)
+    if (mp_active() && MpBubble::shotThrough(&vec1.x, &vec2.x)) {
+        MR::startSound(this, "SE_OJ_STAR_PIECE_HIT_ENEMY");
+        kill();
+        return;
+    }
+#endif
+
     TVec3f camZDir(MR::getCamZdir());
     TVec3f camPos(MR::getCamPos());
 #ifdef TARGET_PC
@@ -1080,6 +1108,19 @@ void StarPiece::emitGettableEffect(f32 f1) {
     MR::setEffectColor(this, "GetAble", clampedR, clampedG, clampedB, clampedR2, clampedG2, clampedB2);
 }
 
+#ifdef TARGET_PC
+// MP3 costar: a Star Bit another player's held pointer sweeps is gettable too: only asked when neither this console's pointer nor the Star Bit reach points at it, and only in a session (as the
+// second player's pointer sweeps Star Bits for Mario). (merge of 3.0 on c181: this is the right operand of the SAME "||" chain c181 has, in a non-inlined wrapper, so that tryGotJudge keeps
+// c181's control flow and its PGO profile.)
+static bool PortStarPieceAssistOrSweep(StarPiece* pPiece) __attribute__((noinline));
+static bool PortStarPieceAssistOrSweep(StarPiece* pPiece) {
+    if (MR::isStarPointerPointingStarPieceAssist(pPiece)) {
+        return true;
+    }
+    return mp_active() && MpCoStar::sweeps(pPiece);
+}
+#endif
+
 void StarPiece::tryGotJudge() {
     if (225000000.0f < (*MR::getPlayerCenterPos() - mPosition).squared() || !mFlags._1) {
         _C8 = -1;
@@ -1097,7 +1138,8 @@ void StarPiece::tryGotJudge() {
         bool isPointing = MR::isStarPointerPointing1Por2P(this, "\x8e\xe3", false, false);
 #ifdef TARGET_PC
         // (the port's Star Bit reach, pause menu: Select; level 1, the default, is the game's own and adds nothing)
-        isPointing = isPointing || MR::isStarPointerPointingStarPieceAssist(this);
+        // (MP3 costar: and another player's held pointer sweeps Star Bits near it: see PortStarPieceAssistOrSweep)
+        isPointing = isPointing || PortStarPieceAssistOrSweep(this);
 #endif
         MR::getStarPointerLastPointedPort(this);
 
@@ -1249,7 +1291,7 @@ bool StarPiece::receiveOtherMsg(u32 msg, HitSensor* pSender, HitSensor* pReceive
     if (MR::isMsgStartPowerStarGet(msg)) {
         if ((isNerve(GET_NERVE(StarPiece, HostTypeNrvToTarget)) && mFlags.isGoToPlayer) || isNerve(GET_NERVE(StarPiece, HostTypeNrvSpinDrained)) ||
             isNerve(GET_NERVE(StarPiece, HostTypeNrvToPlayerEnd))) {
-            MR::gotByPlayer();
+            MR::gotByPlayer();   // (MP3 costar: a swept bit is counted like any other here: a forged pointer must never be able to destroy Star Bits)
         }
 
         makeActorDead();
@@ -1264,7 +1306,12 @@ bool StarPiece::isIgnoreTriOnThrow(const Triangle* pTriangle) {
 }
 
 bool StarPiece::touchPlayer() {
-    if (MR::gotByPlayer()) {
+    bool got;
+    got = MR::gotByPlayer();   // (MP3 costar: a bit another player's pointer swept is counted too, see MpCoStar::sweeps)
+#ifdef TARGET_PC
+    mMpRemoteSweep = false;
+#endif
+    if (got) {
         if (200.0f < calcDistToCamera()) {
             if (isEffectLight()) {
                 MR::emitEffect(this, "StarPieceGetS");
@@ -1319,3 +1366,19 @@ void StarPiece::calcAndSetBaseMtx() {
 void StarPiece::setHostInfo(StarPieceHostInfo* pHostInfo) {
     mHostInfo = pHostInfo;
 }
+
+#ifdef TARGET_PC
+// GXV_IDLE25 (ActorTurnLod.cpp): the nerve a marked star bit is in, from this file's own nerve objects. 1: Floating with no change pending (the idle state:
+// exeFloating's step is a rotation and tryGotJudge, see port/idle25.h); 2: RailMove (census only: ACTIVE); 0: anything else.
+extern "C" int port_idle25_starpiece_nerve(const void* pActor) {
+    const StarPiece* p = static_cast< const StarPiece* >(pActor);
+    const Spine* s = p->mSpine;
+    if (s == nullptr || s->mNextNerve != nullptr) {
+        return 0;
+    }
+    if (s->mCurrNerve == GET_NERVE(StarPiece, HostTypeNrvFloating)) {
+        return 1;
+    }
+    return s->mCurrNerve == GET_NERVE(StarPiece, HostTypeNrvRailMove) ? 2 : 0;
+}
+#endif

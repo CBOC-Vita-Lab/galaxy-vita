@@ -1,0 +1,23 @@
+# ingame item 9: Play Together's Power Star without the star card: the faces of everyone under the game's own star-get words, a
+# small Power Star over the one who touched it (mp_star's footing: the guest gets the star 15 s into Good Egg 1).
+name: ingame_star
+description: the star row on the star-get demo, no star card
+shot_size: 960x544
+seconds: 420
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 1000, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 2}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 15, SMG_MP_NAME: Daisy, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] team star row count=2 by=1/'
+  - 'expect guest /\[mp\] team star row count=2 by=1/'
+  - 'absent * /\[mp\] ui: star card shown/'

@@ -1,0 +1,1 @@
+{"action": "batch", "steps": [{"action": "close"}, {"sleep": 3}, {"action": "vc", "cmd": "screen on", "wait": 2}, {"action": "vc", "cmd": "unlock", "wait": 3}, {"action": "vc", "cmd": "nosleep on", "wait": 1.0}, {"action": "clear_input"}, {"action": "put", "src": "env-8189-W0.txt", "path": "ux0:data/smg/env.txt"}, {"action": "launch"}]}

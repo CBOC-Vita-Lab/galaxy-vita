@@ -1,0 +1,52 @@
+# Coop extras in Good Egg 1 (desktop test hooks, each counted from the start of every scene the player controls):
+#  - emote: the guest greets 10 s in (SMG_MP_TEST_EMOTE "10:1" = stamp 1 "Thanks!", the D-pad-down button path): gesture +
+#    voice, EMOTE to the host, the host shows the toast "guest: Thanks!" and plays the voice at the guest's puppet;
+#  - pointer: the guest holds B with the pointer circling the screen centre for 5 s from 20 s (SMG_MP_TEST_POINTER "20:5"):
+#    POINTER pings reach the host, who shows the guest's 2P pointer, and hides it after the release (on=0);
+#  - super jump: the host is dropped 320 above the guest 35 s in (plain stomp: the trample bounce), then 8 s later the same
+#    drop with the jump button held (the friend head-spring super jump); the apexes are logged (stomp small, super big).
+# Screenshots every 2 s: look at the gesture, the 2P pointer on the host's screen, the super jump height.
+name: mp_coop
+description: greeting emote, pointer ping, head-bounce super jump between two players
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_EMOTE, SMG_MP_TEST_POINTER, SMG_MP_TEST_SUPERJUMP]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_TEST_SUPERJUMP: "35"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_EMOTE: "10:1:1", SMG_MP_TEST_POINTER: "20:5:1"}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect * /\[mp\] coop init pointer=1/ after host /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  # emote (in Good Egg)
+  - 'expect guest /\[mp\] coop emote sent stamp=1 gesture=1 via=button ok=1/ after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'absent guest /\[mp\] coop test emote: gave up/'
+  - 'order guest /\[mp\] coop emote sent stamp=1 gesture=1 via=button ok=1/ before host /\[mp\] coop emote recv from=1 stamp=1 gesture=1 voice=1/ within 5s'
+  - 'expect host /\[mp\] ui: toast "guest: Thanks!"/ after guest /\[mp\] coop emote sent stamp=1/'
+  - 'absent * /\[mp\] coop emote (refused|recv from=\d dropped)/'
+  # pointer ping: sent while B is held, shown on the host in the guest's colour, hidden after the release
+  - 'expect guest /\[mp\] coop pointer first screen=/ after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order guest /\[mp\] coop pointer first / before host /\[mp\] coop pointer recv from=1 pos=-?\d+,-?\d+,-?\d+/ within 5s'
+  - 'expect host /\[mp\] coop pointer show slot=1 at=/ within 3s after host /\[mp\] coop pointer recv from=1/'
+  - 'expect guest /\[mp\] coop pointer off/ within 8s after guest /\[mp\] coop pointer first /'
+  - 'expect host /\[mp\] coop pointer hide slot=1/ within 3s after guest /\[mp\] coop pointer off/'
+  # super jump: a plain stomp first (a small trample bounce), then the held one (the spring): a far higher apex
+  - 'expect host /\[mp\] coop test superjump: dropped onto slot=1 held=0/ after host /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'expect host /\[mp\] coop bounce apex=([0-3]?\d?\d) kind=stomp/ within 8s after host /\[mp\] coop test superjump: dropped onto slot=1 held=0/'
+  - 'expect host /\[mp\] coop test superjump: dropped onto slot=1 held=1/'
+  - 'expect host /\[mp\] coop superjump onto slot=1/ within 3s after host /\[mp\] coop test superjump: dropped onto slot=1 held=1/'
+  - 'expect host /\[mp\] coop bounce apex=([5-9]\d\d|\d{4,}) kind=super/ within 5s after host /\[mp\] coop superjump onto slot=1/'
+  - 'absent host /\[mp\] coop test superjump: no friend/'
+  - 'expect guest /\[mp\] puppet bump recv from=0 kind=stomp/ after host /\[mp\] coop test superjump: dropped onto slot=1 held=0/'
+  - 'absent * /\[mp\] (session ended|slot \d left)/ before * /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'exit * == 0'

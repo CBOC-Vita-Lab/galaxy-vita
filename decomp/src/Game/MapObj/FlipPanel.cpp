@@ -73,7 +73,8 @@ void FlipPanel::exeFrontLand() {
             MapObjActorUtil::appearBloomModel(this);
             ModelObj* bloomModel = mBloomModel;
             u32 frameMax = MR::getBrkFrameMax(bloomModel);
-            u32 val = ::sBloomSyncStep / frameMax;
+            // MP3 tour: a zero-frame bloom brk (FlipPanelExGalaxy): x86 traps on the division, the Vita's ARM returns 0
+            u32 val = frameMax != 0 ? ::sBloomSyncStep / frameMax : 0;
             frameMax = ::sBloomSyncStep - (val)*frameMax;
             MR::setBrkFrame(bloomModel, frameMax);
         } else {
@@ -104,7 +105,8 @@ void FlipPanel::exeBackLand() {
             MapObjActorUtil::appearBloomModel(this);
             ModelObj* bloomModel = mBloomModel;
             u32 frameMax = MR::getBrkFrameMax(bloomModel);
-            u32 val = ::sBloomSyncStep / frameMax;
+            // MP3 tour: a zero-frame bloom brk (FlipPanelExGalaxy): x86 traps on the division, the Vita's ARM returns 0
+            u32 val = frameMax != 0 ? ::sBloomSyncStep / frameMax : 0;
             frameMax = ::sBloomSyncStep - (val)*frameMax;
             MR::setBrkFrame(bloomModel, frameMax);
         }
@@ -179,7 +181,8 @@ void FlipPanel::endClipped() {
     if (MR::getBrkCtrl(mBloomModel)) {
         ModelObj* bloomModel = mBloomModel;
         u32 frameMax = MR::getBrkFrameMax(bloomModel);
-        u32 val = ::sBloomSyncStep / frameMax;
+        // MP3 tour: a zero-frame bloom brk (FlipPanelExGalaxy): x86 traps on the division, the Vita's ARM returns 0
+        u32 val = frameMax != 0 ? ::sBloomSyncStep / frameMax : 0;
         frameMax = ::sBloomSyncStep - (val)*frameMax;
         MR::setBrkFrame(bloomModel, frameMax);
     }

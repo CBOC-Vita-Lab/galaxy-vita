@@ -1,0 +1,11 @@
+# 8123 A1o-on: C182 smoothing set, owner plays: jumps and fast camera turns (the owner plays or watches)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+GXV_HRW41_DEPTH=1
+GXV_HRW41_BOXKEY=1
+GXV_HRW41_BOX_ROUND=1
+GXV_HRW41_BUDGET=1
+GXV_HRW_STAGE_AUTO_RETRY=3

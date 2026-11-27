@@ -1,0 +1,37 @@
+# Strikers Charged Vita online service.
+# Nothing here is tied to an account: no account_id, no routes, no secrets. `wrangler deploy` picks the account
+# from the logged-in user (or CLOUDFLARE_ACCOUNT_ID in the environment). See README.md for the deployment steps.
+
+name = "msc-online-example"       # placeholder: pick a neutral name; the public URL becomes <name>.<subdomain>.workers.dev
+main = "src/worker.js"
+compatibility_date = "2025-10-01"
+workers_dev = true
+
+[observability]
+enabled = false                    # no request logging on the platform side
+
+[[durable_objects.bindings]]
+name = "GAME"
+class_name = "GameServer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameServer"]
+
+# Plain (non-secret) settings. Everything is optional; see README.md for the full list.
+[vars]
+KILL_SWITCH = ""                   # comma list: all, register, rooms, ranked, ranking, turn
+MAINTENANCE_MESSAGE = ""
+REQUIRE_APP_VERSION = "1"          # production: every request must carry X-Msc-App (version gating fails closed). Tests set "0" explicitly.
+RANK_PUT_POLICY = "credit"         # credit | delta | open (open = no server-side score check)
+TURN_PROVIDER = "cloudflare"       # cloudflare | stub | "" (off)
+TURN_TTL_SEC = "3600"
+TURN_MAX_CREDS_PER_DAY = "300"
+TURN_MAX_CREDS_PER_PLAYER_DAY = "6"
+TURN_MONTHLY_BUDGET_MB = "100000"
+
+# Secrets (set with `wrangler secret put NAME`, never in this file):
+#   RANK_HMAC_KEY_HEX        64 hex chars; the ranking digest key from the game (scripts/extract-hmac-key.mjs prints it)
+#   ADMIN_TOKEN              long random string for /v1/admin/*
+#   TURN_KEY_ID              Cloudflare Realtime TURN key id
+#   TURN_KEY_API_TOKEN       Cloudflare Realtime TURN key API token

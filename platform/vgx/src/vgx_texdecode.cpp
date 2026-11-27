@@ -500,6 +500,64 @@ bool DecodeTextureLA88(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, u
     return true;
 }
 
+bool DecodeTextureI8(const uint8_t* s, uint32_t w, uint32_t h, uint32_t fmt, uint8_t* d) {
+    if (fmt > 1 || !w || !h || !s || !d) return false;
+    if (fmt == 1) {
+        // GX I8: 8x4 tiles, 32 bytes/tile (1 byte/texel). Whole tiles are direct 8-byte row copies.
+        if (!(w & 7u) && !(h & 3u)) {
+            for (uint32_t ty = 0; ty < h; ty += 4)
+                for (uint32_t tx = 0; tx < w; tx += 8, s += 32) {
+                    uint8_t* row = d + static_cast<size_t>(ty) * w + tx;
+                    for (uint32_t y = 0; y < 4; ++y) std::memcpy(row + static_cast<size_t>(y) * w, s + y * 8, 8);
+                }
+            return true;
+        }
+        for (uint32_t ty = 0; ty < h; ty += 4)
+            for (uint32_t tx = 0; tx < w; tx += 8, s += 32) {
+                const uint32_t rows = h - ty < 4u ? h - ty : 4u;
+                const uint32_t cols = w - tx < 8u ? w - tx : 8u;
+                for (uint32_t y = 0; y < rows; ++y)
+                    std::memcpy(d + static_cast<size_t>(ty + y) * w + tx, s + y * 8, cols);
+            }
+        return true;
+    }
+    // GX I4: 8x8 tiles, 32 bytes/tile (4 bytes/row, high nibble first, * 17).
+#if defined(__ARM_NEON)
+    if (!(w & 7u) && !(h & 7u)) {
+        for (uint32_t ty = 0; ty < h; ty += 8)
+            for (uint32_t tx = 0; tx < w; tx += 8, s += 32) {
+                uint8_t* row = d + static_cast<size_t>(ty) * w + tx;
+                for (uint32_t y = 0; y < 8; y += 2) {
+                    const uint8x8_t packed = vld1_u8(s + y * 4);
+                    uint8x8_t hi = vshr_n_u8(packed, 4), lo = vand_u8(packed, vdup_n_u8(15));
+                    hi = vorr_u8(hi, vshl_n_u8(hi, 4));
+                    lo = vorr_u8(lo, vshl_n_u8(lo, 4));
+                    const uint8x8x2_t pixels = vzip_u8(hi, lo);
+                    vst1_u8(row + static_cast<size_t>(y) * w, pixels.val[0]);
+                    vst1_u8(row + static_cast<size_t>(y + 1) * w, pixels.val[1]);
+                }
+            }
+        return true;
+    }
+#endif
+    for (uint32_t ty = 0; ty < h; ty += 8)
+        for (uint32_t tx = 0; tx < w; tx += 8, s += 32) {
+            const uint32_t rows = h - ty < 8u ? h - ty : 8u;
+            const uint32_t cols = w - tx < 8u ? w - tx : 8u;
+            for (uint32_t y = 0; y < rows; ++y) {
+                uint8_t* out = d + static_cast<size_t>(ty + y) * w + tx;
+                uint32_t x = 0;
+                for (; x + 1 < cols; x += 2, out += 2) {
+                    const uint8_t packed = s[y * 4 + x / 2];
+                    out[0] = static_cast<uint8_t>((packed >> 4) * 17);
+                    out[1] = static_cast<uint8_t>((packed & 15) * 17);
+                }
+                if (x < cols) out[0] = static_cast<uint8_t>((s[y * 4 + x / 2] >> 4) * 17);
+            }
+        }
+    return true;
+}
+
 bool CmprToDxt1(const uint8_t* s, uint32_t w, uint32_t h, uint8_t* d, bool allowTransparent) {
     const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4; // DXT1 blocks
     const uint32_t tw = (w + 7) / 8;                   // CMPR tiles per row

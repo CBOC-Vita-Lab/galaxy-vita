@@ -171,6 +171,27 @@ int main(int argc, char** argv) {
             Require(f.busyKnown == known && f.gpuBusyUs == (known ? i * 100u : 0u),
                     "ring reuse cannot leak validity or cost from an older entry");
         }
+    } else if (mode == "honest") {
+        // GXV_PACE23: the scene timers' corrected busy time replaces the timers' own once enabled; a present with nothing new carries none
+        Require(!HonestBusyEnabled(), "off until the back end's scene timers run");
+        auto f = Present(1, 4, 4, 9000);
+        Require(f.busyKnown && f.gpuBusyUs == 9000 && f.gpuRawUs == 0 && f.gpuFrames == 1, "off: the timers' own figure, untouched");
+        HonestBusyEnable(true);
+        f = Present(2, 4, 4, 9000);
+        Require(!f.busyKnown && f.gpuBusyUs == 0, "on, nothing published yet: no busy time (the raw one is not used)");
+        HonestBusyPublish(4000, 9000);
+        f = Present(3, 4, 4, 9000);
+        Require(f.busyKnown && f.gpuBusyUs == 4000 && f.gpuRawUs == 9000 && f.gpuFrames == 1, "on: the corrected busy time, the raw one beside it");
+        f = Present(4, 4, 4, 9000);
+        Require(!f.busyKnown, "a publication is delivered once");
+        HonestBusyPublish(5000, 6000);
+        HonestBusyPublish(5500, 6500);
+        HonestBusyPublish(3000, 7000);
+        f = Present(5, 4, 4, 9000);
+        Require(f.busyKnown && f.gpuBusyUs == 3000 && f.gpuRawUs == 7000 && f.gpuFrames == 3, "three pictures finished: the last one's time and their count");
+        HonestBusyEnable(false);
+        f = Present(6, 4, 4, 8000);
+        Require(f.busyKnown && f.gpuBusyUs == 8000 && f.gpuFrames == 1, "off again: the timers' own figure");
     } else if (mode == "trace") {
         Controller c(RecoveryConfig());
         for (unsigned i = 1; i <= 32; ++i) {

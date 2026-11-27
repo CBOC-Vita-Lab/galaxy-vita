@@ -1,0 +1,8 @@
+# stage-presets-1114-fresh-b.txt (pace33 PATCH7, 14 Nov 2026; UNMEASURED proposal): headroom for the re-projected 60 with the player drawn fresh at Beach Bowl.
+# Console c135 with fresh (2867b): pair 30.5 ms in the heavy windows (drawn 18.3 + undrawn 12.2; 63 of 124 pairs under 32.3), GPU 16.5 ms a picture = 33 ms a pair: both lanes are AT the
+# limit; the aim is 30 ms (90 %). This file: the far field with the governors free to go to level 3 when the pair is over its budget (opens at full quality; cuts only while hot, given back after).
+# What the player can see: far things only (Beach Bowl: 92 % of its draws are beyond 50 m): far models animate at 20 / 15 Hz, far star bits are thinned (shrinking away), small far plants
+# beyond 70 m and shadows beyond 40 m fade out, far particles are thinned; nothing within 25 m, never Mario, the HUD or close geometry.
+# One switch: GXV_STAGE_PRESETS_FILE=<this file>. As stage-presets-1114-reproj.txt otherwise, with every stage re-projected (the owner's decision of 11:50).
+@class base start=6 floor=6 ceil=6 size=fixed fx=down clip_skipempty=1 cpulod=3 pb_lod=0.45 pb_decor=4000 pb_ptcl=0.4 pb_fur=2000 pb_shadow=1800 ptcl_thin=0.35 ptcl_thin_d0=2000 ptcl_thin_d1=5000 piecethin_dist=4500 reproj=2 warp_depth=4
+HeavenlyBeachGalaxy class=gpu-light ff=1 ff_start=0 fe_gov=3 game_gov=3

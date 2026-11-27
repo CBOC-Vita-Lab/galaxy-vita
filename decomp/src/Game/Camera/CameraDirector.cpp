@@ -34,7 +34,12 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/SequenceUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
+#include "Game/MP/MpSpectate.hpp"  // MP3 spectate: L / R switch the watched player, no "can't" beep
+#include "port/mp_bridge.h"  // MP3: D-pad down is the greeting in a session
 #include <cstring>
+#ifdef TARGET_PC
+extern "C" void port_hrw_camera_cut(void);  // GXV_HRW (platform/src/gx/vgx_galaxy.cpp): an explicit camera change (event, reset, end of event): the pair in flight is not re-projected
+#endif
 
 void CameraDirector_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -59,6 +64,8 @@ namespace {
     // static const s32 sConvertSize =
     // static const s32 sConvertQuality =
     static s32 sUpdateCounter;
+    // MP3 spectate: the event camera a waiting player's view of a teammate runs as (MpSpectate.cpp starts it, MpWatchTarget is its target)
+    static const char* sMpWatchCameraName = "MpWatch";
     // static const s32 sAnimCameraName =
     // static const s32 sAnimCameraZoneID =
 };  // namespace
@@ -324,6 +331,9 @@ void CameraDirector::checkStartCondition() {
 }
 
 void CameraDirector::startEvent(s32 zoneID, const char* pName, const CameraTargetArg& rTargetArg, s32 frame) {
+#ifdef TARGET_PC
+    port_hrw_camera_cut();
+#endif
     mViewInterpolator->mIsInterpolationOff = false;
     removeEndEventAtLanding(zoneID, pName);
 
@@ -342,6 +352,9 @@ void CameraDirector::startEvent(s32 zoneID, const char* pName, const CameraTarge
 }
 
 void CameraDirector::endEvent(s32 zoneID, const char* pName, bool resetView, s32 frame) {
+#ifdef TARGET_PC
+    port_hrw_camera_cut();
+#endif
     if (getCurrentCameraMan() == mCameraManEvent) {
         mCameraManEvent->end(zoneID, pName, frame);
 
@@ -359,6 +372,9 @@ void CameraDirector::endEvent(s32 zoneID, const char* pName, bool resetView, s32
 }
 
 void CameraDirector::endEventAtLanding(s32 zoneID, const char* pName, s32 frame) {
+#ifdef TARGET_PC
+    port_hrw_camera_cut();
+#endif
     if (getCurrentCameraMan() == mCameraManEvent) {
         mEvents[mEventNum].mZoneID = zoneID;
         strcpy(mEvents[mEventNum].mName, pName);
@@ -397,6 +413,17 @@ void CameraDirector::closeCreatingCameraChunk() {
     createStartAnimCamera();
     createTalkCamera();
     createSubjectiveCamera();
+    if (mp_active()) {   // MP3 spectate: single player declares nothing
+        const s32 type = mHolder->getIndexOf("CAM_TYPE_MP_WATCH");
+        if (type >= 0) {
+            declareEvent(0, ::sMpWatchCameraName);
+            CameraParamChunkEvent* chunk = getEventParameter(0, ::sMpWatchCameraName);
+            if (chunk != nullptr) {
+                chunk->setCameraType("CAM_TYPE_MP_WATCH", mHolder);
+                chunk->_64 = true;
+            }
+        }
+    }
     mCameraManGame->closeCreatingCameraChunk();
     mChunkHolder->loadCameraParameters();
     mChunkHolder->sort();
@@ -661,6 +688,10 @@ void CameraDirector::controlCameraSE() {
         return;
     }
 
+    if (mp_active() && MpSpectate::watching()) {   // MP3 spectate: L / R / the pad switch the watched player, nothing is "not possible"
+        return;
+    }
+
     if (mIsSubjectiveCamera) {
         if (MR::testCorePadTriggerLeft(WPAD_CHAN0) || MR::testCorePadTriggerRight(WPAD_CHAN0) || MR::testFpViewStartTrigger()) {
             if (isPlayableCameraSE(false)) {
@@ -723,7 +754,8 @@ void CameraDirector::controlCameraSE() {
         }
     }
 
-    if (MR::testCorePadTriggerDown(WPAD_CHAN0)) {
+    // MP3: in a session the D-pad down is the greeting (MpCoop), not a "can't" beep
+    if (MR::testCorePadTriggerDown(WPAD_CHAN0) && !mp_active()) {
         if (isPlayableCameraSE(false)) {
             MR::startSystemSE("SE_SY_CAMERA_NG");
             mIsCameraNG = true;
@@ -807,6 +839,9 @@ bool CameraDirector::isPlayableCameraSE(bool checkSubjective) {
 }
 
 void CameraDirector::resetCameraMan() {
+#ifdef TARGET_PC
+    port_hrw_camera_cut();
+#endif
     setInterpolation(0);
 
     CameraTargetObj* target1;

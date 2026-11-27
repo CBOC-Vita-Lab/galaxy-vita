@@ -8,6 +8,9 @@ class HitSensor;
 class LiveActor;
 
 namespace MR {
+#ifdef TARGET_PC
+    void portMarkProjectileShadow(LiveActor* pActor);  // (boss23, PETARI_BOSS_PSHADOW; call right after initShadowVolumeSphere)
+#endif
     void initShadowFromCSV(LiveActor*, const char*);
     void initShadowSurfaceCircle(LiveActor*, f32);
     void initShadowVolumeSphere(LiveActor*, f32);

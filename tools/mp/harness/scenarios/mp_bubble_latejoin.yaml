@@ -1,0 +1,43 @@
+# Bubbles + a late joiner (bubble2): host + guest in Good Egg 1; the guest falls 25 s into the scene and floats by the host. A
+# third console drops in later: it arrives in a bubble beside the host (the drop-in arrival handler), which pops by itself after
+# ~2 s; it draws the guest's bubble from the pose, and gets the guest's BUBBLE (re-announce when the guest first sees it in the
+# scene), so its table agrees with everyone's. The host shows the arrival bubble (BUBBLE flag arrival: no "in a bubble" toast).
+name: mp_bubble_latejoin
+description: a late joiner arrives in a bubble and sees the bubble state that was there before it
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, 'bubble reannounce why=', 'puppet dropin arrive handler']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25"}
+  - name: late
+    delay: 150
+    seconds: 150
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect guest /\[mp\] bubble on slot=1 /'
+  - 'expect host /\[mp\] slot 2 joined name=late /'
+  # the late joiner: drop-in, arrives in a bubble beside the host, the bubble pops by itself (arrival)
+  - 'expect late /\[mp\] puppet dropin self serial=\d+/'
+  - 'expect late /\[mp\] bubble arrival why=dropin to=0(?! refused)/'
+  - 'expect late /\[mp\] puppet dropin arrive handler to=0/'
+  - 'expect late /\[mp\] bubble off slot=2 by=-1 land=0 why=(arrival|touch) .*arrival=1/'
+  - 'expect host /\[mp\] bubble msg from=2 on=1 .*arrival=1/'
+  - 'absent host /\[mp\] ui: toast "late is in a bubble/'
+  # the bubble that was there before: drawn from the pose, and the table gets the guest's BUBBLE (re-announce)
+  - 'expect guest /\[mp\] bubble reannounce why=seen mask=4/'
+  - 'expect late /\[mp\] bubble msg from=1 on=1 /'
+  - 'expect late /\[mp\] bubble remote on slot=1/'
+  - 'absent late /\[mp\] bubble drop BUBBLE/'
+  - 'absent * /\[mp\] flow warp failed/'

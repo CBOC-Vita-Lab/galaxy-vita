@@ -1,0 +1,314 @@
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -733,7 +733,14 @@
+ static uint32_t scene_fail_tries = 0; // Failed attempts in that frame
+ static uint32_t scene_fail_streak = 0; // Failed attempts since the last scene that began
+ 
++#ifdef VP26_SURFACE_RETRY
++static uint32_t vgl_scene_begin_failures = 0; // (patch 0028: every scene begin that failed, whatever the cause)
++uint32_t vglGetSceneBeginFailures(void) { return vgl_scene_begin_failures; }
++#endif
+ static GLboolean scene_begin_failed(void) {
++#ifdef VP26_SURFACE_RETRY
++	vgl_scene_begin_failures++;
++#endif
+ 	needs_end_scene = GL_FALSE; // No scene is open: sceGxmEndScene must not follow
+ 	needs_scene_reset = GL_TRUE; // The next call starts the scene again
+ 	if (scene_fail_streak == 0 || scene_fail_frame != vgl_framecount) {
+@@ -813,16 +820,44 @@
+ // the texture differs in size or format, the framebuffer has no colour texture, or multisampling is on. Armed for one scene
+ // begin only (scene_reset's); binding or attaching does not disarm it, a begin on another framebuffer does. Counter:
+ // vglGetColorLoadsFrom().
++#ifdef VP26_SURFACE_RETRY
++// Patch 0028 (VP26_SURFACE_RETRY): a scene begun with a colour surface this file changed (a cheap load, patch 0021 / bit 16; a load from
++// another buffer, 0019) that sceGxmBeginScene refuses is begun again AT ONCE with the surface as it is, and the changes are not made
++// again (vglColorLoadSkip / vglColorLoadFrom then return GL_FALSE). Without this a refusal went to scene_begin_failed: the draw that
++// began the scene (the clear, the draw-back corner) was dropped, and with three refusals in one frame (the EFB's, a pass's and the
++// display's cheap loads) the frame's attempts were used up and the REST OF THE FRAME was not submitted - the suspected cause of the
++// console's GXV_COLOR_LOADSKIP=7 result (3.6 ms less 3D than the bits alone add up to, stale pixels) and of GXV_VGL_LOADFROM's black
++// screen (the dropped draw-back corner, the scene then loading the fresh buffer's own memory). Counted and the first refusal logged
++// with GXM's error: vglGetColorSurfaceRefusals().
++static GLboolean vgl_color_mods_broken = GL_FALSE;
++static uint32_t vgl_color_surface_refusals = 0;
++uint32_t vglGetColorSurfaceRefusals(void) { return vgl_color_surface_refusals; }
++static void vgl_color_surface_refused(int r, const char *where) {
++	if (!vgl_color_surface_refusals)
++		vgl_log("%s:%d sceGxmBeginScene refused a changed colour surface on %s (%s): begun again as it is; no cheap / redirected loads from now on.\n",
++			__FILE__, __LINE__, where, get_gxm_error_literal(r));
++	vgl_color_surface_refusals++;
++	vgl_color_mods_broken = GL_TRUE;
++}
++#endif
+ static framebuffer *vgl_color_load_fb = NULL;
+ static void *vgl_color_load_src = NULL;
+ static uint32_t vgl_color_loads_from = 0;
+ uint32_t vglGetColorLoadsFrom(void) { return vgl_color_loads_from; }
++#ifdef VP26_LOADFROM_INIT
++static uint32_t vgl_color_load_from_failures = 0; // (patch 0028: armed loads that fell back to the surface's own load)
++uint32_t vglGetColorLoadFromFailures(void) { return vgl_color_load_from_failures; }
++#endif
+ GLboolean vglColorLoadFrom(GLuint tex_id) {
+ 	vgl_color_load_fb = NULL;
+ 	vgl_color_load_src = NULL;
+ 	framebuffer *fb = active_write_fb;
+ 	if (!fb || !fb->tex || tex_id == 0 || tex_id >= TEXTURES_NUM || msaa_mode != SCE_GXM_MULTISAMPLE_NONE)
+ 		return GL_FALSE;
++#ifdef VP26_SURFACE_RETRY
++	if (vgl_color_mods_broken)
++		return GL_FALSE;
++#endif
+ 	texture *t = &texture_slots[tex_id];
+ 	if (t == fb->tex || !t->status)
+ 		return GL_FALSE;
+@@ -853,13 +888,25 @@
+ static SceGxmColorSurface vgl_color_skip_display_saved;
+ static int vgl_color_skip_display_idx = -1;
+ uint32_t vglGetColorLoadSkips(void) { return vgl_color_load_skips; }
++#ifdef VP26_SKIP_COLOR
++static void *vgl_color_skip_cur = NULL;                  // (patch 0028: the armed scene's texture, zeros when NULL)
++static GLboolean vgl_color_skip_need_rgba8 = GL_FALSE;   // (patch 0028: a colour texture, for RGBA8 surfaces only)
++#endif
+ GLboolean vglColorLoadSkip(GLboolean arm) {
+ 	vgl_color_skip_armed = GL_FALSE;
+ 	vgl_color_skip_fb = NULL;
++#ifdef VP26_SKIP_COLOR
++	vgl_color_skip_cur = NULL; // (a plain arming uses the zero texture; vglColorLoadSkipColor arms its own colour texture directly)
++	vgl_color_skip_need_rgba8 = GL_FALSE;
++#endif
+ 	if (!arm)
+ 		return GL_TRUE; // (disarmed: the host calls it after the clear that began the scene, so a begin that did not happen leaves nothing behind)
+ 	if (msaa_mode != SCE_GXM_MULTISAMPLE_NONE)
+ 		return GL_FALSE;
++#ifdef VP26_SURFACE_RETRY
++	if (vgl_color_mods_broken)
++		return GL_FALSE;
++#endif
+ 	if (active_write_fb && !active_write_fb->tex)
+ 		return GL_FALSE;
+ 	if (!vgl_color_skip_data) {
+@@ -872,12 +919,69 @@
+ 	vgl_color_skip_fb = active_write_fb;
+ 	return GL_TRUE;
+ }
++#ifdef VP26_SKIP_COLOR
++// Patch 0028 (VP26_SKIP_COLOR): vglColorLoadSkipColor(GL_TRUE, rgba) arms the same cheap load with a 32x32 texture that holds one colour
++// (rgba: byte 0 red .. byte 3 alpha) instead of zeros: for a scene that begins with a clear of its whole target to that colour, the
++// tiles then START with exactly what the clear writes, whatever the clear quad itself reaches - the GX semantics of the clear by
++// construction (the console showed GXV_COLOR_LOADSKIP's zero texture leaving a band of pixels that differ). Only colours whose four
++// bytes are each 0 or 255 (exact in any float-to-byte rounding) and only for an RGBA8 (U8U8U8U8_ABGR) surface; otherwise nothing is
++// armed (GL_FALSE) or, at the begin, the surface's own load is made. One 4 KiB texture per colour, made once and never written again
++// (no race with a scene in flight). Disarmed as vglColorLoadSkip: vglColorLoadSkip(GL_FALSE).
++static void *vgl_color_skip_colors[16];
++GLboolean vglColorLoadSkipColor(GLboolean arm, uint32_t rgba) {
++	if (!arm)
++		return vglColorLoadSkip(GL_FALSE);
++	vgl_color_skip_armed = GL_FALSE;
++	vgl_color_skip_fb = NULL;
++	vgl_color_skip_cur = NULL;
++	vgl_color_skip_need_rgba8 = GL_FALSE;
++	if (msaa_mode != SCE_GXM_MULTISAMPLE_NONE)
++		return GL_FALSE;
++#ifdef VP26_SURFACE_RETRY
++	if (vgl_color_mods_broken)
++		return GL_FALSE;
++#endif
++	if (active_write_fb && !active_write_fb->tex)
++		return GL_FALSE;
++	uint32_t idx = 0;
++	for (int i = 0; i < 4; ++i) {
++		const uint32_t b = (rgba >> (8 * i)) & 0xFFu;
++		if (b != 0 && b != 0xFFu)
++			return GL_FALSE;
++		idx |= (b ? 1u : 0u) << i;
++	}
++	if (!vgl_color_skip_colors[idx]) {
++		uint32_t *p = (uint32_t *)gpu_alloc_mapped_aligned_for_gpu(SCE_GXM_TEXTURE_ALIGNMENT, 4096);
++		if (!p)
++			return GL_FALSE;
++		for (int i = 0; i < 1024; ++i)
++			p[i] = rgba; // (U8U8U8U8_ABGR: red in the low byte, as GL_RGBA bytes)
++		vgl_color_skip_colors[idx] = p;
++	}
++	vgl_color_skip_armed = GL_TRUE;
++	vgl_color_skip_fb = active_write_fb;
++	vgl_color_skip_cur = vgl_color_skip_colors[idx];
++	vgl_color_skip_need_rgba8 = GL_TRUE;
++	return GL_TRUE;
++}
++#endif
+ // The background texture of `surface` made cheap (32x32, 4 bytes a pixel at most: the data is 4096 bytes).
+ static GLboolean vgl_color_skip_apply(SceGxmColorSurface *surface) {
+ 	SceGxmTextureFormat fmt = sceGxmTextureGetFormat(&surface->backgroundTex);
+ 	SceGxmTexture t;
++#ifdef VP26_SKIP_COLOR
++	void *data = vgl_color_skip_cur ? vgl_color_skip_cur : vgl_color_skip_data;
++	const GLboolean needRgba8 = vgl_color_skip_need_rgba8;
++	vgl_color_skip_cur = NULL;
++	vgl_color_skip_need_rgba8 = GL_FALSE;
++	if (needRgba8 && fmt != SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR)
++		return GL_FALSE; // (a colour texture only for the format its bytes are written in: the surface's own load)
++	if (sceGxmTextureInitSwizzled(&t, data, fmt, 32, 32, 1) != 0)
++		return GL_FALSE;
++#else
+ 	if (sceGxmTextureInitSwizzled(&t, vgl_color_skip_data, fmt, 32, 32, 1) != 0)
+ 		return GL_FALSE;
++#endif
+ 	sceGxmTextureSetUAddrMode(&t, SCE_GXM_TEXTURE_ADDR_REPEAT);
+ 	sceGxmTextureSetVAddrMode(&t, SCE_GXM_TEXTURE_ADDR_REPEAT);
+ 	sceGxmTextureSetMinFilter(&t, SCE_GXM_TEXTURE_FILTER_POINT);
+@@ -931,11 +1035,36 @@
+ 		return &fb->colorbuffer;
+ 	}
+ 	surface = fb->colorbuffer;
++#ifdef VP26_LOADFROM_INIT
++	// (patch 0028: the background descriptor is made anew for the other buffer - as patch 0021's cheap load makes its own, which the
++	// console proved GXM uses (GXV_COLOR_LOADSKIP: 3.6 ms less 3D at 720x404) - instead of sceGxmTextureSetData on the descriptor
++	// sceGxmColorSurfaceInit made, whose return was never looked at: the black screen of GXV_VGL_LOADFROM is most likely that call
++	// not taking, the scene then loading the fresh buffer's own memory (a new allocation). Any failure: the surface's own load.)
++	{
++		void *src = vgl_color_load_src;
++		vgl_color_load_fb = NULL;
++		vgl_color_load_src = NULL;
++		SceGxmTexture t;
++		const SceGxmTextureFormat fmt = sceGxmTextureGetFormat(&fb->colorbuffer.backgroundTex);
++		if (fmt != SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR || sceGxmTextureInitLinear(&t, src, fmt, fb->width, fb->height, 1) != 0) {
++			vgl_color_load_from_failures++;
++			return &fb->colorbuffer;
++		}
++		sceGxmTextureSetMinFilter(&t, SCE_GXM_TEXTURE_FILTER_POINT);
++		sceGxmTextureSetMagFilter(&t, SCE_GXM_TEXTURE_FILTER_POINT);
++		sceGxmTextureSetUAddrMode(&t, SCE_GXM_TEXTURE_ADDR_CLAMP);
++		sceGxmTextureSetVAddrMode(&t, SCE_GXM_TEXTURE_ADDR_CLAMP);
++		surface.backgroundTex = t;
++		vgl_color_loads_from++;
++		return &surface;
++	}
++#else
+ 	sceGxmTextureSetData(&surface.backgroundTex, vgl_color_load_src);
+ 	vgl_color_load_fb = NULL;
+ 	vgl_color_load_src = NULL;
+ 	vgl_color_loads_from++;
+ 	return &surface;
++#endif
+ }
+ #define VGL_COLOR_LOAD(fb) vgl_color_load(fb)
+ #define VGL_COLOR_SKIP_DISPLAY_RESTORE() vgl_color_skip_display_restore()
+@@ -946,6 +1075,46 @@
+ #define VGL_COLOR_SKIP_DISPLAY_BEGIN()
+ #endif
+ 
++#ifdef VP26_VALID_REGION
++// Patch 0028 (VP26_VALID_REGION): vglSetNextSceneValidRegion(xMax, yMax) (pixels of the target, inclusive) arms the next scene begun on the
++// framebuffer object bound for drawing now to be begun with the SceGxmValidRegion (0, 0) - (xMax, yMax) (rounded out to whole 32-pixel
++// tiles, clipped to the target; GXM's valid region always starts at the origin): GXM then processes only those tiles (loads, shades and
++// stores nothing else). The host asks it only for a scene none of whose pixels outside the region is ever read (the Galaxy back end's
++// GXV_HOIST_GRID pass). If sceGxmBeginScene refuses the region, the scene is begun at once again without one (the whole target: what it
++// was before), the refusal is counted and logged once, and no region is ever asked again. One begin only; a begin on another target drops
++// it. Counters: vglGetValidRegionScenes(), vglGetValidRegionRefusals().
++static framebuffer *vgl_vr_fb = NULL;
++static SceGxmValidRegion vgl_vr;
++static GLboolean vgl_vr_broken = GL_FALSE;
++static uint32_t vgl_vr_scenes = 0, vgl_vr_refusals = 0;
++uint32_t vglGetValidRegionScenes(void) { return vgl_vr_scenes; }
++uint32_t vglGetValidRegionRefusals(void) { return vgl_vr_refusals; }
++GLboolean vglSetNextSceneValidRegion(GLint xMax, GLint yMax) {
++	vgl_vr_fb = NULL;
++	framebuffer *fb = active_write_fb;
++	if (vgl_vr_broken || !fb || xMax < 0 || yMax < 0)
++		return GL_FALSE;
++	xMax |= 31;
++	yMax |= 31;
++	if (xMax >= (GLint)fb->width) xMax = fb->width - 1;
++	if (yMax >= (GLint)fb->height) yMax = fb->height - 1;
++	if (xMax == (GLint)fb->width - 1 && yMax == (GLint)fb->height - 1)
++		return GL_FALSE; // (the whole target: nothing to gain)
++	vgl_vr.xMax = xMax;
++	vgl_vr.yMax = yMax;
++	vgl_vr_fb = fb;
++	return GL_TRUE;
++}
++static const SceGxmValidRegion *vgl_valid_region(framebuffer *fb) {
++	const GLboolean mine = vgl_vr_fb == fb && !vgl_vr_broken;
++	vgl_vr_fb = NULL;
++	return mine ? &vgl_vr : NULL;
++}
++#define VGL_VALID_REGION(fb) vgl_valid_region(fb)
++#else
++#define VGL_VALID_REGION(fb) ((const SceGxmValidRegion *)NULL)
++#endif
++
+ GLboolean scene_reset(void) {
+ 	if (in_use_framebuffer != active_write_fb || needs_scene_reset || dirty_framebuffer || dirty_query) {
+ 		// The attempts of this frame are used up: nothing is touched, nothing is submitted
+@@ -1010,6 +1179,14 @@
+ 				gxm_sync_objects[gxm_back_buffer_index],
+ 				&gxm_color_surfaces[gxm_back_buffer_index],
+ 				&gxm_depth_stencil_surface);
++#ifdef VP26_SURFACE_RETRY
++			if (r && vgl_color_skip_display_idx >= 0) { // (the cheap load refused: the surface as it was, at once)
++				vgl_color_surface_refused(r, "the display");
++				vgl_color_skip_display_restore();
++				r = sceGxmBeginScene(gxm_context, 0, gxm_render_target, NULL, NULL, gxm_sync_objects[gxm_back_buffer_index],
++					&gxm_color_surfaces[gxm_back_buffer_index], &gxm_depth_stencil_surface);
++			}
++#endif
+ #ifdef LOG_ERRORS
+ 			if (r) {
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on display.\n", __FILE__, __LINE__, get_gxm_error_literal(r));
+@@ -1070,13 +1247,35 @@
+ #ifdef RECYCLE_RENDERTARGETS
+ 			fbo_rt->last_frame = vgl_framecount;
+ #endif
+-			int r = sceGxmBeginScene(gxm_context, 0, fbo_rt->rt,
++			SceGxmRenderTarget *scene_rt = fbo_rt->rt;
+ #else
+-			int r = sceGxmBeginScene(gxm_context, 0, active_write_fb->target,
++			SceGxmRenderTarget *scene_rt = active_write_fb->target;
++#endif
++			const SceGxmValidRegion *scene_vr = VGL_VALID_REGION(active_write_fb);
++			SceGxmColorSurface *scene_cs = VGL_COLOR_LOAD(active_write_fb);
++			SceGxmDepthStencilSurface *scene_ds = VGL_MASK_KEEP(active_write_fb->depthbuffer_ptr);
++			int r = sceGxmBeginScene(gxm_context, 0, scene_rt, scene_vr, NULL, NULL, scene_cs, scene_ds);
++#ifdef VP26_VALID_REGION
++			if (r && scene_vr) { // (refused with a valid region: once more without it - the whole target, as before; never asked again)
++				const int r0 = r;
++				r = sceGxmBeginScene(gxm_context, 0, scene_rt, NULL, NULL, NULL, scene_cs, scene_ds);
++				if (!r) {
++					vgl_vr_broken = GL_TRUE;
++					vgl_vr_refusals++;
++					vgl_log("%s:%d sceGxmBeginScene refused the valid region 0,0-%u,%u (%s): whole targets from now on.\n", __FILE__, __LINE__,
++						(unsigned)scene_vr->xMax, (unsigned)scene_vr->yMax, get_gxm_error_literal(r0));
++				}
++				scene_vr = NULL;
++			} else if (scene_vr)
++				vgl_vr_scenes++;
++#endif
++#ifdef VP26_SURFACE_RETRY
++			if (r && scene_cs != &active_write_fb->colorbuffer) { // (a changed surface refused: as it is, at once)
++				vgl_color_surface_refused(r, "a framebuffer object");
++				scene_cs = &active_write_fb->colorbuffer;
++				r = sceGxmBeginScene(gxm_context, 0, scene_rt, scene_vr, NULL, NULL, scene_cs, scene_ds);
++			}
+ #endif
+-					NULL, NULL, NULL,
+-					VGL_COLOR_LOAD(active_write_fb),
+-					VGL_MASK_KEEP(active_write_fb->depthbuffer_ptr));
+ #ifdef LOG_ERRORS
+ 			if (r)
+ 				vgl_log("%s:%d Scene reset failed due to sceGxmBeginScene erroring (%s) on framebuffer 0x%08X.\n", __FILE__, __LINE__, get_gxm_error_literal(r), active_write_fb);
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1393,6 +1393,13 @@
+ uint32_t vglGetMaskSkips(void); /* MASK_SKIP builds */
+ GLint vglFramebufferDepthTexture(GLuint fb); /* DEPTH_SAMPLE builds: the row width in samples, 0 when refused */
+ void vglSetNextSceneDepthModes(GLboolean load, GLboolean store); /* DEPTH_HINT builds */
++GLboolean vglSetNextSceneValidRegion(GLint xMax, GLint yMax); /* VP26_VALID_REGION builds (patch 0028): the region (0,0)-(xMax,yMax) */
++uint32_t vglGetValidRegionScenes(void);
++uint32_t vglGetValidRegionRefusals(void);
++GLboolean vglColorLoadSkipColor(GLboolean arm, uint32_t rgba); /* VP26_SKIP_COLOR builds (patch 0028) */
++uint32_t vglGetColorLoadFromFailures(void); /* VP26_LOADFROM_INIT builds (patch 0028) */
++uint32_t vglGetColorSurfaceRefusals(void); /* VP26_SURFACE_RETRY builds (patch 0028) */
++uint32_t vglGetSceneBeginFailures(void); /* VP26_SURFACE_RETRY builds (patch 0028) */
+ // ---- GPU timers (builds with GPU_TIMERS only: source/rt_gpu.c; the names follow the Strikers port's vitaGL) ----
+ #define VGL_RT_GPU_TIMERS 0x8 // a fragment notification per scene and a watcher thread (priority, affinity): GPU completion of every scene
+ void vglRtSetup(uint32_t flags, int watcher_priority, int watcher_affinity);

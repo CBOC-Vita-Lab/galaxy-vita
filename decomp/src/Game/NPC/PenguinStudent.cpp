@@ -1,6 +1,8 @@
 #include "Game/NPC/PenguinStudent.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/LiveActorGroupArray.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/LiveActor/RailRider.hpp"
 #include "Game/NPC/Penguin.hpp"
 #include "Game/NPC/TalkMessageFunc.hpp"
 #include "Game/Util/ActorMovementUtil.hpp"
@@ -23,6 +25,9 @@ namespace NrvPenguinStudent {
 };  // namespace NrvPenguinStudent
 
 PenguinStudent::PenguinStudent(const char* pName) : NPCActor(pName) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
     mRemovableTurtle = nullptr;
     mActor = nullptr;
     _15C = -1;
@@ -112,8 +117,8 @@ void PenguinStudent::exeSwim() {
         MR::setBckFrameAtRandom(this);
     }
     f32 speed = ((200.0f * MR::getRailCoordSpeed(mActor)) / 7.0f);
-    MR::setRailCoord(this, MR::getRailCoord(mActor) - _168);
-    MR::moveCoordAndFollowTrans(this);
+    mRailRider->moveFromCoord(MR::getRailCoord(mActor) - _168);
+    MR::moveTransToCurrentRailPos(this);
     MR::followRailPose(this, _114, 1.0f);
     TVec3f v19, v20, v21;
     MR::calcUpVec(&v20, this);

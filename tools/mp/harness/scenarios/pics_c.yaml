@@ -1,0 +1,13 @@
+# integ (13 Nov): pictures of the single-console menus (inputs/pics_c.txt). Not a test: nocrash only.
+name: pics_c
+description: pictures - Safe Copies with two real copies and the Bring Back a Copy list
+seconds: 260
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@pics_c"
+    env: {SMG_KEYBOARD_CODE: ZZZZZ, SMG_MP_LOOK: 0}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'

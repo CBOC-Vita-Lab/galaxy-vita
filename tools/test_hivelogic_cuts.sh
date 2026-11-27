@@ -15,3 +15,10 @@ flags=(-std=gnu++17 -O1 -DTARGET_PC=1 -DNDEBUG=1 -DVERSION=0 -fshort-wchar -fsig
 # (the units' other callees, never reached here, are left unresolved)
 "${GAMECXX:-clang++}" "$out/hivelogic_cuts.o" "$out/SensorHitChecker.o" "$out/AreaForm.o" -no-pie -Wl,--unresolved-symbols=ignore-all -o "$out/hivelogic_cuts"
 "$out/hivelogic_cuts"
+# update23: GXV_SENSOR_BP's negative control (`bash tools/test_hivelogic_cuts.sh <dir> neg`): the broad phase built with a margin
+# too narrow (PORT_SENSOR_BP_NEG) must make the sensor-bp checks FAIL.
+if [ "${2:-}" = "neg" ]; then
+  "${GAMECXX:-clang++}" "${flags[@]}" -DPORT_SENSOR_BP_NEG=1 -c "$D/src/Game/LiveActor/SensorHitChecker.cpp" -o "$out/SensorHitCheckerNeg.o"
+  "${GAMECXX:-clang++}" "$out/hivelogic_cuts.o" "$out/SensorHitCheckerNeg.o" "$out/AreaForm.o" -no-pie -Wl,--unresolved-symbols=ignore-all -o "$out/hivelogic_cuts_neg"
+  if "$out/hivelogic_cuts_neg"; then echo "NEGATIVE CONTROL DID NOT FAIL"; exit 1; else echo "negative control failed as it must"; fi
+fi

@@ -1,0 +1,21 @@
+# BASELINE. From the Observatory, PETARI_STAGE jumps to Good Egg scenario 1 (after 120 gameplay turns), then the player
+# walks forward (stick up) for 20 s with a few jumps; screenshots every 4 s; no crash; the position changes.
+name: b_goodegg_walk
+description: PETARI_STAGE jump into EggStarGalaxy:1, walk 20 s, screenshots, no crash
+seconds: 160
+env: {PETARI_GAME_CLOCK: 1, PETARI_POSLOG: 1, PETARI_SHOT_MS: 4000}
+processes:
+  - name: game
+    input: "@file2_observatory,100:A,103:A,106:A,120-140:SY=1,125:A,130:A,135:A"
+    env: {PETARI_STAGE: "EggStarGalaxy:1"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|cannot alloc memory/'
+  - 'expect * /port: jumping to EggStarGalaxy scenario 1/ within 110s'
+  # after the jump: Mario in Good Egg, moving (at least 5 different positions in the walk)
+  - 'distinct * /player at (-?\d+\.\d -?\d+\.\d -?\d+\.\d)/ >= 8'
+  - 'expect * /player at (?!2825\.0 787\.3 -3750\.0)(?!0\.0 0\.0 0\.0)/ within 60s after * /port: jumping to EggStarGalaxy/'
+  - 'shots * >= 30'

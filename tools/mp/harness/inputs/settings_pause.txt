@@ -1,0 +1,43 @@
+# settingsnative (15 Nov): single player file 2 into the Observatory, the pause menu (Plus), then Settings opened by the harness-only trigger
+# (SMG_SETTINGS_PAUSE_TEST=1, 150 frames after the pause is up), a tour of every screen, and back to the pause menu.
+# Needs SMG_SETTINGS_CAPTURE_TEST=1 (a raw pad with nothing held: the desktop has none) for the capture screen. PETARI_GAME_CLOCK=1, PETARI_SHOT_MS=1000.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose single/ ~36
+title+8-8.5:A|B
+entry+3-3.2:A                # entry: Single Player (the pointer rests mid-screen: it chooses nothing)
+chose+12-20:PX=0.25|PY=0.3   # pointer on file 2
+chose+15-15.2:A
+chose+28-36:PX=0.52|PY=0.78  # "Play This File"
+chose+31-31.2:A
+mark play /mem scene start probe galaxy=AstroGalaxy/ ~60
+mark open /settings: opened \(pause\)/ ~80
+play+18-18.3:PLUS            # the pause menu
+open+3-3.2:RIGHT             # Settings over the pause: Picture
+open+5-5.2:DOWN              # Camera
+open+6.5-6.7:A
+open+9-9.2:RIGHT             # Camera Zoom
+open+10.5-10.7:B
+open+12-12.2:DOWN            # Controls
+open+13.5-13.7:A
+open+16-16.2:DOWN
+open+17.5-17.7:DOWN
+open+19-19.2:DOWN
+open+20.5-20.7:DOWN
+open+22-22.2:DOWN            # Change Buttons
+open+23.5-23.7:A             # the list of moves
+open+26-26.2:A               # capture: "press the button you want"
+open+34-34.2:B               # (times out into the pick list) back
+open+36-36.2:B               # Controls
+open+37.5-37.7:B             # Settings
+open+39-39.2:DOWN            # More
+open+40.5-40.7:A
+open+43-43.2:DOWN
+open+44.5-44.7:B
+open+46-46.2:DOWN
+open+47.5-47.7:DOWN
+open+49-49.2:A               # Put Everything Back: the question
+open+52-52.2:B               # No
+open+54-54.2:B               # Settings closes (or the leave question)
+open+58-58.2:A               # Save (if asked): back to the pause menu
+open+62-62.2:PLUS

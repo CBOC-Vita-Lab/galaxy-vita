@@ -19,6 +19,11 @@ void SingleEmitter::deleteEmitter() {
     }
 }
 
+#ifdef TARGET_PC
+// prewarm24 (GXV_PREWARM, decomp JPAEmitterManager.cpp): the effects a stage's actors set up, for the warm-up behind its closed screen
+extern "C" void port_prewarm_note_effect(unsigned resUsrIdx, unsigned group, int oneTime) __attribute__((weak));
+#endif
+
 void SingleEmitter::scanParticleEmitter(EffectSystem* pSystem) {
     ParticleEmitter* emitter;
     if (mSpawn == SINGLE_EMITTER_UNDEF_SPAWN) {
@@ -26,6 +31,11 @@ void SingleEmitter::scanParticleEmitter(EffectSystem* pSystem) {
         mSpawn = emitter->isContinuousParticle() ? SINGLE_EMITTER_CONTINUOUS_SPAWN : SINGLE_EMITTER_ONE_TIME_SPAWN;
         pSystem->forceDeleteEmitter(emitter);
     }
+#ifdef TARGET_PC
+    if (port_prewarm_note_effect) {
+        port_prewarm_note_effect(_4, mGroupId, mSpawn == SINGLE_EMITTER_ONE_TIME_SPAWN ? 1 : 0);
+    }
+#endif
 }
 
 bool SingleEmitter::isOneTime() const {

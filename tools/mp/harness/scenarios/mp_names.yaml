@@ -1,0 +1,26 @@
+# harness3: long and accented names (MP_NAME_BYTES = 16 BYTES: "Ångström Müller" is cut at 16 bytes) in tags, toasts and the
+# "Watching ..." label: g1 falls into a bubble 25 s after the scene starts and watches the host; g2 is a third player.
+# Look at the screenshots (name tags clipped? toasts, "Watching <name>" label overflowing?).
+name: mp_names
+description: "3 players with 10-16 character names with accents: tags, toasts, Watching label"
+seconds: 240
+requires: {strings: [SMG_MP_AUTO_MODE, 'spectate']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_NAME: "Ångström Müller"}
+  - name: g1
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_NAME: "Jürgen Ñuñoz", SMG_MP_TEST_DIE: "25"}
+  - name: g2
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, SMG_MP_NAME: "Chloé Brûlé"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] slot [12] joined name=\S/'
+  - 'expect g1 /\[mp\] bubble on slot=1 /'
+  - 'expect g1 /\[mp\] spectate: /'
+  - 'absent * /Assertion|OSPanic|FATAL/'

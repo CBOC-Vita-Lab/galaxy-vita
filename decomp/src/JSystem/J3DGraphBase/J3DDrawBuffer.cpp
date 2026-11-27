@@ -178,23 +178,51 @@ void J3DDrawBuffer::draw() const {
     (this->*func)();
 }
 
+// GXV_DRAW_PREFETCH (game24, default 0): the packets of a draw buffer are scattered through the heap, and the draw of one packet (material
+// load, display lists, shape draws) is the only work between two reads of the chain; the next packet's first lines are asked for before
+// the current packet is drawn. A hint only: the chain is still read from the current packet after its draw, as before, nothing else changes.
+#ifdef TARGET_PC
+extern "C" int port_draw_prefetch_on(void);
+extern "C" int port_draw_prof_on(void);
+extern "C" void port_draw_prof_count(int what, unsigned n);
+#define PORT_DRAW_PF(pk) do { if (pf) { J3DPacket* pfn = (pk)->getNextPacket(); if (pfn != nullptr) { __builtin_prefetch(pfn, 0, 3); __builtin_prefetch(reinterpret_cast< char* >(pfn) + 32, 0, 3); ++pfCount; } } } while (0)
+#else
+#define PORT_DRAW_PF(pk) do {} while (0)
+#endif
+
 void J3DDrawBuffer::drawHead() const {
     u32 size = mEntryTableSize;
     J3DPacket** buf = mpBuffer;
+#ifdef TARGET_PC
+    const bool pf = port_draw_prefetch_on() != 0;
+    unsigned pfCount = 0;
+#endif
 
     for (u32 i = 0; i < size; i++) {
         for (J3DPacket* packet = buf[i]; packet != nullptr; packet = packet->getNextPacket()) {
+            PORT_DRAW_PF(packet);
             packet->draw();
         }
     }
+#ifdef TARGET_PC
+    if (pfCount != 0 && port_draw_prof_on() != 0) port_draw_prof_count(19, pfCount);
+#endif
 }
 
 void J3DDrawBuffer::drawTail() const {
+#ifdef TARGET_PC
+    const bool pf = port_draw_prefetch_on() != 0;
+    unsigned pfCount = 0;
+#endif
     for (int i = mEntryTableSize - 1; i >= 0; i--) {
         for (J3DPacket* packet = mpBuffer[i]; packet != nullptr; packet = packet->getNextPacket()) {
+            PORT_DRAW_PF(packet);
             packet->draw();
         }
     }
+#ifdef TARGET_PC
+    if (pfCount != 0 && port_draw_prof_on() != 0) port_draw_prof_count(19, pfCount);
+#endif
 }
 
 void J3DDrawBuffer::calcZRatio() {

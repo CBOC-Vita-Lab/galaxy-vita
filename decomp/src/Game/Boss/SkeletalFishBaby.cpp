@@ -327,7 +327,7 @@ bool SkeletalFishBaby::isAttackable() const {
 
 bool SkeletalFishBaby::isStarPointerPointing() const {
     for (u32 i = 0; i < ARRAY_SIZE(mStarPieceTargets); i++) {
-        if (MR::isStarPointerPointing2POnPressButton(mStarPieceTargets[i], "\x8e\xe3", true, false)) {
+        if (MR::isStarPointerPointing2POnPressButtonNoMp(mStarPieceTargets[i], "\x8e\xe3", true, false)) {
             return true;
         }
     }

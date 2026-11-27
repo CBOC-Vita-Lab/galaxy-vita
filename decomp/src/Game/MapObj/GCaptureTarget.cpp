@@ -134,11 +134,23 @@ void GCaptureTarget::endClipped() {
     emitNerveEffect();
 }
 
+#ifdef TARGET_PC
+extern "C" void port_zoom_relax_request(void);  // (GXV_ZOOM_PULLSTAR, zoomclip23: Game/Camera/CameraContext.cpp)
+#endif
+
 void GCaptureTarget::control() {
     if (mRailMover != nullptr) {
         mRailMover->movement();
         mPosition.set(mRailMover->_28);
     }
+#ifdef TARGET_PC
+    // (zoomclip23) Mario is in this Pull Star's range (pointable, pointed at, or pulling): the handheld zoom eases to 1.0, so the star can
+    // be pointed at where the game's camera framed it (GXV_ZOOM_PULLSTAR).
+    if (isNerve(GET_NERVE(GCaptureTarget, GCaptureTargetNrvPointable)) || isNerve(GET_NERVE(GCaptureTarget, GCaptureTargetNrvHitPointer)) ||
+        isNerve(GET_NERVE(GCaptureTarget, GCaptureTargetNrvActive))) {
+        port_zoom_relax_request();
+    }
+#endif
 }
 
 void GCaptureTarget::exeTryDemoAppear() {

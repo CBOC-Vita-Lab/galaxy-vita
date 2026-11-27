@@ -1,0 +1,45 @@
+# Bubbles + host migration (bubble2): host + 2 guests in Good Egg 1, Falls = Bubbles. g2 falls 25 s into the scene (a bubble that
+# floats to a teammate); the host process is killed (SIGKILL, no BYE) 40 s after its scene barrier; the lowest guest slot takes
+# over. The bubbled player gets his BUBBLE to the new host again (re-announce), floats to the one teammate left; then g1 falls
+# too (60 s): everyone is caught, and the NEW host decides it (restart sent with its slot and the new epoch); both consoles run
+# the coordinated restart, nobody is left floating ("alone" restart never needed).
+name: mp_bubble_migrate
+description: a bubble survives a host migration; the new host runs the everyone-caught restart
+seconds: 270
+requires: {strings: [SMG_MP_AUTO_MODE, 'bubble reannounce why=']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 3, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_KILL: 'flow barrier release serial=1 |40|9'}
+  - name: g1
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "62"}
+  - name: g2
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, SMG_MP_TEST_DIE: "25"}
+rules:
+  - '?absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall g1,g2'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot [12] joined name=g[12] .*players=3/'
+  - 'expect g2 /\[mp\] bubble on slot=\d lives=\d+->\d+ out=0/'
+  - 'expect host /\[mp\] bubble msg from=\d on=1/'
+  - 'expect host /harness: kill signal=9/'
+  - 'expect any /\[mp\] host lost: slot \d takes over epoch=\d+ \(old host 0\)/ within 30s after host /harness: kill signal=9/'
+  # the bubble module sees the migration on both guests; the floating g2 sends its BUBBLE again for the new host
+  - 'expect g1 /\[mp\] bubble host now slot=1 epoch=\d+ /'
+  - 'expect g2 /\[mp\] bubble host now slot=1 epoch=\d+ me=\d bubbled=1/'
+  - 'expect g2 /\[mp\] bubble reannounce why=host/'
+  # g1 falls later: everyone caught; the new host (slot 1, epoch 1) sends the restart; both run it
+  - 'expect g1 /\[mp\] bubble on slot=\d/'
+  - 'expect any /\[mp\] bubble restart sent serial=\d+ host=1 epoch=[1-9]/'
+  - 'expect g1,g2 /\[mp\] bubble restart start serial=\d+ why=(host|message)/'
+  - 'expect g1,g2 /\[mp\] bubble restart reload serial=\d+/'
+  - 'absent g1,g2 /\[mp\] bubble restart start serial=\d+ why=alone/'
+  - 'absent g1,g2 /\[mp\] session ended reason=(?!none \(shutdown\))/ before g1,g2 /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'exit g1,g2 == 0'

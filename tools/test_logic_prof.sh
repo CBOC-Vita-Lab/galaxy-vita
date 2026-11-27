@@ -1,0 +1,15 @@
+#!/bin/bash
+# logic23 (8 Nov): host test of GXV_LOGIC_PROF's bookkeeping (platform/src/port/perf.cpp, the real file) under a fake clock
+# (tests/logic_prof.cpp). `bash tools/test_logic_prof.sh [outdir]`. Prints PASS or FAIL.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+out=${1:-$(mktemp -d "${TMPDIR:-/tmp}/logic-prof.XXXXXX")}
+mkdir -p "$out"
+for log in 1 0; do
+    "${CXX:-clang++}" -std=c++20 -O1 -g -DPORT_LOGGING=$log -I"$root/platform/include" -I"$root/decomp/libs/RVL_SDK/include" \
+        -c "$root/platform/src/port/perf.cpp" -o "$out/perf$log.o"
+    "${CXX:-clang++}" -std=c++20 -O1 -g -I"$root/platform/include" -c "$root/tests/logic_prof.cpp" -o "$out/test.o"
+    "${CXX:-clang++}" "$out/test.o" "$out/perf$log.o" -pthread -no-pie -Wl,--unresolved-symbols=ignore-all -o "$out/logic_prof$log"
+    echo "== PORT_LOGGING=$log"
+    "$out/logic_prof$log"
+done

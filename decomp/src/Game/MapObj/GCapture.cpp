@@ -141,7 +141,16 @@ void GCapture::draw() const {
     mCaptureRibbon->draw();
 }
 
+#ifdef TARGET_PC
+extern "C" void port_zoom_relax_request(void);  // (GXV_ZOOM_PULLSTAR, zoomclip23: Game/Camera/CameraContext.cpp)
+#endif
+
 void GCapture::control() {
+#ifdef TARGET_PC
+    if (_108 != nullptr) {
+        port_zoom_relax_request();  // (zoomclip23: Mario is held by a Pull Star; the next one must be pointable: zoom 1.0)
+    }
+#endif
     if (mGuidanceTime > 0) {
         MR::requestBlueStarGuidance();
         mGuidanceTime--;

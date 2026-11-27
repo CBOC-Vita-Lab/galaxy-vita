@@ -13,7 +13,8 @@ so the flag set is exactly the one of the 1,834 game units) but
 usage: vita_runtime_gen_vgx.py <galaxy-root> <vita-source-build-dir> <runtime-build-dir> <vitagl-deps-dir> [commit]
 
 Environment: VITA_PGO_PROFILE=<merged .profdata> compiles the renderer's units (platform/vgx/src, platform/src/gx) with
--fprofile-use (build.py --pgo-profile sets it).
+-fprofile-use (build.py --pgo-profile sets it).  VITA_PGO_GENERATE=1 compiles those same units with -fprofile-generate instead (the
+instrumented build that records a profile on the console, tools/pgo/README.md "Record on the console"); a profile is then ignored.
 """
 import json
 import os
@@ -48,8 +49,8 @@ def base_command(entry):
         if argument in ("-o", "-c", "-MF", "-MT", "-MQ"):
             index += 2
             continue
-        if argument in ("-MD", "-MMD") or argument.startswith(("-fprofile-use", "-fprofile-instr-use")):
-            # (a game-unit profile does not describe the runtime's files)
+        if argument in ("-MD", "-MMD") or argument.startswith(("-fprofile-use", "-fprofile-instr-use", "-fprofile-generate")):
+            # (a game-unit profile does not describe the runtime's files; nor does the game units' instrumentation apply to them)
             index += 1
             continue
         command.append(argument)
@@ -106,12 +107,21 @@ def main():
     root, source_build, out, deps = (Path(a).resolve() for a in sys.argv[1:5])
     commit = sys.argv[5] if len(sys.argv) > 5 else "unknown"
     pgo_profile = os.environ.get("VITA_PGO_PROFILE", "")
+    pgo_generate = os.environ.get("VITA_PGO_GENERATE") == "1"
+    if pgo_generate:
+        pgo_profile = ""  # (recording: the units are instrumented, none is compiled with a profile)
     if pgo_profile and not Path(pgo_profile).is_file():
         raise SystemExit(f"VITA_PGO_PROFILE: no such file {pgo_profile}")
     database = json.loads((source_build / "compile_commands.json").read_text())
     bases = {suffix: base_command(next(e for e in database if e["file"].endswith(suffix)))
              for suffix in (".c", ".cpp")}
     vgx_base = strip_forced_includes(bases[".cpp"])
+    # core2: the multiplayer build choices come with the source stage's flags (cmake/MpBuildDefs.cmake on vita_source_options): say
+    # which ones the platform units get, and refuse a database made before they were wired (no MP_BUILD_ID at all)
+    mp_flags = [f for f in bases[".cpp"] if f.startswith(("-DMP_BUILD_ID=", "-DNP_ONLINE_URL="))]
+    if not any(f.startswith("-DMP_BUILD_ID=") for f in mp_flags):
+        raise SystemExit("the source stage's compile database has no -DMP_BUILD_ID: configure the source stage again (build.py source)")
+    print("multiplayer build flags: " + " ".join(mp_flags))
     rows = inventory(root)
     out.mkdir(parents=True, exist_ok=True)
     (out / "inventory.tsv").write_text("source\tselection\tgroup\treason\n" + "".join("\t".join(r) + "\n" for r in rows))
@@ -129,18 +139,25 @@ def main():
         "-DNOMINMAX", "-D__VGX_VITA__", "-DGXV_ABSIDX_DEFAULT=0", "-DGXV_STRICT_DRAW_PROFILE=1",
         f"-I{root / 'platform/vgx/vita/include'}", f"-I{deps / 'include'}", f"-I{root / 'platform/vgx/src'}",
         f"-I{root / 'platform/vgx/third_party'}", f"-I{root / 'platform/vgx/vita'}",
-        f"-DGXV_COMMIT=\"{commit}\"", "-Wno-unused-function",
+        "-Wno-unused-function",
     ]
+    # label32: the build label (it holds the commit, so it changes every build) goes only to the two units that print it; given to
+    # every renderer unit, it made all 24 of them recompile on every build (~1 min a build) for two log lines.
+    label_units = {"platform/vgx/vita/vgx_host_galaxy_vita.cpp", "platform/vgx/vita/vgx_host_vita.cpp"}
     for source, selection, group, reason in rows:
         if selection != "attempt":
             continue
         suffix = ".c" if source.endswith(".c") else ".cpp"
         if group == "vgx":
-            cmd, extra = vgx_base, vgx_defs + shlex.split(os.environ.get("VITA_VGX_CFLAGS", ""))  # (e.g. -O3: later flags win)
+            cmd, extra = vgx_base, vgx_defs + ([f"-DGXV_COMMIT=\"{commit}\""] if source in label_units else []) + shlex.split(os.environ.get("VITA_VGX_CFLAGS", ""))  # (e.g. -O3: later flags win)
         else:
             cmd = bases[suffix]
             extra = ["-DPORT_PLATFORM_CODE=1", f"-I{root / 'vita/runtime'}", "-DPORT_GX_VGX=1", "-DPORT_GX_VGX_ONLY=1",
                      f"-I{root / 'platform/vgx/src'}"]
+            if source.startswith("platform/src/mp/"):
+                # MP3: the session layer sees net/'s C API and VLink (vlink.h, np_glue.h, np_https.h, np_json.h); without it
+                # mp_transport_vlink.cpp / mp_service.cpp compile their "no net/" fallbacks and the Vita has no multiplayer link.
+                extra.append(f"-I{root / 'net/include'}")
             if os.environ.get("VITA_MEM2_MIB"):  # experiment: bigger MEM2 bank (the original Wii value is 64)
                 extra.append(f"-DPORT_MEM2_SIZE={int(os.environ['VITA_MEM2_MIB']) << 20}u")
             if os.environ.get("VITA_MEM1_MIB"):
@@ -153,6 +170,8 @@ def main():
         # and back end and the GX glue they are fed by.  Every other runtime unit stays as it was (the profile has nothing for it).
         if pgo_profile and source.endswith(".cpp") and source.startswith(PGO_PREFIXES):
             extra.append(f"-fprofile-use={pgo_profile}")
+        elif pgo_generate and source.endswith(".cpp") and source.startswith(PGO_PREFIXES):
+            extra.append("-fprofile-generate")  # (the flag of the armhf harness: the profile's function hashes are the same)
         obj = out / "objects" / (source + ".obj")
         lines.append(f"build {obj}: cc {root / source}")
         lines.append(f"  cmd = {esc(shlex.join(cmd))}")

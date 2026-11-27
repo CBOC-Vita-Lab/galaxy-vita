@@ -26,6 +26,7 @@ public:
     void setDemoAppearPos(const TVec3f&);
     bool isEndAppearDemo() const;
     void offAppearDemo();
+    void mpMakeCollectable();  // MP3: a shared star brought to this player: visible, touchable, waiting (any prior state)
     static void setupColor(LiveActor*, const NameObj*, s32);
     static void setupColorAtResultSequence(LiveActor*, bool);
     static void requestPointLight(const LiveActor*, const NameObj*, s32);

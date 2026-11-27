@@ -1,0 +1,37 @@
+# racefix: Star Race with UNEQUAL openings. Same setup as mp_race, but the guest taps A through its galaxy opening camera (inputs/
+# file2_observatory_skipopen) and the host does not, so the guest reaches Action well before the host. Before racefix the guest was released
+# first (its own countdown started at its own Action entry once GO was known, or after 10 s); now the host sends GO only when both are in
+# Action and both start their countdowns on it. Expected: the guest says READY early, ONE GO with ready=3, both countdowns within 1 s.
+# NOT VERIFIED IN A GAME (written for the final pass). GUESSES: how long the opening lasts and when the taps land in it (see the input file);
+# if the host's opening is short enough that both consoles reach Action together this still passes, but then it proves nothing about the skip.
+name: mp_race_unequal
+description: "Star Race, the guest skips its opening and the host does not: one GO, both countdowns together"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 15000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: race, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 25}
+  - name: guest
+    input: "@file2_observatory_skipopen"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 15}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect host /\[mp\] flow session start role=host slot=0 mode=2/'
+  - 'order host /\[mp\] race armed serial=(\d+) galaxy=EggStarGalaxy/ before guest /\[mp\] race armed serial=$1 galaxy=EggStarGalaxy/ within 10s'
+  - 'order guest /\[mp\] race ready sent serial=(\d+)/ before host /\[mp\] race ready from slot=1 serial=$1/ within 2s tol 300ms'
+  - 'expect host /\[mp\] race go sent serial=\d+ ready=3 present=3 waited=\d+ ms/'
+  - 'count host /\[mp\] race go sent serial=\d+/ == 1'
+  - 'count host /\[mp\] race countdown serial=\d+/ == 1'
+  - 'count guest /\[mp\] race countdown serial=\d+/ == 1'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before host /\[mp\] race countdown serial=$1/ within 1s'
+  - 'order host /\[mp\] race go sent serial=(\d+)/ before guest /\[mp\] race countdown serial=$1/ within 3s tol 300ms'
+  - 'order host /\[mp\] race countdown serial=(\d+)/ near guest /\[mp\] race countdown serial=$1/ within 1s'
+  - 'order host /\[mp\] race go serial=(\d+)/ near guest /\[mp\] race go serial=$1/ within 1s'
+  - 'expect guest /\[mp\] race finish slot=1 frames=\d+ star=\d+/ within 90s after guest /\[mp\] race go received/'
+  - 'expect host /\[mp\] race finish slot=0 frames=\d+ star=\d+/ within 90s after host /\[mp\] race go serial/'
+  - 'absent * /\[mp\] (race hold timeout|race drop|star delivered|bad message from slot)/'

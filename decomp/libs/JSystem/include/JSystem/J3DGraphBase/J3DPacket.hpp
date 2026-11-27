@@ -81,6 +81,10 @@ public:
         mpDisplayList[1] = nullptr;
         mSize = 0;
         mMaxSize = 0;
+#ifdef TARGET_PC
+        mPortVer = 0;
+        mPortKinds = 0;
+#endif
     }
 
 
@@ -114,7 +118,21 @@ public:
     /* 0x0 */ void* mpDisplayList[2];
     /* 0x8 */ u32 mSize;
     /* 0xC */ u32 mMaxSize;
-};  // Size: 0x10
+#ifdef TARGET_PC
+    // (GXV_J3DNATIVE, J3DPortNative.hpp) the list's version: bumped at every writer of its bytes (all go through this class), and the
+    // kinds of the animation of the write that last made it (J3DMaterial::diff's flags). Relaxed atomics: a worker may write (GXV_PAR_DL).
+    u32 mPortVer;
+    u32 mPortKinds;
+    void portBump(u32 kinds = 0) {
+        __atomic_fetch_add(&mPortVer, 1u, __ATOMIC_RELAXED);
+        __atomic_store_n(&mPortKinds, kinds, __ATOMIC_RELAXED);  // (the last write's)
+    }
+    // (j3n2, GXV_J3DNATIVE >= 1) after a list was made again in the other buffer (beginDL swapped): when its bytes are those of the
+    // buffer that was current, the swap is undone (the current buffer, which nothing wrote, stays the one called: the same list, the same
+    // address, the same version for the front end) and true is returned; otherwise false (the caller bumps). prevSize: the current list's size.
+    bool portKeepIfSame(u32 prevSize);
+#endif
+};  // Size: 0x10 (0x18 with the port's fields)
 
 class J3DPacket {
 public:
@@ -354,5 +372,14 @@ struct J3DPortListStats {
     u32 diffKept;     // of them, the same bytes as the current buffer: not stored (GXV_J3D_DIFFKEEP)
 };
 extern J3DPortListStats gJ3DPortListStats;
+// GXV_STARBATCH (starbatch25, default 0; J3DPortSort.hpp, DrawBuffer.cpp portSortOrder): 1 = the packets of an opaque drawer are sent with the same
+// differed list adjacent; 2 = verify (starbatch26): sent in the drawer's own order, then the planned order once more into the same recording, and the
+// stream bytes of each packet's shape draw and the differed list in force are compared between the two passes. GXV_STARBATCH_MIN (default 4): fewest active packets
+// of a stretch that are planned. Counted on the thread that draws, logged with the "j3d lists:" line ("starbatch:").
+#include "J3DPortSort.hpp"
+int J3DPortSortMode();
+u32 J3DPortSortMin();
+extern J3DPortSortStats gJ3DPortSortStats;
 extern "C" void port_j3d_picture_begin(void);
+#include <JSystem/J3DGraphBase/J3DPortNative.hpp>
 #endif

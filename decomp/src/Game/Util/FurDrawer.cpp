@@ -234,10 +234,15 @@ void FurDrawer::setupMaterial(DynamicFurParam* pParam) const {
     }
 }
 
-void FurDrawer::setupLayerMaterial(s32 layer) const {
+void FurDrawer::setupLayerMaterial(s32 layer, f32 weight) const {
     f32 alpha = mBrightness.calcValue(layer, mNumLayers);
     f32 brightness = mAlpha.calcValue(mNumLayers - layer - 1, mNumLayers);
     f32 blend = mColorBlend.calcValue(mNumLayers - layer - 1, mNumLayers);
+    if (weight != 1.0f) {
+        // (detail25: a layer's weight: <1 while it fades, >1 for a kept layer that stands for a dropped one; the strands' alpha (K3_G) and the base blend (K3_B))
+        brightness = brightness * weight > 255.0f ? 255.0f : brightness * weight;
+        blend = blend * (weight < 1.0f ? weight : 1.0f);
+    }
     GXColor kColor;
     kColor.r = alpha;
     kColor.g = brightness;
@@ -263,6 +268,42 @@ void FurDrawer::setupLayerMaterial(s32 layer) const {
         GXSetIndTexMtx(GX_ITM_0, mtx, 0);
     }
 }
+
+#ifdef TARGET_PC
+void FurDrawer::calcLayerKonst(s32 layer, f32* pR, f32* pG, f32* pB) const {
+    // (the same three expressions as setupLayerMaterial: the names there are swapped: "alpha" is K3_R, "brightness" K3_G, "blend" K3_B)
+    *pR = mBrightness.calcValue(layer, mNumLayers);
+    *pG = mAlpha.calcValue(mNumLayers - layer - 1, mNumLayers);
+    *pB = mColorBlend.calcValue(mNumLayers - layer - 1, mNumLayers);
+}
+
+void FurDrawer::setupLayerMaterialKonst(s32 layer, f32 r, f32 g, f32 b) const {
+    GXColor kColor;
+    kColor.r = static_cast< u8 >(r < 0.0f ? 0.0f : (r > 255.0f ? 255.0f : r + 0.5f));
+    kColor.g = static_cast< u8 >(g < 0.0f ? 0.0f : (g > 255.0f ? 255.0f : g + 0.5f));
+    kColor.b = static_cast< u8 >(b < 0.0f ? 0.0f : (b > 255.0f ? 255.0f : b + 0.5f));
+    kColor.a = 255;
+    GXSetTevKColor(GX_KCOLOR3, kColor);
+    GXColor color;
+    color.r = mColor.r;
+    color.g = mColor.g;
+    color.b = mColor.b;
+    color.a = 255;
+    GXSetTevColor(GX_TEVREG2, color);
+
+    if (mUseIndirect) {
+        f32 scale = mIndirect.calcValue(layer, mNumLayers);
+        f32 mtx[2][3];
+        mtx[0][0] = scale;
+        mtx[0][1] = 0.0f;
+        mtx[0][2] = 0.0f;
+        mtx[1][0] = 0.0f;
+        mtx[1][1] = scale;
+        mtx[1][2] = 0.0f;
+        GXSetIndTexMtx(GX_ITM_0, mtx, 0);
+    }
+}
+#endif
 
 void FurDrawer::createFurMap() {
     u32 width = mFurTexture->getTexInfo()->mWidth;

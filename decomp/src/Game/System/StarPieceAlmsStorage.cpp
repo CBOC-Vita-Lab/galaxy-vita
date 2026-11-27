@@ -43,7 +43,12 @@ s32 StarPieceAlmsStorage::serialize(u8* pData, u32) const {
     return 32;
 }
 
-s32 StarPieceAlmsStorage::deserialize(const u8* pData, u32) {
+s32 StarPieceAlmsStorage::deserialize(const u8* pData, u32 size) {
+    // MP3: the 32-byte copy must come from inside the chunk (serialize writes exactly 32); 2 = a failed chunk
+    if (size < 32) {
+        return 2;
+    }
+
     MR::copyMemory(mValueArray, pData, 32);
     return 0;
 }

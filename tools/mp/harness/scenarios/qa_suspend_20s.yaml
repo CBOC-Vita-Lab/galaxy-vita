@@ -1,0 +1,48 @@
+# QA-FUNC 14/15. ONE CONSOLE FREEZES FOR 20 s (SIGSTOP/SIGCONT) and the group goes on. Not the console's sleep path (mp_core_suspend / the Vita's
+# power callback, mp_core_vita.cpp, are Vita-only and nothing on a computer calls them: see REPORT.md) but its desktop shadow: no packets, no pump.
+# The host's silent-guest limit is MP_PEER_LOST_MS=15000, so the host REMOVES the guest at +15 s; when the guest wakes ("woke after ... without a pump"
+# mp_core.cpp:1330) the host tells it, sealed ("host says this console was removed", :2267), the guest runs the reconnect (requestEnd(...,true) ->
+# "reconnecting (try 1)" -> "rejoin start") and takes its slot back (rejoin=1). mp_silence2/6 stop at 2 s / 6 s, below every limit. READY.
+name: qa_suspend_20s
+description: "guest frozen 20 s: host removes it at 15 s, it wakes, is told, reconnects, takes slot 1 back, puppets return both ways"
+seconds: 380
+min_speed: 0.4
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_STOP: 'flow barrier release serial=1 |25|20'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit host,guest == 0'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 .*players=2/'
+  - 'expect guest /harness: SIGSTOP for 20(\.0)? s/'
+  - 'expect guest /harness: SIGCONT/'
+  - 'expect host /\[mp\] slot 1 left reason=\S+ \(lost\) players=1/ within 40s after guest /harness: SIGSTOP/'
+  - 'order host /\[mp\] slot 1 left / before guest /\[mp\] woke after \d+ ms without a pump/ within 10s tol 2s'
+  - 'expect guest /\[mp\] woke after \d+ ms without a pump/'
+  - 'expect guest /\[mp\] host says this console was removed/ within 20s after guest /harness: SIGCONT/'
+  - 'expect guest /\[mp\] connection lost reason=\S+/ within 20s after guest /harness: SIGCONT/'
+  - 'order guest /\[mp\] connection lost reason=/ before guest /\[mp\] reconnecting \(try 1\)/ within 5s'
+  - 'expect guest /\[mp\] reconnecting \(try 1\)/ within 20s after guest /harness: SIGCONT/'
+  - 'expect guest /\[mp\] reconnected after=\d+ms/ within 60s after guest /harness: SIGCONT/'
+  - 'absent host /\[mp\] (connection lost|reconnect)/'
+  - 'expect guest /\[mp\] rejoin start conn=wifi session=[0-9a-f]+/'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=1 .*players=2/ within 60s after guest /harness: SIGCONT/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 / within 60s after guest /harness: SIGCONT/'
+  - 'count host /\[mp\] puppet slot=1 appear model=\w+ self=0/ >= 2'
+  - 'count guest /\[mp\] puppet slot=0 appear model=\w+ self=0/ >= 2'
+  - 'absent guest /\[mp\] (host lost: slot \d takes over|following new host)/'
+  - 'absent host /\[mp\] (host lost|session ended reason=(?!none \(shutdown\)))/'
+  - 'absent guest /\[mp\] session ended reason=(?!none \(shutdown\)|timeout)/ before shutdown'
+  - 'count host /\[mp\] slot 1 joined / == 2'
+  - 'metric guest fps >= 3'
+  - 'absent * /\[mp\] (bad message from slot|events lost|queue overflow)/'

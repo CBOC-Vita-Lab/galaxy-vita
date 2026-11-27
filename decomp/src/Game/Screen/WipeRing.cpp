@@ -53,6 +53,11 @@ void WipeRing::draw() const {
     f32 radius = isWipeOut() ? 1.0f - t : t;
     f32 fullyOpen = calcRadius() / calcMaxRadius();
     f32 closed = 1.0f - MR::clamp(fullyOpen > 0.0f ? radius / fullyOpen : 1.0f, 0.0f, 1.0f);
+    // (hitch33 4a) A ring that has finished closing sits in the Close nerve with the "Out" animation at its END: t is 1, isWipeOut() is false, and the line above then
+    // reported a fully closed ring as fully OPEN (radius 1). forceClose (the "In" animation at frame 0) reported 1 already. Closed is closed in both cases.
+    if (isClose()) {
+        closed = 1.0f;
+    }
     port_vr_wipe(mIsCenterOnPlayer ? 1 : 2, closed, 0x000000);
     if (port_vr_diorama()) {
         return;
@@ -65,8 +70,26 @@ void WipeRing::exeClose() {
     updatePlayerPos();
 }
 
+#ifdef TARGET_PC
+extern "C" int port_wipe_open_hold(void) __attribute__((weak));  // (hitch33 5a, GXV_WIPE_OPEN_HOLD: see WipeFade.cpp)
+static const WipeRing* sOpenFromClosed = nullptr;  // (hitch33 5a) the ring whose wipe-in began from the fully closed state (only that one may be held)
+#endif
+
 void WipeRing::exeWipeIn() {
     updatePlayerPos();
+
+#ifdef TARGET_PC
+    // (hitch33 5a) the ring stays fully closed while the port asks: the nerve is entered again, so the step stays 0 and the animation frame stays where a closed ring has it
+    if (MR::isFirstStep(this) && sOpenFromClosed == this) {
+        if (port_wipe_open_hold && port_wipe_open_hold()) {
+            MR::getAnimCtrl(this, 0)->setRate(0.0f);
+            MR::getAnimCtrl(this, 0)->setFrame(0.0f);
+            setNerve(GET_NERVE_ANON(WipeRingNrvWipeIn));
+            return;
+        }
+        sOpenFromClosed = nullptr;
+    }
+#endif
 
     if (MR::isFirstStep(this)) {
         f32 radiusRate = calcRadius() / calcMaxRadius();
@@ -123,6 +146,9 @@ void WipeRing::wipe(s32 frame) {
     if (isNerve(GET_NERVE_ANON(WipeRingNrvClose))) {
         setNerve(GET_NERVE_ANON(WipeRingNrvWipeIn));
         startAnim(::sInAnimName);
+#ifdef TARGET_PC
+        sOpenFromClosed = this;  // (hitch33 5a)
+#endif
     } else if (isNerve(GET_NERVE_ANON(WipeRingNrvWipeIn))) {
         setNerve(GET_NERVE_ANON(WipeRingNrvWipeOut));
         startAnim(::sOutAnimName);

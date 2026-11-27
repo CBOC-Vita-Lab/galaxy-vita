@@ -32,7 +32,8 @@ weights `realesr-general-x4v3.pth` (xinntao/Real-ESRGAN release v0.2.5.0, BSD-3-
     python3 -E -P tools/hdtex/build_pack.py            # about 10 minutes on 2 CPUs
     python3 -E -P tools/hdtex/build_pack.py --list     # only list what would go in
 
-Options: `--data` (the `files/` folder of a flat converted copy; default `cooked/files`, or
+Options: `--psnr-floor` (dB, default 34; 0 = none), `--mip-gamma` (1 = average mips in the
+game's encoded values, default; 2.2 = linear light), `--list`, `--report`, `--selection`, `--threads`, `--data` (the `files/` folder of a flat converted copy; default `cooked/files`, or
 `HDTEX_DATA`), `--out` (default `hdtex-build`), `--model` (default
 `<out>/models/realesr-general-x4v3.pth`), `--scale 2|4`.
 
@@ -65,6 +66,24 @@ its best level. Three rules keep the result faithful to the original at the orig
   below one texel and the CMPR block noise it removes.
 - On/off alpha (all CMPR with transparency) stays on/off: the HD alpha is thresholded at 0.5.
 
+A texture whose compression PSNR (colour only) is below the floor first has the network's share
+lowered (100, 70, 40 % toward a plain Lanczos enlargement of the original), and is left out
+(the game's own texture is used) if even that misses it. Mip levels are averaged weighted by
+alpha, so transparent texels never darken the edge of a shape. Data is written in selection
+order (Mario and Luigi first), so a pack larger than the preload size still has the important
+textures in memory. `manifest.tsv` also has, per texture, whether it is seen at its full 2x size in
+gameplay, only in close-ups, or never (estimates from `screensize.txt`, 960x544).
+
+What a pack costs, without any game data (also on a pack you were given or built earlier):
+
+    python3 -E -P tools/hdtex/build_pack.py --report hdtex-build/hdtex.pack [--manifest hdtex-build/manifest.tsv]
+
+prints the format and size, the GPU memory if all textures were alive and for typical scenes (Mario
+alone, Comet Observatory, Bowser fight ...), against what the game's own images of the same
+textures take, the screen-size verdicts, the worst compression PSNR (with the manifest), and
+checks that need no game data: mip chain consistency, partial alpha, colour under transparent
+texels, and wrap-around seams of textures that repeat.
+
 Checks:
 - `python3 -E -P tools/hdtex/check_borders.py <pack> [out.tsv]` (reads the converted copy from `HDTEX_DATA`, default `cooked/files`): for all entries, the HD level 0
   area-averaged to the original's size against the original, per border strip (top, bottom,
@@ -73,6 +92,31 @@ Checks:
 - `python3 -E -P tools/hdtex/compare.py <pack> <out.png> Mario:MarioFace ...` validates every
   index entry of a pack against the selection (keys, offsets, level sizes) and draws close-up
   before/after pictures (both bilinear-magnified to one size).
+
+## Checking a pack on the console
+
+Is it used? `log.txt` (every build): `hdtex: pack ... found: N records ... KiB` at start, then at
+most one `hdtex: scene ...` line per scene. A pack from an older build of this tool works as it is
+(same format, same keys); `--report` tells what it costs without game data.
+
+Cost and looks, A/B on the same stage (lines with `perf:`, `vitaGL pools` and the texture-cache
+report need a diagnostics build; the `hdtex:` lines do not). Add to `ux0:data/smg/env.txt`, for
+both runs: `GXV_AUTOQ_LEVEL=6` (960x544, no automatic changes), `GXV_FPS_LIMIT=0` (uncapped), and a
+stage (`PETARI_STAGE=HoneyBeeKingdomGalaxy:1`, then `PETARI_STAGE=AstroGalaxy:1` for the Observatory), the same
+scripted input in both. Run A: `GXV_HDTEX=0`. Run B: no `GXV_HDTEX` line. Compare `perf: GPU finished`
+ms, the renderer's cpu ms and upload ms, the front-end line, the texture-cache line, and the free video memory
+in `vitaGL pools`. Third run C, to separate the filter from the size: `GXV_HDTEX_TRILINEAR=0`
+(replaced textures keep their original filter; anisotropic filtering, `GXV_ANISO=4` with
+`GXV_ANISO_MINSIZE=128`, then does not apply to them). The first seconds of B (uploads) differ from the
+rest; compare after the first minute, and look at the scene's `hdtex:` line for how much was uploaded in play.
+
+Looks: `PETARI_PAUSE_FREEZE=1` with a scripted `input.txt` that ends with the pause, and
+`PETARI_SCRIPT_ANCHOR=play`, holds one frame; take the same screenshot for A and B (Vita screenshots tear
+on moving content, so only compare paused frames). Look for: shimmer or dark fringes on edges
+(mip and alpha problems), texture seams on Mario's body, and eyes. A difference you cannot see on a
+paused frame at 960x544 is not worth its memory: remove those textures from `selection.txt` (the
+manifest's `screen` column says which ones the estimates rate that way; correct `screensize.txt`
+with what you see).
 
 ## Pack format (version 1, little-endian)
 
@@ -113,8 +157,18 @@ Switches (env.txt): `GXV_HDTEX` (0 off, 1 on when the pack exists: default, 2 dr
 hits, upload originals), `GXV_HDTEX_PATH`, `GXV_HDTEX_BUDGET` (MiB alive at once, default 16),
 `GXV_HDTEX_PRELOAD` (MiB, default 8: a pack up to that size is read whole at start-up, so
 no first use during play waits on the card; 0: read each texture on first use), `GXV_HDTEX_TRILINEAR`, `GXV_HDTEX_LOG`
-(replacements logged by name, default 48). Log: `hdtex:` lines at start and per replacement,
-`perf: hdtex:` with the counters every perf period, and a line in the texture-cache report.
+(replacements logged by name, default 48). Log (`ux0:data/smg/log.txt`, also in the short release log): one `hdtex: pack ... found: N records ... KiB`
+line at start (or `no pack at ...`, `off`, `not a usable pack`), and at most one
+`hdtex: scene N: ... HD textures substituted (... KiB uploaded, ... in play) ...` line per scene,
+with how many are alive, freed, and read from the card. A scene line of `0 substituted` with
+candidates hashed means nothing matched this game version's textures; no scene line means no HD
+texture was uploaded in that scene. Per replacement lines (by name, `GXV_HDTEX_LOG`, default 48),
+`perf: hdtex:` counters and the texture-cache line are only in diagnostic builds.
+A pack larger than `GXV_HDTEX_PRELOAD` is read in part: the first part (selection order) stays in
+memory, the rest is read from the card on first use, and again if the texture cache freed it
+meanwhile. HD textures count at their HD size against the texture cache's limits, so they are
+freed after two scenes unused like any other.
 
 Test: `tools/test_vgx_hdtex.sh` (synthetic pack through the real texture cache: replace,
-mip clamp, budget, dry run, EFB copy, rewritten texture).
+mip clamp, budget, dry run, EFB copy, rewritten texture, cache age and caps, partial preload).
+Builder: `python3 -E -P tools/tests/test_hdtex_builder.py` (synthetic textures only).

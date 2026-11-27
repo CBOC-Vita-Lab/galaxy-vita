@@ -9,6 +9,8 @@
 
 #ifdef TARGET_PC
 extern "C" void port_irq_poll(void);
+extern "C" int64_t port_host_time_ns(void);
+extern "C" void port_load_note_decomp(uint32_t bytes, int64_t ns) __attribute__((weak));  // (cook24: the load-split census, platform/src/dvd/dvd.cpp)
 #endif
 
 JSUList< JKRDMCommand > JKRDvdRipper::sDvdAsyncList = JSUList< JKRDMCommand >();
@@ -431,7 +433,13 @@ static int JKRDecompressFromDVD(JKRDvdFile* dvdFile, void* dst, u32 fileSize, u3
     *tsPtr = 0;
     u8* data = firstSrcData();
     if (data != nullptr) {
+#ifdef TARGET_PC
+        const int64_t lsT0 = port_host_time_ns();
+#endif
         result = decompSZS_subroutine(data, reinterpret_cast< u8* >(dst));
+#ifdef TARGET_PC
+        if (port_load_note_decomp) port_load_note_decomp(*tsPtr, port_host_time_ns() - lsT0);
+#endif
     } else {
         result = -1;
     }

@@ -1,0 +1,32 @@
+# hostreload, case (c): the mirror of host_tryagain_keeps_world. Falls = Try Again (SMG_MP_DOWNED=1). The HOST defeats 3 enemies at 5 s
+# (SMG_MP_TEST_KILL; the KILLs go to the guest); at 40 s the GUEST alone falls (1 life, no bubble) and restarts from the checkpoint (its own
+# move type 5, same serial) while the host stays in the scene. The guest's second placement has the SAME registry CRC as its first (shared pools
+# are no row's actors), so object sync stays on, and the host answers the guest's REGCRC with the full state: the 3 defeats come back by OBJMAP.
+name: guest_tryagain_keeps_world
+description: "host clears 3 enemies, the guest alone falls and takes Try Again: same registry CRC after its reload, the 3 defeats come back by OBJMAP"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_KILL, SMG_MP_TEST_DIE, SMG_MP_DOWNED]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 8000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_DOWNED: 1, SMG_MP_TEST_KILL: "5:3"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_DOWNED: 1, SMG_MP_TEST_DIE: "40:1:abyss", SMG_MP_TEST_LIVES: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] world test kill: killed=3 serial=\d+/'
+  - 'expect guest /\[mp\] flow own move type=5 galaxy=EggStarGalaxy serial=\d+ role=guest/'
+  - 'count guest /\[mp\] world reg n=\d+ crc=/ >= 2'
+  - 'distinct guest /\[mp\] world reg n=\d+ crc=([0-9a-f]+) / == 1'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'expect host /\[mp\] world objmap sent kill=3 purple=\d+ chip=\d+ chunks=[1-9]\d* to=1/ after guest /\[mp\] flow own move type=5/'
+  - 'expect guest /\[mp\] world objmap applied kind=1 start=\d+ bits=3/ after guest /\[mp\] flow own move type=5/'
+  - 'absent host /\[mp\] flow local move type=[57]/'
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'absent * /\[mp\] bubble (on|msg|remote on|restart)/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

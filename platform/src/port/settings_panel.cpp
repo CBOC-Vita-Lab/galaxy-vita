@@ -1,4 +1,5 @@
-// The settings of the handheld ports under the game's pause menu: camera zoom (L / R) and rear touch aiming (Triangle).
+// The settings of the handheld ports under the game's pause menu: camera zoom (L / R) and the hint "Triangle: Settings" (settingsnative: the rear
+// touch, right stick and Star Bit reach rows moved into the native Settings menu; Triangle asks for it, vita/runtime/input.cpp).
 //
 // PauseMenu::draw calls port_settings_panel_draw every picture; the panel shows while the menu waits for a choice
 // (port_zoom_menu_active, platform/src/port/perf.cpp, which also keeps the values and saves them in settings.ini; the buttons
@@ -30,10 +31,8 @@
 extern "C" int port_handheld(void);
 extern "C" int port_zoom_menu_active(void);
 extern "C" int port_zoom_tenths(void);
-extern "C" int port_rear_aim_enabled(void);
-extern "C" int port_stick_pointer_enabled(void);
 extern "C" unsigned port_zoom_limit_hits(void);
-extern "C" int port_star_bit_reach(void);
+extern "C" int port_settings_hint_visible(void);   // perf.cpp: Settings can open from here (not in a session, not where the platform has none)
 
 namespace {
 namespace sp = settings_panel;
@@ -53,11 +52,10 @@ bool SoundOn() {
 
 // ---- the panel's animation state (game thread only: the turn hook and the draw both run there)
 bool sActive = false;
-float sFade = 0.0f, sKnob = 0.0f, sStickKnob = 0.0f, sPulse = 0.0f;
-int sLastZoom = -1, sLastRear = -1, sLastStick = -1;
+float sFade = 0.0f, sPulse = 0.0f;
+int sLastZoom = -1;
 unsigned sLastLimitHits = 0;
 int sTurnsSinceLimitSound = 1000;
-int sLastReach = -1;  // (Star Bit reach, 1..5)
 int sLanguage = -1;
 bool sLogged = false;
 
@@ -153,23 +151,18 @@ void DrawRuns(const sp::Plan& plan, const nw4r::ut::Font* fonts[2]) {
 // Game thread, once a turn (from port_zoom_menu): sounds and animation. `selecting`: the pause menu waits for a choice.
 extern "C" void port_settings_panel_turn(int selecting) {
     if (!selecting || !port_handheld()) {
-        if (sActive) port_log("settings panel: hidden (zoom %d.%d, rear touch aiming %s)", sLastZoom / 10, sLastZoom % 10, sLastRear ? "on" : "off");
+        if (sActive) port_log("settings panel: hidden (zoom %d.%d)", sLastZoom / 10, sLastZoom % 10);
         sActive = false;
         sFade = 0.0f;
         sPulse = 0.0f;
         return;
     }
-    const int zoom = port_zoom_tenths(), rear = port_rear_aim_enabled() ? 1 : 0, stick = port_stick_pointer_enabled() ? 1 : 0;
+    const int zoom = port_zoom_tenths();
     const unsigned hits = port_zoom_limit_hits();
     if (!sActive) {
         sActive = true;
         sLastZoom = zoom;
-        sLastRear = rear;
-        sLastStick = stick;
         sLastLimitHits = hits;
-        sLastReach = port_star_bit_reach();
-        sKnob = static_cast<float>(rear);
-        sStickKnob = static_cast<float>(stick);
         sLogged = false;  // (the placement is logged once each time the panel shows)
     }
     if (zoom != sLastZoom) {
@@ -187,32 +180,13 @@ extern "C" void port_settings_panel_turn(int selecting) {
         }
         sLastLimitHits = hits;
     }
-    if (rear != sLastRear) {
-        Sound("SE_SY_TALK_OK");  // (the confirm sound of the game's message windows)
-        port_log("settings panel: rear touch aiming %s", rear ? "on" : "off");
-        sLastRear = rear;
-    }
-    if (stick != sLastStick) {
-        Sound("SE_SY_TALK_OK");
-        port_log("settings panel: right stick %s", stick ? "pointer" : "camera");
-        sLastStick = stick;
-    }
-    if (const int reach = port_star_bit_reach(); reach != sLastReach) {
-        Sound("SE_SY_TALK_OK");
-        port_log("settings panel: Star Bit reach %d", reach);
-        sLastReach = reach;
-    }
     if (sTurnsSinceLimitSound < 1000) ++sTurnsSinceLimitSound;
     sFade = sFade + 1.0f / 8.0f > 1.0f ? 1.0f : sFade + 1.0f / 8.0f;
-    sKnob += (static_cast<float>(rear) - sKnob) * 0.4f;
-    if (fabsf(sKnob - rear) < 0.01f) sKnob = static_cast<float>(rear);
-    sStickKnob += (static_cast<float>(stick) - sStickKnob) * 0.4f;
-    if (fabsf(sStickKnob - stick) < 0.01f) sStickKnob = static_cast<float>(stick);
     sPulse *= 0.78f;
     if (sPulse < 0.01f) sPulse = 0.0f;
 }
 
-// PauseMenu::draw, every picture. flags: 1 = the Luigi letter button is on screen.
+// PauseMenu::draw, every picture. flags: 1 = the Luigi letter button is on screen; 2 = the multiplayer session menu (MpUiSystem::drawSystem).
 extern "C" void port_settings_panel_draw(int flags) {
     if (!PanelOn() || !port_zoom_menu_active() || !sActive) return;
     const nw4r::ut::Font* fonts[2] = {MR::getFontOnCurrentLanguage(), MR::getPictureFontNW4R()};
@@ -223,13 +197,12 @@ extern "C" void port_settings_panel_draw(int flags) {
     st.height = static_cast<float>(MR::getScreenHeight());
     st.width = st.height * (MR::isScreen16Per9() ? 16.0f / 9.0f : 4.0f / 3.0f);
     st.zoomTenths = port_zoom_tenths();
-    st.rearAim = port_rear_aim_enabled() != 0;
-    st.knob = sKnob;
-    st.stickKnob = sStickKnob;
-    st.starBitReach = port_star_bit_reach();
+    st.showSettings = port_settings_hint_visible() != 0;
     st.pulse = sPulse;
     st.alpha = sFade;
     st.compact = (flags & 1) != 0;
+    st.note = (flags & 2) != 0;   // mppause: the multiplayer session menu (MpUiSystem.cpp): the zoom row and the note "The game keeps running."
+    if (st.note) st.showSettings = false;   // (Triangle is Players there)
     st.language = sLanguage;
     const sp::FontMetrics metrics[2] = {Metrics(fonts[0]), Metrics(fonts[1])};
     static sp::Plan plan;  // (big: kept out of the stack)

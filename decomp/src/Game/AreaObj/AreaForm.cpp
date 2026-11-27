@@ -3,6 +3,7 @@
 #ifdef TARGET_PC
 #include <cmath>
 #include <cstring>
+#include "port/obj_cut.h"  // (GXV_AREA_GRID, logic23: port_area_geo_gen)
 extern "C" int port_hl_areacube_on(void);  // GXV_HL_AREACUBE (hivelogic), platform/src/port/perf.cpp: 0 off, 1 on, 2 verify
 // GXV_HL_AREACUBE=2 (perf.cpp): counts a check, and logs the first mismatches / stale boxes with the area's name.
 extern "C" void port_hl_verify_area(int outsideByBox, int insideByFull, int stale, const char* owner, const float* pos, const float* cubeTrans);
@@ -163,6 +164,7 @@ void AreaFormCube::updateBoxParam() {
     }
 #ifdef TARGET_PC
     portUpdateReject();
+    PortAreaGeoBump();  // (GXV_AREA_GRID, logic23: a cube's world box changes)
 #endif
 }
 

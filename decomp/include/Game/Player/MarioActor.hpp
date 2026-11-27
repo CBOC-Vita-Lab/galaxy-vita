@@ -79,6 +79,9 @@ public:
     virtual void draw() const;
     virtual void calcAnim();
     virtual void calcViewAndEntry();
+#ifdef TARGET_PC
+    void portPlayerLook() const;  // (mario24: the "player-look:" line, MarioActorDraw.cpp)
+#endif
     virtual void control();
     virtual void calcAndSetBaseMtx();
     virtual void updateHitSensor(HitSensor*);
@@ -182,6 +185,7 @@ public:
 
     void initDrawAndModel();
     void initBeeMario();
+    void initBeeTextureSwap();  // port (beefix25, after community PR #34): the Bee eyelid texture slots _B6C[4..7]
     void initTeresaMario();
     void initHopperMario();
     void initIceMario();
@@ -383,6 +387,13 @@ public:
     void calcViewBlurModel();
     void calcViewFootPrint();
     void drawSilhouette() const;
+#ifdef TARGET_PC
+    void drawSilhouetteMp() const;  // MP3: drawSilhouette behind the self puppet's hide flag (MarioActorShadow.cpp)
+#endif
+#ifdef TARGET_PC
+    int portSilhouetteHint();  // (GXV_SILH_GATE, MarioActorShadow.cpp)
+    bool portReflectionOutside(const TVec3f& rOrigin, bool* pNear);  // (reflfur25, GXV_MIRROR25, MarioActorShadow.cpp)
+#endif
 
     // Defined in MarioActorSpecialDraw
     void initScreenBox();
@@ -448,6 +459,7 @@ public:
 
     // Defined in MarioActorMorph
     void setPlayerMode(u16, bool);
+    bool canEnterPlayerMode(u16);  // port (relfix24): would setPlayerMode accept this mode? No state is touched.
     void resetPlayerModeOnDamage();
     void resetPlayerModeOnNoDamage();
     void updatePlayerMode();
@@ -1015,6 +1027,9 @@ public:
     /* 0xFC8 */ MatrixValueGetter* _FC8;
     /* 0xFCC */ bool _FCC;
     /* 0xFCD */ bool _FCD;
+#ifdef TARGET_PC
+    u8 mPortReflSkip = 0;  // (reflfur25, GXV_MIRROR25: this picture's reflection is outside the frustum: not calculated, not drawn)
+#endif
 };
 
 // header defined since these actually get defined in CamHeliEffector

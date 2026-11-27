@@ -12,6 +12,9 @@
 #include "Game/Util/StringUtil.hpp"
 #include <algorithm>
 #include <cstdio>
+#ifdef TARGET_PC
+#include "port/firstuse.h"
+#endif
 
 void EffectKeeper_FORCE_MATCH_SDATA2() {
     0.0f;
@@ -133,6 +136,9 @@ void EffectKeeper::registerSyncBckEffect(XanimePlayer* pParam1, const char* pPar
 }
 
 MultiEmitter* EffectKeeper::createEmitter(const char* pParam1) {
+#ifdef TARGET_PC
+    PortFirstUseScope firstUse("effect", 0, pParam1);  // (firstuse24, GXV_FIRSTUSE_LOG: the first emit of each effect name is timed)
+#endif
     MultiEmitter* emitter = getEmitter(pParam1);
 
     emitter->createEmitter();

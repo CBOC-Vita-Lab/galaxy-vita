@@ -1,0 +1,19 @@
+Patch 0039 (gt3vgl hardening, Carbon S3): fix uninitialised mip_stride (when po2_w != 0), wrong orig_w / (2 * level), tall-texture 0-stride collapse, and level >= 31 shift UB in _glTexSubImage2D.
+diff --git a/source/textures.c b/source/textures.c
+index 9a2c718..da81020 100644
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -1230,9 +1230,11 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
+ 				for (int j = 0; j < level; j++) {
+ 					ptr += jumps[j];
+ 				}
++				// patch 0039: mip_stride was left uninitialised when po2_w != 0; clamp to >= 1 so tall textures never get VGL_ALIGN(0, 8) == 0.
++				mip_stride = (level < 31 && (po2_w >> level)) ? (po2_w >> level) : 1;
+ 			}
+-			mip_w = orig_w / (2 * level);
+-			mip_stride = VGL_ALIGN(mip_stride, 8) * bpp;
++			mip_w = (level < 31 && (orig_w >> level)) ? (orig_w >> level) : 1;
++			mip_stride = VGL_ALIGN(mip_stride ? mip_stride : 1, 8) * bpp;
+ 		} else {
+ 			mip_w = orig_w;
+ 			mip_stride = VGL_ALIGN(orig_w, 8) * bpp;

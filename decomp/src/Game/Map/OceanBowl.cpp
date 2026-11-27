@@ -389,7 +389,20 @@ void OceanBowl::draw() const {
     }
 }
 
+#ifdef TARGET_PC
+#define OB_WET wet
+#else
+#define OB_WET MR::isCameraInWater()
+#endif
 void OceanBowl::loadMaterial() const {
+#ifdef TARGET_PC
+    loadMaterialForm(MR::isCameraInWater());
+}
+
+// dive27: loadMaterial's body with the camera's wetness as a parameter: the rehearsal (GXV_REHEARSE) makes the wet form's state (3 TEV stages, no indirect warp, additive blend: a program
+// of its own) while the camera is dry, without a flag the rest of the game could read.
+void OceanBowl::loadMaterialForm(bool wet) const {
+#endif
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
@@ -444,7 +457,7 @@ void OceanBowl::loadMaterial() const {
     mWaterIndirectTex->load(GX_TEXMAP2);
     mMaskTex->load(GX_TEXMAP3);
     MR::resetTextureCacheSize();
-    if (MR::isCameraInWater()) {
+    if (OB_WET) {
         GXSetNumIndStages(0);
     } else {
         GXSetNumIndStages(1);
@@ -461,7 +474,7 @@ void OceanBowl::loadMaterial() const {
         GXSetIndTexMtx(GX_ITM_0, indmtx, 0);
     }
 
-    if (MR::isCameraInWater()) {
+    if (OB_WET) {
         GXSetNumTevStages(3);
     } else {
         GXSetNumTevStages(4);
@@ -488,7 +501,7 @@ void OceanBowl::loadMaterial() const {
     GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_ZERO, GX_CA_RASA, GX_CA_TEXA, GX_CA_ZERO);
     GXSetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_FALSE, GX_TEVPREV);
 
-    if (!MR::isCameraInWater()) {
+    if (!OB_WET) {
         GXSetTevOrder(GX_TEVSTAGE3, GX_TEXCOORD3, GX_TEXMAP1, GX_COLOR_NULL);
         GXSetTevColorIn(GX_TEVSTAGE3, GX_CC_ZERO, GX_CC_TEXC, GX_CC_C1, GX_CC_CPREV);
         GXSetTevColorOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
@@ -496,7 +509,7 @@ void OceanBowl::loadMaterial() const {
         GXSetTevAlphaOp(GX_TEVSTAGE3, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_FALSE, GX_TEVPREV);
     }
 
-    if (MR::isCameraInWater()) {
+    if (OB_WET) {
         GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_ONE, GX_LO_NOOP);
     } else {
         GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_NOOP);
@@ -508,6 +521,34 @@ void OceanBowl::loadMaterial() const {
     GXSetCullMode(GX_CULL_NONE);
     GXSetClipMode(GX_CLIP_ENABLE);
 }
+
+#undef OB_WET
+
+#ifdef TARGET_PC
+// dive27 (GXV_REHEARSE, inside a warm-up scope behind the closed wipe): the wet form of the surface material and its first strip of the real draw (50 vertices: the same vertex count, so
+// the same CPU-transform / folding decision as the real strips), and the underwater-only bloom material and strip.
+void OceanBowl::rehearse() const {
+    loadMaterialForm(true);
+    GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT0, 50);
+    u16 even = 0;
+    u16 odd = 1;
+    for (s32 y = 0; y < 25; y++) {
+        OceanBowlPoint* pPoint = getPoint(1, y);
+        OceanBowlPoint* pPoint2 = getPoint(0, y);
+        GXPosition3f32(pPoint->mVertexPosition.x, pPoint->mVertexPosition.y, pPoint->mVertexPosition.z);
+        GXColor4u8(255, 255, 255, pPoint->mAlpha);
+        GXTexCoord2s16(even, even);
+        GXTexCoord2s16(even, even);
+        GXPosition3f32(pPoint2->mVertexPosition.x, pPoint2->mVertexPosition.y, pPoint2->mVertexPosition.z);
+        GXColor4u8(255, 255, 255, pPoint2->mAlpha);
+        GXTexCoord2s16(odd, odd);
+        GXTexCoord2s16(odd, odd);
+        even += 2;
+        odd += 2;
+    }
+    GXEnd();
+}
+#endif
 
 void OceanBowl::loadMaterialBloom() const {
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);

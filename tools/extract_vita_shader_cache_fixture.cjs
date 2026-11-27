@@ -13,6 +13,7 @@ function body(source, start, end) {
   return source.slice(a, b);
 }
 const source = read('src/custom_shaders.c'), shared = read('src/shared.h');
+const hardened = inputs['src/custom_shaders.c'] === '95219c9b84fe31f342db0a7d63759895a821842de79e1743f7b4da5547bfe48d';
 const record = read('compile.txt').split('\n').find(line => line.includes(' -c custom_shaders.c '));
 if (!record || !record.includes('-DHAVE_SHADER_CACHE') || !record.includes('-DHAVE_SHARK_LOG') || !record.includes('-DLOG_ERRORS'))
   throw new Error('Frozen shader-cache build flags need review');
@@ -28,6 +29,8 @@ const shaderCompile = (readerVariant ? body(variant, '#ifdef GXV_SHADER_CACHE_RE
 if (readerVariant) inputs.reader_variant = crypto.createHash('sha256').update(variant).digest('hex');
 const prefix = `// Mechanically extracted unmodified vitaGL functions; generated locally, never a driver replacement.
 #include "vita_shader_cache_fixture.h"
+#include <psp2/io/stat.h>
+#define MAX_CUSTOM_SHADERS 8
 #define XXH_STATIC_LINKING_ONLY
 #define XXH_IMPLEMENTATION
 #define XXH_NAMESPACE VITAGL_
@@ -53,7 +56,8 @@ function requireSource(good, why) { if (!good) throw new Error('Frozen cache inv
 requireSource(JSON.stringify([...new Set(inventory.root_references.map(site => site.file))].sort()) ===
   JSON.stringify(['src/custom_shaders.c', 'src/shared.h', 'src/vgl.c']), 'new root consumer');
 const expectedWrites = [
-  ['src/custom_shaders.c', 'SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);'],
+  hardened ? ['src/utils/shader_cache_io.h', 'SceUID f = sceIoOpen(temporary, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);'] :
+    ['src/custom_shaders.c', 'SceUID f = sceIoOpen(cache_fname, SCE_O_CREAT | SCE_O_WRONLY | SCE_O_TRUNC, 0777);'],
   ['src/ffp.c', 'f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_TRUNC | SCE_O_CREAT, 0777);'],
   ['src/ffp.c', 'f = sceIoOpen(fname, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);'],
   ['src/utils/gpu_utils.c', 'SceUID f = sceIoOpen(fname, SCE_O_CREAT | SCE_O_TRUNC | SCE_O_WRONLY, 0777);'],
@@ -65,6 +69,7 @@ requireSource(formats.length === 3 && formats[0].text.includes('"%s/%s/%02X/%llX
 requireSource(source.includes('fname = vert_fname;') && source.includes('fname = frag_fname;') &&
   source.match(/vgl_compile_shader\(p->[vf]shader, GL_TRUE\);/g)?.length === 2, 'postponed compiler must reuse the inventoried private writer');
 const ffp = read('src/ffp.c'), gpu = read('src/utils/gpu_utils.c'), init = read('src/vgl.c');
+if (hardened) for (const file of ['src/utils/shader_candidate.h', 'src/utils/shader_binary.h', 'src/utils/shader_cache_io.h']) read(file);
 requireSource(ffp.includes('"ux0:data/shader_cache/v%d/v/') && ffp.includes('"ux0:data/shader_cache/v%d/f/') &&
   !ffp.includes('vgl_shader_cache_path'), 'FFP writes must remain in separate fixed-root non-bucket cache');
 requireSource(init.includes('"ux0:data/shader_cache/v%d/v"') && init.includes('"ux0:data/shader_cache/v%d/f"'), 'FFP parent initialization');

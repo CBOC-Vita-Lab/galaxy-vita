@@ -1,0 +1,10 @@
+# flow (11 Nov): screenshots of the simplified menus, guest side: Play Together -> character once -> Join: the list filling in
+# (60-92: empty, then the host's room) -> the room -> lobby as a guest (93-130).
+mark title /boot: the title screen has appeared/ ~31
+title+8-8.5:A|B
+title+13-13.2:DOWN
+title+15-15.2:A
+title+31-31.2:A                  # Play Together
+title+35-35.2:A                  # character (the first play)
+title+37-37.2:A                  # Join
+title+70-70.2:A                  # the host's room

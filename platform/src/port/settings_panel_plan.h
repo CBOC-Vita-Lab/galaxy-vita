@@ -38,7 +38,7 @@ struct TextRun {
 struct State {
     float width = 810.6667f, height = 456.0f;  // the picture, in square units
     int zoomTenths = 15;                       // 10..20
-    bool rearAim = false;
+    bool rearAim = false;  // (unused since settingsnative: the rear touch row moved into Settings; kept so the preview tool still builds)
     float knob = 0.0f;   // the On / Off switch's highlight, 0 = Off .. 1 = On (eased towards the setting)
     float stickKnob = 0.0f;  // the right stick's switch, 0 = Camera .. 1 = Pointer
     int starBitReach = 1;    // 1 (the game's own, "Off") .. 5 ("All"), platform/src/port/perf.cpp
@@ -46,6 +46,8 @@ struct State {
     float alpha = 1.0f;  // the panel's fade-in
     bool compact = false;  // the Luigi letter button is at the bottom of the screen: a lower panel, tighter rows
     int language = 0;    // index into the translations (LanguageIndex)
+    bool note = false;   // mppause: the multiplayer session menu: the compact panel, its second row the one-line note "The game keeps running." (no Settings hint there)
+    bool showSettings = true;  // settingsnative: the "[Triangle] Settings" line (false in a multiplayer session and where Settings can't be opened)
 };
 
 // The translations: English, French, Spanish, German, Italian, Dutch, Japanese. Others (and any text the font lacks) English.

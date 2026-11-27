@@ -1,0 +1,40 @@
+# savefix: "Play on my file 2" (SMG_MP_AUTO_SAVE=mine:2): the host backs up its single-player file, plays on it, and the game saves
+# (SMG_MP_TEST_SAVE, auto-confirmed, atomic while multiplayer is involved). The host is killed (SIGKILL) right after a save is
+# requested, i.e. during the write. The same console boots again from its own files (host2): the single-player GameData.bin must be
+# whole, the session's backup must exist, the recovery offer must appear and is answered "save to my file" (backup first): after it
+# only file 2 differs from the backup.
+name: sv_mine_kill
+description: "Play on my file 2; host killed during a save; relaunch: file valid, backup kept, recovery offered and kept into file 2"
+seconds: 260
+requires: {strings: [SMG_MP_TEST_SAVE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "mine:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_TEST_SAVE: 25,
+          HARNESS_KILL: 'save test: game save requested|0.05|9'}
+  - name: guest
+    seconds: 150
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+  - name: host2
+    seconds: 100
+    input: "@file2_charselect"
+    env: {HARNESS_AFTER: host, HARNESS_CONTINUE: host, SMG_MP_AUTO_RECOVERY: single}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard guest'
+  - 'expect host /\[mp\] save backup sp path=\S+GameData-\d{8}-\d{8}-\d{6}\.bin/'
+  - 'expect host /\[mp\] save session on single-player file sp=2/'
+  - 'expect host /\[mp\] save auto choice mine:2 ready/'
+  - 'expect host /\[mp\] save test: game save requested/'
+  - 'expect host /harness: kill signal=9/'
+  - 'save_valid host'
+  - 'save_mine host 2'
+  - 'save_valid host2'
+  - 'expect host2 /\[mp\] ui: recovery offered stars=\d+/'
+  - 'expect host2 /\[mp\] save recovery kept index=\d+ sp=2 backup=\S+/'
+  - 'expect host2 /\[mp\] save test: recovery single ok/'
+  - 'save_mine host2 2'
+  - 'absent * /save refused: the save image is not verified|Assertion|OSPanic|FATAL/'

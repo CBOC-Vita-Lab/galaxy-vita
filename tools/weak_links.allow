@@ -1,0 +1,2 @@
+# symbols that are meant to be undefined in the final Vita link
+vglRtGpuFrameSize   # vgx_autoq.cpp: only newer vitaGL has it; absent = old 16-byte struct, handled by `!vglRtGpuFrameSize`

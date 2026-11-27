@@ -8,6 +8,9 @@
 
 PartsModel::PartsModel(LiveActor* pActor, const char* pName, const char* pModelName, MtxPtr pMtx, int drawBufferType, bool a6)
     : LiveActor(pName), mHost(pActor), mFixedPosition(), mMtx(pMtx), mIsCalcOwnMtx(true), _99(), mIsDead() {
+#ifdef TARGET_PC
+    mPortHrwHost = pActor;  // (GXV_HRW, hrw28: a part is refreshed with its host)
+#endif
     if (drawBufferType < 0) {
         drawBufferType = MR::DrawBufferType_MapObj;
     }

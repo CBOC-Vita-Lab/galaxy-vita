@@ -206,6 +206,9 @@ namespace NrvPowerStarList {
 PowerStarList::PowerStarList()
     : LayoutActor("\x91\x53\x83\x70\x83\x8f\x81\x5b\x83\x58\x83\x5e\x81\x5b\x83\x8a\x83\x58\x83\x67", true), mArrowUpButtonCtrl(), mArrowDownButtonCtrl(), mCaptureButtonCtrl(), mSysInfoWindow(), mPageNo(),
       mMailMessageLength(), mMailMessage() {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
     mSeparatorArray = new Separator[4]();
 }
 

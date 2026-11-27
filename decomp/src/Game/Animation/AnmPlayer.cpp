@@ -91,6 +91,7 @@ MaterialAnmPlayerBase::MaterialAnmPlayerBase(const ResTable* pResTable, J3DModel
 }
 
 void MaterialAnmPlayerBase::beginDiff() {
+    PortDlGameEnter();  // (GXV_PAR_DL: the animation resource's frame and the materials' animators are the material path's; J3DSys.hpp)
     if (mAnmRes != nullptr) {
         reflectFrame();
         attach(mAnmRes, mModelData);

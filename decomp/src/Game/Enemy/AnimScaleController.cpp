@@ -1,5 +1,6 @@
 #include "Game/Enemy/AnimScaleController.hpp"
 #include "Game/LiveActor/Nerve.hpp"
+#include "Game/LiveActor/Spine.hpp"
 #include "Game/Util/MathUtil.hpp"
 #include "Game/Util/NerveUtil.hpp"
 
@@ -168,6 +169,12 @@ bool AnimScaleController::tryStop() {
     }
     return false;
 }
+
+#ifdef TARGET_PC
+bool AnimScaleController::portIsStopped() const {
+    return mSpine != nullptr && mSpine->mNextNerve == nullptr && mSpine->mCurrNerve == GET_NERVE(AnimScaleController, AnimScaleControllerNrvStop);
+}
+#endif
 
 void AnimScaleController::update() {
     updateNerve();

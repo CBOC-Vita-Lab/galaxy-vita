@@ -15,7 +15,7 @@ if [[ ${2:-} == arm32 ]]; then
 fi
 docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
   --mount "type=bind,source=$root,target=/work,readonly" -w /work \
-  -e "COMPACT_MODES=${1:-plain legacy accept reject mip switch}" \
+  -e "COMPACT_MODES=${1:-plain legacy accept reject mip switch follow}" \
   -e "CXX=$compiler" -e "FLAGS=$flags" -e "LIBS=$libs" \
   "$image" bash -euo pipefail -c '
     export ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1
@@ -29,7 +29,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
       -Iplatform/vgx/src -Iplatform/vgx/third_party tests/vgx_texcache_compact.cpp \
       platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp platform/vgx/src/vgx_dlcache.cpp \
       platform/vgx/src/vgx_guestmem.cpp platform/vgx/src/vgx_bpsync.cpp platform/vgx/src/vgx_shadergen.cpp \
-      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp \
+      platform/vgx/src/vgx_texcache.cpp platform/vgx/src/vgx_texcomp.cpp platform/vgx/src/vgx_texdecode.cpp platform/vgx/src/vgx_stats.cpp \
       platform/vgx/src/vgx_backend_null.cpp -o /tmp/compact $LIBS
     for la in 1 0; do for mode in $COMPACT_MODES; do
       GXV_LA88=$la timeout 20s "$@" /tmp/compact "$mode" "$la"

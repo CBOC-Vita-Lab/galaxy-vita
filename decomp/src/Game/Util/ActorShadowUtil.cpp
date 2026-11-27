@@ -14,6 +14,14 @@
 #include "Game/Util/LiveActorUtil.hpp"
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/StringUtil.hpp"
+#ifdef TARGET_PC
+// GXV_UNDRAWN_LEAN (undrawn26): the game's logic asks for a shadow's cast; if that cast was left out for the next picture, it is counted
+// (mode 2: VIOLATION line) and the controller is never left out again. All the logic's accessors of a cast are in this file.
+extern "C" void port_undrawn_shadow_read(const void* ctrl, const char* owner);
+static inline void PortShadowRead(const LiveActor* pActor, ShadowController* pController) {
+    port_undrawn_shadow_read(pController, pActor != nullptr ? pActor->mName : nullptr);
+}
+#endif
 
 namespace MR {
     void initShadowFromCSV(LiveActor* pActor, const char* pName) {
@@ -73,6 +81,21 @@ namespace MR {
         pController->setShadowDrawer(pCircle);
         pCircle->setRadius(radius);
     }
+
+#ifdef TARGET_PC
+    // boss23 (PETARI_BOSS_PSHADOW, ShadowVolumeSphere.cpp): the sphere volume the actor's last initShadowVolumeSphere made is a small
+    // projectile's (a boss's fireball, bomb): drawn as a flat disc when the switch is on.
+    void portMarkProjectileShadow(LiveActor* pActor) {
+        ShadowControllerList* pList = pActor->mShadowControllerList;
+        if (pList == nullptr || pList->getControllerCount() == 0) {
+            return;
+        }
+        ShadowController* pController = pList->getController(pList->getControllerCount() - 1);
+        if (pController != nullptr && pController->getShadowDrawer() != nullptr) {
+            static_cast< ShadowVolumeSphere* >(pController->getShadowDrawer())->mPortProjectile = true;
+        }
+    }
+#endif
 
     void addShadowVolumeSphere(LiveActor* pActor, const char* pName, f32 radius) {
         ShadowController* pController = ActorShadow::createShadowControllerVolumeParam(pActor, pName);
@@ -439,6 +462,9 @@ namespace MR {
     bool calcClippingRangeIncludeShadow(TVec3f* pVecOutput, f32* pF32Output, const LiveActor* pActor, f32 a4) {
         TVec3f projectionPos;
 
+#ifdef TARGET_PC
+        PortShadowRead(pActor, ActorShadow::getShadowController(pActor, static_cast< const char* >(nullptr)));
+#endif
         if (ActorShadow::getShadowController(pActor, static_cast< const char* >(nullptr))->isProjected()) {
             getShadowProjectionPos(pActor, nullptr, &projectionPos);
             pVecOutput->set((pActor->mPosition + projectionPos) * 0.5f);
@@ -462,19 +488,35 @@ namespace MR {
     }
 
     bool isShadowProjected(const LiveActor* pActor, const char* pName) {
+#ifdef TARGET_PC
+        ActorShadow::getShadowController(pActor, pName)->mPbLogicRead = true;  // (GXV_PB_SHADOW: logic reads it: never far-clipped by the budget)
+        PortShadowRead(pActor, ActorShadow::getShadowController(pActor, pName));
+#endif
         return ActorShadow::getShadowController(pActor, pName)->isProjected();
     }
 
     void getShadowProjectionPos(const LiveActor* pActor, const char* pName, TVec3f* pResult) {
+#ifdef TARGET_PC
+        ActorShadow::getShadowController(pActor, pName)->mPbLogicRead = true;
+        PortShadowRead(pActor, ActorShadow::getShadowController(pActor, pName));
+#endif
         ActorShadow::getShadowController(pActor, pName)->getProjectionPos(pResult);
     }
 
     void getShadowProjectionNormal(const LiveActor* pActor, const char* pName, TVec3f* pResult) {
+#ifdef TARGET_PC
+        ActorShadow::getShadowController(pActor, pName)->mPbLogicRead = true;
+        PortShadowRead(pActor, ActorShadow::getShadowController(pActor, pName));
+#endif
         ActorShadow::getShadowController(pActor, pName)->getProjectionNormal(pResult);
     }
 
     f32 getShadowProjectionLength(const LiveActor* pActor, const char* pName) {
         ShadowController* pController = ActorShadow::getShadowController(pActor, pName);
+#ifdef TARGET_PC
+        pController->mPbLogicRead = true;
+        PortShadowRead(pActor, pController);
+#endif
 
         if (pController->isProjected()) {
             return pController->getProjectionLength();
@@ -484,6 +526,9 @@ namespace MR {
     }
 
     HitSensor* getShadowProjectedSensor(const LiveActor* pActor, const char* pName) {
+#ifdef TARGET_PC
+        PortShadowRead(pActor, ActorShadow::getShadowController(pActor, pName));
+#endif
         return ActorShadow::getShadowController(pActor, pName)->mProjectedSensor;
     }
 
@@ -491,6 +536,10 @@ namespace MR {
         u32 count = ActorShadow::getShadowControllerCount(pActor);
 
         for (u32 i = 0; i < count; i++) {
+#ifdef TARGET_PC
+            ActorShadow::getShadowController(pActor, i)->mPbLogicRead = true;
+            PortShadowRead(pActor, ActorShadow::getShadowController(pActor, i));
+#endif
             if (ActorShadow::getShadowController(pActor, i)->isProjected()) {
                 return true;
             }
@@ -504,6 +553,9 @@ namespace MR {
         f32 result = FLOAT_MAX;
 
         for (u32 i = 0; i < count; i++) {
+#ifdef TARGET_PC
+            PortShadowRead(pActor, ActorShadow::getShadowController(pActor, i));
+#endif
             if (ActorShadow::getShadowController(pActor, i)->isProjected()) {
                 f32 length = ActorShadow::getShadowController(pActor, i)->getProjectionLength();
 

@@ -10,10 +10,11 @@
 # entry's layout, the sweep schedule's place).
 #   tools/test_vgx_drawreplay.sh [frames] [seeds]      (CXX: host compiler, default g++; out-of-tree build in $OUT, default /tmp/vgx_drawreplay)
 set -euo pipefail
+. "$(cd "$(dirname "$0")" && pwd)/../tests/mp/tmproot.sh"
 root=$(cd "$(dirname "$0")/.." && pwd)
 frames=${1:-400}
 seeds=${2:-"1 2 3"}
-out=${OUT:-/tmp/vgx_drawreplay}
+out=${OUT:-$MP_TMP/vgx_drawreplay}
 mkdir -p "$out"
 cxx=${CXX:-g++}
 srcs=(tests/vgx_drawreplay.cpp platform/vgx/src/vgx_state.cpp platform/vgx/src/vgx_draw.cpp platform/vgx/src/vgx_fesplit.cpp

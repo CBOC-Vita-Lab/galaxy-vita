@@ -1,0 +1,25 @@
+# playtest (12 Nov): the ONE-DOOR menus. Title -> entry -> Multiplayer -> Play Together (first row; the pointer is NOT moved: a still pointer never chooses) -> character (first play only)
+# The guest console is started when the host has opened its room (HARNESS_START_ON in the scenario): the console that gathers first leads, so the host leads, and its START is the one that counts.
+# -> the gathering screen (no Host/Join: consoles find each other) -> the leader presses START -> falls question -> Which File? -> in play.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose multiplayer/ ~37.2
+mark chars /\[mp\] ui: screen chars/ ~42
+mark gather /\[mp\] ui: gathering mode=1/ ~48
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+chose+3-3.2:A      # Play Together (first row)
+chars+2-2.2:A     # character (keeps the preselected look)
+mark joined /\[mp\] slot 1 joined/ ~70
+mark falls /\[mp\] ui: screen falls/ ~75
+mark save /\[mp\] ui: screen save/ ~80
+mark spfile /\[mp\] ui: screen spfile/ ~85
+mark fileuse /\[mp\] ui: screen fileuse/ ~90
+joined+6-6.3:PLUS    # START (the leader of the gathering; the guest console joined this console's room)
+falls+2-2.2:A        # the falls question (first time): "A Bubble" (first row)
+save+2-2.2:DOWN      # Which File?: New Co-op File -> Start from My Own File...
+save+3-3.2:A
+spfile+2-2.2:DOWN    # my file 1 -> file 2
+spfile+3-3.2:A
+fileuse+2-2.2:A      # Make a Co-op Copy (first row): the session starts

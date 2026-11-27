@@ -12,6 +12,11 @@
 #include <JSystem/JUtility/JUTConsole.hpp>
 #include <JSystem/JUtility/JUTException.hpp>
 #include <JSystem/JUtility/JUTTexture.hpp>
+#ifdef TARGET_PC
+#include "port/gx_dedup.h"  // (GXV_GX_DEDUP: PORT_GX_CALL_PRIMS, the quad lists' calls)
+#else
+#define PORT_GX_CALL_PRIMS(list, nbytes) GXCallDisplayList((list), (nbytes))
+#endif
 
 #include <JSystem/JSupport/JSUInputStream.hpp>
 #include <JSystem/JSupport/JSUOutputStream.hpp>
@@ -232,9 +237,9 @@ bool JUTException::queryMapAddress_single(char* pMap, u32 address, s32 section, 
 void J3DShapeMtx::loadMtxIndx_PNGP(int slot, u16 index) const {
     J3DFifoLoadIndx(0x20, index, 0xB000 | static_cast< u16 >(slot * 12));
     J3DFifoLoadNrmMtxIndx3x3(index, slot * 3);
-    ShapePacketUserData* pData = MR::getJ3DShapePacketUserData(j3dSys.getShapePacket());
+    ShapePacketUserData* pData = MR::getJ3DShapePacketUserData(J3D_DSYS.getShapePacket());  // (GXV_DRAWPIPE: the draw path's J3DSys, J3DSys.hpp)
     if (pData != nullptr) {
-        pData->loadTexMtx(j3dSys.getShapePacket()->getShape()->getMaterial(), slot, index);
+        pData->loadTexMtx(J3D_DSYS.getShapePacket()->getShape()->getMaterial(), slot, index);
     }
 }
 
@@ -512,6 +517,16 @@ void JPABaseEmitter::init(JPAEmitterManager* pManager, JPAResource* pResource) {
 #endif
 }
 
+#ifdef TARGET_PC
+// GXV_HOTPROF_PTCLCULL (JPAResource.cpp): the quad functions' test (one byte while no loop is armed).
+extern unsigned char gPortPtclCullArmed;
+bool port_jpa_ptcl_cull(JPAEmitterWorkData* work, const Mtx m, bool cross);
+#define PORT_PTCL_CULL(work, m, cross)                                                                                              \
+    if (__builtin_expect(gPortPtclCullArmed != 0, 0) && port_jpa_ptcl_cull((work), (m), (cross))) return
+#else
+#define PORT_PTCL_CULL(work, m, cross) ((void)0)
+#endif
+
 void JPADrawDirection(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
     if (pParticle->checkStatus(8)) {
         return;
@@ -550,9 +565,10 @@ void JPADrawDirection(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
     matrix[2][3] = pParticle->mPosition.z;
     p_plane[pWork->mPlaneType](matrix, scaleX, scaleY);
     PSMTXConcat(pWork->mPosCamMtx, matrix, matrix);
+    PORT_PTCL_CULL(pWork, matrix, pWork->mDLType != 0);  // (GXV_HOTPROF_PTCLCULL)
     GXLoadPosMtxImm(matrix, GX_PNMTX0);
     p_prj[pWork->mPrjType](pWork, matrix);
-    GXCallDisplayList(p_dl[pWork->mDLType], 32);
+    PORT_GX_CALL_PRIMS(p_dl[pWork->mDLType], 32);  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
 }
 
 void JPADrawRotDirection(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
@@ -598,9 +614,10 @@ void JPADrawRotDirection(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) 
     matrix[2][3] = pParticle->mPosition.z;
     PSMTXConcat(matrix, rotation, rotation);
     PSMTXConcat(pWork->mPosCamMtx, rotation, matrix);
+    PORT_PTCL_CULL(pWork, matrix, pWork->mDLType != 0);  // (GXV_HOTPROF_PTCLCULL)
     GXLoadPosMtxImm(matrix, GX_PNMTX0);
     p_prj[pWork->mPrjType](pWork, matrix);
-    GXCallDisplayList(p_dl[pWork->mDLType], 32);
+    PORT_GX_CALL_PRIMS(p_dl[pWork->mDLType], 32);  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
 }
 
 void JPADrawDBillboard(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
@@ -632,9 +649,10 @@ void JPADrawDBillboard(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
     matrix[2][2] = 1.0f;
     matrix[2][3] = position.z;
     matrix[0][2] = matrix[1][2] = matrix[2][0] = matrix[2][1] = 0.0f;
+    PORT_PTCL_CULL(pWork, matrix, false);  // (GXV_HOTPROF_PTCLCULL)
     GXLoadPosMtxImm(matrix, GX_PNMTX0);
     p_prj[pWork->mPrjType](pWork, matrix);
-    GXCallDisplayList(jpa_dl, 32);
+    PORT_GX_CALL_PRIMS(jpa_dl, 32);  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
 }
 
 void JPADrawLine(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
@@ -1013,9 +1031,10 @@ void JPADrawYBillboard(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
     matrix[2][2] = pWork->mYBBCamMtx[2][2];
     matrix[2][3] = position.z;
     matrix[0][1] = matrix[0][2] = matrix[1][0] = matrix[2][0] = 0.0f;
+    PORT_PTCL_CULL(pWork, matrix, false);  // (GXV_HOTPROF_PTCLCULL)
     GXLoadPosMtxImm(matrix, GX_PNMTX0);
     p_prj[pWork->mPrjType](pWork, matrix);
-    GXCallDisplayList(jpa_dl, 32);
+    PORT_GX_CALL_PRIMS(jpa_dl, 32);  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
 }
 
 void JPADrawRotYBillboard(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle) {
@@ -1051,9 +1070,10 @@ void JPADrawRotYBillboard(JPAEmitterWorkData* pWork, JPABaseParticle* pParticle)
     matrix[2][1] = cosY * z;
     matrix[2][2] = y;
     matrix[2][3] = position.z;
+    PORT_PTCL_CULL(pWork, matrix, false);  // (GXV_HOTPROF_PTCLCULL)
     GXLoadPosMtxImm(matrix, GX_PNMTX0);
     p_prj[pWork->mPrjType](pWork, matrix);
-    GXCallDisplayList(jpa_dl, 32);
+    PORT_GX_CALL_PRIMS(jpa_dl, 32);  // (GXV_GX_DEDUP: a quad list of this file, primitives only)
 }
 
 void JKRAramPiece::startDMA(JKRAMCommand* pCommand) {

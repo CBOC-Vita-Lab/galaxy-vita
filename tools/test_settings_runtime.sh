@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 : "${VITASDK:?Set VITASDK to existing headers for native-adapter host tests}"
-modes=(off cold cold-playstation stale allocation-failure present-failure restart-failure running running-prior running-failure running-scanout-failure running-restore-set-failure running-restore-wait-failure running-restart running-font-oom font-flat font-bucket font-cased font-missing font-corrupt font-short-read font-eof font-read-error font-close-error font-ambiguous font-oversized font-bounded font-bucket-limit font-directory-read-error font-directory-close-error backdrop-ok backdrop-missing backdrop-legacy-path backdrop-short backdrop-oversized backdrop-short-read backdrop-eof backdrop-read-error backdrop-close-error backdrop-alloc running-backdrop running-backdrop-alloc hdtex-present hdtex-missing hdtex-empty hdtex-path hdtex-path-missing hdtex-dir)
+modes=(off cold cold-playstation stale start-bindings start-list start-list-pad allocation-failure present-failure restart-failure running running-prior running-failure running-scanout-failure running-restore-set-failure running-restore-wait-failure running-restart running-onebuffer running-frontbuffer running-memory-retry running-font-oom font-flat font-bucket font-cased font-missing font-corrupt font-short-read font-eof font-read-error font-close-error font-ambiguous font-oversized font-bounded font-bucket-limit font-directory-read-error font-directory-close-error backdrop-ok backdrop-missing backdrop-legacy-path backdrop-short backdrop-oversized backdrop-short-read backdrop-eof backdrop-read-error backdrop-close-error backdrop-alloc running-backdrop running-backdrop-alloc hdtex-present hdtex-missing hdtex-empty hdtex-path hdtex-path-missing hdtex-dir)
 if (($#)); then modes=("$@"); fi
 docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
   --mount "type=bind,source=$root,target=/work,readonly" \
@@ -11,7 +11,7 @@ docker run --rm --pull=never --platform linux/arm64 --network none --cpus=2 \
     clang++ -std=c++20 -stdlib=libc++ -fno-exceptions -fno-rtti -O1 -g -pthread \
       -fsanitize=address,undefined -fno-sanitize-link-runtime -fno-omit-frame-pointer \
       -Iplatform/include -Iplatform/vgx/src -Ivita/runtime -idirafter /sdk/arm-vita-eabi/include \
-      tests/settings_runtime.cpp platform/src/settings/{player_settings,settings_store,settings_launch,settings_font}.cpp \
+      -DGALAXY_SETTINGS_VERSION=\"3.0.0\" tests/settings_runtime.cpp platform/src/settings/{player_settings,settings_store,settings_launch,settings_font,settings_native,settings_guard}.cpp \
       platform/src/input/control_bindings.cpp -o /tmp/settings-runtime -l:libasan.so.8 -l:libubsan.so.1
     for mode in "$@"; do timeout 20 /tmp/settings-runtime "$mode"; done
   ' test-settings-runtime "${modes[@]}"

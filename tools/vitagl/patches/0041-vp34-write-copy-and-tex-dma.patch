@@ -1,0 +1,332 @@
+Patch 0041 (vp34, ported from Strikers 0045 + 0051 + 0061 + Carbon S7, GXV_VGL_WRCOPY / GXV_VGL_TEXCOPY_DMA):
+NEON/vstm/DMA write-combining copies into uncached stream & uniform pools (with mode 3 DMA -> mode 1 NEON fallback)
+and DMA engine contiguous linear texture uploads (source/utils/wrcopy.{c,h}). Default mode 0 (inert until enabled by host).
+diff --git a/source/buffers.c b/source/buffers.c
+index 9019d9a..49abe02 100644
+--- a/source/buffers.c
++++ b/source/buffers.c
+@@ -435,7 +435,7 @@ inline void glNamedBufferData(GLuint buffer, GLsizei size, const void *data, GLe
+ 	gpu_buf->last_frame = OBJ_NOT_USED;
+ 
+ 	if (data)
+-		vgl_fast_memcpy(gpu_buf->ptr, data, size);
++		vgl_wr_copy(gpu_buf->ptr, data, size); // patch 0041: NEON/DMA write copy into uncached pool when vglSetWriteCopy asks
+ }
+ 
+ void glBufferData(GLenum target, GLsizei size, const GLvoid *data, GLenum usage) {
+@@ -509,7 +509,7 @@ inline void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size
+ 	} else
+ #endif
+ 	{
+-		vgl_memcpy((uint8_t *)gpu_buf->ptr + offset, data, size);
++		vgl_wr_copy((uint8_t *)gpu_buf->ptr + offset, data, size); // patch 0041
+ 	}
+ }
+ 
+diff --git a/source/custom_shaders.c b/source/custom_shaders.c
+index 97bef5b..d0cebda 100644
+--- a/source/custom_shaders.c
++++ b/source/custom_shaders.c
+@@ -190,12 +190,12 @@ char vgl_file_cache_path[256];
+ 				vglSetUniformData(p->ffp_binds[FFP_NORMAL_MATRIX]->vptr, SCE_GXM_PARAMETER_TYPE_F32, 0, 3, 3, (const float *)normal_matrix, SCE_GXM_PARAMETER_TYPE_F32); \
+ 			} \
+ 		} \
+-		vgl_fast_memcpy(buffer, p->unif_vbuffer, p->vshader->unif_buf_size); \
++		vgl_wr_copy(buffer, p->unif_vbuffer, p->vshader->unif_buf_size); \
+ 		dirty_shader_vert_unifs = GL_FALSE; \
+ 	} \
+ 	if (p->frag_uniforms && dirty_shader_frag_unifs) { \
+ 		void *buffer = vglReserveFragmentUniformBuffer(p->fshader->unif_buf_size); \
+-		vgl_fast_memcpy(buffer, p->unif_fbuffer, p->fshader->unif_buf_size); \
++		vgl_wr_copy(buffer, p->unif_fbuffer, p->fshader->unif_buf_size); \
+ 		dirty_shader_frag_unifs = GL_FALSE; \
+ 	} \
+ 	if (p->vert_ubos) { \
+@@ -621,7 +621,7 @@ static inline __attribute__((always_inline)) void vgl_upload_vert_unifs(program
+ 		return;
+ 	}
+ 	void *buffer = vglReserveVertexUniformBuffer(size);
+-	vgl_fast_memcpy(buffer, p->unif_vbuffer, size);
++	vgl_wr_copy(buffer, p->unif_vbuffer, size);
+ 	p->ring_v = buffer;
+ 	p->ring_gen_v = vgl_unif_pool_gen; // (read after the reservation: a rollover inside it has already counted)
+ 	p->ring_epoch_v = vgl_unif_epoch;
+@@ -639,7 +639,7 @@ static inline __attribute__((always_inline)) void vgl_upload_frag_unifs(program
+ 		return;
+ 	}
+ 	void *buffer = vglReserveFragmentUniformBuffer(size);
+-	vgl_fast_memcpy(buffer, p->unif_fbuffer, size);
++	vgl_wr_copy(buffer, p->unif_fbuffer, size);
+ 	p->ring_f = buffer;
+ 	p->ring_gen_f = vgl_unif_pool_gen;
+ 	p->ring_epoch_f = vgl_unif_epoch;
+diff --git a/source/textures.c b/source/textures.c
+index da81020..9741de5 100644
+--- a/source/textures.c
++++ b/source/textures.c
+@@ -1245,7 +1245,7 @@ static inline __attribute__((always_inline)) void _glTexSubImage2D(texture *tex,
+ 			uint32_t line_size = width * bpp;
+ 			uint32_t src_stride = (unpack_row_len ? unpack_row_len : width) * bpp;
+ 			if (xoffset == 0 && src_stride == mip_w * bpp && src_stride == mip_stride) {
+-				vgl_fast_memcpy(ptr, data, line_size * height);
++				vgl_tex_copy(ptr, data, line_size * height); // patch 0041
+ 			} else {
+ 				for (int i = 0; i < height; i++) {
+ 					vgl_fast_memcpy(ptr, data, line_size);
+diff --git a/source/utils/gpu_utils.c b/source/utils/gpu_utils.c
+index cbba208..4a8b9e0 100644
+--- a/source/utils/gpu_utils.c
++++ b/source/utils/gpu_utils.c
+@@ -443,7 +443,7 @@ void gpu_alloc_texture(uint32_t w, uint32_t h, SceGxmTextureFormat format, const
+ 			uint8_t *dst;
+ 			if (fast_store) { // Internal Format and Data Format are the same, we can just use vgl_fast_memcpy for better performance
+ 				if (aligned_w == w) // Texture size is already aligned, we can use a single vgl_fast_memcpy for better performance
+-					vgl_fast_memcpy(texture_data, src, tex_size);
++					vgl_tex_copy(texture_data, src, tex_size); // patch 0041
+ 				else {
+ 					uint32_t line_size = w * bpp;
+ 					for (int i = 0; i < h; i++) {
+diff --git a/source/utils/mem_utils.h b/source/utils/mem_utils.h
+index 80f3f86..e05e7e0 100644
+--- a/source/utils/mem_utils.h
++++ b/source/utils/mem_utils.h
+@@ -35,6 +35,10 @@
+ #define vgl_fast_memcpy sceClibMemcpy
+ #endif
+ 
++// patch 0041 (GXV_VGL_WRCOPY / GXV_VGL_TEXCOPY_DMA): write-combining NEON/DMA copies into uncached pools and texture memory (utils/wrcopy.c)
++void vgl_wr_copy(void *dst, const void *src, uint32_t n);
++void vgl_tex_copy(void *dst, const void *src, uint32_t n);
++
+ extern vglMemType VGL_MEM_MAIN; // Flag for VRAM usage for allocations
+ 
+ // Support for older vitasdk versions for CI based on ancient builds
+diff --git a/source/utils/wrcopy.c b/source/utils/wrcopy.c
+new file mode 100644
+index 0000000..1f84e97
+--- /dev/null
++++ b/source/utils/wrcopy.c
+@@ -0,0 +1,180 @@
++/*
++ * wrcopy.c (patch 0041, ported from Strikers 0045 + 0051 + 0061 + Carbon S7):
++ *  - vgl_wr_copy: NEON 64B / vstm 128B / DMA copies into uncached pools (stream buffers, uniform ring) with mode 3 -> mode 1 NEON fallback.
++ *  - vgl_tex_copy: DMA engine contiguous linear texture upload copy (8 KiB+, full span strictly below 0x81000000).
++ */
++#include <stdint.h>
++#include <string.h>
++#include <psp2/kernel/clib.h>
++#include <psp2/kernel/dmac.h>
++#include <psp2/kernel/processmgr.h>
++#include "wrcopy.h"
++#ifndef vgl_fast_memcpy
++#define vgl_fast_memcpy sceClibMemcpy
++#endif
++
++#define VGL_WRCOPY_MIN 192u
++#define VGL_DMA_ADDR_LIMIT 0x81000000u
++#ifndef VGL_WR_ADDR
++#define VGL_WR_ADDR(p) ((uint32_t)(uintptr_t)(p))
++#endif
++#define VGL_DMA_SPAN_OK(p, n) ((n) <= VGL_DMA_ADDR_LIMIT && VGL_WR_ADDR(p) <= VGL_DMA_ADDR_LIMIT - (n))
++
++static volatile int vgl_wr_mode = 0;
++static volatile int vgl_wr_fb = 1; // mode 3 fallback: 1 = mode 1 NEON stores (default), 0 = sceClibMemcpy
++uint32_t vgl_wr_stat[8];           // [0..1] NEON copies/bytes, [2..3] clib copies/bytes, [4..5] DMA copies/bytes, [6] 8KiB+ >=0x81000000 skips, [7] DMA errors
++
++static inline void wr_neon64(uint8_t *d, const uint8_t *s, uint32_t blocks) {
++	__asm__ volatile(
++		"1:\n\t"
++		"pld [%1, #256]\n\t"
++		"vld1.8 {d0-d3}, [%1]!\n\t"
++		"vld1.8 {d4-d7}, [%1]!\n\t"
++		"subs %2, %2, #1\n\t"
++		"vst1.64 {d0-d3}, [%0:256]!\n\t"
++		"vst1.64 {d4-d7}, [%0:256]!\n\t"
++		"bne 1b\n\t"
++		: "+r"(d), "+r"(s), "+r"(blocks)
++		:
++		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "memory", "cc");
++}
++
++static inline void wr_vstm128(uint8_t *d, const uint8_t *s, uint32_t blocks) {
++	__asm__ volatile(
++		"1:\n\t"
++		"pld [%1, #256]\n\t"
++		"vld1.8 {d0-d3}, [%1]!\n\t"
++		"vld1.8 {d4-d7}, [%1]!\n\t"
++		"vld1.8 {d8-d11}, [%1]!\n\t"
++		"vld1.8 {d12-d15}, [%1]!\n\t"
++		"subs %2, %2, #1\n\t"
++		"vstmia %0!, {d0-d15}\n\t"
++		"bne 1b\n\t"
++		: "+r"(d), "+r"(s), "+r"(blocks)
++		:
++		: "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15", "memory", "cc");
++}
++
++void vglSetWriteCopyFallback(int on) {
++	vgl_wr_fb = on ? 1 : 0;
++}
++int vglGetWriteCopyFallback(void) {
++	return vgl_wr_fb;
++}
++
++void vglWriteCopyVariant(int mode, void *dst, const void *src, uint32_t n) {
++	uint8_t *d = (uint8_t *)dst;
++	const uint8_t *s = (const uint8_t *)src;
++	if (mode == 3) {
++		if (n >= 0x2000u) {
++			if (VGL_DMA_SPAN_OK(s, n) && VGL_DMA_SPAN_OK(d, n)) {
++				if (sceDmacMemcpy(d, s, n) >= 0) {
++					vgl_wr_stat[4]++;
++					vgl_wr_stat[5] += n;
++					return;
++				}
++				vgl_wr_stat[7]++;
++			} else {
++				vgl_wr_stat[6]++;
++			}
++		}
++		if (!vgl_wr_fb) {
++			vgl_wr_stat[2]++;
++			vgl_wr_stat[3] += n;
++			sceClibMemcpy(d, s, n);
++			return;
++		}
++		mode = 1;
++	}
++	if (mode != 1 && mode != 2) {
++		vgl_wr_stat[2]++;
++		vgl_wr_stat[3] += n;
++		sceClibMemcpy(d, s, n);
++		return;
++	}
++	const uint32_t unit = mode == 1 ? 64u : 128u;
++	uint32_t head = (uint32_t)(-(intptr_t)d) & 63u;
++	if (n < head + unit) {
++		vgl_wr_stat[2]++;
++		vgl_wr_stat[3] += n;
++		sceClibMemcpy(d, s, n);
++		return;
++	}
++	vgl_wr_stat[0]++;
++	vgl_wr_stat[1] += n;
++	if (head) {
++		sceClibMemcpy(d, s, head);
++		d += head;
++		s += head;
++		n -= head;
++	}
++	const uint32_t blocks = n >> (mode == 1 ? 6 : 7);
++	if (mode == 1)
++		wr_neon64(d, s, blocks);
++	else
++		wr_vstm128(d, s, blocks);
++	d += blocks * unit;
++	s += blocks * unit;
++	n -= blocks * unit;
++	if (n)
++		sceClibMemcpy(d, s, n);
++}
++
++void vglSetWriteCopy(int mode) {
++	vgl_wr_mode = (mode >= 1 && mode <= 3) ? mode : 0;
++}
++int vglGetWriteCopy(void) {
++	return vgl_wr_mode;
++}
++void vglWriteCopyStats(uint32_t *out4) {
++	for (int i = 0; i < 4; i++)
++		out4[i] = vgl_wr_stat[i];
++}
++void vglWriteCopyStats8(uint32_t *out8) {
++	for (int i = 0; i < 8; i++)
++		out8[i] = vgl_wr_stat[i];
++}
++
++static volatile int vgl_tex_mode = 0;
++static uint32_t vgl_tex_stat[6]; // dma copies, dma bytes, dma us, cpu copies, differences (mode 2), refusals
++void vglSetTextureCopyDma(int mode) {
++	vgl_tex_mode = (mode == 1 || mode == 2) ? mode : 0;
++}
++void vglTextureCopyStats(uint32_t *out6) {
++	for (int i = 0; i < 6; i++)
++		out6[i] = vgl_tex_stat[i];
++}
++void vgl_tex_copy(void *dst, const void *src, uint32_t n) {
++	const int m = vgl_tex_mode;
++	if (m == 0) {
++		vgl_fast_memcpy(dst, src, n);
++		return;
++	}
++	if (n >= 0x2000u && VGL_DMA_SPAN_OK(src, n) && VGL_DMA_SPAN_OK(dst, n)) {
++		const uint64_t t0 = sceKernelGetProcessTimeWide();
++		if (sceDmacMemcpy(dst, src, n) >= 0) {
++			vgl_tex_stat[0]++;
++			vgl_tex_stat[1] += n;
++			vgl_tex_stat[2] += (uint32_t)(sceKernelGetProcessTimeWide() - t0);
++			if (m == 2 && memcmp(dst, src, n) != 0) {
++				vgl_tex_stat[4]++;
++				sceClibMemcpy(dst, src, n);
++			}
++			return;
++		}
++		vgl_tex_stat[5]++;
++	}
++	vgl_tex_stat[3]++;
++	vgl_fast_memcpy(dst, src, n);
++}
++
++void vgl_wr_copy(void *dst, const void *src, uint32_t n) {
++	const int m = vgl_wr_mode;
++	if (m == 0 || n < VGL_WRCOPY_MIN) {
++		vgl_wr_stat[2]++;
++		vgl_wr_stat[3] += n;
++		sceClibMemcpy(dst, src, n);
++		return;
++	}
++	vglWriteCopyVariant(m, dst, src, n);
++}
+diff --git a/source/utils/wrcopy.h b/source/utils/wrcopy.h
+new file mode 100644
+index 0000000..7c076f1
+--- /dev/null
++++ b/source/utils/wrcopy.h
+@@ -0,0 +1,16 @@
++#ifndef _WRCOPY_H_
++#define _WRCOPY_H_
++#include <stdint.h>
++// patch 0041 (GXV_VGL_WRCOPY / GXV_VGL_TEXCOPY_DMA): see utils/wrcopy.c
++void vgl_wr_copy(void *dst, const void *src, uint32_t n);
++void vglSetWriteCopy(int mode);
++int vglGetWriteCopy(void);
++void vglWriteCopyVariant(int mode, void *dst, const void *src, uint32_t n);
++void vglWriteCopyStats(uint32_t *out4);
++void vglWriteCopyStats8(uint32_t *out8);
++void vglSetWriteCopyFallback(int on);
++int vglGetWriteCopyFallback(void);
++void vgl_tex_copy(void *dst, const void *src, uint32_t n);
++void vglSetTextureCopyDma(int mode);
++void vglTextureCopyStats(uint32_t *out6);
++#endif
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 9d9dfa7..7b18c20 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1404,6 +1404,16 @@ void vglUseVramForUSSE(GLboolean usage);
+ void vglSetFramebufferDetachKeep(GLboolean on);
+ GLboolean vglGetFramebufferDetachKeep(void);
+ 
++// patch 0041 (GXV_VGL_WRCOPY / GXV_VGL_TEXCOPY_DMA): write-combining NEON/DMA copies and DMA texture upload (default off).
++void vglSetWriteCopy(int mode);
++int vglGetWriteCopy(void);
++void vglSetWriteCopyFallback(int on);
++int vglGetWriteCopyFallback(void);
++void vglWriteCopyStats(uint32_t *out4);
++void vglWriteCopyStats8(uint32_t *out8);
++void vglSetTextureCopyDma(int mode);
++void vglTextureCopyStats(uint32_t *out6);
++
+ // Allows vitaGL to use newlib memory once all internal mempools are exhausted. Default value: GL_TRUE.
+ void vglUseExtraMem(GLboolean usage);
+ 

@@ -1,11 +1,16 @@
-// The player's own pictures. The public package carries no game artwork: the first time the real title screen has been fully
+// The player's own pictures. The package's bubble and LiveArea pictures are the contributor artwork (it includes the game's key art and logo; vita/vgx-game/sce_sys/ARTWORK.md);
+// an install by hand keeps them. Where the installer places the player's own: the first time the real title screen has been fully
 // shown, this worker copies the presented frame to ux0:data/smg/art/title.rgba (the loading screen and the Settings backdrop read
 // it from then on) and makes the bubble and LiveArea pictures from it (the console shows them after the home screen has been
 // refreshed). Everything that is not a console call is in port/title_art.h and is tested on the host.
 //
+// At each start (GXV_TITLEART=1) it compares the home-screen icon on the card with what it wrote last time (size and checksum, in
+// ux0:data/smg/art/title.ver): a package update, the console's "Refresh LiveArea" or a database rebuild that puts the package's
+// own pictures back is noticed at the next start and the pictures are made again from the saved capture, without capturing.
+//
 // It never touches the render path: the thread runs at the lowest user priority, reads the display buffer once in a few large
 // slices (the buffer is in video memory, which the CPU reads slowly), and does the rest from its own memory. Memory is bounded
-// (about 8 MiB at the peak: the 2 MiB capture and 5.5 MiB for the pictures, freed afterwards, and not started at all when the C heap has less than 32 MiB free). Every failure
+// (about 9 MiB at the peak: the 2 MiB capture and about 7 MiB for the pictures, freed afterwards, and not started at all when the C heap has less than 32 MiB free). Every failure
 // is silent apart from one log line.
 #include "title_art_runtime.h"
 #include "port/title_art.h"
@@ -23,7 +28,7 @@
 
 extern "C" int port_boot_title_is_visible(void);
 extern "C" int port_vgx_vita_splash_active(void);
-extern "C" void port_log_summary(const char*, ...);
+extern "C" void port_log_summary(const char*, ...) __attribute__((format(printf, 1, 2)));
 extern "C" unsigned int _newlib_heap_size_user;
 
 namespace {
@@ -70,6 +75,35 @@ bool ReadSmall(const char* path, char* out, size_t size) {
     if (n <= 0) return false;
     out[n] = 0;
     return true;
+}
+
+// BubbleSum (port/title_art.h) of what the home screen shows now: the app folder's icon0.png and the shell's copy in ur0:appmeta.
+// Two small files (tens of KiB), read on this low-priority thread only.
+uint32_t CurrentBubbleSum(const char* titleId) {
+    BubbleSum sum;
+    char paths[2][96];
+    std::snprintf(paths[0], sizeof paths[0], "ux0:app/%s/sce_sys/icon0.png", titleId);
+    std::snprintf(paths[1], sizeof paths[1], "ur0:appmeta/%s/icon0.png", titleId);
+    for (const char* path : paths) {
+        const long size = FileSize(path);
+        Mem<uint8_t> data;
+        long got = -1;
+        if (size >= 0 && size <= 4L * 1024 * 1024 && (size == 0 || data.Alloc(static_cast<size_t>(size)))) {
+            const SceUID f = sceIoOpen(path, SCE_O_RDONLY, 0);
+            if (f >= 0) {
+                got = 0;
+                while (got < size) {
+                    const int n = sceIoRead(f, data.p + got, static_cast<SceSize>(size - got > 65536 ? 65536 : size - got));
+                    if (n <= 0) break;
+                    got += n;
+                }
+                sceIoClose(f);
+                if (got != size) got = -1;
+            }
+        }
+        sum.File(got > 0 ? data.p : nullptr, got);
+    }
+    return sum.crc;
 }
 
 bool HeapAllows() {
@@ -120,11 +154,12 @@ bool CaptureFrame(uint8_t* rgba) {
 struct SinkContext {
     const char* titleId;
     int written = 0, wanted = 0;
+    bool liveAreaMeta = false;  // bg.png / startup.png also to the shell's LiveArea copy (Targets)
 };
 bool Sink(void* context, int which, const uint8_t* png, size_t length) {
     auto& c = *static_cast<SinkContext*>(context);
     char targets[2][96];
-    const int count = Targets(which, c.titleId, targets);
+    const int count = Targets(which, c.titleId, targets, c.liveAreaMeta);
     bool all = true;
     for (int i = 0; i < count; ++i) {
         ++c.wanted;
@@ -150,6 +185,15 @@ bool MakePictures(const uint8_t* rgba, const char* titleId) {
     const uint64_t t0 = NowUs();
     SinkContext context{titleId};
     int made = 0;
+    {
+        // GXV_TITLEART_LIVEAREA (default 1; 2.3, issue 7): the LiveArea's two pictures also go to the shell's copy of the LiveArea, which
+        // is what the home screen shows; only when the install made that folder (a folder made here would hold a LiveArea without its
+        // template). 0: the app folder only, as 2.2.
+        char liveArea[96];
+        std::snprintf(liveArea, sizeof liveArea, "ur0:appmeta/%s/livearea/contents", titleId);
+        SceIoStat st{};
+        context.liveAreaMeta = vgx::EnvInt("GXV_TITLEART_LIVEAREA", 1) != 0 && sceIoGetstat(liveArea, &st) >= 0 && SCE_S_ISDIR(st.st_mode);
+    }
     // On the console a homebrew game may not be allowed to change its own folder or the home screen's copy of its pictures
     // (both refused on a retail Vita with the default settings): then the pictures are not made at all (they take about 13 s of
     // a spare core) and the stamp says so, so it is not tried at every start. The capture still gives the loading screen and Settings.
@@ -170,6 +214,8 @@ bool MakePictures(const uint8_t* rgba, const char* titleId) {
     stamp.capture = kCaptureVersion;
     stamp.bubble = built ? kBubbleVersion : 0;  // a build that failed is tried again at the next start
     stamp.icon = FileSize(iconPath);
+    stamp.sum = CurrentBubbleSum(titleId);  // what is on the card now (also when a folder refused the pictures: then that is not retried)
+    stamp.hasSum = true;
     char text[96];
     const int length = FormatStamp(stamp, text, sizeof text);
     if (length > 0) ReplaceFile(kStampPath, reinterpret_cast<const uint8_t*>(text), static_cast<size_t>(length));
@@ -180,6 +226,7 @@ bool MakePictures(const uint8_t* rgba, const char* titleId) {
 
 int Main(SceSize, void*) {
     const long mode = vgx::EnvInt("GXV_TITLEART", 1);
+    const bool replaceShell = vgx::EnvInt("GXV_TITLEART_REPLACE_SHELL", 0) == 1;
     char titleId[32] = "";
     if (sceAppMgrAppParamGetString(0, 12, titleId, sizeof titleId) < 0 || !ValidTitleId(titleId)) std::snprintf(titleId, sizeof titleId, "%s", kDefaultTitleId);
     CaptureTrigger trigger;
@@ -200,8 +247,14 @@ int Main(SceSize, void*) {
             if (!ReadSmall(kStampPath, text, sizeof text) || !ParseStamp(text, stamp)) stamp = Stamp{};
             char iconPath[96];
             std::snprintf(iconPath, sizeof iconPath, "ux0:app/%s/sce_sys/icon0.png", titleId);
-            plan = Decide(static_cast<int>(mode), FileSize(kTitlePath) == static_cast<long>(kRgbaBytes), stamp, FileSize(iconPath));
+            const bool haveTitle = FileSize(kTitlePath) == static_cast<long>(kRgbaBytes);
+            plan = replaceShell ? Decide(static_cast<int>(mode), haveTitle, stamp, FileSize(iconPath),
+                                         stamp.hasSum ? CurrentBubbleSum(titleId) : 0u)
+                                : mode > 0 && (!haveTitle || mode >= 2) ? Plan::kCapture : Plan::kNone;
             if (plan == Plan::kNone) return sceKernelExitDeleteThread(0);
+            if (plan == Plan::kBuildOnly && stamp.capture == kCaptureVersion)
+                port_log_summary("title art: the home-screen pictures are not the ones made last time (a package update, a refresh, or a new "
+                                 "picture version %d after %d): making them again from the saved capture", kBubbleVersion, stamp.bubble);
             if (!HeapAllows()) {
                 port_log_summary("title art: skipped, the C heap has less than 32 MiB free");
                 return sceKernelExitDeleteThread(0);
@@ -257,7 +310,7 @@ int Main(SceSize, void*) {
                     ok = true;  // (nothing more to try this session)
                 } else {
                     port_log_summary("title art: the title screen was captured to ux0:data/smg/art/title.rgba");
-                    MakePictures(rgba.p, titleId);
+                    if (replaceShell) MakePictures(rgba.p, titleId);
                     ok = true;
                 }
                 saved = saved || ok;

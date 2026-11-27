@@ -28,7 +28,12 @@ void AudCameraWatcher::movement() {
     MR::setMicMtx(const_cast< TPos3f& >(MR::getCameraViewMtx()), 0);
 
     // They could've just done something like setFarCamera(MR::getFovy() < 20.0f), but oh well.
+#ifdef TARGET_PC
+    // (zoomclip23, GXV_ZOOM_LOGIC_VIEW: the game's own field of view; the handheld zoom must not switch the far-camera sound on)
+    if (MR::getFovyForLogic() < 20.0f) {
+#else
     if (MR::getFovy() < 20.0f) {
+#endif
         AudWrap::getSystem()->setFarCamera(true);
     } else {
         AudWrap::getSystem()->setFarCamera(false);

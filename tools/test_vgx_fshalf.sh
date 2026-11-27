@@ -19,3 +19,10 @@ run GXV_FS_HALF=bogus
 run GXV_FS_HALF=2
 run GXV_FS_HALF=3
 run GXV_FS_HALF=1
+# GXV_FS_HALF_MINOR (shadowpx23): with modes 0 / 2 it changes nothing (pinned digest); with 1 it adds keys (section 5); "perf" outside
+# Performance mode is off (mode 1's own digest), in Performance mode on
+run GXV_FS_HALF=0 GXV_FS_HALF_MINOR=1
+run GXV_FS_HALF=2 GXV_FS_HALF_MINOR=1
+run GXV_FS_HALF=1 GXV_FS_HALF_MINOR=perf GXV_AUTOQ_TARGET=60 GXV_FPS_LIMIT=30
+run GXV_FS_HALF=1 GXV_FS_HALF_MINOR=1
+run GXV_FS_HALF=1 GXV_FS_HALF_MINOR=perf GXV_AUTOQ_TARGET=60 GXV_FPS_LIMIT=0

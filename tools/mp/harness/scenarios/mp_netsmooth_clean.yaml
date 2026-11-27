@@ -1,0 +1,39 @@
+# STRENGTHENED (rigfix, from chk-harness): the old rules judged almost nothing (a host-only line, or crash/stall only). Every log pattern below was
+# checked against the format strings in platform/src/mp, decomp/src/Game/MP and net/src; NOT run against the game (the first real run decides).
+# netsmooth check: the guest walks squares in the Observatory; the host's puppet of the guest is judged afterwards:
+#   tools/mp/netsmooth/poselog.py judge <pair-folder> --sender guest --receiver host
+name: mp_netsmooth_clean
+description: "clean LAN pair with SMG_MP_POSELOG: judge with tools/mp/netsmooth/poselog.py (no snaps)"
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, SMG_MP_POSELOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2}
+  - name: guest
+    input: "@file2_observatory,170-178:SY=1,178-186:SX=1,186-194:SY=-1,194-202:SX=-1,202-210:SY=1,210-218:SX=1,218-226:SY=-1,226-234:SX=-1,234-242:SY=1,242-250:SX=1,250-258:SY=-1,258-266:SX=-1,266-274:SY=1,274-282:SX=1,282-290:SY=-1,290-298:SX=-1"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'metric * wall_s >= 208'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect host /\[mp\] slot 1 joined name=\S+ rejoin=0 .*players=2/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10s after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/'
+  - 'expect * /\[mp\] flow session start role=(host|guest)/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30s'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - 'absent guest /\[mp\] session ended reason=host-left/ before shutdown'
+  - 'absent * /\[mp\] (slot \d left|session ended reason=(?!none \(shutdown\)))/ before shutdown'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/ within 150s'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/ within 150s'
+  - 'shots * >= 10'

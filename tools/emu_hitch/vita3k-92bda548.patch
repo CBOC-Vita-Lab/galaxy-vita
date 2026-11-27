@@ -1,0 +1,275 @@
+diff --git a/vita3k/renderer/include/renderer/vulkan/checkpoint.h b/vita3k/renderer/include/renderer/vulkan/checkpoint.h
+new file mode 100644
+index 0000000..b14c7f2
+--- /dev/null
++++ b/vita3k/renderer/include/renderer/vulkan/checkpoint.h
+@@ -0,0 +1,120 @@
++// POSIX host helper for the optional Vita3K Vulkan pipeline-cache checkpoint.
++#pragma once
++
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <filesystem>
++#include <future>
++#include <string>
++#include <system_error>
++#include <utility>
++#include <vector>
++#include <unistd.h>
++
++namespace vk_checkpoint {
++namespace fs = std::filesystem;
++
++struct Snapshot {
++    fs::path shader_file, pipeline_file;
++    std::vector<uint8_t> shaders;
++    std::vector<uint64_t> keys;
++    std::vector<uint8_t> driver;
++    uint32_t magic = 0;
++};
++
++template<class List>
++std::vector<uint8_t> shader_bytes(const List &records, uint32_t version, uint32_t features) {
++    std::vector<uint8_t> out;
++    const size_t count = records.size();
++    out.reserve(sizeof(count) + 2 * sizeof(uint32_t) + count * 64);
++    auto append = [&](const auto &v) {
++        const auto *p = reinterpret_cast<const uint8_t *>(&v);
++        out.insert(out.end(), p, p + sizeof(v));
++    };
++    append(count);
++    append(version);
++    append(features);
++    for (const auto &h : records) {
++        static_assert(sizeof(h.frag) == 32 && sizeof(h.vert) == 32);
++        append(h.frag);
++        append(h.vert);
++    }
++    return out;
++}
++
++// Never truncate the last good checkpoint. The temporary is unique and on
++// the same filesystem as its destination. Each of the two caches is an
++// independent upstream file; this is not a transaction across both files.
++template<class Write>
++bool replace_file(const fs::path &path, Write write) {
++    std::string temp = path.string() + ".tmp.XXXXXX";
++    const int fd = ::mkstemp(temp.data());
++    if (fd < 0)
++        return false;
++    FILE *f = ::fdopen(fd, "wb");
++    bool ok = false;
++    if (f) {
++        try {
++            ok = write(f) && std::fflush(f) == 0 && ::fsync(fd) == 0;
++        } catch (...) {
++            ok = false;
++        }
++        if (std::fclose(f) != 0)
++            ok = false;
++    } else {
++        ::close(fd);
++    }
++    if (ok && ::rename(temp.c_str(), path.c_str()) == 0)
++        return true;
++    ::unlink(temp.c_str());
++    return false;
++}
++
++inline bool bytes(FILE *f, const void *data, size_t n) {
++    return !n || std::fwrite(data, 1, n, f) == n;
++}
++
++inline bool persist(const Snapshot &s) {
++    std::error_code err;
++    fs::create_directories(s.shader_file.parent_path(), err);
++    if (err || !replace_file(s.shader_file, [&](FILE *f) { return bytes(f, s.shaders.data(), s.shaders.size()); }))
++        return false;
++    if (s.driver.empty())
++        return true; // upstream saves the shader list, but not an empty driver cache
++    const size_t count = s.keys.size();
++    return replace_file(s.pipeline_file, [&](FILE *f) {
++        return bytes(f, &s.magic, sizeof(s.magic)) && bytes(f, &count, sizeof(count))
++            && bytes(f, s.keys.data(), count * sizeof(uint64_t))
++            && bytes(f, s.driver.data(), s.driver.size());
++    });
++}
++
++// The renderer owns this object. Never queue a second giant driver blob:
++// when busy, leave the checkpoint due and take a fresh snapshot on a later
++// second. The worker operates only on moved data, never on Vulkan objects.
++class Writer {
++    std::future<bool> job;
++public:
++    bool busy() const {
++        return job.valid() && job.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
++    }
++    bool finish() {
++        return !job.valid() || job.get();
++    }
++    template<class Write>
++    bool start(Snapshot snapshot, Write write) {
++        if (job.valid())
++            return false;
++        try {
++            job = std::async(std::launch::async, [s = std::move(snapshot), w = std::move(write)] {
++                try { return w(s); } catch (...) { return false; }
++            });
++            return true;
++        } catch (const std::system_error &) {
++            return false;
++        }
++    }
++};
++} // namespace vk_checkpoint
+diff --git a/vita3k/renderer/include/renderer/vulkan/pipeline_cache.h b/vita3k/renderer/include/renderer/vulkan/pipeline_cache.h
+index 9dd0644..d86c810 100644
+--- a/vita3k/renderer/include/renderer/vulkan/pipeline_cache.h
++++ b/vita3k/renderer/include/renderer/vulkan/pipeline_cache.h
+@@ -21,6 +21,10 @@
+ #include <util/containers.h>
+ #include <vkutil/vkutil.h>
+ 
++#ifdef __APPLE__
++#include "checkpoint.h"
++#endif
++
+ #include <array>
+ #include <limits>
+ #include <map>
+@@ -77,6 +81,12 @@ private:
+     static constexpr int pipeline_cache_save_delay = 15;
+ 
+     vk::PipelineCache pipeline_cache;
++#ifdef __APPLE__
++    vk_checkpoint::Writer checkpoint_writer;
++    bool final_checkpoint_requested = false;
++    static bool checkpoint_enabled();
++    bool checkpoint(bool closing);
++#endif
+ 
+     // first index: 0 if color is backed by memory, 1 otherwise
+     // second index: 1 if depth-stencil is force loaded, 0 otherwise
+diff --git a/vita3k/renderer/src/vulkan/pipeline_cache.cpp b/vita3k/renderer/src/vulkan/pipeline_cache.cpp
+index 0cfc2d3..4c9aaf0 100644
+--- a/vita3k/renderer/src/vulkan/pipeline_cache.cpp
++++ b/vita3k/renderer/src/vulkan/pipeline_cache.cpp
+@@ -30,6 +30,10 @@
+ #include <util/log.h>
+ 
+ #include <SDL3/SDL_cpuinfo.h>
++#ifdef __APPLE__
++#include <cstdlib>
++#include <cstring>
++#endif
+ 
+ // don't use the dispatch version, because we always hash a small amount
+ // with a known size
+@@ -339,6 +343,50 @@ void PipelineCache::read_pipeline_cache() {
+     LOG_INFO("Pipeline cache read and loaded");
+ }
+ 
++#ifdef __APPLE__
++bool PipelineCache::checkpoint_enabled() {
++    static const bool enabled = [] {
++        const char *value = std::getenv("VITA3K_ASYNC_PIPELINE_CHECKPOINT");
++        return value && std::strcmp(value, "1") == 0;
++    }();
++    return enabled;
++}
++
++bool PipelineCache::checkpoint(bool closing) {
++    // Called by the render thread during play and only after its join on exit.
++    if (!closing && checkpoint_writer.busy())
++        return false;
++    if (!checkpoint_writer.finish())
++        LOG_ERROR("Previous pipeline checkpoint failed; retrying with current cache");
++
++    const auto start = std::chrono::steady_clock::now();
++    vk_checkpoint::Snapshot snapshot;
++    snapshot.shader_file = state.shaders_path / "hashs-vk.dat";
++    snapshot.pipeline_file = state.shaders_path / fmt::format("pipeline-cache-vk{}.dat", shader::CURRENT_VERSION);
++    snapshot.magic = pipeline_cache_magic;
++    {
++        std::lock_guard<std::mutex> lock(shaders_mutex);
++        snapshot.shaders = vk_checkpoint::shader_bytes(state.shaders_cache_hashs, shader::CURRENT_VERSION, state.get_features_mask());
++    }
++    // Only the same upstream caller touches the Vulkan driver or live maps.
++    snapshot.driver = state.device.getPipelineCacheData(pipeline_cache);
++    snapshot.keys.reserve(pipelines.size());
++    for (const auto &[key, unused] : pipelines)
++        snapshot.keys.push_back(key);
++    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
++    LOG_INFO("Pipeline checkpoint snapshot: {} ms, {} driver bytes, final {}", elapsed_ms, snapshot.driver.size(), closing);
++    auto persist = [](const vk_checkpoint::Snapshot &data) {
++        const auto t = std::chrono::steady_clock::now();
++        const bool ok = vk_checkpoint::persist(data);
++        LOG_INFO("Pipeline checkpoint disk write: {} ms, success {}", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count(), ok);
++        return ok;
++    };
++    if (closing)
++        return persist(snapshot);
++    return checkpoint_writer.start(std::move(snapshot), persist);
++}
++#endif
++
+ void PipelineCache::save_pipeline_cache() {
+     // first save the shader hashes
+     // do a copy for thread safety
+@@ -384,6 +432,16 @@ void PipelineCache::cleanup() {
+     if (use_async_compilation)
+         set_async_compilation(false);
+ 
++#ifdef __APPLE__
++    if (final_checkpoint_requested) {
++        if (!checkpoint(true))
++            LOG_ERROR("Final pipeline checkpoint failed");
++        final_checkpoint_requested = false;
++    } else if (!checkpoint_writer.finish()) {
++        LOG_ERROR("Pipeline checkpoint failed before cleanup");
++    }
++#endif
++
+     for (auto &[hash, pipeline] : pipelines)
+         state.device.destroy(pipeline);
+     pipelines.clear();
+diff --git a/vita3k/renderer/src/vulkan/renderer.cpp b/vita3k/renderer/src/vulkan/renderer.cpp
+index 0cf29e2..a00d18a 100644
+--- a/vita3k/renderer/src/vulkan/renderer.cpp
++++ b/vita3k/renderer/src/vulkan/renderer.cpp
+@@ -1278,8 +1278,17 @@ void VKState::swap_window() {
+     // look once a frame if we need to save the pipeline cache
+     const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+     if (time_s >= pipeline_cache.next_pipeline_cache_save) {
+-        pipeline_cache.save_pipeline_cache();
+-
++#ifdef __APPLE__
++        if (pipeline_cache.checkpoint_enabled()) {
++            if (!pipeline_cache.checkpoint(false)) {
++                pipeline_cache.next_pipeline_cache_save = time_s + 1;
++                return;
++            }
++        } else
++#endif
++        {
++            pipeline_cache.save_pipeline_cache();
++        }
+         pipeline_cache.next_pipeline_cache_save = std::numeric_limits<uint64_t>::max();
+     }
+ }
+@@ -1834,6 +1843,13 @@ void VKState::preclose_action() {
+     if (shaders_path.empty())
+         return;
+ 
++#ifdef __APPLE__
++    if (pipeline_cache.checkpoint_enabled()) {
++        // shutdown_app_runtime joins the render thread before cache cleanup.
++        pipeline_cache.final_checkpoint_requested = true;
++        return;
++    }
++#endif
+     pipeline_cache.save_pipeline_cache();
+ }
+ 

@@ -447,6 +447,10 @@ namespace MR {
         MarioAccess::changeItemStatus(param1);
     }
 
+    bool canChangePlayerItemStatus(s32 param1) {
+        return MarioAccess::canChangeItemStatus(param1);
+    }
+
     void curePlayerElementMode() {
         changePlayerItemStatus(8);
     }

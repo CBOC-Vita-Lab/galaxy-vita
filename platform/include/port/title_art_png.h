@@ -6,7 +6,7 @@
 //
 // Memory: every buffer comes from malloc (never operator new, which is fatal on the console when the heap is short) and
 // every function returns false instead of aborting when malloc says no. Peak use for a 960x544 picture is about 4 MiB.
-// The reference of the colour handling is tools/handheld/make_livearea_title.py (Pillow's median cut).
+// The quantizer is ported exactly to tools/handheld/palette_png.py (the host reference and the package pictures use it).
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -99,16 +99,17 @@ inline bool BuildPalette(const uint8_t* rgb, size_t pixels, Palette& pal, uint32
     };
     while (boxCount < maxColours) {
         // The box to split: the largest weighted spread times the square root of its pixel count (a pure population rule starves
-        // the small, saturated colours of a logo; a pure spread rule spends the palette on single stray pixels).
+        // the small, saturated colours of a logo; a pure spread rule spends the palette on single stray pixels). Compared as
+        // spread^2 * count, in integers, so that the host reference (tools/handheld/palette_png.py) picks the very same box.
         int best = -1, bestAxis = 0;
-        double bestScore = 0;
+        uint64_t bestScore = 0;
         for (int i = 0; i < boxCount; ++i) {
             if (boxes[i].end - boxes[i].begin < 2) continue;
             int axis, range;
             uint64_t total;
             stats(boxes[i], axis, range, total);
             if (range <= 0) continue;
-            double score = double(range) * std::sqrt(double(total));
+            const uint64_t score = uint64_t(range) * uint64_t(range) * total;
             if (score > bestScore) { bestScore = score; best = i; bestAxis = axis; }
         }
         if (best < 0) break;
@@ -550,6 +551,7 @@ inline bool ZlibCompress(const uint8_t* in, size_t n, uint8_t* out, size_t cap, 
 
 // ------------------------------------------------------------------------------------------------ PNG
 // An 8-bit palette PNG of `idx` (w*h palette indices). `out` receives the file; its capacity must be at least PngBound(w, h).
+// The palette chunk always has 256 entries (unused ones black), as the package's own pictures have.
 inline size_t PngBound(int w, int h) { return ZlibBound(size_t(w + 1) * h) + 768 + 128; }
 inline bool EncodePng8(const uint8_t* idx, int w, int h, const Palette& pal, uint8_t* out, size_t cap, size_t& outLen) {
     using namespace detail;
@@ -578,7 +580,9 @@ inline bool EncodePng8(const uint8_t* idx, int w, int h, const Palette& pal, uin
     };
     uint8_t ihdr[13] = {uint8_t(w >> 24), uint8_t(w >> 16), uint8_t(w >> 8), uint8_t(w), uint8_t(h >> 24), uint8_t(h >> 16), uint8_t(h >> 8), uint8_t(h), 8, 3, 0, 0, 0};
     chunk("IHDR", ihdr, 13);
-    chunk("PLTE", pal.rgb, size_t(pal.count) * 3);
+    uint8_t plte[256 * 3] = {};
+    std::memcpy(plte, pal.rgb, size_t(pal.count) * 3);
+    chunk("PLTE", plte, sizeof plte);
     chunk("IDAT", packed.p, packedLen);
     chunk("IEND", nullptr, 0);
     outLen = o;

@@ -1,0 +1,27 @@
+# UNRUN (rules checked against the code's log lines by tests/mp/scenario_regex_test.py; the game has not played it). G1/G7: the host gets the star while the guest floats in a bubble (guest fell at 20 s, host's star at 40 s; nobody pops it).
+# Expected (read from MpFlow.cpp deliveryStep): the guest's bubble is popped in place ("star"), the star is delivered once, both follow the clear move.
+# A failure would be: path=record (15 s timeout), a bubble left over, or a hold timeout.
+name: glitch_star_while_bubbled
+description: "star arrives at a bubbled guest: pop in place, one delivery, both move on"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 40}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "20:1:abyss"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] bubble on slot=1 / '
+  - 'expect host /\[mp\] flow star got id=\d+ grand=\d by=0/'
+  - 'order guest /\[mp\] bubble on slot=1/ before guest /\[mp\] flow star got id=\d+ grand=\d by=0/'
+  - 'expect guest /\[mp\] bubble off slot=1 .*why=star/ within 15s after guest /\[mp\] flow star got/'
+  - 'expect guest /\[mp\] star delivered id=\d+ path=(native|synthetic)/ within 20s after guest /\[mp\] flow star got/'
+  - 'count guest /\[mp\] star delivered id=/ == 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow star delivery dropped|flow clear hold timeout|bubble restart)/'
+  - 'order host /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8s'

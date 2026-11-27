@@ -1,0 +1,8 @@
+# (11 Nov, harness3: the power-save tip no longer shows on entering the Multiplayer menu (conntest 716f9e1: only after a laggy session / the test): the old "42 A tip" press is gone)
+# harness3 (11 Nov): entry -> Multiplayer -> tip -> the Multiplayer menu -> Square (SPIN = the swing: in.sq) = Connection Test; it runs to the
+# end (shots every few s); Square again on the result = save the report (report.txt). PETARI_GAME_CLOCK=1, fresh mp.cfg.
+30-30.5:A|B
+35-35.2:DOWN
+37-37.2:A
+50-50.3:SPIN               # Square: Connection Test
+170-170.3:SPIN             # Square on the result: save the report

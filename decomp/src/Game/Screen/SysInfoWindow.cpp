@@ -23,6 +23,9 @@ namespace NrvSysInfoWindow {
 SysInfoWindow::SysInfoWindow(SysInfoWindowType windowType, SysInfoExecuteType executeType)
     : LayoutActor("\x83\x56\x83\x58\x83\x65\x83\x80\x97\x70\x83\x43\x83\x93\x83\x74\x83\x48\x83\x81\x81\x5b\x83\x56\x83\x87\x83\x93\x83\x45\x83\x42\x83\x93\x83\x68\x83\x45", true), mWindowType(windowType), mType(Type_Key), mYesNoSelector(nullptr),
       mIconAButton(nullptr), mTextParentPaneName(nullptr), mWindowParentPaneName(nullptr), _38(executeType == ExecuteType_Children) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
     switch (windowType) {
     case WindowType_Normal:
         mTextParentPaneName = "InfoWindow";
@@ -159,6 +162,14 @@ void SysInfoWindow::forceKill() {
 bool SysInfoWindow::isWait() const {
     return isNerve(GET_NERVE(SysInfoWindow, SysInfoWindowNrvWait));
 }
+
+#ifdef TARGET_PC
+void SysInfoWindow::setPortPadYesNo(bool on) {
+    if (mYesNoSelector != nullptr) {
+        mYesNoSelector->setPortPad(on);
+    }
+}
+#endif
 
 bool SysInfoWindow::isSelectedYes() const {
     return mYesNoSelector->isSelectedYes();

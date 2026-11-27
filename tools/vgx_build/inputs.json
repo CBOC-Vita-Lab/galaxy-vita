@@ -21,6 +21,20 @@
     "bin/vita-elf-create",
     "bin/vita-make-fself",
     "share/vita.toolchain.cmake",
-    "share/vita.cmake"
-  ]
+    "share/vita.cmake",
+    "arm-vita-eabi/lib/libSceNet_stub.a",
+    "arm-vita-eabi/lib/libSceNetCtl_stub.a",
+    "arm-vita-eabi/lib/libSceSysmodule_stub.a",
+    "arm-vita-eabi/lib/libScePspnetAdhoc_stub_weak.a",
+    "bin/arm-vita-eabi-gcc"
+  ],
+  "mbedtls": [
+    "include/mbedtls/ssl.h",
+    "include/mbedtls/np_user_config.h",
+    "include/psa/crypto.h",
+    "lib/libmbedtls.a",
+    "lib/libmbedx509.a",
+    "lib/libmbedcrypto.a"
+  ],
+  "mbedtlsScope": "MP3: files the link stage needs from SMG_MBEDTLS / --mbedtls (python3 tools/mp/build-mbedtls.py --target vita --work /tls makes /tls/mbedtls/vita); only checked when one is given."
 }

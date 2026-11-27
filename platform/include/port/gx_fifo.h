@@ -178,6 +178,31 @@ void port_gx_fx_end(void) __attribute__((weak));                                
 int __PortGXFxMergeOk(void) __attribute__((weak));           // gx_fifo.cpp: the switch, and the FIFO feeds the vgx front end now
 void __PortGXFifoWriteBytes(const void* src, uint32_t n) __attribute__((weak)); // gx_fifo.cpp: bytes in, as element writes would put them
 void __PortGXFxForeign(void) __attribute__((weak));          // gx_fifo.cpp: a write the gathering did not take (logged; gathering off)
+// GXV_RETAINED (default 0): J3D's shape calls (J3DShapeDraw::draw) carry a handle for the front end, a port-private command 0x59 + u32
+// right in front of the CALL_DL (GXDisplayList.c port_gx_call_retained; the front end: platform/vgx/src/vgx_dlcache.cpp "retained shapes").
+int __PortGXRetainedOk(void) __attribute__((weak));          // gx_fifo.cpp: the switch, and the FIFO feeds the vgx front end now
+void port_gx_call_retained(const void* list, uint32_t nbytes, uint32_t handle); // GXDisplayList.c: GXCallDisplayList with the handle
+// GXV_J3DNATIVE (default 0; 1 census, 2 verify, 3 on): J3D's material / differed list calls carry a bracket for the front end (GXDisplayList.c
+// port_gx_call_bracketed; decomp/include/JSystem/J3DGraphBase/J3DPortNative.hpp; the front end: platform/vgx/src/vgx_j3native.inc).
+int __PortGXBracketOk(void) __attribute__((weak));           // gx_fifo.cpp: the switch (>= 1), and the FIFO feeds the vgx front end now
+int __PortGXJ3nMode(void);                                   // gx_fifo.cpp: GXV_J3DNATIVE, 0 when the FIFO is not the vgx front end's
+// GXV_REPLAY25 (replay25, default 0; decomp/src/Game/System/DrawBuffer.cpp): a shape's draw (J3DShapePacket::drawFast) re-emitted as the
+// bytes it wrote the last time, when every input it reads is the same. The engine copies bytes into the stream, so it asks:
+//   __PortGXFifoOverflowSerial  moved by every __PortGXFifoOverflow (a publish step or a segment change: the bytes written since a
+//                               recorded position may have moved, so a record that spans one is dropped)
+//   __PortGXReplayOk()          1 when the FIFO writes into the staging buffer the vgx front end reads, no GX capture is open and no
+//                               particle gathering is on (gx_fifo.cpp)
+//   port_gx_replay_clean()      1 when the GX library holds no deferred state to send and no pending primitive flush: the next retained
+//                               call then writes exactly its own bytes (GXDisplayList.c)
+// (weak: host tests that link the GX units without them keep the engine off)
+#if defined(PORT_GX_FIFO_BATCH_OWNER)
+extern uint32_t __PortGXFifoOverflowSerial;
+#else
+__attribute__((weak)) uint32_t __PortGXFifoOverflowSerial = 0;
+#endif
+int __PortGXReplayOk(void) __attribute__((weak));
+int port_gx_replay_clean(void) __attribute__((weak));
+void port_gx_call_bracketed(const void* list, uint32_t nbytes, uint32_t id, uint32_t verA, uint32_t verB, uint32_t ext, uint32_t flags);
 #endif
 
 #ifdef __cplusplus

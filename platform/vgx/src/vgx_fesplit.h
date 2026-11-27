@@ -81,12 +81,21 @@ struct DrawJob {
     uint32_t chunk = 0, first = 0, vtxStart = 0, stride = 0;
     int16_t exX = 0, exY = 0, exW = 0, exH = 0;
     int16_t abX = 0, abY = 0, abW = 0, abH = 0; // (see ab)
-    // static: the record's geometry
+    // static: the record's geometry (and, GXV_STATIC_INST, `chunk` is the list's instance buffer, 0 none; with vsTwin, see FinishStatic)
     uint32_t vbuf = 0, vtxOffset = 0, idxOffset = 0, vtxFirst = 0;
     // dynamic, GXV_RIGIDMERGE: the vertex shader of the draw's key with the matrix palette (0xFFFF: the draw may not join a palette run), and
     // where its vertices are in memory (the arena at the moment: the finishing thread writes the palette slot into their w)
     uint16_t vsTwin = 0xFFFF, padTwin = 0;
     uint32_t vtxPtrLo = 0, vtxPtrHi = 0;
+    // static, GXV_VTXPACK (vgx_draw.cpp VqScaleBlocks): the packed run's shifts (5 bits each: position, normal, tex0, tex1; 0: not
+    // packed), how the draw's vertex shader reads them (4 bits per texgen, VqTexOf), its palette class (VsKey::perVtxPos) and the floats
+    // of the texture-matrix block it reads (BuildMtxC's packed length)
+    uint32_t vqK = 0, vqTex = 0;
+    uint8_t vqPal = 0, vqTmLen = 0;
+    uint16_t owner = 0; // GXV_HRW (hrw27): DrawRec::owner
+    uint8_t depthMark = 0; // hrw41: DrawRec::depthMark
+    uint8_t playerMark = 0; // g30: DrawRec::playerMark (fits in padding before clearRgba)
+    uint32_t clearRgba = 0; // GXV_CLEARQ: the clear's colour and alpha bytes (r | g << 8 | b << 16 | a << 24) when `cover` bit 3 is set
 };
 // The palette run the last record may be (GXV_RIGIDMERGE; see FinishDraw): rec is the record's index (-1: none), slots the matrices in its
 // palette block (at uni offset pal).
@@ -145,6 +154,11 @@ void Settle(uint32_t ticket);
 void Xform(size_t offset, uint32_t count, uint32_t layoutMask);
 // A draw: returns the index its placeholder (Cmd{CMD_DRAW, index}) carries.
 uint32_t Job(const DrawJob& j, const DrawStateRef& st);
+// GXV_FE_PARALLEL (vgx_fepar.h): an operation that calls `fn` with n (<= 64) words, in order with the others; whether this frame may
+// hand work to the finishing thread that way (the split on, not GXV_SPLIT=2, whose shadow reads the arena on the player).
+using CallFn = void (*)(const uint32_t* w);
+void Call(CallFn fn, const uint32_t* w, uint32_t n);
+bool OffThreadOk();
 // The vertex arena is about to grow past its capacity (its memory moves): the finishing thread must be idle.
 void BeforeArenaGrow(const std::vector<uint8_t, NoInitAlloc<uint8_t>>& vtx, size_t newSize);
 // End of the frame's drawing: waits for the finishing thread, puts its records, indices and uniforms into `buf`
@@ -164,6 +178,16 @@ void FxJoinCounters(uint64_t out[2]);
 void KeyIdCounters(uint64_t out[4]);
 // (any thread) Operations the player ran itself at frame ends because the finishing thread was behind (since the start).
 uint32_t StolenOps();
+// (hitch30) The player's two waits that used to spin without a bound (and with std::this_thread::yield(), which is empty on the console):
+// site 0: FinishFrame taking the reader while the finishing thread is in a batch; site 1: fepar SettleSources waiting for a decode.
+// Both now spin GXV_BOUND_SPIN_US (default 100; 0 = the old spin) and then sleep on the condition (site 0) or do the work themselves
+// (site 1, Drain). out = waits, spins that ran out, take-overs, longest wait in us since the last call (reset), longest ever (us).
+void SpinCounters(int site, uint32_t out[5]);
+uint32_t BoundSpinUs();
+void NoteSpin(int site, int64_t waitNs, bool spunOut, bool tookOver);
+// (any thread, for the workload line) wake-up calls, those that found the finishing thread asleep and signalled it, their time in ns (with
+// GXV_SPLIT_WAKESTAT=1), and the times the finishing thread went to sleep; all since the start.
+void WakeCounters(uint64_t out[4]);
 // (player, GXV_RIGIDMERGE_DLLEARN) the join log of the frame FinishFrame finished (see FinishCtx::joinLog).
 const std::vector<uint8_t>& FinishedJoinLog();
 

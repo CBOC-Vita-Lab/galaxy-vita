@@ -83,6 +83,16 @@ static void stall() {
     w3.Update(0, many, 20);
     many[19] = 7;  // beyond the watched words
     CHECK(w3.Update(6u * 1000000u, many, 20).stalled);
+    // 8th word (index 7 = compileSeq) counts as active progress and prevents a false stall.
+    uint64_t comp[8] = {1, 1, 0, 0, 0, 0, 0, 0};
+    StallWatch w4(60.0);
+    w4.Update(0, comp, 8);
+    comp[7] = 1;
+    CHECK(!w4.Update(50u * 1000000u, comp, 8).stalled);
+    comp[7] = 2;
+    CHECK(!w4.Update(100u * 1000000u, comp, 8).stalled);
+    // Stopping compileSeq for 60 s still trips the stall watchdog (OLED safety on a real compiler hang).
+    CHECK(w4.Update(160u * 1000000u, comp, 8).stalled);
 }
 
 static void small() {

@@ -23,7 +23,7 @@ Windows and Linux. Nothing else to install: no Python, no Dolphin, no FTP client
 Before anything is sent, the installer converts your game for the Vita on your
 computer: every archive, model, sound and movie is made ready for the port,
 every file is checked against the expected result, and the movies are made
-about half the size so they play smoothly. This takes about 2–3 minutes on a
+about half the size to save about 1 GB of card space. This takes about 2–3 minutes on a
 recent computer, once. Your own disc image is never changed.
 
 Then it copies about 2.5 GB to `ux0:data/smg/game/` and installs the app. Over
@@ -41,3 +41,5 @@ install.
 
 First launch help: [Mac](https://github.com/CBOC-Vita-Lab/vita-installer/blob/main/docs/mac-open.md).
 On Windows, if SmartScreen appears, choose **More info > Run anyway**.
+
+**Recommended for best 60 FPS performance:** While the game runs without extra plug-ins, enabling **CapUnlocker** (unlocks the PS Vita's 4th CPU core) and overclocking with **PSVshell / PSVshellPlus** (**500 MHz CPU / 222 MHz GPU / 222 MHz BUS**) gives you the smoothest 60 FPS and Quality 2× MSAA experience.

@@ -1,0 +1,8 @@
+# 8193 Q2: crisp31 Q2: GXV_EDGE_DEPTH=1; Quality at 1:1: screenshots of Mario's eyes, emblems, sign text, a fence or leaf silhouette ('[aa25]' line) (the owner plays or watches)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1
+GXV_PICTURE_MODE=30
+GXV_EDGE_DEPTH=1

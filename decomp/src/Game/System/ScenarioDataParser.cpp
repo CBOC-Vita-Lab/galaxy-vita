@@ -20,8 +20,12 @@ namespace {
 
     struct GalaxyNameSortLt {
         bool operator()(ScenarioData* pLhs, ScenarioData* pRhs) {
+#ifdef TARGET_PC
+            return pLhs->mGalaxySortIndex < pRhs->mGalaxySortIndex;
+#else
             return static_cast< u32 >(GalaxyNameSortTable::getGalaxySortIndex(getGalaxyName(pLhs))) <
                    static_cast< u32 >(GalaxyNameSortTable::getGalaxySortIndex(getGalaxyName(pRhs)));
+#endif
         }
     };
 
@@ -45,6 +49,10 @@ ScenarioData::ScenarioData(const char* pFilePath) : mScenarioData(), mGalaxyName
 
     mGalaxyName = new char[galaxyNameSize];
     MR::copyString(mGalaxyName, fileName, galaxyNameSize);
+#ifdef TARGET_PC
+    // The immutable GalaxyID table orders the same galaxy on every comparator call.
+    mGalaxySortIndex = static_cast<u32>(GalaxyNameSortTable::getGalaxySortIndex(mGalaxyName));
+#endif
 
     JKRMemArchive* pArchive = static_cast< JKRMemArchive* >(MR::receiveArchive(pFilePath));
 
@@ -83,6 +91,7 @@ s32 ScenarioData::getPowerStarNum() const {
 
 bool ScenarioData::getValueString(const char* pKey, s32 scenarioNo, const char** ppOut) const {
     JMapInfoIter iter = getScenarioDataIter(scenarioNo);
+    if (!iter.isValid()) return false;
     bool isExist = iter.getValue(pKey, ppOut);
 
     if (isExist) {
@@ -108,12 +117,12 @@ JMapInfoIter ScenarioData::getScenarioDataIter(s32 scenarioNo) const {
 
 bool ScenarioData::getValueU32(const char* pKey, s32 scenarioNo, u32* pOut) const {
     JMapInfoIter iter = getScenarioDataIter(scenarioNo);
-    return iter.getValue(pKey, pOut);
+    return iter.isValid() && iter.getValue(pKey, pOut);
 }
 
 bool ScenarioData::getValueBool(const char* pKey, s32 scenarioNo, bool* pOut) const {
     JMapInfoIter iter = getScenarioDataIter(scenarioNo);
-    return iter.getValue(pKey, pOut);
+    return iter.isValid() && iter.getValue(pKey, pOut);
 }
 
 s32 ScenarioData::getZoneNum() const {
@@ -173,6 +182,7 @@ ScenarioDataParser::ScenarioDataParser(const char* pName) : NameObj(pName), mSce
             continue;
         }
 
+        if (mScenarioData.size() >= mScenarioData.capacity()) continue;
         ScenarioData* pData = new ScenarioData(fileName);
 
         u32 index = mScenarioData.mCount;
@@ -215,7 +225,9 @@ namespace ScenarioDataFunction {
     }
 
     u32 getCurrentCommonLayers(const char* pParam1) {
+#ifndef TARGET_PC
         ::getCurrentScenarioData();
+#endif
 
         return 1;
     }
@@ -223,7 +235,8 @@ namespace ScenarioDataFunction {
     u32 getCurrentScenarioLayers(const char* pParam1, s32 param2) {
         u32 layerNum;
 
-        if (::getCurrentScenarioData()->getValueU32(pParam1, param2, &layerNum)) {
+        const ScenarioData* current = ::getCurrentScenarioData();
+        if (current && current->getValueU32(pParam1, param2, &layerNum)) {
             return layerNum * 2;
         }
 

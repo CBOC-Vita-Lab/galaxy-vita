@@ -104,6 +104,7 @@ public:
     void exeRFLWaitEnd();
     void exeFileSelectStart();
     void exeFileSelect();
+    void exeBackToEntry();   // menuback32: Back on the heads: the wipe closes, the entry screen comes back
     void exeFileConfirmStart();
     void exeFileConfirmMiiDeleteWarningStart();
     void exeFileConfirmMiiDeleteWarning();

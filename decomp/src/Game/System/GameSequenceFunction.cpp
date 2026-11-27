@@ -101,7 +101,11 @@ namespace GameSequenceFunction {
     }
 
     bool isReadyToStartScene() {
+#ifdef TARGET_PC
+        return SingletonHolder< GameSystem >::get()->mSceneController->isReadyToStartSceneMp();  // (MP3: the session's start barrier, else isReadyToStartScene)
+#else
         return SingletonHolder< GameSystem >::get()->mSceneController->isReadyToStartScene();
+#endif
     }
 
     void startScene() {

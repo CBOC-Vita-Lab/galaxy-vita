@@ -1,0 +1,60 @@
+# integ (13 Nov): the owner's screenshot set, host side, for the CURRENT menus (main: Play Together / Star Race / Enter a Friend's Code; Safe Copies is
+# on Which File? (Triangle) and behind How to Play; the character select; the gathering screen; the code over the heads). MARKS: every press waits for
+# the game's own log line. Cursor-driven (no pointer): the cursor starts on the first button of each screen.
+# Needs the fake service (SMG_ONLINE_URL) for the 5-character code: tools in wt/integ-scratch/pics-door.sh.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark chars /ui: screen chars/ ~50
+mark gather /ui: screen gather/ ~60
+mark joined /slot 1 joined name=Luigi64/ ~90
+mark code /ui: far-away code shown/ ~110
+mark falls /ui: screen falls/ ~130
+mark save /ui: screen save/ ~108
+mark keep /ui: screen keep/ ~150
+mark keeplist /ui: screen keeplist/ ~160
+mark spfile /ui: screen spfile/ ~124
+mark play /ui: session playing/ ~112
+mark session /ui: screen session/ ~140
+mark players /ui: screen player/ ~145
+title+8-8.5:A|B
+entry+3-3.2:DOWN           # entry: Multiplayer
+entry+5-5.2:A
+main+6-6.2:A               # Play Together (a name the first time: the harness answers the keyboard)
+chars+6-6.2:A              # the character (Mario, preselected): the gathering screen at once
+joined+10-10.2:A           # Invite from Far Away (the friend is in): "Getting your code...", then the code
+code+16-16.3:PLUS          # START: the falls question (the first time)
+falls+6-6.2:A              # In a Bubble (first row): Which File?
+save+6-6.2:C               # Triangle: Safe Copies
+keep+4-4.2:A               # Make a Copy (the account exists by now: a real copy)
+keep+8-8.2:A               # OK
+keep+11-11.2:DOWN
+keep+12-12.2:A             # Make a Copy to Share
+keep+16-16.2:A             # OK (Bring Back a Copy is a row now)
+keep+19-19.2:DOWN
+keep+20-20.2:A             # Bring Back a Copy: the list (S_KEEPLIST) with two copies
+keeplist+5-5.2:DOWN
+keeplist+9-9.2:B           # back to Safe Copies
+keep+34-34.2:B             # back to Which File?
+keep+38-38.2:DOWN          # Start from my own file...
+keep+39-39.2:A             # which of my files (shot)
+spfile+6-6.2:B             # back to Which File?
+spfile+8-8.2:UP            # the new team file
+spfile+9-9.2:A             # the game starts
+play+4-4.2:A               # (the new file's story cards: Cross turns them)
+play+8-8.2:A
+play+12-12.2:A
+play+16-16.2:A
+play+20-20.2:A
+play+24-24.2:A
+play+28-28.2:A
+play+32-32.2:A
+play+36-36.2:A
+play+40-40.2:A
+play+44-44.2:A
+play+62-62.2:PLUS          # the pause screen
+session+4-4.2:C            # Players
+players+4-4.2:A            # the guest's page
+players+8-8.2:B
+players+10-10.2:B
+players+12-12.2:B

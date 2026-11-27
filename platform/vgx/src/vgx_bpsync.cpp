@@ -7,6 +7,7 @@
 // addresses: this file turns those back into what the texture cache and the copy code want.
 #include "vgx_state.h"
 #include "vgx_texdecode.h"
+#include "vgx_twocore.h"
 
 namespace vgx {
 
@@ -89,6 +90,10 @@ void BpTlutLoad() {
         return;
     }
     uint8_t* dst = g_tlutMem + (ts << 9);
+#if defined(VGX_CLONE_B)
+    // (GXV_FE_TWOCORE, the second worker: which palette slots it has loaded in this picture, and the loads of a segment for the player)
+    two::NoteTlutLoad(g.bp[0x64], r, ts, (n + 511) >> 9);
+#endif
     if (std::memcmp(dst, src, n) == 0) return; // the same palette again (J3D reloads them with every material)
     std::memcpy(dst, src, n);
     ++g_tlutLoadGen;
@@ -144,6 +149,23 @@ void BpCopyTrigger(uint32_t cmd) {
     src.y = static_cast<int16_t>((tl >> 10) & 0x3FF);
     src.w = static_cast<int16_t>((wh & 0x3FF) + 1);
     src.h = static_cast<int16_t>(((wh >> 10) & 0x3FF) + 1);
+#if defined(VGX_CLONE_B)
+    // (GXV_FE_TWOCORE, the second worker: never in a segment; its scan keeps the registers the copy sets and leaves the copy to the player)
+    if (toXfb) {
+        g.dispCopySrc = src;
+        two::PictureEndSeen();
+        return;
+    }
+    g.texCopySrc = src;
+    g.texCopyHalf = half;
+    g.texCopyDstW = static_cast<uint16_t>(half ? (src.w + 1) / 2 : src.w);
+    g.texCopyDstH = static_cast<uint16_t>(half ? (src.h + 1) / 2 : src.h);
+    g.texCopyFmt = CopyFormat(cmd);
+    g.texDirty = true;
+    g.texSlotDirty = 0xFF;
+    (void)clear;
+    return;
+#endif
     if (toXfb) {
         g.dispCopySrc = src;
         QueueCopyDisp(clear);
@@ -214,4 +236,14 @@ bool BpZTexConstant(float& z) {
     return true;
 }
 
+#if !defined(VGX_CLONE_B)
+// GXV_FE_TWOCORE (vgx_twocore.cpp): a palette load the second worker made in a segment, made again on the player's palette memory
+// from the same registers and guest bytes, in the same order (what follows the segment then sees the player's memory as the
+// single-thread path left it).
+extern "C" void vgx2_a_tlut_replay(uint32_t bp64, uint32_t bp65) {
+    g.bp[0x64] = bp64;
+    g.bp[0x65] = bp65;
+    BpTlutLoad();
+}
+#endif
 } // namespace vgx

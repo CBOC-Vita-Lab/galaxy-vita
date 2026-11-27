@@ -49,6 +49,9 @@ namespace WaterAreaFunction {
     bool tryInOceanArea(const TVec3f&, WaterInfo*);
     bool tryInWhirlPoolAccelerator(const TVec3f&, TVec3f*);
     bool isCameraInWaterForCameraUtil();
+#ifdef TARGET_PC
+    bool isBloomForWater();  // (dive27)
+#endif
     f32 getCameraWaterDepth();
     WaterInfo* getCameraWaterInfo();
     void pauseOffWaterArea();

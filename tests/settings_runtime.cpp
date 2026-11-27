@@ -60,6 +60,8 @@ std::map<std::string,std::vector<std::string>> directories;
 std::map<int,std::pair<std::string,size_t>> fileHandles, directoryHandles;
 bool title=false, renderer=false, paused=false, audio=false;
 bool failAllocate=false, failPresent=false, failRenderer=false;
+size_t cdramLimit=~size_t(0);  // (polish23: the largest video-memory block the console would give; ~0 = any)
+unsigned disables=0, setFrameBufs=0;
 bool failScanout=false, restoreSubmitted=false, gameplayHeld=true;
 unsigned failRestoreSet=0, failRestoreWait=0;
 void* original=nullptr;
@@ -73,12 +75,15 @@ extern "C" int sceAppMgrGetAppParam(char* data) {
     ++fixture::parameterReads;
     std::strncpy(data,fixture::parameter.c_str(),1024);fixture::parameter.clear();return 0;
 }
+extern "C" int sceAppMgrReceiveSystemEvent(SceAppMgrSystemEvent*) {return -1;}
+extern "C" int sceAppMgrReceiveEvent(SceAppMgrEvent*) {return -1;}
 extern "C" int sceAppMgrLoadExec(const char* path,char* const argv[],const SceAppMgrExecOptParam*) {
     assert(std::strcmp(path,"app0:eboot.bin")==0 && std::strcmp(argv[0],"-play")==0 && !argv[1]);
     assert(!fixture::renderer && !fixture::audio && fixture::interrupts==1);
     ++fixture::restarts;fixture::nextIntent=port::settings::ExitIntent::Exit;return -1;
 }
-extern "C" SceUID sceKernelAllocMemBlock(const char*,SceKernelMemBlockType,SceSize bytes,SceKernelAllocMemBlockOpt*) {
+extern "C" SceUID sceKernelAllocMemBlock(const char*,SceKernelMemBlockType type,SceSize bytes,SceKernelAllocMemBlockOpt*) {
+    if(type==SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW && bytes>fixture::cdramLimit)return static_cast<int>(0x80020000u|0x2004u);
     if(fixture::failAllocate)return -1;
     const int id=++fixture::opens;fixture::blocks[id]=std::calloc(1,bytes);return id;
 }
@@ -94,6 +99,7 @@ void AssertRestoreHeld() {
 }
 extern "C" int sceDisplaySetFrameBuf(const SceDisplayFrameBuf* in,SceDisplaySetBufSync) {
     if(fixture::failPresent)return -1;
+    ++fixture::setFrameBufs;
     fixture::restoreSubmitted=in && in->base==fixture::original;
     if(fixture::restoreSubmitted) {
         ++fixture::restoreAttempts;
@@ -151,7 +157,8 @@ bool port_vita_input_raw_poll(PortVitaRawInput& out) {
     out.caps=port::controls::NominalCaps(port::controls::ProfileId::Handheld);out.caps.connected=true;return true;
 }
 bool port_vita_input_mapping_available() {return true;}
-extern "C" int port_vita_input_external_pad() {return 0;}
+static int sFixtureExternalPad=0;   // (remapui31: a pad on a PS TV / an emulator pad)
+extern "C" int port_vita_input_external_pad() {return sFixtureExternalPad;}
 extern "C" void port_vita_input_settings_rearm() { assert(fixture::interrupts==0 && sInputHold.Requested());++fixture::hostRearms;fixture::gameplayHeld=false; }
 extern "C" void port_input_settings_rearm() { assert(fixture::interrupts==0 && sInputHold.Requested());++fixture::guestRearms;fixture::gameplayHeld=false; }
 extern "C" int port_is_paused() {return fixture::paused;}
@@ -159,12 +166,16 @@ extern "C" void port_set_paused(int value) {fixture::paused=value!=0;}
 extern "C" int port_settings_time_pause(int value) {const int old=fixture::clock;fixture::clock=value;return old;}
 extern "C" int port_vita_audio_is_held() {return fixture::audio;}
 extern "C" int port_vita_audio_hold(int value,unsigned) {fixture::audio=value!=0;return 1;}
+extern "C" int port_vita_audio_failed(void) {return 0;}
+// (the system's quit request is never part of these runs: leaving would end the test)
+extern "C" void port_log_flush(void) {}
+extern "C" int sceKernelExitProcess(int) {std::fputs("FAIL: the adapter left the process\n",stderr);std::abort();}
 extern "C" int port_vgx_settings_hold(unsigned,unsigned) {if(fixture::failRenderer)return 0;fixture::renderer=true;return 1;}
 extern "C" void port_vgx_settings_release(unsigned) {fixture::renderer=false;}
 extern "C" int port_vgx_vita_fixed_cap_supported() {return 1;}
 extern "C" int port_boot_title_is_visible() {return fixture::title;}
 extern "C" int port_vgx_vita_splash_active() {return !fixture::title;}
-extern "C" int OSDisableInterrupts() {const int old=fixture::interrupts;fixture::interrupts=0;return old;}
+extern "C" int OSDisableInterrupts() {++fixture::disables;const int old=fixture::interrupts;fixture::interrupts=0;return old;}
 extern "C" int OSRestoreInterrupts(int state) {const int old=fixture::interrupts;fixture::interrupts=state;return old;}
 extern "C" void port_dvd_set_root(const char*) {++fixture::discProbes;}
 extern "C" const char* port_dvd_root() {return "ux0:data/smg/game";}
@@ -324,8 +335,9 @@ int main(int argc,char** argv) {
     } else if(mode=="off") {
         assert(!port_settings_startup(0,nullptr));assert(!fixture::fileReads && !fixture::menus && !fixture::parameterReads);
     } else if(mode=="allocation-failure") {
+        // (polish23: no memory for the cold-start menu starts the game instead of closing it)
         fixture::failAllocate=true;
-        assert(port_settings_startup(0,nullptr));assert(fixture::menus==0 && fixture::blocks.empty());
+        assert(!port_settings_startup(0,nullptr));assert(fixture::menus==0 && fixture::blocks.empty());
     } else if(mode=="present-failure") {
         fixture::failPresent=true;
         assert(port_settings_startup(0,nullptr));assert(fixture::menus==1 && fixture::frees==1);
@@ -336,13 +348,67 @@ int main(int argc,char** argv) {
         char play[]="-play";char* args[]={play,nullptr};
         assert(!port_settings_startup(1,args));assert(fixture::parameterReads==1 && !fixture::menus && !fixture::discProbes);
         assert(!fixture::fontOpens && !fixture::dirReads);
+    } else if(mode=="start-bindings") {
+        // setfix31: the buttons the player saved are the ones the game starts with. The native Settings' start-up (NativeStartup -> NativeHostGet) read
+        // ActiveCapabilities() before SetActiveMapping, which made the default mapping the active one; SetActiveMapping was then refused ("Active controls
+        // are immutable until restart", in every emulator log) and a saved swap (or a PS TV pad's profile) never applied at a start.
+        const auto& api=port::controls::GetControlApi();
+        port::settings::Config c=port::settings::DefaultConfig(api);
+        std::string conflict;
+        assert(api.bind(c.profiles[0],"jump",0,"circle",true,port::controls::NominalCaps(port::controls::ProfileId::Handheld),conflict)==port::controls::BindResult::Applied);
+        std::string text;
+        assert(port::settings::SerializeDocument({port::settings::DefaultConfig(api),"",true},c,api,text).status==port::settings::StoreStatus::Ok);
+        text="# player-settings written by Galaxy " GALAXY_SETTINGS_VERSION "\n"+text;   // (this release's file: the guard leaves it alone)
+        fixture::files[kPath]=std::vector<uint8_t>(text.begin(),text.end());
+        char play[]="-play";char* args[]={play,nullptr};
+        assert(!port_settings_startup(1,args));
+        const auto* jump=port::controls::PrimaryButton(port::controls::ActiveMapping(),port::controls::Action::Jump);
+        if(!jump||std::strcmp(jump->id,"circle")!=0){std::fprintf(stderr,"FAIL start-bindings: jump starts on %s, the file says circle\n",jump?jump->id:"(none)");return 1;}
+    } else if(mode=="start-list" || mode=="start-list-pad") {
+        // remapui31: after a start the Change Buttons list shows what the game uses (the emulator showed the defaults after a restart although the saved Jump = Circle was
+        // the active mapping). Same start as start-bindings, then the model the in-game Settings opens: its rows must be the active mapping's buttons.
+        if(mode=="start-list-pad")sFixtureExternalPad=1;
+        const auto& api=port::controls::GetControlApi();
+        port::settings::Config c=port::settings::DefaultConfig(api);
+        std::string conflict;
+        assert(api.bind(c.profiles[0],"jump",0,"circle",true,port::controls::NominalCaps(port::controls::ProfileId::Handheld),conflict)==port::controls::BindResult::Applied);
+        assert(api.bind(c.profiles[0],"star_bits",0,"cross",true,port::controls::NominalCaps(port::controls::ProfileId::Handheld),conflict)==port::controls::BindResult::Applied);
+        std::string text;
+        assert(port::settings::SerializeDocument({port::settings::DefaultConfig(api),"",true},c,api,text).status==port::settings::StoreStatus::Ok);
+        text="# player-settings written by Galaxy " GALAXY_SETTINGS_VERSION "\n"+text;
+        fixture::files[kPath]=std::vector<uint8_t>(text.begin(),text.end());
+        char play[]="-play";char* args[]={play,nullptr};
+        assert(!port_settings_startup(1,args));
+        port::settings::NativeModel model;
+        const auto* host=port::settings::NativeHostGet();assert(host);
+        model.Open(*host,{});
+        struct Mv{const char* id;port::controls::Action a;};
+        const Mv moves[]={{"jump",port::controls::Action::Jump},{"star_bits",port::controls::Action::StarBits},{"spin",port::controls::Action::Spin},{"crouch",port::controls::Action::Crouch},{"camera_centre",port::controls::Action::CameraCentre},{"pause",port::controls::Action::Pause},{"minus",port::controls::Action::Minus}};
+        for(const Mv& m:moves) {
+            const char* mv=m.id;
+            const auto* active=port::controls::PrimaryButton(port::controls::ActiveMapping(),m.a);
+            const std::string shown=model.ButtonOf(mv,0);
+            if(!active||shown!=active->id){std::fprintf(stderr,"FAIL %s: the list shows %s for %s, the game uses %s\n",mode.c_str(),shown.c_str(),mv,active?active->id:"(none)");return 1;}
+        }
     } else if(mode=="restart-failure") {
         fixture::nextIntent=port::settings::ExitIntent::Play;
         assert(port_settings_startup(0,nullptr));assert(fixture::restarts==1 && fixture::menus==2);
     } else {
         fixture::parameter.clear();assert(!port_settings_startup(0,nullptr));
+        unsetenv("GXV_FPS_LIMIT");  // (what the start-up's picture mode set: the check below is that the running menu sets nothing)
         static uint32_t originalScreen=0;
         fixture::current.base=fixture::original=&originalScreen;
+        // (polish23) the console in play: 2-4 MiB of video memory free, often not 4 MiB in one piece
+        if(mode=="running-onebuffer")fixture::cdramLimit=2u<<20;
+        static std::vector<uint32_t> gameFront;
+        if(mode=="running-frontbuffer" || mode=="running-memory-retry") {
+            fixture::cdramLimit=0;
+            if(mode=="running-memory-retry")setenv("GXV_SETTINGS_FRONTBUF","0",1);
+            gameFront.assign(960*544,0x11223344u);
+            fixture::current.base=fixture::original=gameFront.data();
+            fixture::current.width=960;fixture::current.height=544;fixture::current.pitch=960;
+            fixture::current.pixelformat=SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+        }
         fixture::nextIntent=port::settings::ExitIntent::Return;
         port_settings_request();port_settings_game_boundary(1);assert(fixture::menus==0);
         fixture::title=true;port_settings_game_boundary(0);assert(fixture::menus==0);
@@ -355,7 +421,21 @@ int main(int argc,char** argv) {
         if(mode=="running-restart")fixture::nextIntent=port::settings::ExitIntent::Restart;
         std::atomic<bool> stop{false};
         std::thread input([&] {while(!stop.load()){port_settings_input_service();std::this_thread::sleep_for(std::chrono::milliseconds(1));}});
+        if(mode=="running-memory-retry") {
+            // (no display memory at all and the front buffer refused: nothing of the game is held, the request stays, a retry is set)
+            port_settings_game_boundary(1);
+            assert(fixture::menus==0 && fixture::disables==0 && !fixture::renderer && !fixture::audio && !fixture::paused && fixture::interrupts==1);
+            assert(!port_settings_active() && sRequested.load() && sRetryAfter>Now() && fixture::blocks.empty());
+            port_settings_game_boundary(1);assert(fixture::menus==0 && fixture::disables==0);  // (not before the retry time)
+            fixture::cdramLimit=~size_t(0);sRetryAfter=0;
+        }
         port_settings_game_boundary(1);stop=true;input.join();
+        if(mode=="running-frontbuffer") {
+            // (the game's front buffer showed the menu: no display buffer of its own was set, nothing to restore)
+            assert(fixture::menus==1 && fixture::setFrameBufs==0 && fixture::current.base==gameFront.data() && fixture::blocks.empty());
+            assert(gameFront[0]!=0x11223344u);  // (the menu's picture was copied in)
+        }
+        if(mode=="running-onebuffer")assert(fixture::menus==1 && fixture::opens>=1 && fixture::current.base==fixture::original);
         const bool acquisitionFailed=fixture::failRenderer || fixture::failScanout;
         const bool restoreFailed=mode=="running-restore-set-failure" || mode=="running-restore-wait-failure";
         assert(fixture::menus==(acquisitionFailed?0u:restoreFailed?2u:1u) && !fixture::renderer && fixture::audio==prior && fixture::paused==prior && fixture::interrupts==1 && !fixture::clock);

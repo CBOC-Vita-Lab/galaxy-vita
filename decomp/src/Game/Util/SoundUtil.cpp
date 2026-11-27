@@ -705,6 +705,9 @@ namespace MR {
 
     JAISoundHandle* startBossBGM(s32 id) {
         JAISoundHandle* pSoundHandle = nullptr;
+#ifdef TARGET_PC
+        port_anticipate_event(4, 0, 6000);  // (anticip32: a boss battle begins: the first seconds of it are announced to the scaling engine; drawing only)
+#endif
 
         switch (id) {
         case BossBgmID_01_A:

@@ -5,6 +5,10 @@
 #include "Game/Scene/GameScene.hpp"
 #include "Game/Screen/GamePauseSequence.hpp"
 #include "Game/System/PauseButtonCheckerInGame.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpGame.hpp"  // MP3: the session menu replaces the pause menu
+#include "Game/MP/MpUi.hpp"    // MP3 fix3: ... also while the session reconnects
+#endif
 
 namespace {
     NEW_NERVE(GameScenePauseControlNormal, GameScenePauseControl, Normal);
@@ -28,7 +32,11 @@ void GameScenePauseControl::requestPauseMenuOff() {
 }
 
 void GameScenePauseControl::exeNormal() {
+#ifdef TARGET_PC
+    tryStartPauseMenuMp();   // (MP3: the session menu in front of tryStartPauseMenu)
+#else
     tryStartPauseMenu();
+#endif
 
     if (mPauseMenuOff) {
 #ifdef TARGET_PC
@@ -40,6 +48,23 @@ void GameScenePauseControl::exeNormal() {
         mScene->mPauseSeq->deactivate();
     }
 }
+
+#ifdef TARGET_PC
+// MP3: in a multiplayer session the pause press opens the session menu; the world keeps running (no pause nerve).
+// fix3: also while the session reconnects (mp_active() is false then; two bool reads in single-player).
+// (merge of 3.0 on c181: a wrapper in front of tryStartPauseMenu, which keeps c181's text, control flow and PGO profile; same order as before: permit, update, the session's press, then the game's)
+bool GameScenePauseControl::tryStartPauseMenuMp() {
+    if ((mp_active() || MpUi::reconnecting()) && MpFlow::replacePause() && mScene->isPermitToPauseMenu()) {
+        mPauseChecker->update();
+        const bool press = port_input_take_pause_request() || mPauseChecker->isPermitToMinusPause() || mPauseChecker->isPermitToPlusPause();
+        if (press && !MpUi::isMenuOpen()) {
+            MpUi::openSessionMenu();
+        }
+        return false;
+    }
+    return tryStartPauseMenu();
+}
+#endif
 
 bool GameScenePauseControl::tryStartPauseMenu() {
     if (mScene->isPermitToPauseMenu()) {

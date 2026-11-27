@@ -1,0 +1,20 @@
+00:00:01.000 [vgx-vita] compiled-shader cache: ux0:data/smg/shadercache/b4d4c2a9-sw31 (key of: fake)
+00:00:01.100 profile: word 0123456789abcdef generator 2 vgl fake (stamp of the shader-text switches)
+00:00:01.200 seedwalk: helpers built 12 programs
+00:00:02.000 flow: PETARI_FLOW armed: 3 entries, 120 turns of play before the first, 90 on the star select before choosing, 5400 of play in each stage
+00:00:10.000 flow: entry 1 of 3: asking for the star select of HoneyBeeKingdomGalaxy (from - scenario 1), then star 1
+00:00:20.000 flow: entry 1 of 3: in HoneyBeeKingdomGalaxy with star 1 (asked 1), 8.0 s after the request
+00:00:21.000 flow: play began in HoneyBeeKingdomGalaxy scenario 1, 1.0 s after the scene started
+00:00:22.000 GXV_PACK_MISSLOG=1: logging
+00:00:23.000 pack-miss: f/3A/3A1B2C3D4E5F6071.gxp stage=099e9a42 play=0 t=123456 n=1
+00:00:30.000 survey: 14 hops done in HoneyBeeKingdomGalaxy scenario 1
+00:00:40.000 cover: stage=HoneyBeeKingdomGalaxy scenario=1 links=12 link_ms=41.5 worst_ms=9.8 compiles=0 misses=1 newrec=3 uploads=2 targets=0 hold_ms=3100
+00:00:41.000 flow: entry 1 of 3 (HoneyBeeKingdomGalaxy) done: 5400 turns of play, 5800 in all
+00:00:50.000 flow: entry 2 of 3: in EggStarGalaxy with star 1 (asked 1), 7.0 s after the request
+00:01:20.000 cover: stage=EggStarGalaxy scenario=1 links=4 link_ms=12.0 worst_ms=5.0 compiles=0 misses=0 newrec=0 uploads=0 targets=1 hold_ms=2000
+00:01:21.000 flow: entry 2 of 3 (EggStarGalaxy) done: 5400 turns of play, 5800 in all
+00:01:30.000 flow: entry 3 of 3: in StarDustGalaxy with star 1 (asked 1), 7.0 s after the request
+00:02:00.000 cover: stage=StarDustGalaxy scenario=1 links=0 link_ms=0 worst_ms=0 compiles=0 misses=0 newrec=0 uploads=0 targets=0 hold_ms=1500
+00:02:01.000 flow: entry 3 of 3 (StarDustGalaxy) done: 5400 turns of play, 5800 in all
+00:02:02.000 flow: done: all 3 entries
+00:02:03.000 pack: hits 1203 misses 1 compiled-in-play 0 (window 60 s: compiled 1 in all, user pack hits 0; since start: hits 1203 misses 1 (1 distinct keys, 0 past the table) compiled 1, compiled-in-play 0)

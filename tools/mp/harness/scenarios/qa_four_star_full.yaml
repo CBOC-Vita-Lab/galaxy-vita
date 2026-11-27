@@ -1,0 +1,59 @@
+# QA-FUNC 1/15. FOUR consoles, one star from start to finish: join (4 players), move, one guest (g2, not the host, not the first joiner) gets the star,
+# all four credit it once, the Team Star card needs four tallies, the host takes the star natively, everyone follows the after-clear move, the host's
+# co-op save is written, everyone leaves with a BYE. mp_four stops at "star got"; nothing today checks the card, the tallies or the after-clear move
+# with four consoles. Hooks: all exist. READY. Slow: 4 game processes (~4 GB); run alone, HARNESS_VITA_LIMITS=1 optional.
+name: qa_four_star_full
+description: "4 consoles: join, move, a guest's star, Team Star card with 4 tallies, after-clear move, host save, BYE"
+seconds: 700
+min_speed: 0.15
+timeout: 900
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    may_end_early: true
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 4, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_LOOK: 0,
+          HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=host|40'}
+  - name: g1
+    may_end_early: true
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|40'}
+  - name: g2
+    may_end_early: true
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 2, SMG_MP_TEST_STAR: 15, HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|40'}
+  - name: g3
+    may_end_early: true
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 3, HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|40'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'exit * <= 1'   # (main.cpp: _exit(1) when the LAST capture rendered no frame: a screenshot quirk on a starved machine, not a failure; crashes are 'nocrash')
+  - 'distinct host /\[mp\] slot (\d) joined name=g\d rejoin=0 .*players=\d/ == 3'
+  - 'expect host /\[mp\] slot \d joined name=g\d rejoin=0 .*players=4/'
+  - 'expect g1,g2,g3 /\[mp\] joined slot=\d session=[0-9a-f]+ host=0 epoch=\d+ players=\d/'
+  - 'order host /\[mp\] snapshot sent slot=(\d) bytes=(\d+) crc=([0-9a-f]+)/ before g1,g2,g3 /\[mp\] snapshot received bytes=$2 crc=$3 ok=1/ within 90s each'
+  - 'expect g1,g2,g3 /\[mp\] puppet slot=\d appear model=\w+ self=0/'
+  - 'count g1,g2,g3 /\[mp\] puppet slot=\d appear model=\w+ self=0/ >= 3'
+  - 'order host /\[mp\] flow move type=0 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before g1,g2,g3 /\[mp\] flow move type=0 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 120s'
+  - 'expect * /\[mp\] flow barrier release serial=\d+ /'
+  - 'expect g2 /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/ within 150s after g2 /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'same host,g1,g2,g3 /\[mp\] flow star got id=(\d+) grand=\d by=(\d)/ first'
+  - 'expect host /\[mp\] star delivered id=\d+ path=native/'
+  - 'count * /\[mp\] star delivered id=/ <= 1'
+  - 'count * /\[mp\] team star id=/ == 1'
+  # (integ: the Team Star card is off in Play Together, kStarCardInTogether=false in MpTeam.cpp: the faces under "You got a Star!" replace it; judge the tallies instead)
+  - 'expect * /\[mp\] team tally got slot=\d bits=\d+ /'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow star dup|flow star delivery dropped|flow drop STAR|flow clear hold timeout|team drop TALLY)/'
+  - 'order host /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before g1,g2,g3 /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 45s'
+  - 'expect * /\[mp\] flow barrier release serial=\d+ / within 90s after host /\[mp\] flow move type=4/'
+  - 'mp_save host'
+  - 'absent g1,g2,g3 /\[mp\] save autoconfirm/'
+  - 'absent * /\[mp\] (rejected by host|hello rejected|bad message from slot|events lost|queue overflow)/'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left))/'
+  - '?metric * rss_mib <= 1300'

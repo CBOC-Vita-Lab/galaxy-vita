@@ -8,6 +8,35 @@
 JPAEmitterCallBack::~JPAEmitterCallBack() {
 }
 
+#ifdef TARGET_PC
+// GXV_PAR_PTCL: a calc that runs on a work area of its own (mPortWork) makes its particles with that one, and the pool is taken
+// through jpaPoolPop / jpaPoolPush (a spin lock only while the threads run). Serial: mPortWork is the manager's pWd, as before, and
+// the pool is the list itself.
+JPABaseParticle* JPABaseEmitter::createParticle() {
+    JPAEmitterWorkData* const wd = mPortWork != nullptr ? mPortWork : mpEmtrMgr->pWd;
+    JPANode< JPABaseParticle >* node = jpaPoolPop(mpPtclPool);  // (NULL when the pool is empty, as the getNum() test was)
+    if (node != NULL) {
+        mAlivePtclBase.push_front(node);
+        mpRes->getDyn()->calc(wd);
+        node->mData.init_p(wd);
+        return &node->mData;
+    }
+
+    return NULL;
+}
+
+JPABaseParticle* JPABaseEmitter::createChild(JPABaseParticle* parent) {
+    JPAEmitterWorkData* const wd = mPortWork != nullptr ? mPortWork : mpEmtrMgr->pWd;
+    JPANode< JPABaseParticle >* node = jpaPoolPop(mpPtclPool);
+    if (node != NULL) {
+        mAlivePtclChld.push_front(node);
+        node->mData.init_c(wd, parent);
+        return &node->mData;
+    }
+
+    return NULL;
+}
+#else
 JPABaseParticle* JPABaseEmitter::createParticle() {
     if (mpPtclPool->getNum() != 0) {
         JPANode< JPABaseParticle >* node = mpPtclPool->pop_front();
@@ -30,12 +59,20 @@ JPABaseParticle* JPABaseEmitter::createChild(JPABaseParticle* parent) {
 
     return NULL;
 }
+#endif
 
 void JPABaseEmitter::deleteAllParticle() {
+#ifdef TARGET_PC
+    while (mAlivePtclBase.getNum())
+        jpaPoolPush(mpPtclPool, mAlivePtclBase.pop_back());
+    while (mAlivePtclChld.getNum())
+        jpaPoolPush(mpPtclPool, mAlivePtclChld.pop_back());
+#else
     while (mAlivePtclBase.getNum())
         mpPtclPool->push_front(mAlivePtclBase.pop_back());
     while (mAlivePtclChld.getNum())
         mpPtclPool->push_front(mAlivePtclChld.pop_back());
+#endif
 }
 
 bool JPABaseEmitter::processTillStartFrame() {

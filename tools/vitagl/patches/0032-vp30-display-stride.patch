@@ -1,0 +1,130 @@
+diff --git a/gxm.c b/gxm.c
+--- a/gxm.c
++++ b/gxm.c
+@@ -71,6 +71,30 @@
+ 			return vgl_dd_tab[i].sync;
+ 	return NULL;
+ }
++// (patch 0032) A display texture's row length in bytes. sceGxmTextureGetStride answers only for LINEAR_STRIDED textures (the SDK header: the stride
++// field exists there alone; direct24's first console run: patch 0030 asked it of a plain LINEAR one, got 0 and refused every texture). A plain
++// linear A8B8G8R8 texture's rows are the width rounded up to 8 texels, 4 bytes each: vitaGL's own framebuffers' rule (fb->stride, shared.h).
++static uint32_t vgl_dd_stride(const texture *t) {
++	if (sceGxmTextureGetType(&t->gxm_tex) == SCE_GXM_TEXTURE_LINEAR_STRIDED)
++		return sceGxmTextureGetStride(&t->gxm_tex);
++	return VGL_ALIGN(sceGxmTextureGetWidth(&t->gxm_tex), 8) * 4;
++}
++// (patch 0032) Why the last vglMakeDisplayTexture / vglSetNextFlip refusal, for the host's one log line (vglGetDisplayFailure).
++static uint32_t vgl_dd_fail[10];
++static uint32_t vgl_dd_fail_n = 0;
++static void vgl_dd_note_fail(uint32_t reason, const texture *t, uint32_t name, uint32_t stride) {
++	vgl_dd_fail[0] = reason;
++	vgl_dd_fail[1] = name;
++	vgl_dd_fail[2] = t ? (uint32_t)t->status : 0;
++	vgl_dd_fail[3] = t ? (uint32_t)(uintptr_t)t->data : 0;
++	vgl_dd_fail[4] = t ? (uint32_t)sceGxmTextureGetFormat(&t->gxm_tex) : 0;
++	vgl_dd_fail[5] = t ? (uint32_t)sceGxmTextureGetType(&t->gxm_tex) : 0;
++	vgl_dd_fail[6] = stride;
++	vgl_dd_fail[7] = t ? sceGxmTextureGetWidth(&t->gxm_tex) : 0;
++	vgl_dd_fail[8] = t ? sceGxmTextureGetHeight(&t->gxm_tex) : 0;
++	vgl_dd_fail[9] = vgl_dd_n;
++	vgl_dd_fail_n++;
++}
+ #define VGL_FBO_SYNC(fb) ((fb)->tex && vgl_dd_n ? vgl_dd_sync_for((fb)->tex) : (SceGxmSyncObject *)NULL)
+ // A display texture's storage is let go (gpu_free_texture_data): it stops being one, its sync object is destroyed a few frames from now
+ // (the display queue may still hold an entry that names it).
+@@ -1791,7 +1815,7 @@
+ 			dd_new_sync = vgl_dd_sync_for(vgl_dd_next_tex);
+ 			queue_cb_data.addr = vgl_dd_next_tex->data;
+ #ifdef VP27_DISPLAY_MODE
+-			queue_cb_data.pitch = sceGxmTextureGetStride(&vgl_dd_next_tex->gxm_tex) / 4; // (pixels; vglMakeDisplayTexture checked the format and size)
++			queue_cb_data.pitch = vgl_dd_stride(vgl_dd_next_tex) / 4; // (pixels; vglMakeDisplayTexture checked the format and size)
+ #endif
+ 			vgl_dd_flips++;
+ 		}
+@@ -1940,21 +1964,31 @@
+ // Makes the texture `name` (valid, linear A8B8G8R8, 4096-aligned storage, stride a multiple of 64 pixels, at least DISPLAY_WIDTH x
+ // DISPLAY_HEIGHT) a display texture. Returns 1 on success, 0 (and changes nothing) otherwise.
+ int vglMakeDisplayTexture(GLuint name) {
+-	if (name == 0 || name >= TEXTURES_NUM || vgl_dd_n >= VGL_DD_MAX || !gxm_initialized)
++	if (name == 0 || name >= TEXTURES_NUM || vgl_dd_n >= VGL_DD_MAX || !gxm_initialized) {
++		vgl_dd_note_fail(1, NULL, name, 0); // (bad name, 16 already, or vitaGL's GXM not started)
+ 		return 0;
++	}
+ 	texture *t = &texture_slots[name];
+-	if (t->status != TEX_VALID || !t->data || ((uintptr_t)t->data & 4095))
++	if (t->status != TEX_VALID || !t->data || ((uintptr_t)t->data & 4095)) {
++		vgl_dd_note_fail(2, t, name, 0); // (no storage, or not 4096-aligned)
+ 		return 0;
++	}
+ 	if (vgl_dd_sync_for(t))
+ 		return 1;
+-	if (sceGxmTextureGetFormat(&t->gxm_tex) != SCE_GXM_TEXTURE_FORMAT_A8B8G8R8 || sceGxmTextureGetType(&t->gxm_tex) != SCE_GXM_TEXTURE_LINEAR)
++	if (sceGxmTextureGetFormat(&t->gxm_tex) != SCE_GXM_TEXTURE_FORMAT_A8B8G8R8 || (sceGxmTextureGetType(&t->gxm_tex) != SCE_GXM_TEXTURE_LINEAR && sceGxmTextureGetType(&t->gxm_tex) != SCE_GXM_TEXTURE_LINEAR_STRIDED)) {
++		vgl_dd_note_fail(3, t, name, 0); // (format or type)
+ 		return 0;
+-	uint32_t stride = sceGxmTextureGetStride(&t->gxm_tex);
+-	if ((stride & 255) || stride / 4 < DISPLAY_WIDTH || sceGxmTextureGetWidth(&t->gxm_tex) < DISPLAY_WIDTH || sceGxmTextureGetHeight(&t->gxm_tex) < DISPLAY_HEIGHT)
++	}
++	uint32_t stride = vgl_dd_stride(t);
++	if ((stride & 255) || stride / 4 < DISPLAY_WIDTH || sceGxmTextureGetWidth(&t->gxm_tex) < DISPLAY_WIDTH || sceGxmTextureGetHeight(&t->gxm_tex) < DISPLAY_HEIGHT) {
++		vgl_dd_note_fail(4, t, name, stride); // (stride or size)
+ 		return 0;
++	}
+ 	SceGxmSyncObject *so = NULL;
+-	if (sceGxmSyncObjectCreate(&so) < 0 || !so)
++	if (sceGxmSyncObjectCreate(&so) < 0 || !so) {
++		vgl_dd_note_fail(5, t, name, stride); // (no sync object)
+ 		return 0;
++	}
+ 	vgl_dd_tab[vgl_dd_n].tex = t;
+ 	vgl_dd_tab[vgl_dd_n].sync = so;
+ 	vgl_dd_n++;
+@@ -1962,6 +1996,16 @@
+ 	return 1;
+ }
+ 
++// Fills out[0..9] with the details of the last refusal (reason 1 name/count/not started, 2 storage or alignment, 3 format/type, 4 stride/size, 5 sync
++// object; the texture's name, status, data pointer, format word, type word, stride, width, height; the display textures made so far) and returns
++// how many refusals there have been. 0: none.
++uint32_t vglGetDisplayFailure(uint32_t *out) {
++	if (out)
++		for (int i = 0; i < 10; i++)
++			out[i] = vgl_dd_fail[i];
++	return vgl_dd_fail_n;
++}
++
+ // 1 when `name` is a display texture.
+ int vglIsDisplayTexture(GLuint name) {
+ 	return name > 0 && name < TEXTURES_NUM && vgl_dd_sync_for(&texture_slots[name]) != NULL;
+@@ -1973,17 +2017,20 @@
+ int vglSetNextFlip(GLuint name) {
+ 	if (name == 0 || name >= TEXTURES_NUM || !vgl_dd_sync_for(&texture_slots[name])) {
+ 		vgl_dd_refused++;
++		vgl_dd_note_fail(6, name > 0 && name < TEXTURES_NUM ? &texture_slots[name] : NULL, name, 0); // (not a display texture)
+ 		return 0;
+ 	}
+ 	texture *t = &texture_slots[name];
+ #ifdef VP27_DISPLAY_MODE
+ 	if (vgl_display_mode_cur != 0) { // (patch 0029: a prepared smaller display mode is current: the picture is not that size)
+ 		vgl_dd_refused++;
++		vgl_dd_note_fail(7, t, name, 0); // (a prepared display mode is current)
+ 		return 0;
+ 	}
+ #endif
+ 	if (t->status != TEX_VALID || !t->data || sceGxmTextureGetWidth(&t->gxm_tex) < DISPLAY_WIDTH || sceGxmTextureGetHeight(&t->gxm_tex) < DISPLAY_HEIGHT) {
+ 		vgl_dd_refused++;
++		vgl_dd_note_fail(8, t, name, 0); // (storage or size)
+ 		return 0;
+ 	}
+ 	vgl_dd_next_tex = t;
+diff --git a/vitaGL.h b/vitaGL.h
+--- a/vitaGL.h
++++ b/vitaGL.h
+@@ -1288,6 +1288,7 @@
+ uint32_t vglGetDirectFlips(void);
+ uint32_t vglGetDirectRefusals(void);
+ uint32_t vglGetDisplayTextures(void);
++uint32_t vglGetDisplayFailure(uint32_t *out); // patch 0032: the last vglMakeDisplayTexture refusal's details (10 words); returns the refusal count
+ 
+ // Replaces original texture data pointer with a new one in a GL texture.
+ void vglOverloadTexDataPointer(GLenum target, void *data);

@@ -1,6 +1,9 @@
 #include "Game/Screen/WipeGameOver.hpp"
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/LayoutUtil.hpp"
+#ifdef TARGET_PC
+#include "port/compat.h"
+#endif
 
 namespace NrvWipeGameOver {
     NEW_NERVE(WipeGameOverWait, WipeGameOver, Wait);
@@ -63,4 +66,10 @@ void WipeGameOver::exeActive() {
         MR::showLayout(this);
         MR::startAnim(this, "GameOver", 0);
     }
+#ifdef TARGET_PC
+    // (14 Nov, owner's console report: a flickering strip of colours along the bottom of the Game Over screen) the game-over layout is a wipe too, but unlike
+    // WipeFade / WipeRing it never told the port: the re-projected 60 kept making in-between pictures behind the closed screen. Closed (its animation stopped)
+    // = the screen is covered: port_screen_quiet() reads 2, so no pairs, no warp, no fresh player while it stands.
+    port_vr_wipe(0, isClose() ? 1.0f : 0.0f, 0x000000);
+#endif
 }

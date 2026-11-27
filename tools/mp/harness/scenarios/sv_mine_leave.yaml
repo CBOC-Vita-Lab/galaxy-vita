@@ -1,0 +1,30 @@
+# savefix: "Play on my file 2", saves during play, then the host leaves normally and answers "save to my file": the single-player
+# GameData.bin differs from the session's backup only in file 2's blocks; the guest's single-player file is untouched.
+name: sv_mine_leave
+description: "Play on my file 2, play, save, leave and save to my file: only file 2 changed, backup kept"
+# seconds: the host's console only reaches the game at about 160 s of game time (the +30 stagger and two loads on 2 cores), THEN the session plays
+# SMG_MP_TEST_LEAVE seconds and decides; 200 ended the run before the leave decision (final run 14 Nov: no 'leave decision' line). 330 = 160 + 70 + margin.
+seconds: 330
+requires: {strings: [SMG_MP_TEST_LEAVE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "mine:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_TEST_SAVE: 20,
+          SMG_MP_TEST_LEAVE: 70, SMG_MP_AUTO_LEAVE: single}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_AUTO_LEAVE: discard}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard guest'
+  - 'expect host /\[mp\] save auto choice mine:2 ready/'
+  - 'expect host /\[mp\] save autoconfirm \(host\)/'
+  - 'expect host /\[mp\] save test: leaving the session/'
+  - 'expect host /\[mp\] save leave sp=2 backup=\S+ stars=\d+/'
+  - 'expect host /\[mp\] save test: leave decision single ok/'
+  - 'absent guest /\[mp\] save autoconfirm/'
+  - 'save_valid host'
+  - 'save_mine host 2'
+  - 'absent * /save refused: the save image is not verified|Assertion|OSPanic|FATAL/'

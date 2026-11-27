@@ -1,0 +1,28 @@
+# flow (11 Nov, rewritten 16 Nov for the one-door menus): screenshots of the multiplayer screens, two players (handheld UI: Vita glyphs), every press waiting for the
+# game's own screen line (inputs entry_host / entry_guest). Entry -> Multiplayer -> Play Together -> character -> the gathering screen (guest joins) -> START ->
+# the falls question -> Which File? -> My file 2 -> Make a Co-op Copy -> in play. Shots every 2 s of game time in each process's shots/ folder.
+name: flow_shots
+description: screenshots of the one-door multiplayer screens (entry, character, gathering, falls, Which File?, file choice, Make a Co-op Copy), two players
+seconds: 230
+requires: {strings: ["entry: chose %s"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@entry_host"
+    env: {SMG_MP_NAME: Alex, SMG_KEYBOARD_NAME: Alex, SMG_MP_LOOK: 0}
+  - name: guest
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: Luigi64, SMG_KEYBOARD_NAME: Luigi64, SMG_MP_LOOK: 1, HARNESS_START_ON: 'host|\[mp\] hosting session|0'}
+rules:
+  - 'nocrash *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect * /\[mp\] entry: chose multiplayer/ within 50s'
+  - 'expect host /\[mp\] ui: screen chars/'
+  - 'expect host /\[mp\] ui: gathering mode=1/'
+  - 'expect host /\[mp\] ui: screen falls/'
+  - 'expect host /\[mp\] ui: screen save/'
+  - 'expect host /\[mp\] ui: screen spfile/'
+  - 'expect host /\[mp\] ui: screen fileuse/'
+  - 'expect host /\[mp\] ui: host save kind=2 coop=1 sp=2 ready/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/'

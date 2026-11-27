@@ -1,0 +1,38 @@
+# Beta diagnostics (diag_report.yaml): entry -> Multiplayer: the after-error offer -> Yes (the pointer on the Yes button, -1..1 y down, then Cross) -> the two "what is sent"
+# windows -> the consent screen -> a note (SMG_KEYBOARD_TEXT) -> Send: the stub says 429 (a failure window) -> Cancel -> Start = Having Trouble? ->
+# Check Connection (STUN + the relay loopback against diag_stub.mjs) -> Send a Problem Report (windows, consent) -> Send: 201 (Thanks + id) -> back out and into
+# Multiplayer again (no second offer). Marks, not times (the pointer is only down for the span it is given).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark offer /\[mp\] ui: report offered after an error/ ~60
+mark report /\[mp\] ui: screen report/ ~90
+mark noted /\[mp\] ui: report note set/ ~110
+mark rp1 /\[mp\] ui: report result 7/ ~130
+mark help /\[mp\] ui: screen help/ ~150
+mark ckdone /\[mp\] ui: check result/ ~170
+mark thanks /\[mp\] ui: report result 1 / ~230
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+offer+4-9:PX=0.28|PY=0.6
+offer+6-6.2:A              # Yes
+offer+14-14.2:A            # the first window
+offer+20-20.2:A            # the second window (its answer opens the consent screen)
+report+5-5.2:DOWN
+report+6-6.2:A             # Add a Note (SMG_KEYBOARD_TEXT answers)
+noted+5-5.2:UP
+noted+6-6.2:A              # Send: the stub says 429
+rp1+6-6.2:A                # close the failure window
+rp1+10-10.2:B              # Cancel: back to the Multiplayer menu
+rp1+14-14.2:PLUS           # Start = Having Trouble?
+help+4-4.2:A               # Check Connection
+ckdone+6-6.2:A             # close the result window
+ckdone+10-10.2:DOWN
+ckdone+11-11.2:A           # Send a Problem Report: the first window
+ckdone+17-17.2:A           # the first window closes, the second opens
+ckdone+23-23.2:A           # the second closes: the consent screen
+ckdone+30-30.2:A           # Send on the consent screen: 201
+thanks+6-6.2:A             # close Thanks
+thanks+12-12.2:B           # Having Trouble? -> Multiplayer
+thanks+16-16.2:B           # -> the entry screen
+thanks+20-20.2:A           # Multiplayer again: no offer this time

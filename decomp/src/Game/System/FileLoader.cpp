@@ -19,7 +19,7 @@ FileLoader::FileLoader() {
 }
 
 void FileLoader::requestLoadToMainRAM(const char* pName, u8* pData, JKRHeap* pHeap, JKRDvdRipper::EAllocDirection direction, bool jam) {
-    if (isNeedToLoad(pName)) {
+    if (isNeedToLoadMp(pName)) {
         if (pHeap == nullptr) {
             pHeap = MR::getCurrentHeap();
         }
@@ -38,7 +38,7 @@ void FileLoader::requestLoadToMainRAM(const char* pName, u8* pData, JKRHeap* pHe
 }
 
 void FileLoader::requestMountArchive(const char* pName, JKRHeap* pHeap, bool jam) {
-    if (isNeedToLoad(pName)) {
+    if (isNeedToLoadMp(pName)) {
         if (pHeap == nullptr) {
             pHeap = MR::getCurrentHeap();
         }
@@ -115,6 +115,20 @@ bool FileLoader::isNeedToLoad(const char* pName) const {
     }
 
     return !isLoaded(pName);
+}
+
+// MP3 integ (B1): a request made AFTER a scene's init (a menu mounting a layout on the main thread) stays in the list until the NEXT
+// scene's init has finished (the list is cleared at the end of initializeScene), but its file died with the first scene's heap.
+// The next scene's archive phase then asked for it in vain: nothing was loaded, the archive missing. A finished request whose file
+// is no longer held is stale: its name is blanked (the slot stays: the loader thread may still hold the pointer) and it loads again.
+// (merge of 3.0 on c181: this is a wrapper in front of isNeedToLoad, which keeps c181's text, control flow and PGO profile; the two callers ask the wrapper.)
+bool FileLoader::isNeedToLoadMp(const char* pName) const {
+    const RequestFileInfo* prior = getRequestFileInfoConst(pName);
+    if (prior != nullptr && prior->_88 == 2 && !isLoaded(pName)) {
+        const_cast< RequestFileInfo* >(prior)->mFileName[0] = '\0';
+        return true;
+    }
+    return isNeedToLoad(pName);
 }
 
 const RequestFileInfo* FileLoader::getRequestFileInfoConst(const char* pName) const {

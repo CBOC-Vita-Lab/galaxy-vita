@@ -3,6 +3,7 @@
 #include "Game/LiveActor/PartsModel.hpp"
 #include "Game/MapObj/SpiderThread.hpp"
 #include "Game/Scene/SceneFunction.hpp"
+#include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Util.hpp"
 #include "Game/Util/DemoUtil.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
@@ -75,6 +76,13 @@ void SpiderCoin::kill() {
 void SpiderCoin::exeWait() {
     if (MR::isFirstStep(this)) {
         if (mPointPos == nullptr) {
+            // crash25 (25 Nov): a SpiderCoin that wakes up in a scene where no TombSpider built the SpiderThread (SceneObj 0x5A) read a null object
+            // (the console's dump: startActorBind, ldr [r4,#0xe8], r4 = 0). Stock code has no guard; with the object present nothing changes.
+            if (!MR::isExistSceneObj(SceneObj_SpiderThread)) {
+                if (mCocoonModel != nullptr) mCocoonModel->makeActorDead();
+                LiveActor::kill();  // (not SpiderCoin::kill: that reads mUp, which is not set)
+                return;
+            }
             MR::startActorBindToSpiderThread(this, &mPointPos, &mNeutralPos, &mUp, mPosition, TVec3f(0.0f, 0.0f, 0.0f));
         }
         mRotation.y = 0.0f;

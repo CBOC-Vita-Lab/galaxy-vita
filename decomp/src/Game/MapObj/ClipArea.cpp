@@ -3,6 +3,9 @@
 #include "Game/MapObj/ClipAreaShape.hpp"
 #include "Game/Scene/SceneFunction.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include "Game/Screen/ImageEffectLocalUtil.hpp"
+#endif
 
 namespace {
     static const Color8 sShapeColor(0, 0, 0, 4);
@@ -30,6 +33,9 @@ void ClipArea::draw() const {
         return;
     }
 
+#ifdef TARGET_PC
+    ImageEffectLocalUtil::portClipVolumeDrawn();  // (PETARI_CLIPCHAIN_SKIPEMPTY: a volume goes into the alpha plane this picture)
+#endif
     GXSetTevColor(GX_TEVREG0, ::sShapeColor);
     GXSetColorUpdate(GX_FALSE);
     GXSetDstAlpha(GX_FALSE, 0);

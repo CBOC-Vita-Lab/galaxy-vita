@@ -49,6 +49,9 @@ public:
     void requestCalc();
     void update();
     void updateFarClipping(f32);
+#ifdef TARGET_PC
+    void updateFarClippingPb(f32 clip, f32 pbClip);  // (GXV_PB_SHADOW, the Performance-mode visual budget)
+#endif
     void updateDirection();
     ShadowDrawer* getShadowDrawer();
     LiveActor* getHost() const;
@@ -133,6 +136,13 @@ public:
     /* 0x71 */ u8 _71;
     /* 0x72 */ u8 _72;
 #ifdef TARGET_PC
+    bool mPbShadowFar = false;  // (popin24, GXV_POPIN_HYST: GXV_PB_SHADOW held the shadow far-clipped at the last update)
+    bool mPbLogicRead = false;  // (GXV_PB_SHADOW) game logic has asked this controller's projection (MR::isShadowProjected ...): never far-clipped by the budget
+    bool mHoneyWasDrawn = false;
+    u8 mPbFloorKept = 0;      // (popin31b: the floor kept this shadow at the last far-clip update: its update is timed for the census's price line)
+    u16 mPbFloorAt = 0;       // (popin31, GXV_PB_MINPX: the turn the actor's model extent was measured; port/popin_site.h CachedExtent)
+    f32 mPbFloorExt = -1.0f;  // (... the extent, -1 = never)
+    f32 portFloorRadius();    // (popin31: the shadow's size radius for the floor: the actor's model extent with the margin, 300 without a model)
     // GXV_SHADOWMEMO (shadowmemo): the last projection cast made from ShadowControllerHolder, its arguments and its answer
     // (ShadowController.cpp, port/shadow_memo.h). Port only; the controller is only ever made with new.
     struct PortProjMemo {

@@ -1,9 +1,15 @@
 // Register file, command-stream parser and vertex decoding (front end).
 #include "vgx_state.h"
+#include "vgx_j3n2.h"
+#include "vgx_twocore.h"
 #include "vgx_guestmem.h"
 #include "vgx_fixes.h"
 #include "vgx_workload.h"
+#include "vgx_fepar.h"
+#include "vgx_deccen.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <map>
 #include <memory>
@@ -21,6 +27,32 @@ bool FixLodBias() {
     const bool on = VGX_KNOB(EnvInt("GXV_FIX_LODBIAS", 0) != 0) != 0;
     return on;
 }
+int LodSamplerMode() {
+    const int m = static_cast<int>(VGX_KNOB([] {
+        const long v = EnvInt("GXV_LODBIAS_SAMPLER", 0);
+        return (v == 1 || v == 2) && FixLodBias() ? v : 0L;
+    }()));
+    return m;
+}
+const lodsampler::Cfg& LodSamplerCfg() {
+    static const lodsampler::Cfg c = [] { // (the switches the back end's BindTexture sums from, read the way it reads them)
+        lodsampler::Cfg k;
+        k.rungPct = std::clamp<long>(EnvInt("GXV_RUNG_LODBIAS", 0), 0, 200);
+        k.rungExtra = std::clamp<long>(EnvInt("GXV_RUNG_LODBIAS_EXTRA", 0), 0, 24);
+        if (const char* e = std::getenv("GXV_RUNG_LODBIAS_EXTRA_AF"); e && *e) k.rungExtra = std::max(k.rungExtra, std::clamp<long>(std::atol(e), 0, 24));
+        k.playerHundredths = EnvInt("GXV_PLAYER_LODBIAS", 0);
+        k.automipMode = static_cast<int>(EnvInt("GXV_AUTOMIP", 0));
+        k.automipBias = static_cast<int>(std::clamp<long>(EnvInt("GXV_AUTOMIP_BIAS", -4), -16, 8));
+        return k;
+    }();
+    return c;
+}
+void LodBiases(const uint32_t* bp, int out[8]) {
+    for (unsigned m = 0; m < 8; ++m) {
+        const unsigned r = fixes::TexMode0Reg(m);
+        out[m] = static_cast<int>(std::lround(fixes::LodBiasOf(bp[r], bp[r + 4]) * 32.0f));
+    }
+}
 bool FixTevIn() {
     const bool on = VGX_KNOB(EnvInt("GXV_FIX_TEVIN", 0) != 0) != 0;
     return on;
@@ -33,9 +65,19 @@ bool TevOorTracked() {
                              EnvInt("GXV_FS_TRIM", 0) == 1) != 0;
     return on;
 }
+bool TevInCanonOn() {
+    // (the switch of vgx_shadergen.h TevInCanonMode, read here so that this file does not depend on the shader generator)
+    const bool on = VGX_KNOB([] { const long m = EnvInt("GXV_TEVIN_CANON", 0); return m == 1 || m == 2; }()) != 0;
+    return on;
+}
 bool VsTrimTracked() {
     // (the switch of vgx_shadergen.h VsTrimMode, read here so that this file does not depend on the shader generator)
     const bool on = VGX_KNOB(EnvInt("GXV_VS_TRIM", 0) == 1) != 0;
+    return on;
+}
+bool LtSkipOn() {
+    // (the switch of vgx_shadergen.h VsLtSkipMode, read here so that this file does not depend on the shader generator)
+    const bool on = VGX_KNOB(EnvInt("GXV_VS_LTSKIP", 0) == 1) != 0;
     return on;
 }
 void SetGuestHooks(const GuestHooks& h) { g_hooks = h; }
@@ -80,10 +122,10 @@ static constexpr bool IsKeyXF(uint32_t r) { return r == 0x09 || (r >= 0x0E && r 
 // KeyZ(i, v) for register i (BP 0..255, XF 0x100 + r): two 32-bit lanes, each a multiply-xorshift of the value keyed by a
 // random word per register (the console's processor has no 64-bit multiply; the keys come from a fixed splitmix sequence).
 struct KeyZTable {
-    uint32_t a[0x15A], b[0x15A];
+    uint32_t a[0x15C], b[0x15C];
     constexpr KeyZTable() : a(), b() {
         uint64_t x = 0x243F6A8885A308D3ull;
-        for (int i = 0; i < 0x15A; ++i) {
+        for (int i = 0; i < 0x15C; ++i) {
             for (int k = 0; k < 2; ++k) {
                 x += 0x9E3779B97F4A7C15ull;
                 uint64_t z = x;
@@ -120,6 +162,12 @@ uint64_t KeyHashOf(const State& s) {
         }
     for (uint32_t r = 0; r < 0x58; ++r)
         if (IsKeyXF(r)) h ^= KeyZ(0x100u + r, s.xfReg[r]);
+    if (LodSamplerMode() != 0) {
+        int b[8];
+        LodBiases(s.bp, b);
+        const uint64_t d = lodsampler::PackBiases(b);
+        h ^= KeyZ(0x15Au, static_cast<uint32_t>(d)) ^ KeyZ(0x15Bu, static_cast<uint32_t>(d >> 32));
+    }
     if (TevOorTracked()) h ^= KeyZ(0x158u, s.tevOor);
     if (VsTrimTracked()) h ^= KeyZ(0x159u, s.ltCos1 | (static_cast<uint32_t>(s.ltDist1) << 8));
     return h;
@@ -165,6 +213,20 @@ static inline void LodRegChanged(uint32_t reg, uint32_t oldv, uint32_t newv) {
     const float before = fixes::LodBiasOf(reg == mode0 ? oldv : g.bp[mode0], reg == mode0 ? g.bp[mode0 + 4] : oldv);
     const float after = fixes::LodBiasOf(reg == mode0 ? newv : g.bp[mode0], reg == mode0 ? g.bp[mode0 + 4] : newv);
     if (before == after) return;
+    if (LodSamplerMode() != 0) { // (the sampler's decisions read every unit's bias: the hash and the key follow each change of a value, not only of its presence.
+        // The word before the write is the current one with this unit's old bias: nothing is stored, so a register file copied or replayed wholesale (GXV_J3DNATIVE
+        // checkpoints) cannot leave a stale copy behind: its hash holds the word of the registers it was made from.)
+        int b[8];
+        LodBiases(g.bp, b);
+        const uint64_t d = lodsampler::PackBiases(b);
+        b[(reg & 3) + (reg >= 0xA0 ? 4 : 0)] = static_cast<int>(std::lround(before * 32.0f));
+        const uint64_t o = lodsampler::PackBiases(b);
+        if (d != o) {
+            if (RsCacheMode() != 0)
+                g.keyHash ^= KeyZ(0x15Au, static_cast<uint32_t>(o)) ^ KeyZ(0x15Au, static_cast<uint32_t>(d)) ^ KeyZ(0x15Bu, static_cast<uint32_t>(o >> 32)) ^ KeyZ(0x15Bu, static_cast<uint32_t>(d >> 32));
+            g.bpKeyDirty = true;
+        }
+    }
     if ((before != 0.0f) != (after != 0.0f)) {
         KeyHashBP(mode0, before != 0.0f, after != 0.0f);
         g.bpKeyDirty = true;
@@ -238,7 +300,10 @@ static inline void TevOorUpdate(int idx) {
     const int* d = g.tevReg[idx];
     uint8_t oor = (static_cast<unsigned>(d[0]) > 255u || static_cast<unsigned>(d[1]) > 255u || static_cast<unsigned>(d[2]) > 255u ||
                    static_cast<unsigned>(d[3]) > 255u) ? 1 : 0;
-    if (!oor && g.tevOor)
+    if (TevInCanonOn()) {
+        // (GXV_TEVIN_CANON: tevOor is a mask, bit r = register r outside 0..255; only the register just written can change its bit)
+        oor = static_cast<uint8_t>((g.tevOor & ~(1u << idx)) | (static_cast<unsigned>(oor) << idx));
+    } else if (!oor && g.tevOor)
         for (int i = 0; i < 4; ++i)
             for (int c = 0; c < 4; ++c)
                 if (static_cast<unsigned>(g.tevReg[i][c]) > 255u) oor = 1;
@@ -269,6 +334,36 @@ static void TevShadowCheck(uint8_t reg, uint32_t nv) {
     ShadowCheckLog((reg & 1) ? (d[2] == lo && d[1] == hi) : (d[0] == lo && d[3] == hi), "TEV colour", reg, nv);
 }
 
+namespace sc { void Marker(uint32_t kind, uint32_t payload); void ArrVerify(uint32_t kind, uint32_t payload); } // (GXV_STREAM_CENSUS, GXV_ARRAYSKIP=2: vgx_census.inc)
+void GxDedupProbe(uint32_t a, uint32_t w); // (GXV_GX_DEDUP=2, port/gx_dedup.h: the game's probe, XF 0x0C00 / 0x0C01; below)
+// GXV_HOTPROF_TEVCOL=2 (hotprof25; decomp/src/RVL_SDK/gx/GXTev.c): the game announces every TEV colour word that mode 1 would not write
+// (the repeats of the BG word; in a particle loop a word equal to the loop's last for that register): markers BP 0xFF kind 28 (the
+// register and the value's high byte) and kind 29 (the low 16 bits), right before the word itself. It must be what this register file
+// holds: both the raw register and the colour half the bit-23 selector names. "tevcol verify:" every 2^18 checks and at each of the
+// first 8 that differ (a differing one means something wrote the register behind the game's memory of it).
+#if !defined(VGX_CLONE_B)
+static uint32_t g_tvHi = 0;
+static bool g_tvHave = false;
+static uint64_t g_tvChecked = 0, g_tvBad = 0;
+static void TevColVerify(uint32_t kind, uint32_t payload) {
+    if (kind == 38u) { g_tvHi = payload; g_tvHave = true; return; }
+    if (!g_tvHave) return;
+    g_tvHave = false;
+    const uint32_t reg = (g_tvHi >> 8) & 0xFFu, value = ((g_tvHi & 0xFFu) << 16) | payload;
+    const bool ok = reg >= 0xE0 && reg <= 0xE7 && g.bpMask == 0x00FFFFFFu && g.bp[reg] == value && g.tevRaw[TevRawSlot(reg, value)] == value;
+    ++g_tvChecked;
+    if (!ok) ++g_tvBad;
+    if ((!ok && g_tvBad <= 8) || (g_tvChecked & 0x3FFFFu) == 0) {
+        if (port_log_summary)
+            port_log_summary("tevcol verify: %llu checked, %llu differing%s (register %02X: front end %06X, the game would leave out %06X)",
+                             static_cast<unsigned long long>(g_tvChecked), static_cast<unsigned long long>(g_tvBad), ok ? "" : ": MISMATCH", reg,
+                             reg >= 0xE0 && reg <= 0xE7 ? g.bp[reg] : 0u, value);
+    }
+}
+uint64_t TevColVerifyCounts(uint64_t* bad) { *bad = g_tvBad; return g_tvChecked; }
+#else
+static void TevColVerify(uint32_t, uint32_t) {}
+#endif
 // ------------------------------------------------------------------ BP
 void WriteBP(uint32_t rv) {
     const uint8_t reg = static_cast<uint8_t>(rv >> 24);
@@ -294,10 +389,12 @@ void WriteBP(uint32_t rv) {
     switch (reg) {
     case 0x45: // PE done: everything before this command has been read from the game's memory
         g.bp[reg] = nv;
+        if (nv & 2) fepar::SettleSources();   // (GXV_FE_PARALLEL: the decodes still to be done read the game's memory)
         if ((nv & 2) && g_hooks.peFinish) g_hooks.peFinish();
         return;
     case 0x47: case 0x48: // draw-sync token (0x47: with interrupt)
         g.bp[reg] = nv;
+        fepar::SettleSources();
         if (g_hooks.peToken) g_hooks.peToken(static_cast<uint16_t>(nv), reg == 0x47);
         return;
     case 0x52: // EFB copy trigger: the set-up registers 0x49-0x51 are already in g.bp
@@ -314,7 +411,74 @@ void WriteBP(uint32_t rv) {
             const uint32_t kind = val & 0xFFu;
             if (kind == kPresentAllowedMarker || kind == kPresentSuppressedMarker) PresentationMarker(kind);
             else if (kind == kPresentStampMarker) PresentationStamp((val >> 8) & 0xFFFFu);
-            else CharaMarker(kind);
+            else if (kind == 10) TransientMarker((val >> 8) & 0xFFFFu); // (PORT_GX_MARK_TRANSIENT_COPY + the stage, GXV_INDCAP_SKIP)
+            else if (hrwpair::IsMarker(kind)) {
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                HrwMarker(hrwpair::Token(val));
+            }
+            else if (kind == kOwnerMarker) {                              // (PORT_GX_MARK_OWNER + the key, GXV_HRW: vgx_draw.cpp OwnerMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                OwnerMarker((val >> 8) & 0xFFFFu);
+            }
+            else if (kind == kFreshEndMarker) {                           // (PORT_GX_MARK_FRESH_END + the pair's number, GXV_HRW: vgx_draw.cpp FreshEndMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                FreshEndMarker((val >> 8) & 0xFFFFu);
+            }
+            else if (kind == 32) {                                        // (PORT_GX_MARK_SILH_HINT, GXV_SILH_GATE: vgx_draw.cpp SilhHintMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                SilhHintMarker((val >> 8) & 0xFFu);
+            }
+            else if (kind == 7) SceneDepthMarker();                      // (hrw41: PORT_GX_MARK_SCENE_DEPTH, written only with the depth mask's switches: vgx_draw.cpp)
+            else if (kind == 11) GeoPhaseMarker((val >> 8) & 0xFFu);    // (PORT_GX_MARK_PHASE, GXV_GEOPASS)
+            else if (kind == 14 || kind == 15) {                         // (PORT_GX_MARK_WARM_BEGIN / _END, GXV_PREWARM: vgx_draw.cpp WarmScopeMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1); // (GXV_FE_TWOCORE: the warm-up scope is the player's: the second worker gives the picture up)
+#endif
+                WarmScopeMarker(kind);
+            }
+            else if (kind >= 24 && kind <= 27) {                         // (GXV_ARRAYSKIP=2, port/array_skip.h: a write the game would leave out, checked here)
+                sc::ArrVerify(kind, (val >> 8) & 0xFFFFu);
+            }
+            else if (kind == 38 || kind == 39) TevColVerify(kind, (val >> 8) & 0xFFFFu); // (GXV_HOTPROF_TEVCOL=2: above)
+            else if (kind == 40) {                                       // (PORT_GX_MARK_BLOOM_BRACKET + the sub-kind, GXV_BLOOM_BRACKET: vgx_draw.cpp BloomBracketMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                BloomBracketMarker((val >> 8) & 0xFFu);
+            }
+            else if (kind >= 21 && kind <= 23) {                         // (PORT_GX_MARK_CENSUS*, GXV_STREAM_CENSUS: vgx_census.inc; written only in a counted picture)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                sc::Marker(kind, (val >> 8) & 0xFFFFu);
+            }
+            else if (kind >= 28 && kind <= 31) {                         // (PORT_GX_MARK_BGCAT / BG_BEGIN / BG_END / BG_REUSE, GXV_BGLAYER: vgx_bglayer.inc)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                BgMarker(kind, (val >> 8) & 0xFFFFu);
+            }
+            else if (kind == 33) {                                       // (PORT_GX_MARK_STAGE_ENUM_DRAW, GXV_STAGE_ENUM: vgx_draw.cpp StageEnumDrawMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                StageEnumDrawMarker((val >> 8) & 0xFFFFu);
+            }
+            else if (kind == 19 || kind == 20) {                         // (PORT_GX_MARK_LAYOUT_BEGIN / _END, GXV_LAYOUTWARM_LOG: vgx_draw.cpp LayoutCensusMarker)
+#if defined(VGX_CLONE_B)
+                two::Abandon(1);
+#endif
+                LayoutCensusMarker(kind, (val >> 8) & 0xFFFFu);
+            }
+            else CharaMarker(kind); // (includes PORT_GX_MARK_PLAYER_BEGIN/END 5/6: tracks g_playerMarkDepth identically to HUD 1/2; vgx2_b_draw_can_begin refuses segments while > 0)
         }
         return;
     default:
@@ -423,6 +587,8 @@ static void WriteXFWord(uint32_t a, uint32_t w) {
             g.xfLightDirty = true;
             if ((o & 15) >= 4 && (o & 15) <= 9 && VsTrimTracked()) LightFactsUpdate(o >> 4);
         }
+    } else if ((a & ~1u) == 0x0C00u) {
+        GxDedupProbe(a, w); // (GXV_GX_DEDUP=2: XF memory the console does not have; nothing is kept here)
     }
 }
 void WriteXF(uint32_t addr, uint32_t count, const uint32_t* w) {
@@ -687,7 +853,7 @@ void InitState(State& g) {
     g.xfReg[0x20] = f2u(1.0f); g.xfReg[0x22] = f2u(1.0f); g.xfReg[0x24] = f2u(1.0f);
     g.keyHash = KeyHashOf(g);
 }
-void ResetState() { InitState(g); }
+void ResetState() { J3n2Flush(); InitState(g); }
 
 // ------------------------------------------------------- vertex decoding
 namespace {
@@ -1027,6 +1193,68 @@ const AttrFn kPositionFn[5][2] = {VGX_POS_ROW(C_U8), VGX_POS_ROW(C_S8), VGX_POS_
 #define VGX_POS_ROW(T) {&DecodePositionVerify<T, 2>, &DecodePositionVerify<T, 3>}
 const AttrFn kPositionVerifyFn[5][2] = {VGX_POS_ROW(C_U8), VGX_POS_ROW(C_S8), VGX_POS_ROW(C_U16), VGX_POS_ROW(C_S16), VGX_POS_ROW(C_F32)};
 #undef VGX_POS_ROW
+
+// NW4R DrawQuad and CharWriter::PrintGlyph write four interleaved vertices. Decode
+// them in one traversal instead of a defaults pass and one indirect call per attribute.
+template<int N, bool COLOR, bool FIXED>
+bool DecodeDirectQuad(const Plan& p, const uint8_t* src, uint8_t* out) {
+    constexpr int tex = 4*N + (COLOR ? 4 : 0);
+    constexpr int stride = tex + (FIXED ? 4 : 8);
+    const int dstStride = p.layout.stride, texOut = p.layout.offTex[0];
+    const float scale = FIXED ? p.a[COLOR ? 2 : 1].scale : 1.f;
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t* s = src + i*stride;
+        uint8_t* d = out + i*dstStride;
+        const uint32_t pos[4] = {be32(s), be32(s+4), N == 3 ? be32(s+8) : 0u, 0u};
+        std::memcpy(d, pos, sizeof pos);
+        if (COLOR) std::memcpy(d + p.layout.offCol0, s + 4*N, 4);
+        if (FIXED) {
+            const float st[2] = {static_cast<float>(be16(s+tex))*scale, static_cast<float>(be16(s+tex+2))*scale};
+            std::memcpy(d + texOut, st, sizeof st);
+        } else {
+            const uint32_t st[2] = {be32(s+tex), be32(s+tex+4)};
+            std::memcpy(d + texOut, st, sizeof st);
+        }
+    }
+    return true;
+}
+// JPABaseShape::jpa_dl addresses four consecutive corners of two byte arrays.
+// A changed index, stride or undersized binding goes back through the ordinary
+// bounds and reporting path before a single output byte is written.
+static bool DecodeParticleQuad(const Plan& p, const uint8_t* src, uint8_t* out) {
+    static constexpr uint8_t corners[] = {0,0,1,1,2,2,3,3};
+    const auto& pos = g.arrays[A_POS];
+    const auto& tex = g.arrays[A_TEX0];
+    if (std::memcmp(src, corners, sizeof corners) || pos.stride != 3 || tex.stride != 2 ||
+        pos.size < 12 || tex.size < 8 || !pos.data || !tex.data) return false;
+    for (int i=0; i<4; ++i) {
+        const auto* v = reinterpret_cast<const int8_t*>(pos.data + 3*i);
+        const auto* t = reinterpret_cast<const int8_t*>(tex.data + 2*i);
+        const float xyzw[] = {static_cast<float>(v[0]), static_cast<float>(v[1]), static_cast<float>(v[2]), 0.f};
+        const float st[] = {static_cast<float>(t[0]), static_cast<float>(t[1])};
+        uint8_t* d = out + i*p.layout.stride;
+        std::memcpy(d, xyzw, sizeof xyzw);
+        std::memcpy(d + p.layout.offTex[0], st, sizeof st);
+    }
+    return true;
+}
+decltype(Plan::quad) QuadRecipe(const Plan& p) {
+    if (p.n == 2 && p.a[0].attr == A_POS && p.a[1].attr == A_TEX0 && p.a[0].mode == T_INDEX8 && p.a[1].mode == T_INDEX8 &&
+        p.a[0].type == C_S8 && p.a[1].type == C_S8 && p.a[0].comps == 3 && p.a[1].comps == 2 &&
+        p.a[0].frac == 0 && p.a[1].frac == 0) return DecodeParticleQuad;
+    if (!p.direct || (p.n != 2 && p.n != 3)) return nullptr;
+    const auto& pos = p.a[0];
+    const auto& tex = p.a[p.n-1];
+    if (pos.attr != A_POS || pos.type != C_F32 || tex.attr != A_TEX0 || tex.comps != 2 ||
+        (tex.type != C_F32 && tex.type != C_U16)) return nullptr;
+    const bool color = p.n == 3;
+    if (color && (p.a[1].attr != A_CLR0 || p.a[1].type != 5)) return nullptr;
+    static constexpr decltype(Plan::quad) recipes[2][2][2] = {
+        {{DecodeDirectQuad<2,false,false>, DecodeDirectQuad<2,false,true>}, {DecodeDirectQuad<2,true,false>, DecodeDirectQuad<2,true,true>}},
+        {{DecodeDirectQuad<3,false,false>, DecodeDirectQuad<3,false,true>}, {DecodeDirectQuad<3,true,false>, DecodeDirectQuad<3,true,true>}}
+    };
+    return recipes[pos.comps == 3][color][tex.type == C_U16];
+}
 } // namespace
 
 // Picks, for a plan whose attributes all come from the stream, the decode loop of each (the choice the general path makes per draw).
@@ -1065,6 +1293,8 @@ static void FinishDirectPlan(Plan& p) {
     // Without a matrix-index attribute, direct POS2/POS3 can supply all defaults
     // in their existing traversal. TMI still needs its own clearing pass.
     const int positionMode = PositionDefaultsMode();
+    if (positionMode != 2 && VGX_KNOB(EnvInt("GXV_QUAD_DECODE", 1) != 0))
+        p.quad = QuadRecipe(p);
     if (positionMode && direct && needW && !(p.layoutMask & VL_TMI)) {
         for (int i = 0; i < p.n; ++i) {
             AttrPlan& a = p.a[i];
@@ -1109,9 +1339,12 @@ ArraySpans MeasureArraySpans(const Plan& p, const uint8_t* src, uint32_t count, 
 }
 
 // The general form: every attribute from the stream or from an array, chosen per draw. `spec`: the specialised loops (kAttrFn) where they apply.
-static void DecodeVerticesGeneral(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out, ArraySpans* spans, bool spec) {
+// `arrays`, `player` (GXV_FE_PARALLEL, DecodeVerticesOff): the vertex arrays to read; false: not on the player's thread (no global is
+// written: the highest matrix row is left alone, an out-of-range index is counted in *oobOut instead of logged).
+static void DecodeVerticesGeneral(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out, ArraySpans* spans, bool spec,
+                                  const ArrayRef* arrays = g.arrays, bool player = true, uint32_t* oobOut = nullptr) {
     const VtxLayout& L = p.layout;
-    g_lastPosMtxMax = 0;
+    if (player) g_lastPosMtxMax = 0;
     const uint32_t ss = p.streamSize, os = L.stride;
     if (spans) *spans = MeasureArraySpans(p, src, count);
     // Defaults: z = 0 for two-component positions, matrix row 0, texture-matrix indices 0.
@@ -1143,14 +1376,14 @@ static void DecodeVerticesGeneral(const Plan& p, const uint8_t* src, uint32_t co
                     const float f = static_cast<float>(s[0]);
                     std::memcpy(o, &f, 4); // outOff = 12: the position's w
                 }
-                g_lastPosMtxMax = mx;
+                if (player) g_lastPosMtxMax = mx;
             } else {
                 for (uint32_t v = 0; v < count; ++v, s += ss, o += os) o[0] = s[0];
             }
             continue;
         }
         // Source element for vertex v: the stream itself (direct) or an array element (indexed).
-        const ArrayRef& ar = g.arrays[a.attr];
+        const ArrayRef& ar = arrays[a.attr];
         const bool indexed = a.mode != T_DIRECT;
         const bool idx16 = a.mode == T_INDEX16;
         const uint32_t elem = (a.attr == A_NRM && a.cnt == 2) ? 3u * static_cast<uint32_t>(CompSize(a.type)) : a.elemSize; // NBT3: normal only
@@ -1169,7 +1402,8 @@ static void DecodeVerticesGeneral(const Plan& p, const uint8_t* src, uint32_t co
             const AttrFn f = indexed ? a.fnx[le ? 1 : 0] : a.fn; // (null: a colour that is not RGBA8)
             if (f) {
                 const uint32_t bad = f(s, o, count, ss, os, adata, astride, maxOff, a.scale);
-                if (bad) VGX_LOG_N(16, "vertex array read out of range: attr %d stride %u size %u\n", a.attr, ar.stride, ar.size);
+                if (bad && !player) ++*oobOut;
+                else if (bad) VGX_LOG_N(16, "vertex array read out of range: attr %d stride %u size %u\n", a.attr, ar.stride, ar.size);
                 continue;
             }
         }
@@ -1265,15 +1499,17 @@ static void DecodeVerticesGeneral(const Plan& p, const uint8_t* src, uint32_t co
         }
 #undef VGX_ELEM
 #undef VGX_STORE
-        if (oob) VGX_LOG_N(16, "vertex array read out of range: attr %d stride %u size %u\n", a.attr, ar.stride, ar.size);
+        if (oob && !player) ++*oobOut;
+        else if (oob) VGX_LOG_N(16, "vertex array read out of range: attr %d stride %u size %u\n", a.attr, ar.stride, ar.size);
     }
 }
 
 
 // The fast form, for a plan whose attributes all come from the stream (Plan::direct): no array, no index, no per-draw choices.
-static void DecodeVerticesDirect(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out) {
+static void DecodeVerticesDirect(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out, bool player = true) {
     const VtxLayout& L = p.layout;
-    g_lastPosMtxMax = 0;
+    if (player) g_lastPosMtxMax = 0; // (GXV_FE_PARALLEL: off the player's thread, a plan without PNMTXIDX: nothing else is written)
+    if (count == 4 && p.quad) { p.quad(p, src, out); return; }
     const uint32_t ss = p.streamSize, os = L.stride;
     // Defaults: z = 0 for two-component positions, matrix row 0 (no PNMTXIDX), texture-matrix indices 0.
     const bool needZ = (p.directDefaults & 1u) != 0, needW = (p.directDefaults & 2u) != 0;
@@ -1296,6 +1532,15 @@ static void DecodeVerticesDirect(const Plan& p, const uint8_t* src, uint32_t cou
     }
     for (int i = 0; i < p.n; ++i) {
         const AttrPlan& a = p.a[i];
+        if (!player && a.attr == 0) { // (GXV_FE_PARALLEL: DecodePosMtxIdx's loop without its write of the highest row)
+            const uint8_t* s = src + a.srcOff;
+            uint8_t* o = out + a.outOff;
+            for (uint32_t v = 0; v < count; ++v, s += ss, o += os) {
+                const float f = static_cast<float>(s[0]);
+                std::memcpy(o, &f, 4);
+            }
+            continue;
+        }
         a.fn(src + a.srcOff, out + a.outOff, count, ss, os, nullptr, 0, 0, a.scale);
     }
 }
@@ -1305,6 +1550,8 @@ static void DecodeVerticesFast(const Plan& p, const uint8_t* src, uint32_t count
     if (p.direct) {
         if (spans) *spans = ArraySpans{};
         DecodeVerticesDirect(p, src, count, out);
+    } else if (count == 4 && !spans && p.quad && p.quad(p, src, out)) {
+        g_lastPosMtxMax = 0;
     } else {
         DecodeVerticesGeneral(p, src, count, out, spans, true);
     }
@@ -1341,6 +1588,42 @@ void DecodeVertices(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* 
     if (spans && !p.direct) *spans = spansFast;
     else if (spans) *spans = ArraySpans{};
     g_lastPosMtxMax = mxFast;
+}
+
+// ---- GXV_FE_PARALLEL (vgx_fepar.h): the decode on the finishing thread
+bool DecodeOffThreadOk(const Plan& p) {
+    // (GXV_DECODE=0/2, GXV_POSDEFAULT=2: loops that write globals. PNMTXIDX is fine: the decode off the player's thread does not write the
+    // highest row, the player reads it from the stream itself, PosMtxMaxOf)
+    return p.valid && DecodeMode() == 1 && PositionDefaultsMode() != 2;
+}
+uint32_t PosMtxMaxOf(const Plan& p, const uint8_t* src, uint32_t count) {
+    // (the highest PNMTXIDX of the draw, as the decode works it out: DecodePosMtxIdx / DecodeVerticesGeneral; 0 without one)
+    uint32_t off = 0;
+    for (int i = 0; i < p.n; ++i) {
+        const AttrPlan& a = p.a[i];
+        if (a.attr == 0) {
+            uint32_t mx = 0;
+            const uint8_t* s = src + off;
+            for (uint32_t v = 0; v < count; ++v, s += p.streamSize)
+                if (s[0] > mx) mx = s[0];
+            return mx;
+        }
+        off += a.srcSize;
+    }
+    return 0;
+}
+void DecodeVerticesOff(const Plan& p, const uint8_t* src, uint32_t count, uint8_t* out, const ArrayRef* arrays, uint32_t* oob) {
+    // (DecodeVerticesFast with the player's flag off: the same loops, the same arithmetic)
+    if (p.direct) DecodeVerticesDirect(p, src, count, out, false);
+    else DecodeVerticesGeneral(p, src, count, out, nullptr, true, arrays, false, oob);
+}
+void DecodeTablesReady() {
+    // (ByteLut fills a table on its first use: every scale 2^-k the plans can ask for, both signs, here and now on the player)
+    for (uint32_t k = 0; k < 32; ++k) {
+        const float scale = 1.0f / static_cast<float>(1u << k);
+        (void)ByteLut(false, scale);
+        (void)ByteLut(true, scale);
+    }
 }
 
 void SyncVertexArraysSlow() { SyncArrays(0x0FFF); }
@@ -1469,8 +1752,132 @@ static inline void DecodeForDraw(const Plan& p, const uint8_t* src, uint32_t cou
     m.valid = true;
 }
 
+// (GXV_FE_SPLIT / GXV_WORKLOAD_PROBE: what ProcessStream parses, for the "fe stream detail" line of vgx_workload.h. Plain counters of the player's
+// thread, added to once per stream or per draw command; read from another thread for the log, so a figure may be a call behind.)
+namespace {
+struct StreamDetail {
+    uint64_t calls[2] = {}, bytes[2] = {}, stateCmds[2] = {}, draws[2] = {}, verts[2] = {};
+    uint64_t flushStrips = 0, bypassLists = 0, bypassBytes = 0;
+} g_sd;
+} // namespace
+void NoteBypassStream(uint32_t nbytes) { ++g_sd.bypassLists; g_sd.bypassBytes += nbytes; }
+void StreamDetailCounters(uint64_t out[13]) {
+    for (int i = 0; i < 2; ++i) {
+        out[i * 5 + 0] = g_sd.calls[i]; out[i * 5 + 1] = g_sd.bytes[i]; out[i * 5 + 2] = g_sd.stateCmds[i];
+        out[i * 5 + 3] = g_sd.draws[i]; out[i * 5 + 4] = g_sd.verts[i];
+    }
+    out[10] = g_sd.flushStrips; out[11] = g_sd.bypassLists; out[12] = g_sd.bypassBytes;
+}
+
+// ---- streamc31: GXV_DYN_CENSUS bit 2, the stream-decode census (vgx_deccen.h; census only, changes nothing drawn)
+namespace {
+#if defined(VGX_CLONE_B)
+constexpr bool DecCenOn() { return false; } // (GXV_FE_TWOCORE's second worker draws nothing)
+#else
+int g_decCen = -1;
+inline bool DecCenOn() {
+    if (__builtin_expect(g_decCen < 0, 0)) g_decCen = (EnvInt("GXV_DYN_CENSUS", 0) & 2) != 0 ? 1 : 0;
+    return g_decCen != 0;
+}
+deccen::Census* DecCen() {
+    static deccen::Census* c = new deccen::Census(&DecCenNs, static_cast<size_t>(std::clamp<long>(EnvInt("GXV_DYN_CENSUS_KB", 1024), 16, 16384)) << 10);
+    return c;
+}
+#endif
+// What DrawStreamPlan did for one draw (the census's part; plain fields, nothing is read unless the census is on).
+struct DcDraw {
+    uint64_t decNs = 0, emitNs = 0;
+    uint32_t decN = 0, emitN = 0, mask = 0;
+    const uint8_t* out = nullptr;
+    uint32_t outBytes = 0;
+};
+// The plan signature: everything of the plan the decode reads (per attribute where it comes from, its type, size and place), the primitive,
+// the vertex count and the layout decoded into. Not the plan's bytes: its padding is not initialised.
+uint64_t DecCenSig(const Plan& p, uint8_t prim, uint32_t count, uint32_t mask) {
+    uint64_t w[2 + 21 * 2];
+    int n = 0;
+    w[n++] = (static_cast<uint64_t>(prim) << 56) | (static_cast<uint64_t>(p.direct) << 48) | (static_cast<uint64_t>(p.streamSize) << 32) | count;
+    w[n++] = (static_cast<uint64_t>(p.layoutMask) << 32) | mask;
+    for (int i = 0; i < p.n && i < 21; ++i) {
+        const AttrPlan& a = p.a[i];
+        w[n++] = (static_cast<uint64_t>(a.attr) << 56) | (static_cast<uint64_t>(a.mode) << 48) | (static_cast<uint64_t>(a.type) << 40) |
+                 (static_cast<uint64_t>(a.cnt) << 32) | (static_cast<uint64_t>(a.frac) << 24) | (static_cast<uint64_t>(a.srcSize) << 16) | a.srcOff;
+        uint32_t sb;
+        std::memcpy(&sb, &a.scale, 4);
+        w[n++] = (static_cast<uint64_t>(a.elemSize) << 48) | (static_cast<uint64_t>(a.outOff) << 40) | (static_cast<uint64_t>(a.comps) << 32) | sb;
+    }
+    return XXH3_64bits(w, static_cast<size_t>(n) * sizeof w[0]);
+}
+// (a copy of the decoded vertices, for the census's timed copy-out; the arena may move during EmitDraw)
+void DecCenHold(DcDraw& r, const uint8_t* out, uint32_t bytes) {
+    static std::vector<uint8_t> hold;
+    hold.assign(out, out + bytes);
+    r.out = hold.data();
+    r.outBytes = bytes;
+}
+void DecCenNote(const Plan& p, uint8_t prim, const uint8_t* src, uint32_t count, uint8_t origin, const DcDraw& r) {
+#if !defined(VGX_CLONE_B)
+    deccen::DrawIn d;
+    d.sig = DecCenSig(p, prim, count, r.mask);
+    d.origin = origin;
+    d.allDirect = p.direct;
+    d.count = count;
+    d.streamSize = p.streamSize;
+    d.stream = src;
+    d.out = r.out;
+    d.outBytes = r.outBytes;
+    d.decodeNs = r.decNs; d.decodeScopes = r.decN;
+    d.emitNs = r.emitNs; d.emitScopes = r.emitN;
+    bool complete = true;
+    const ArraySpans sp = p.direct ? ArraySpans{} : MeasureArraySpans(p, src, count, &complete);
+    d.inRange = complete;
+    for (int i = 0; i < p.n && i < 21; ++i) {
+        const AttrPlan& a = p.a[i];
+        deccen::AttrIn& o = d.a[d.nAttr++];
+        o.attr = a.attr;
+        o.srcOff = a.srcOff;
+        o.srcSize = a.srcSize;
+        o.indexed = a.attr >= A_POS && a.mode != T_DIRECT;
+        if (o.indexed) {
+            const ArrayRef& ar = g.arrays[a.attr];
+            o.stride = ar.stride;
+            o.le = ar.le;
+            if (ar.data && (sp.mask >> a.attr & 1u)) {
+                o.arr = ar.data + sp.lo[a.attr - A_POS];
+                o.arrLen = sp.hi[a.attr - A_POS] - sp.lo[a.attr - A_POS];
+            }
+        }
+    }
+    DecCen()->Note(d);
+#else
+    (void)p; (void)prim; (void)src; (void)count; (void)origin; (void)r;
+#endif
+}
+} // namespace
+void DecCenPicture() {
+#if !defined(VGX_CLONE_B)
+    if (DecCenOn()) DecCen()->EndPicture();
+#endif
+}
+void DecCenLog(void (*emit)(const char* line)) {
+#if !defined(VGX_CLONE_B)
+    if (!DecCenOn()) return;
+    char lines[6][1000];
+    const int n = DecCen()->Lines(lines, 6);
+    for (int i = 0; i < n; ++i) emit(lines[i]);
+#else
+    (void)emit;
+#endif
+}
+
 // (the caller has the plan of `fmt` already: the command parser asked for the vertex size)
-static void DrawStreamPlan(uint8_t prim, int fmt, const Plan& p, const uint8_t* src, uint32_t count, uint32_t avail) {
+// `origin` (GXV_DYN_CENSUS bit 2 only): 0 the top-level stream, 1 a list ProcessStream parses, 2 a particle command's list (FxTinyDraw).
+static void DrawStreamPlan(uint8_t prim, int fmt, const Plan& p, const uint8_t* src, uint32_t count, uint32_t avail, uint8_t origin) {
+#if defined(VGX_CLONE_B)
+    // (GXV_FE_TWOCORE, the second worker: its scan leaves draws out (they change no register); a segment never reaches one)
+    if (two::g_prescan) return;
+    two::Abandon(1);
+#endif
     workload::FeScope feDraw(workload::FeDraw);
     SyncVertexArrays();
     if (count == 0 || p.streamSize == 0) return;
@@ -1489,7 +1896,7 @@ static void DrawStreamPlan(uint8_t prim, int fmt, const Plan& p, const uint8_t* 
                 if (w) break;
             }
             while (i < n && src[i] == 0) ++i;
-            if (i == n) return;
+            if (i == n) { ++g_sd.flushStrips; return; }
         }
     }
     if (static_cast<uint64_t>(count) * p.streamSize > avail) {
@@ -1497,17 +1904,32 @@ static void DrawStreamPlan(uint8_t prim, int fmt, const Plan& p, const uint8_t* 
         count = avail / p.streamSize;
         if (count == 0) return;
     }
+    // (GXV_DYN_CENSUS bit 2: the decodes' and EmitDraws' times and the vertices made, for DecCenNote; nothing else changes)
+    const bool dc = DecCenOn();
+    DcDraw dcr;
     // (after a run of draws that folded their registers: decode into the folded layout at once)
     const uint32_t decodeMask = FoldGuess(p.layoutMask, count);
     if (decodeMask != p.layoutMask) {
         const Plan& fp = FoldedPlan(fmt, p);
         uint8_t* fout = BeginVertices(decodeMask, count);
         if (!fout) return;
+        const uint64_t t0 = dc ? DecCenNs() : 0;
         DecodeForDraw(fp, src, count, fout);
+        if (dc) { dcr.decNs += DecCenNs() - t0; ++dcr.decN; }
         SetPendingPosMtxMax(g_lastPosMtxMax);
         static const bool check = diag::Int("GXV_FOLDAHEAD", 1) == 2;
         if (check) FoldAheadCheck(p, fp, src, count, fout);
-        if (EmitDraw(prim, decodeMask, count, p.layoutMask)) return;
+        if (__builtin_expect(dc, 0)) {
+            // (the vertices are copied for the census's copy-out timing before EmitDraw may change the arena)
+            dcr.mask = decodeMask;
+            DecCenHold(dcr, fout, count * fp.layout.stride);
+            const uint64_t t1 = DecCenNs();
+            const bool folded = EmitDraw(prim, decodeMask, count, p.layoutMask);
+            dcr.emitNs += DecCenNs() - t1; ++dcr.emitN;
+            if (folded) { DecCenNote(p, prim, src, count, origin, dcr); return; }
+        } else if (EmitDraw(prim, decodeMask, count, p.layoutMask)) {
+            return;
+        }
         // (it did not fold after all: the arena is back as it was)
         ++g_foldRedo;
         if (check) VGX_LOG_N(50, "foldahead: a guessed fold did not fold (mask %03X, %u vertices)\n", p.layoutMask, count);
@@ -1516,14 +1938,30 @@ static void DrawStreamPlan(uint8_t prim, int fmt, const Plan& p, const uint8_t* 
     if (!out) return;
     {
         workload::FeScope feDecode(workload::FeDecode);
-        DecodeForDraw(p, src, count, out);
+        if (dc) dcr.out = nullptr; // (a guessed fold that did not fold: its vertices are not these)
+        const uint64_t t0 = dc ? DecCenNs() : 0;
+        // (GXV_FE_PARALLEL, vgx_fepar.h: the decode may go to the finishing thread; the highest matrix row, which the draw's resolution
+        // needs now, is read from the stream here, as the decode would leave it)
+        if (!g_fxMemo.on && fepar::Want(p, count)) { fepar::Defer(p, src, count, out); g_lastPosMtxMax = PosMtxMaxOf(p, src, count); }
+        else { DecodeForDraw(p, src, count, out); if (dc) dcr.out = out; }
+        if (dc) { dcr.decNs += DecCenNs() - t0; ++dcr.decN; }
     }
     SetPendingPosMtxMax(g_lastPosMtxMax);
     workload::FeScope feEmit(workload::FeEmit);
+    if (__builtin_expect(dc, 0)) {
+        // (the census times its copy-out on a copy taken here: EmitDraw may move or shorten the arena)
+        dcr.mask = p.layoutMask;
+        if (dcr.out) DecCenHold(dcr, dcr.out, count * p.layout.stride);
+        const uint64_t t1 = DecCenNs();
+        EmitDraw(prim, p.layoutMask, count);
+        dcr.emitNs += DecCenNs() - t1; ++dcr.emitN;
+        DecCenNote(p, prim, src, count, origin, dcr);
+        return;
+    }
     EmitDraw(prim, p.layoutMask, count);
 }
 
-void DrawStream(uint8_t prim, int fmt, const uint8_t* src, uint32_t count, uint32_t avail) { DrawStreamPlan(prim, fmt, GetPlan(fmt), src, count, avail); }
+void DrawStream(uint8_t prim, int fmt, const uint8_t* src, uint32_t count, uint32_t avail) { DrawStreamPlan(prim, fmt, GetPlan(fmt), src, count, avail, 0); }
 
 void DrawDecoded(uint8_t prim, uint32_t layoutMask, const uint8_t* verts, uint32_t count) {
     if (count == 0) return;
@@ -1582,6 +2020,281 @@ inline __attribute__((always_inline)) bool BpWriteIsNoop(uint32_t rv) {
     const uint32_t reg = rv >> 24;
     return !kBpEffect.t[reg] && g.bpMask == 0x00FFFFFFu && g.bp[reg] == (rv & 0x00FFFFFFu);
 }
+// GXV_NOOP_FILTER (fedl25; default 0). The top-level stream's register writes are about 70 % repeats of what the register holds (the stream
+// census of the console: 11.4k writes a picture, 8.1k of them changing nothing; BP, CP array bases / strides / matrix indices, XF matrix
+// memory and registers). BPFAST's burst loop took only a run of BP no-ops; every other repeat went round the whole command loop (the look-ahead,
+// two-core and bracket hooks, the opcode chain) and then WriteCPInline / WriteXFBE's own tests. With the switch on, one loop takes every
+// repeat of those kinds, whichever follows which, with the tests of the write functions themselves (a pure "same value": the functions store
+// and mark only a change, so nothing else is left out).
+//   1  on;  2  verify: nothing is left out; before each command the loop would have skipped, the dirty flags, keys and registers it may touch
+//      are summed, the command is made the normal way, and the sums are compared ("noopfilter: N checked, M mismatching").
+// Left alone (the normal path): the census forms, the second worker's clone, GXV_FE_TWOCORE's player, J3D-native hooks that note XF writes.
+int g_noopMode = -1;
+int NoopModeSlow() {
+    long v = EnvInt("GXV_NOOP_FILTER", 0);
+    if (v != 1 && v != 2) v = 0;
+    if (v == 2 && !diag::kEnabled) v = 1;
+    g_noopMode = static_cast<int>(v);
+    return g_noopMode;
+}
+inline int NoopMode() {
+#if defined(VGX_CLONE_B)
+    return 0;
+#else
+    return __builtin_expect(g_noopMode >= 0, 1) ? g_noopMode : NoopModeSlow();
+#endif
+}
+uint64_t g_noopChecked = 0, g_noopBad = 0;
+// CP writes WriteCPInline makes without a trace when the register holds the value (array bases, strides, the two matrix-index words).
+inline bool CpIsNoop(uint32_t reg, uint32_t v) {
+    if (reg >= 0xA0 && reg <= 0xBF) {
+        const uint32_t n = reg & 0xF;
+        return (reg & 0x10) ? g.cpStride[n] == (v & 0xFF) : g.cpBase[n] == v;
+    }
+    if (reg == 0x30) return g.matIdxA == v;
+    if (reg == 0x40) return g.matIdxB == v;
+    return false;
+}
+// n host words at d against n big-endian words at be: all equal (SwapStoreDiff's byte-swap and compare, 16 bytes at a time, without the store)
+inline bool SameBeRaw(const uint8_t* d, const uint8_t* be, uint32_t n) {
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(VGX_NO_NEON)
+    uint32x4_t acc = vdupq_n_u32(0);
+    for (; n >= 4; n -= 4, d += 16, be += 16) acc = vorrq_u32(acc, vreinterpretq_u32_u8(veorq_u8(vrev32q_u8(vld1q_u8(be)), vld1q_u8(d))));
+    const uint32x2_t h = vorr_u32(vget_low_u32(acc), vget_high_u32(acc));
+    if ((vget_lane_u32(h, 0) | vget_lane_u32(h, 1)) != 0) return false;
+#endif
+    for (; n > 0; --n, d += 4, be += 4) {
+        uint32_t o;
+        std::memcpy(&o, d, 4);
+        if (o != be32(be)) return false;
+    }
+    return true;
+}
+inline bool SameBeWords(const uint32_t* d, const uint8_t* be, uint32_t n) { return SameBeRaw(reinterpret_cast<const uint8_t*>(d), be, n); }
+inline bool SameBeFloats(const float* d, const uint8_t* be, uint32_t n) { return SameBeRaw(reinterpret_cast<const uint8_t*>(d), be, n); }
+// An XF load (addr, n words, big-endian) whose every word is what WriteXFWord would find there: matrix memories, light memory, registers
+// (the two matrix-index registers also against CP's copy, as WriteXFWord keeps them).
+inline bool XfIsNoop(uint32_t addr, uint32_t n, const uint8_t* be) {
+    if (addr + n <= 0x100) return SameBeFloats(&g.xfPos[0][0] + addr, be, n);
+    if (addr >= 0x400 && addr + n <= 0x460) return SameBeFloats(&g.xfNrm[0][0] + (addr - 0x400), be, n);
+    if (addr >= 0x500 && addr + n <= 0x600) return SameBeFloats(&g.xfPost[0][0] + (addr - 0x500), be, n);
+    if (addr >= 0x600 && addr + n <= 0x680) return SameBeWords(&g.xfLight[0][0] + (addr - 0x600), be, n);
+    if (addr >= 0x1000 && addr + n <= 0x1058) {
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t a = addr + i, w = be32(be + i * 4u);
+            if (g.xfReg[a - 0x1000] != w) return false;
+            if (a == 0x1018 && g.matIdxA != w) return false;
+            if (a == 0x1019 && g.matIdxB != w) return false;
+        }
+        return true;
+    }
+    return false;
+}
+#if defined(GXV_NOOP_MUTANT) && GXV_NOOP_MUTANT == 1
+// (test-only negative control, -DGXV_NOOP_MUTANT=1: an XF load counts as a repeat when its FIRST word is the register's: the pictures must change)
+#define XF_IS_NOOP(a, n, be) (((a) + (n) <= 0x100 && SameBeFloats(&g.xfPos[0][0] + (a), (be), 1)) ? true : XfIsNoop((a), (n), (be)))
+#else
+#define XF_IS_NOOP(a, n, be) XfIsNoop((a), (n), (be))
+#endif
+// The command at p (an opcode byte, `end - p` bytes there): its size when it is a BP / CP / XF write that changes nothing, else 0.
+inline uint32_t NoopCmdLen(const uint8_t* p, const uint8_t* end) {
+    const uint8_t c = p[0];
+    if (c == 0x61) {
+        if (end - p < 5) return 0;
+        return BpWriteIsNoop(be32(p + 1)) ? 5u : 0u;
+    }
+    if (c == 0x08) {
+        if (end - p < 6) return 0;
+        return CpIsNoop(p[1], be32(p + 2)) ? 6u : 0u;
+    }
+    if (c == 0x10) {
+        if (end - p < 5) return 0;
+        const uint32_t n = static_cast<uint32_t>(be16(p + 1) & 0xF) + 1u, addr = be16(p + 3);
+        if (static_cast<uint32_t>(end - p) < 5u + n * 4u) return 0;
+        return XF_IS_NOOP(addr, n, p + 5) ? 5u + n * 4u : 0u;
+    }
+    return 0;
+}
+// The loop (GXV_NOOP_FILTER=1): from p, the repeats in a row; returns where the first command that is not one starts.
+inline const uint8_t* NoopRun(const uint8_t* p, const uint8_t* end, uint32_t& stateCmds) {
+    while (end - p >= 5) {
+        const uint32_t len = NoopCmdLen(p, end);
+        if (!len) break;
+        p += len;
+        ++stateCmds;
+    }
+    return p;
+}
+// GXV_FE_STATEFAST (fe2-26; default 0). The top-level stream is ~11,700 state commands a picture (BP, CP, XF, indexed matrix loads), most of them
+// short; every one went round ProcessStreamT's whole command loop: the two-core, census, J3D-native and look-ahead tests, the opcode chain, then the
+// write function with its own repeat test. Measured on the host (tests/vgx_fe_work.cpp FEW_TOP, callgrind): 46-76 instructions for a repeated CP / BP write,
+// 120-230 for a repeated XF register write, ~100 more for a changed one than the write function itself costs. One loop here takes a run of such commands
+// with those tests made once at its entry, and the same write functions as the general loop makes (WriteBP, WriteCPInline, WriteXFBE, WriteXF, the
+// indexed-load path line for line); a repeat is recognised with NoopCmdLen's tests (the ones GXV_NOOP_FILTER verified) and left out, a change goes to
+// the write function as before. It stops (returns the command's start) at the first command it does not take: a BP register with an effect (mask,
+// tokens, copies, palette, markers), CP/XF writes cut by the end of the buffer, any other opcode.
+//   0 off, 1 on, 2 verify (every command the loop would leave out is made the normal way and the state digest compared before and after:
+//   "statefast: N checked, M mismatching", must be 0; what the loop sends to the write functions is the same call the general loop makes).
+// Entered only where the general loop has nothing of its own to do for these commands: not the census form, not GXV_BPFAST=0, not the second
+// worker or the two-core player, not with the J3D-native hooks, not with GXV_NOOP_FILTER (it has its own loop).
+int g_stateFast = -1;
+int StateFastSlow() {
+    long v = EnvInt("GXV_FE_STATEFAST", 0);
+    if (v != 1 && v != 2) v = 0;
+    if (v == 2 && !diag::kEnabled) v = 1;
+    g_stateFast = static_cast<int>(v);
+    return g_stateFast;
+}
+inline int StateFastMode() {
+#if defined(VGX_CLONE_B)
+    return 0;
+#else
+    return __builtin_expect(g_stateFast >= 0, 1) ? g_stateFast : StateFastSlow();
+#endif
+}
+uint64_t g_sfChecked = 0, g_sfBad = 0, g_sfCmds = 0, g_sfRuns = 0;
+uint64_t NoopDigest();
+// XfIsNoop with the registers first (the commonest repeat in the top-level stream)
+inline bool StateXfSame(uint32_t addr, uint32_t cnt, const uint8_t* be) {
+    if (addr >= 0x1000 && addr + cnt <= 0x1058) {
+#if defined(GXV_STATEFAST_MUTANT) && GXV_STATEFAST_MUTANT == 1
+        // (test-only negative control, -DGXV_STATEFAST_MUTANT=1: only the FIRST word of an XF register write is compared: the verify mode must see it)
+        if (cnt > 1) return g.xfReg[addr - 0x1000] == be32(be);
+#endif
+        for (uint32_t i = 0; i < cnt; ++i) {
+            const uint32_t w = be32(be + i * 4u), a = addr + i;
+            if (g.xfReg[a - 0x1000] != w || (a == 0x1018 && g.matIdxA != w) || (a == 0x1019 && g.matIdxB != w)) return false;
+        }
+        return true;
+    }
+    return XF_IS_NOOP(addr, cnt, be);
+}
+template <bool kVerify>
+__attribute__((noinline)) const uint8_t* StateRun(const uint8_t* p, const uint8_t* const end, uint32_t& stateCmds) {
+    uint32_t n = 0;
+    while (end - p >= 6) {
+        const uint8_t cmd = p[0];
+        if (cmd == 0x61) {
+            const uint32_t rv = be32(p + 1);
+            const uint32_t reg = rv >> 24;
+            if (kBpEffect.t[reg]) break; // (the mask, tokens, copies, palette loads, the port's markers: the general loop)
+            if (kVerify) {
+                if (g.bpMask == 0x00FFFFFFu && g.bp[reg] == (rv & 0x00FFFFFFu)) {
+                    const uint64_t before = NoopDigest();
+                    WriteBP(rv);
+                    ++g_sfChecked;
+                    if (NoopDigest() != before) { ++g_sfBad; VGX_LOG_N(16, "statefast: MISMATCH (BP register 0x%02X)\n", reg); }
+                    if ((g_sfChecked & 0xFFFFFu) == 0) VGX_LOG_N(200, "statefast: %llu checked, %llu mismatching\n", static_cast<unsigned long long>(g_sfChecked), static_cast<unsigned long long>(g_sfBad));
+                    p += 5; ++n; continue;
+                }
+            } else if (g.bp[reg] == (rv & 0x00FFFFFFu) && g.bpMask == 0x00FFFFFFu) {
+                p += 5; ++n; continue;
+            }
+            p += 5;
+            if (kBpPlain.t[reg] && g.bpMask == 0x00FFFFFFu) { // (WriteBP's plain tail: store, mark; the mask is the default and the register has no side effect)
+                const uint32_t ov = g.bp[reg], nv = rv & 0x00FFFFFFu;
+                g.bp[reg] = nv;
+                MarkBP(static_cast<uint8_t>(reg), ov, nv);
+            } else {
+                WriteBP(rv);
+            }
+            ++n;
+        } else if (cmd == 0x08) {
+            const uint8_t reg = p[1];
+            const uint32_t v = be32(p + 2);
+            p += 6;
+            if (kVerify && CpIsNoop(reg, v)) {
+                const uint64_t before = NoopDigest();
+                WriteCPInline(reg, v);
+                ++g_sfChecked;
+                if (NoopDigest() != before) { ++g_sfBad; VGX_LOG_N(16, "statefast: MISMATCH (CP register 0x%02X)\n", reg); }
+            } else {
+                WriteCPInline(reg, v);
+            }
+            ++n;
+        } else if (cmd == 0x10) {
+            const uint32_t cnt = static_cast<uint32_t>(be16(p + 1) & 0xF) + 1u;
+            const uint32_t addr = be16(p + 3);
+            const uint32_t len = 5u + cnt * 4u;
+            if (static_cast<uint32_t>(end - p) < len) break; // (cut by the end of the buffer: the general loop reports it)
+            if (StateXfSame(addr, cnt, p + 5)) {
+                if (kVerify) {
+                    const uint64_t before = NoopDigest();
+                    WriteXFBE(addr, cnt, p + 5);
+                    ++g_sfChecked;
+                    if (NoopDigest() != before) { ++g_sfBad; VGX_LOG_N(16, "statefast: MISMATCH (XF address 0x%X)\n", addr); }
+                }
+            } else {
+                WriteXFBE(addr, cnt, p + 5);
+            }
+            p += len;
+            ++n;
+        } else if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) {
+            const uint32_t index = be16(p + 1);
+            const uint32_t v = be16(p + 3);
+            p += 5;
+            const uint32_t cnt = (v >> 12) + 1u, addr = v & 0xFFF;
+            const int which = (cmd - 0x20) >> 3;
+            SyncArrays(static_cast<uint16_t>(1u << (12 + which)));
+            bool le = false;
+            const uint8_t* src = ArrayElem(A_POSMTXARRAY + which, index, cnt * 4u, le);
+            if (src != kZero) {
+                if (le) { // (matrices the game's code stored: host words)
+                    uint32_t w[16];
+                    std::memcpy(w, src, cnt * 4u);
+                    WriteXF(addr, cnt, w);
+                } else {
+                    WriteXFBE(addr, cnt, src);
+                }
+            }
+            ++n;
+        } else {
+            break;
+        }
+    }
+    stateCmds += n;
+    g_sfCmds += n;
+    ++g_sfRuns;
+    return p;
+}
+// A digest of what a write of the three kinds may touch: the dirty flags, the keys, the registers.
+uint64_t NoopDigest() {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+    uint32_t w[3];
+    std::memcpy(w, &g.bpDirty, 12);
+    mix(w[0]); mix(w[1]); mix(w[2]);
+    mix(g.bpMask); mix(g.cpArrayStale); mix(g.bpTexStale); mix(g.texSlotDirty); mix(g.tevColDirty); mix(g.xfPosRowsDirty); mix(g.layoutDirty);
+    mix(g.vcdGen); mix(g.keyHash); mix(g.matIdxA); mix(g.matIdxB); mix(g.ltCos1); mix(g.ltDist1);
+    for (uint32_t r : g.bp) mix(r);
+    for (uint32_t r : g.cpBase) mix(r);
+    for (uint32_t r : g.cpStride) mix(r);
+    for (uint32_t r : g.xfReg) mix(r);
+    const uint32_t* q = reinterpret_cast<const uint32_t*>(&g.xfPos[0][0]);
+    for (uint32_t i = 0; i < 256; ++i) mix(q[i]);
+    q = reinterpret_cast<const uint32_t*>(&g.xfNrm[0][0]);
+    for (uint32_t i = 0; i < 96; ++i) mix(q[i]);
+    q = reinterpret_cast<const uint32_t*>(&g.xfPost[0][0]);
+    for (uint32_t i = 0; i < 256; ++i) mix(q[i]);
+    for (const auto& row : g.xfLight) for (uint32_t r : row) mix(r);
+    return h;
+}
+// GXV_NOOP_FILTER=2: the command at p, if the loop would skip it, is made the normal way here (the caller then makes it again: a
+// write of the value the register holds, which is what the check has just found, leaves nothing to do twice) and the digest compared.
+void NoopCheck(const uint8_t* p, const uint8_t* end) {
+    if (!NoopCmdLen(p, end)) return;
+    const uint64_t before = NoopDigest();
+    if (p[0] == 0x61) WriteBP(be32(p + 1));
+    else if (p[0] == 0x08) WriteCPInline(p[1], be32(p + 2));
+    else WriteXFBE(be16(p + 3), static_cast<uint32_t>(be16(p + 1) & 0xF) + 1u, p + 5);
+    ++g_noopChecked;
+    if (NoopDigest() != before) {
+        ++g_noopBad;
+        VGX_LOG_N(16, "noopfilter: MISMATCH (command 0x%02X, register/address 0x%X)\n", p[0], p[0] == 0x10 ? be16(p + 3) : p[1]);
+    }
+    if ((g_noopChecked & 0xFFFFFu) == 0)
+        VGX_LOG_N(200, "noopfilter: %llu checked, %llu mismatching\n", static_cast<unsigned long long>(g_noopChecked), static_cast<unsigned long long>(g_noopBad));
+}
 // GXV_BPFAST=0: every BP write goes through WriteBP; 2: the skipped ones too, and the state they might change is compared (logged).
 void BpCheckNoop(uint32_t rv) {
     static uint64_t checked = 0, bad = 0;
@@ -1602,6 +2315,70 @@ void BpCheckNoop(uint32_t rv) {
         VGX_LOG_N(200, "bpfast: %llu writes checked, %llu mismatching\n", static_cast<unsigned long long>(checked), static_cast<unsigned long long>(bad));
 }
 } // namespace
+
+// GXV_GX_DEDUP=2 (gxdedup31; the game's gate: platform/src/gx/gx_dedup.inc, the decision: platform/include/port/gx_dedup_core.h): in front
+// of every register write the game's =1 would leave out, an XF load of two words at 0x0C00 (an address that holds nothing, here or on the
+// console): what (class << 24 | register: 0 BP, 1 CP, 2 XF with its address) and the value. The write that follows must change nothing:
+// here, the register holds the value (BP: no mask pending, and the TEV colour half the selector names too); every GXV_GX_DEDUP_DIGEST-th
+// probe (default 64; 1: every one) and every probe whose register this file keeps no copy of by value, the write is also made here and the
+// digest of everything a register write can touch (NoopDigest) compared before / after. "gxdedup verify:" every 2^18 checks and at each of
+// the first 8 that differ (a differing one: the game's shadow missed a writer, or the register is not a plain store).
+#if !defined(VGX_CLONE_B)
+namespace {
+uint32_t g_ddWhat = 0;
+bool g_ddHave = false;
+uint64_t g_ddChecked = 0, g_ddBad = 0, g_ddDigests = 0, g_ddDigestBad = 0;
+}
+void GxDedupProbe(uint32_t a, uint32_t w) {
+    if (a == 0x0C00u) { g_ddWhat = w; g_ddHave = true; return; }
+    if (!g_ddHave) return;
+    g_ddHave = false;
+    static const uint32_t every = [] { const long n = EnvInt("GXV_GX_DEDUP_DIGEST", 64); return n < 1 ? 1u : static_cast<uint32_t>(n); }();
+    const uint32_t cls = g_ddWhat >> 24, reg = g_ddWhat & 0xFFFFu;
+    bool ok = false, byValue = true;
+    if (cls == 0) {
+        const uint32_t v = w & 0x00FFFFFFu;
+        ok = reg < 0x100 && !kBpEffect.t[reg] && g.bpMask == 0x00FFFFFFu && g.bp[reg] == v && (reg < 0xE0 || reg > 0xE7 || g.tevRaw[TevRawSlot(reg, v)] == v);
+    } else if (cls == 1) {
+        if (reg >= 0xA0 && reg <= 0xBF) ok = (reg & 0x10) ? g.cpStride[reg & 0xF] == (w & 0xFF) : g.cpBase[reg & 0xF] == w;
+        else if (reg == 0x30) ok = g.matIdxA == w;
+        else if (reg == 0x40) ok = g.matIdxB == w;
+        else {
+            const int slot = reg < 0x100 ? CpRawSlot(static_cast<uint8_t>(reg)) : -1;
+            if (slot >= 0 && ((g.cpRawValid >> slot) & 1u)) ok = g.cpRaw[slot] == w;
+            else { ok = true; byValue = false; } // (not kept by value: the digest decides)
+        }
+    } else if (cls == 2) {
+        ok = reg >= 0x1000 && reg < 0x1058 && g.xfReg[reg - 0x1000] == w && (reg != 0x1018 || g.matIdxA == w) && (reg != 0x1019 || g.matIdxB == w);
+    }
+    ++g_ddChecked;
+    bool bad = !ok;
+    if (ok && (!byValue || g_ddChecked % every == 0)) { // (the write made here, the digest compared; the stream's own write then finds nothing to do)
+        const uint64_t before = NoopDigest();
+        if (cls == 0) WriteBP((reg << 24) | (w & 0x00FFFFFFu));
+        else if (cls == 1) WriteCP(static_cast<uint8_t>(reg), w);
+        else WriteXFWord(reg, w);
+        ++g_ddDigests;
+        if (NoopDigest() != before) { ++g_ddDigestBad; bad = true; }
+    }
+    if (bad) ++g_ddBad;
+    if ((bad && g_ddBad <= 8) || (g_ddChecked & 0x3FFFFu) == 0) {
+        uint32_t fe = 0;
+        if (cls == 0 && reg < 0x100) fe = g.bp[reg];
+        else if (cls == 1 && reg >= 0xA0 && reg <= 0xBF) fe = (reg & 0x10) ? g.cpStride[reg & 0xF] : g.cpBase[reg & 0xF];
+        else if (cls == 2 && reg >= 0x1000 && reg < 0x1058) fe = g.xfReg[reg - 0x1000];
+        if (port_log_summary)
+            port_log_summary("gxdedup verify: %llu checked, %llu differing (digests %llu, differing %llu)%s (%s %04X: front end %08X, the game's shadow %08X, mask %06X)",
+                             static_cast<unsigned long long>(g_ddChecked), static_cast<unsigned long long>(g_ddBad), static_cast<unsigned long long>(g_ddDigests),
+                             static_cast<unsigned long long>(g_ddDigestBad), bad ? ": MISMATCH" : "", cls == 0 ? "BP" : cls == 1 ? "CP" : "XF", reg, fe, w, g.bpMask);
+    }
+}
+uint64_t GxDedupVerifyCounts(uint64_t* bad, uint64_t* digests) { *bad = g_ddBad; *digests = g_ddDigests; return g_ddChecked; }
+#else
+void GxDedupProbe(uint32_t, uint32_t) {}
+#endif
+
+#include "vgx_census.inc" // GXV_STREAM_CENSUS (lighter25): the stream by kind and source, ProcessStreamT<true>
 
 // ------------------------------------------------------------------ look-ahead (GXV_FE_PREFETCH)
 // The player is mostly waiting for memory, not computing. A picture calls about a thousand display lists, and each call looks up
@@ -1670,6 +2447,9 @@ struct FeAhead {
             else if (c == 0x08) len = 6;
             else if (c == 0x40) len = 9;
             else if (c == 0x44 || c == 0x48) len = 1;
+            else if (c == kRetainedOp) len = 5; // (GXV_RETAINED: the handle in front of a CALL_DL; the call itself is the next command)
+            else if (c == kJ3nOp) len = 21;      // (GXV_J3DNATIVE: the bracket's five words; the call is the next command, its end marker the one after)
+            else if (c == kJ3nEndOp) len = 1;
             else if (c == 0x10) {
                 if (end - s < 5) { blocked = true; break; }
                 len = 5u + ((be16(s + 1) & 0xFu) + 1u) * 4u;
@@ -1759,7 +2539,7 @@ bool FxTinyDraw(const uint8_t* list, uint32_t nbytes) {
     ++stats::Cur().streams;
     stats::Cur().streamBytes += nbytes;
     if (vsize != 0 && count != 0) {
-        DrawStreamPlan(cmd & 0xF8, cmd & 7, plan, list + 3, count, avail);
+        DrawStreamPlan(cmd & 0xF8, cmd & 7, plan, list + 3, count, avail, 2);
         ++stats::Cur().primsDL;
         stats::Cur().vertsDL += count;
     }
@@ -1797,7 +2577,9 @@ void FxCall(uint32_t addr, uint32_t size, uint32_t flushVerts, bool memo) {
     }
     g_fxMemo.valid = false; // (the list may change what a decode reads)
     ++g_fxThrough;
+    g_tlSite = 2; // (GXV_TINYLIST_CENSUS: the call site)
     CallList(list, size);
+    g_tlSite = 0;
 }
 // One command's payload (complete: ProcessStream hands it over only whole).
 void FxMergeRun(const uint8_t* p, uint32_t n) {
@@ -1848,11 +2630,58 @@ void FxMergeCounters(uint64_t out[6]) {
     out[0] = g_fxCmds; out[1] = g_fxItems; out[2] = g_fxCalls; out[3] = g_fxShort; out[4] = g_fxMemoHits; out[5] = g_fxThrough;
 }
 
-uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
+// GXV_J3DNATIVE (vgx_j3native.inc): the bracketed call and the census hooks of the top-level stream
+void J3nCall(const uint8_t* list, uint32_t nbytes, uint32_t id, uint32_t vA, uint32_t vB, uint32_t ext, uint32_t fl);
+void J3nNoteBp(uint32_t v);
+void J3nNoteXf(uint32_t addr, uint32_t n, const uint8_t* be);
+void J3nNoteDraw();
+void J3nNoteFx();
+void J3nNoteList(uint32_t nbytes);
+void J3nNoteShape();
+// GXV_J3DNATIVE=4 / 5 (vgx_j3native2.inc): stage 2's chains. g_j3n2On: a chain is active (recording, verify or template mode).
+extern bool g_j3n2On;
+void J3n2End(int reason);
+void J3n2Plain(const uint8_t* list, uint32_t nbytes);
+void J3n2Shape(const uint8_t* list, uint32_t nbytes, uint32_t handle);
+void J3n2NoteBp(uint32_t rv);
+void J3n2NoteXf(uint32_t addr, uint32_t n);
+// What a chain may hold (anything else ends it before it is made): every command but a particle command (0x58) and an unknown opcode. List
+// calls are decided at the call (a compiled state list is a token; anything else ends the chain), BP and XF register writes are noted
+// (J3n2NoteBp / J3n2NoteXf: what they change may differ from the recording), draws read the register file, which is real.
+static inline bool J3n2CmdOk(uint8_t cmd) {
+    if (cmd & 0x80) return true;
+    switch (cmd) {
+    case 0x00: case 0x08: case 0x10: case 0x20: case 0x28: case 0x30: case 0x38: case 0x40: case 0x44: case 0x48: case 0x61: case kRetainedOp: case kJ3nOp:
+    case kJ3nEndOp:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// GXV_FEPLAN=2 (feplan31, the verify of a mixed list's plan, see "mixed display lists" below): while set, every draw a list's parse makes
+// is recorded with the register state before and after it (the parse that the plan is then compared with). Null otherwise: one test a draw.
+struct FpRec;
+static FpRec* g_fpRec = nullptr;
+static void FpRecBefore(uint8_t cmd, const uint8_t* src, uint32_t count, uint32_t avail);
+static void FpRecAfter();
+
+// kC (GXV_STREAM_CENSUS, vgx_census.inc): a counted picture's top-level stream, with the census's tests and counts around the same calls.
+// cont: the rest of a call that switched to the other form at a census BEGIN marker or at the counted picture's display copy (the call's
+// statistics were taken by its first part).
+template <bool kC>
+static uint32_t ProcessStreamT(const uint8_t* p, uint32_t nbytes, bool inList, bool cont) {
     workload::FeScope feStream(inList ? ~0u : workload::FeStream);
     const uint8_t* const end = p + nbytes;
-    ++stats::Cur().streams;
-    stats::Cur().streamBytes += nbytes;
+    if (!cont) {
+        ++stats::Cur().streams;
+        stats::Cur().streamBytes += nbytes;
+    }
+    const uint8_t* switchAt = nullptr; // (GXV_STREAM_CENSUS: the census turned on / off at this command boundary)
+    if constexpr (kC) sc::ParseBegin();
+    sc::Kind ck = sc::kOther; // (kC: the kind of the command being parsed, counted at the next command's start or at the end)
+    uint32_t cverts = 0;
+    const uint8_t* cstart = nullptr;
     // GXV_DLTRACE=<frame>: one line per command stream of that frame.
     static const long dlTrace = diag::Int("GXV_DLTRACE", -1);
     const bool traceThis = dlTrace >= 0 && static_cast<uint64_t>(dlTrace) == CurrentFrame();
@@ -1876,10 +2705,93 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
     FeAhead ahead;
     const int bpFastMode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_BPFAST", 1))));
     const int bpFast = !diag::kEnabled && bpFastMode == 2 ? 1 : bpFastMode;
+    // GXV_NOOP_FILTER: off in the census form, the second worker's clone, the two-core player, and while the J3D-native hooks watch the writes
+    int noopMode = kC ? 0 : NoopMode();
+#if !defined(VGX_CLONE_B)
+    if (noopMode != 0 && (vgx2_mode != 0 || J3nMode() != 0)) noopMode = 0;
+#endif
+    // GXV_FE_SPLIT: the runs of top-level state commands are timed as scopes of the slot FeTopState (one scope per run, not per command)
+    const bool splitRuns = !inList && workload::FeSplitMode() != 0;
+    bool runOpen = false, runTimed = false;
+    int64_t runT = 0;
+    auto runClose = [&]() {
+        if (runTimed) {
+            workload::FeNs[workload::FeTopState].fetch_add(static_cast<uint64_t>(port_host_time_ns() - runT), std::memory_order_relaxed);
+            workload::FeNTimed[workload::FeTopState].fetch_add(1, std::memory_order_relaxed);
+        }
+        workload::FeN[workload::FeTopState].fetch_add(1, std::memory_order_relaxed);
+        runOpen = false;
+    };
+    const uint8_t* jumped = nullptr; // (GXV_FE_TWOCORE: the player took a segment the second worker made and goes on at its end)
+#if !defined(VGX_CLONE_B)
+    if (!inList && __builtin_expect(vgx2_mode != 0, 0)) two::Published(p, end);
+#endif
+    // GXV_FE_STATEFAST: StateRun takes the runs of state commands (the tests it replaces are made here once)
+    int stateFast = 0;
+#if !defined(VGX_CLONE_B)
+    if (!kC && noopMode == 0 && bpFast == 1) {
+        stateFast = StateFastMode();
+        if (stateFast != 0 && (vgx2_mode != 0 || J3nMode() != 0)) stateFast = 0;
+    }
+#endif
     while (p < end) {
+        if (stateFast != 0) {
+            const uint8_t c0 = *p;
+            if (c0 == 0x61 || c0 == 0x08 || c0 == 0x10 || c0 == 0x20 || c0 == 0x28 || c0 == 0x30 || c0 == 0x38) {
+                if (__builtin_expect(splitRuns, 0) && !runOpen) { // (GXV_FE_SPLIT: the run's scope, opened as the general loop opens it)
+                    runOpen = true;
+                    runTimed = workload::FeTimedScope();
+                    runT = runTimed ? port_host_time_ns() : 0;
+                }
+                p = stateFast == 2 ? StateRun<true>(p, end, stateCmds) : StateRun<false>(p, end, stateCmds);
+                if (p >= end) break;
+            }
+        }
         const uint8_t* const cmdStart = p;
+        if constexpr (kC) {
+            if (cstart) sc::Cmd(ck, static_cast<uint32_t>(cmdStart - cstart), cverts);
+            cstart = cmdStart; ck = sc::kOther; cverts = 0;
+        }
+#if defined(VGX_CLONE_B)
+        // (GXV_FE_TWOCORE, the second worker: its state machine, before every top-level command; vgx_twocore_b.cpp)
+        if (!inList && vgx2_dbg && two::g_prescan) { vgx2_dbg_b.push_back(static_cast<uint64_t>(cmdStart - vgx2_pic_start)); vgx2_dbg_b.push_back(vgx2_b_regs_hash()); }
+        if (!inList && two::Before(cmdStart, end)) { cut = cmdStart; break; }
+#else
+        if (!inList && __builtin_expect(vgx2_mode != 0, 0)) {
+            // (GXV_FE_TWOCORE, vgx_twocore.cpp: a picture's first command; a segment the second worker made starts here)
+            if (two::g_needStart) two::StartPicture(cmdStart);
+            if (vgx2_dbg) { vgx2_dbg_a.push_back(static_cast<uint64_t>(cmdStart - vgx2_pic_start)); vgx2_dbg_a.push_back(vgx2_a_regs_hash()); }
+            vgx2_apos.store(cmdStart, std::memory_order_relaxed);
+            if (two::g_verifyAt == cmdStart) two::VerifyAt(cmdStart);
+            if (const uint8_t* const sa = two::StopAt()) {
+                if (cmdStart == sa) {
+                    const uint8_t* const np = two::Arrive(cmdStart);
+                    if (np != cmdStart) {
+                        p = np;
+                        if (p >= end) { jumped = p; break; }
+                        continue;
+                    }
+                } else if (sa < cmdStart) {
+                    two::Missed();
+                }
+            }
+        }
+#endif
         const uint8_t cmd = *p++;
+        if (__builtin_expect(g_j3n2On, 0) && !inList && !J3n2CmdOk(cmd)) J3n2End(0); // (GXV_J3DNATIVE=4 / 5: before the command)
+        if (__builtin_expect(splitRuns, 0)) {
+            const bool st = cmd == 0x61 || cmd == 0x08 || cmd == 0x10 || cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38;
+            if (st && !runOpen) {
+                runOpen = true;
+                runTimed = workload::FeTimedScope();
+                runT = runTimed ? port_host_time_ns() : 0;
+            } else if (!st && runOpen && cmd != 0x00 && cmd != 0x44 && cmd != 0x48) {
+                runClose();
+            }
+        }
+        if (__builtin_expect(noopMode == 2, 0) && (cmd == 0x61 || cmd == 0x08 || cmd == 0x10)) NoopCheck(cmdStart, end);
         if (cmd == 0x00) {
+            if constexpr (kC) ck = sc::kPad;
             // (display lists are padded with zeros to a multiple of 32 bytes: skip a word at a time)
             while (end - p >= 4) {
                 uint32_t w;
@@ -1893,11 +2805,14 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
             if (end - p < 4) { cut = cmdStart; break; }
             const uint32_t v = be32(p);
             p += 4; // (before the write: a display copy ends the frame from inside it)
+            if constexpr (kC) { ck = (v >> 24) == 0xFF ? sc::kMark : sc::kBp; sc::TopBp(v); }
             if (bpFast != 0 && BpWriteIsNoop(v)) {
                 if (diag::kEnabled && bpFast == 2) BpCheckNoop(v);
                 ++stateCmds;
                 // (the GX library writes BP registers in bursts: stay in a tight loop while they are no-ops)
-                if (bpFast == 1) {
+                if (noopMode == 1) {
+                    p = NoopRun(p, end, stateCmds); // (GXV_NOOP_FILTER: BP, CP and XF repeats in a row)
+                } else if (bpFast == 1 && !kC && noopMode == 0) { // (kC: each command counted on its own)
                     // (the mask is the default here, and a no-op write leaves it so: the register's value is the test)
                     while (end - p >= 5 && p[0] == 0x61) {
                         const uint32_t rv = be32(p + 1);
@@ -1908,13 +2823,23 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
                 }
                 continue;
             }
+            if (__builtin_expect(J3nCensus(), 0) && !inList) J3nNoteBp(v);
+            if (__builtin_expect(g_j3n2On, 0) && !inList) J3n2NoteBp(v); // (GXV_J3DNATIVE=4 / 5)
             WriteBP(v);
             ++stateCmds;
+            // (GXV_STREAM_CENSUS: a BEGIN marker, or the counted picture's display copy, switches the form for the rest of the call)
+            if (!inList && __builtin_expect(sc::g_on != kC, 0)) { switchAt = p; break; }
         } else if (cmd == 0x08) {
             if (end - p < 5) { cut = cmdStart; break; }
             const uint8_t reg = p[0];
             const uint32_t v = be32(p + 1);
             p += 5;
+            if constexpr (kC) { ck = sc::kCp; sc::TopCp(reg, v); }
+            if (noopMode == 1 && CpIsNoop(reg, v)) { // (GXV_NOOP_FILTER)
+                ++stateCmds;
+                p = NoopRun(p, end, stateCmds);
+                continue;
+            }
             WriteCPInline(reg, v);
             ++stateCmds;
         } else if (cmd == 0x10) {
@@ -1923,6 +2848,15 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
             const uint32_t addr = be16(p + 2);
             if (static_cast<uint32_t>(end - p) < 4u + n * 4u) { cut = cmdStart; break; }
             p += 4;
+            if (noopMode == 1 && XF_IS_NOOP(addr, n, p)) { // (GXV_NOOP_FILTER)
+                p += n * 4u;
+                ++stateCmds;
+                p = NoopRun(p, end, stateCmds);
+                continue;
+            }
+            if (__builtin_expect(J3nCensus(), 0) && !inList) J3nNoteXf(addr, n, p);
+            if (__builtin_expect(g_j3n2On, 0) && !inList) J3n2NoteXf(addr, n); // (GXV_J3DNATIVE=4 / 5)
+            if constexpr (kC) { ck = sc::kXf; sc::TopXf(addr, n, p); }
             WriteXFBE(addr, n, p);
             p += n * 4u;
             ++stateCmds;
@@ -1936,6 +2870,7 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
             SyncArrays(static_cast<uint16_t>(1u << (12 + which)));
             bool le = false;
             const uint8_t* src = ArrayElem(A_POSMTXARRAY + which, index, n * 4u, le);
+            if constexpr (kC) { ck = sc::kIdx; sc::TopIdx(which, addr, n, src != kZero ? src : nullptr, le); }
             if (src != kZero) {
                 if (le) { // matrices the game's code stored: host words
                     uint32_t w[16];
@@ -1950,6 +2885,7 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
             if (end - p < 8) { cut = cmdStart; break; }
             const uint32_t addr = be32(p), size = be32(p + 4);
             p += 8;
+            if constexpr (kC) ck = sc::kCall;
             if (inList) {
                 VGX_LOG_N(8, "CALL_DL inside a display list ignored\n");
             } else if (addr && size) {
@@ -1961,17 +2897,54 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
                         ResolvePrefetch();
                     }
                     workload::FeScope feList(workload::FeList);
-                    CallList(list, size);
+                    if (__builtin_expect(J3nCensus(), 0)) J3nNoteList(size);
+                    sc::CallSnap snap;
+                    if constexpr (kC) sc::CallBefore(list, size, snap);
+                    if (__builtin_expect(g_j3n2On, 0)) J3n2Plain(list, size); // (GXV_J3DNATIVE=4 / 5: a token of the chain, or its end)
+                    else CallList(list, size);
+                    if constexpr (kC) sc::CallAfter(list, size, snap);
                 }
                 else VGX_LOG_N(16, "CALL_DL %08X + %u: not mapped\n", addr, size);
             }
         } else if (cmd == 0x44 || cmd == 0x48) {
+            if constexpr (kC) ck = sc::kNop;
             continue; // metrics / invalidate vertex cache: one byte, nothing to do
+        } else if (cmd == kRetainedOp && !inList) {
+            // (GXV_RETAINED: a J3D shape's handle, then its CALL_DL; decomp/src/RVL_SDK/gx/GXDisplayList.c port_gx_call_retained. Only
+            // ever in the top-level stream. The pair is taken as one command: a handle without its call is left for the next pass.)
+            if (end - p < 13) { cut = cmdStart; break; }
+            if constexpr (kC) ck = sc::kShape;
+            if (p[4] != 0x40) { p += 4; ++stateCmds; continue; } // (a handle without a call after it: nothing)
+            const uint32_t handle = be32(p), addr = be32(p + 5), size = be32(p + 9);
+            p += 13;
+            if (addr && size) {
+                uint32_t avail = 0;
+                const uint8_t* list = Hooks().resolve ? Hooks().resolve(addr, &avail) : nullptr;
+                if (list && avail >= size) {
+                    if (pfDepth) {
+                        ahead.Step(cmdStart + 5, p, end, pfDepth);
+                        ResolvePrefetch();
+                    }
+                    workload::FeScope feList(workload::FeList);
+                    if (__builtin_expect(J3nCensus(), 0)) J3nNoteShape();
+                    sc::CallSnap snap;
+                    if constexpr (kC) sc::CallBefore(list, size, snap);
+                    g_tlSite = 1; // (GXV_TINYLIST_CENSUS: the call site)
+                    if (__builtin_expect(g_j3n2On, 0)) J3n2Shape(list, size, handle); // (GXV_J3DNATIVE=4 / 5)
+                    else if (RetainedOn()) CallListRetained(list, size, handle);
+                    else CallList(list, size);
+                    g_tlSite = 0;
+                    if constexpr (kC) { sc::CallAfter(list, size, snap); sc::Shape(); }
+                }
+                else VGX_LOG_N(16, "CALL_DL %08X + %u: not mapped\n", addr, size);
+            }
         } else if (cmd == kFxMergeOp && !inList) {
             // (GXV_FXMERGE: a particle command of the game's GX library, FxMergeRun above; only ever in the top-level stream)
             if (end - p < 2) { cut = cmdStart; break; }
             const uint32_t n = be16(p);
             if (static_cast<uint32_t>(end - p) < 2u + n) { cut = cmdStart; break; }
+            if (__builtin_expect(J3nCensus(), 0)) J3nNoteFx();
+            if constexpr (kC) ck = sc::kFx;
             FxMergeRun(p + 2, n);
             p += 2u + n;
             ++stateCmds;
@@ -1987,19 +2960,97 @@ uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
                 VGX_LOG_N(16, "draw in a display list runs past its end: %u verts x %u bytes > %u\n", count, vsize, avail);
             }
             p += 2;
+            if constexpr (kC) { ck = sc::kDraw; cverts = count; }
+#if defined(VGX_CLONE_B)
+            two::g_fmtSeen |= 1u << (cmd & 7); // (GXV_FE_TWOCORE: the formats a list's draws use, for the scan's skip of draw-only lists)
+#endif
             if (vsize != 0 && count != 0) {
-                DrawStreamPlan(cmd & 0xF8, cmd & 7, plan, p, count, avail);
+                if (__builtin_expect(J3nCensus(), 0) && !inList) J3nNoteDraw();
+                ++g_sd.draws[inList]; g_sd.verts[inList] += count;
+                if (__builtin_expect(g_fpRec != nullptr, 0) && inList) FpRecBefore(cmd, p, count, avail); // (GXV_FEPLAN=2)
+                DrawStreamPlan(cmd & 0xF8, cmd & 7, plan, p, count, avail, inList ? 1 : 0);
+                if (__builtin_expect(g_fpRec != nullptr, 0) && inList) FpRecAfter();
                 ++stats::Cur().primsDL;
                 stats::Cur().vertsDL += count;
             }
             if (used > avail) break;
             p += used;
+        } else if ((cmd == kJ3nOp || cmd == kJ3nEndOp) && !inList) {
+            // (GXV_J3DNATIVE: a bracket, decomp/src/RVL_SDK/gx/GXDisplayList.c port_gx_call_bracketed: id, versions, ext, flags, the call, the end
+            // marker. Only ever in the top-level stream. Taken as one command; a stray end marker, or a begin without its call, is consumed.)
+            if constexpr (kC) ck = sc::kJ3n;
+            if (cmd == kJ3nEndOp) continue;
+            if (end - p < 21) { cut = cmdStart; break; }
+            if (p[20] != 0x40) { p += 20; ++stateCmds; continue; }           // (a begin without a call after it: nothing)
+            if (end - p < 30) { cut = cmdStart; break; }                      // (the call and the end marker are still to come)
+            if (p[29] != kJ3nEndOp) { p += 20; ++stateCmds; continue; }       // (no end marker: the call is a plain one)
+            const uint32_t id = be32(p), vA = be32(p + 4), vB = be32(p + 8), ext = be32(p + 12), fl = be32(p + 16);
+            const uint32_t addr = be32(p + 21), size = be32(p + 25);
+            p += 30;
+            if (addr && size) {
+                uint32_t avail = 0;
+                const uint8_t* list = Hooks().resolve ? Hooks().resolve(addr, &avail) : nullptr;
+                if (list && avail >= size) {
+                    if (pfDepth) {
+                        ahead.Step(cmdStart + 21, p, end, pfDepth);
+                        ResolvePrefetch();
+                    }
+                    workload::FeScope feList(workload::FeList);
+                    g_tlSite = 3; // (GXV_TINYLIST_CENSUS: the call site)
+                    J3nCall(list, size, id, vA, vB, ext, fl);
+                    g_tlSite = 0;
+                }
+                else VGX_LOG_N(16, "CALL_DL %08X + %u: not mapped\n", addr, size);
+            }
         } else {
             VGX_LOG_N(16, "unknown GX opcode 0x%02X in a %s (%u bytes left)\n", cmd, inList ? "display list" : "command stream", static_cast<unsigned>(end - p));
             if (inList) break; // (the top-level stream resynchronises a byte at a time, like the console would not)
         }
     }
+    if (runOpen) runClose();
+    if (!cont) { ++g_sd.calls[inList]; g_sd.bytes[inList] += nbytes; }
+    g_sd.stateCmds[inList] += stateCmds;
+    if constexpr (kC) {
+        // (the last command ends where the parse stopped: a cut command is not consumed and not counted)
+        const uint8_t* const stop = switchAt ? switchAt : (cut ? cut : (p < end ? p : end));
+        if (cstart && stop > cstart) sc::Cmd(ck, static_cast<uint32_t>(stop - cstart), cverts);
+        sc::Parsed(static_cast<uint32_t>(stop - start));
+        sc::ParseEnd();
+    }
+    if (switchAt) return static_cast<uint32_t>(switchAt - start) + ProcessStreamT<!kC>(switchAt, static_cast<uint32_t>(end - switchAt), inList, true);
+    if (jumped) return static_cast<uint32_t>(jumped - start); // (may be past `end`: the caller goes on from there)
     return static_cast<uint32_t>((cut ? cut : (p < end ? p : end)) - start);
+}
+void NoopFilterCounters(uint64_t out[2]) { out[0] = g_noopChecked; out[1] = g_noopBad; } // (GXV_NOOP_FILTER=2: commands checked, mismatching)
+// verifyfix31: the verify modes' counts for the game log (port_vgx_verify_summary, every 300 pictures from port_j3d_picture_begin). stderr is not captured by the
+// console build, and the retained verify's count was only in the log with GXV_WORKLOAD_PROBE=1. Cumulative counts; the line is made only while a verify is on.
+// (The counters are written by the front end's worker and read here without a lock: a log line, a torn read at worst shows an older count.)
+bool VerifySummaryLine(char* out, size_t n) {
+    int at = 0;
+    out[0] = '\0';
+    const int nf = NoopMode();
+    const char* const want = getenv("GXV_NOOP_FILTER");
+    if (nf == 2 || (want != nullptr && want[0] == '2')) {
+        uint64_t c[2];
+        NoopFilterCounters(c);
+        at += std::snprintf(out + at, n - at, "noopfilter: GXV_NOOP_FILTER requested %s, effective mode %d%s, %llu checked, %llu mismatching; ", want ? want : "0", nf,
+                            nf == 2 ? "" : " (verify not active here: the quiet build / clone / two-core player run it as 1 or 0)", static_cast<unsigned long long>(c[0]),
+                            static_cast<unsigned long long>(c[1]));
+    }
+    const char* const rt = getenv("GXV_RT_INST");
+    const char* const rr = getenv("GXV_RETAINED");
+    if ((rt != nullptr && rt[0] == '2') || (rr != nullptr && rr[0] == '2')) {
+        uint64_t r[7];
+        RetainedCounters(r);
+        at += std::snprintf(out + at, n - at, "retained verify (GXV_RT_INST=2 / GXV_RETAINED=2): %llu checked, %llu mismatching; ", static_cast<unsigned long long>(r[5]), static_cast<unsigned long long>(r[6]));
+    }
+    return at > 0;
+}
+void StateFastCounters(uint64_t out[4]) { out[0] = g_sfChecked; out[1] = g_sfBad; out[2] = g_sfCmds; out[3] = g_sfRuns; } // (GXV_FE_STATEFAST=2: commands checked, mismatching; =1/2: commands taken, runs)
+uint32_t ProcessStream(const uint8_t* p, uint32_t nbytes, bool inList) {
+    // (GXV_STREAM_CENSUS: a counted picture's top-level stream; one flag test otherwise)
+    if (__builtin_expect(sc::g_on, 0) && !inList) return ProcessStreamT<true>(p, nbytes, inList, false);
+    return ProcessStreamT<false>(p, nbytes, inList, false);
 }
 
 
@@ -2023,6 +3074,8 @@ struct SlOp {
     uint16_t b;      // XF address / indexed: element index
     uint32_t v;      // BP register and value / CP value / XF: first word in words / indexed: (n << 16) | addr
 };
+struct MixPlan; // (GXV_FEPLAN, feplan31: a mixed list's plan, below SlRun)
+struct MixPlanDel { void operator()(MixPlan* m) const; };
 // (the fields a fast hit reads, StateListFastHit and SlRun's delta path, are the entry's first 32 bytes: one cache line of the console,
 // the entry aligned to it. A material hit read three to five lines of the entry before (the fields were spread over its ~110 bytes,
 // the delta's address in the last of them) and wrote two of them back (`changes`, `lastFrame`) on every hit; now it reads one and
@@ -2041,9 +3094,12 @@ struct alignas(32) SlEntry {
     uint64_t hash = 0;
     std::vector<uint8_t> bytes; // (GXV_SLBYTES: the list as parsed, to tell a rewrite with the same bytes from a change)
     uint64_t parseFrame = 0; // (GXV_SLDELTA) the frame of the last parse
+    uint8_t quietWhy = 0, quietCmd = 0; // (GXV_FE_CENSUS, fedl25: why quietUntil was set: 3 refused (the opcode), 4 churn)
     std::vector<SlOp> ops;
     std::vector<uint32_t> words;
     std::vector<uint32_t> delta;
+    std::unique_ptr<MixPlan, MixPlanDel> mix; // (GXV_FEPLAN: usable false and the list holds draws / calls: its exact plan, or none)
+    uint8_t mixMiss = 0;                       // (GXV_FEPLAN: consecutive replays that found a draw's vertex size changed)
 };
 // Entries by list address: open addressing over a power-of-two table (an unordered_map's prime buckets cost a software
 // division per lookup on the Vita), cleared as a whole when it fills.
@@ -2101,8 +3157,61 @@ inline bool SlKeepBytes() {
     return keep;
 }
 uint64_t g_slHits = 0, g_slBuilds = 0, g_slRefused = 0, g_slChecked = 0, g_slBad = 0;
+uint64_t g_slClears = 0; // (heap23b) the store's clears at kSlMax entries
+uint32_t g_slEpoch = 1;  // (j3n1) moves whenever entries are freed (the drop at a scene's destruction, the clear): GXV_J3DNATIVE's records point at entries
 uint64_t g_slFastFront = 0, g_slFastTable = 0, g_slFastSame = 0; // (GXV_SLFAST: StateListFastHit's hits by the front, by the table; rewrites with the same bytes)
 
+uint8_t g_slWhy = 0, g_slBadCmd = 0; // (GXV_FE_CENSUS, fedl25: StateListWhyLast)
+// One state command of a list (its opcode `cmd` already read, p just after it), appended to e's operations: 1 taken (p moved past
+// it), 0 cut by the end of the list (nothing taken: ProcessStream stops there too), -1 not a state command (p unchanged).
+// (feplan31: SlParse's loop body, shared with the mixed lists' plans, GXV_FEPLAN)
+inline int SlParseCmd(SlEntry& e, uint8_t cmd, const uint8_t*& p, const uint8_t* const end, bool shadow) {
+    if (cmd == 0x61) {
+        if (end - p < 4) return 0;
+        const uint32_t rv = be32(p);
+        p += 4;
+        if (kBpEffect.t[rv >> 24]) {
+            e.ops.push_back(SlOp{1, 0, 0, rv});
+        } else {
+            const uint8_t kind = (shadow && (rv >> 24) >= 0xE0 && (rv >> 24) <= 0xE7) ? 6 : 5;
+            if (e.ops.empty() || e.ops.back().kind != kind || e.ops.back().b == 0xFFFF)
+                e.ops.push_back(SlOp{kind, 0, 0, static_cast<uint32_t>(e.words.size())});
+            ++e.ops.back().b;
+            e.words.push_back(rv);
+        }
+        return 1;
+    }
+    if (cmd == 0x08) {
+        if (end - p < 5) return 0;
+        e.ops.push_back(SlOp{2, p[0], 0, be32(p + 1)});
+        p += 5;
+        return 1;
+    }
+    if (cmd == 0x10) {
+        if (end - p < 4) return 0;
+        const uint32_t n = static_cast<uint32_t>(be16(p) & 0xF) + 1u;
+        const uint32_t addr = be16(p + 2);
+        if (static_cast<uint32_t>(end - p) < 4u + n * 4u) return 0;
+        p += 4;
+        if (shadow && n == 1 && addr >= 0x1000 && addr < 0x1058 && addr != 0x1018 && addr != 0x1019) {
+            e.ops.push_back(SlOp{7, 1, static_cast<uint16_t>(addr), be32(p)});
+            p += 4;
+            return 1;
+        }
+        e.ops.push_back(SlOp{3, static_cast<uint8_t>(n), static_cast<uint16_t>(addr), static_cast<uint32_t>(e.words.size())});
+        for (uint32_t i = 0; i < n; ++i) e.words.push_back(be32(p + i * 4));
+        p += n * 4u;
+        return 1;
+    }
+    if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) {
+        if (end - p < 4) return 0;
+        const uint32_t index = be16(p), v = be16(p + 2);
+        p += 4;
+        e.ops.push_back(SlOp{4, static_cast<uint8_t>((cmd - 0x20) >> 3), static_cast<uint16_t>(index), (((v >> 12) + 1u) << 16) | (v & 0xFFF)});
+        return 1;
+    }
+    return -1;
+}
 // Parse; false if the list holds something the replay does not reproduce.
 bool SlParse(SlEntry& e, const uint8_t* p, uint32_t nbytes) {
     const bool shadow = RegShadow() != 0;
@@ -2120,47 +3229,12 @@ bool SlParse(SlEntry& e, const uint8_t* p, uint32_t nbytes) {
             }
             continue;
         }
-        if (cmd == 0x61) {
-            if (end - p < 4) return true;  // (a cut command: ProcessStream stops there too)
-            const uint32_t rv = be32(p);
-            p += 4;
-            if (kBpEffect.t[rv >> 24]) {
-                e.ops.push_back(SlOp{1, 0, 0, rv});
-            } else {
-                const uint8_t kind = (shadow && (rv >> 24) >= 0xE0 && (rv >> 24) <= 0xE7) ? 6 : 5;
-                if (e.ops.empty() || e.ops.back().kind != kind || e.ops.back().b == 0xFFFF)
-                    e.ops.push_back(SlOp{kind, 0, 0, static_cast<uint32_t>(e.words.size())});
-                ++e.ops.back().b;
-                e.words.push_back(rv);
-            }
-        } else if (cmd == 0x08) {
-            if (end - p < 5) return true;
-            e.ops.push_back(SlOp{2, p[0], 0, be32(p + 1)});
-            p += 5;
-        } else if (cmd == 0x10) {
-            if (end - p < 4) return true;
-            const uint32_t n = static_cast<uint32_t>(be16(p) & 0xF) + 1u;
-            const uint32_t addr = be16(p + 2);
-            if (static_cast<uint32_t>(end - p) < 4u + n * 4u) return true;
-            p += 4;
-            if (shadow && n == 1 && addr >= 0x1000 && addr < 0x1058 && addr != 0x1018 && addr != 0x1019) {
-                e.ops.push_back(SlOp{7, 1, static_cast<uint16_t>(addr), be32(p)});
-                p += 4;
-                continue;
-            }
-            e.ops.push_back(SlOp{3, static_cast<uint8_t>(n), static_cast<uint16_t>(addr), static_cast<uint32_t>(e.words.size())});
-            for (uint32_t i = 0; i < n; ++i) e.words.push_back(be32(p + i * 4));
-            p += n * 4u;
-        } else if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) {
-            if (end - p < 4) return true;
-            const uint32_t index = be16(p), v = be16(p + 2);
-            p += 4;
-            e.ops.push_back(SlOp{4, static_cast<uint8_t>((cmd - 0x20) >> 3), static_cast<uint16_t>(index), (((v >> 12) + 1u) << 16) | (v & 0xFFF)});
-        } else if (cmd == 0x44 || cmd == 0x48) {
-            continue;
-        } else {
-            return false;  // a draw, a call or an unknown opcode
-        }
+        if (cmd == 0x44 || cmd == 0x48) continue;
+        const int r = SlParseCmd(e, cmd, p, end, shadow);
+        if (r > 0) continue;
+        if (r == 0) return true;  // (a cut command: ProcessStream stops there too)
+        g_slBadCmd = cmd;
+        return false;  // a draw, a call or an unknown opcode
     }
     return true;
 }
@@ -2470,9 +3544,14 @@ bool SlCompileDelta(SlEntry& e) {
 }
 
 uint64_t g_slCompactApplied = 0; // (GXV_FECUT_SLHOT: delta replays in the compact layout)
-template <bool kCompact> void SlDeltaApplyT(const SlEntry& e) {
-    ++stats::Cur().streams;
-    stats::Cur().streamBytes += e.nbytes;
+// kPart (GXV_J3DNATIVE stage 2, vgx_j3native2.inc): 0 the whole delta (every other caller); 1 only the register part (BP, TEV, XF
+// registers: the sections before XfB, with the flags and the key hash they collect); 2 only the CP and XF-memory part (XfB, Cp). The
+// sections touch disjoint state (see above), so 1 then 2 (or 2 then 1) leaves exactly what 0 leaves.
+template <bool kCompact, int kPart = 0> void SlDeltaApplyT(const SlEntry& e) {
+    if (kPart != 2) {
+        ++stats::Cur().streams;
+        stats::Cur().streamBytes += e.nbytes;
+    }
     const uint32_t* p = e.dp; // (delta.data(), from the entry's first line)
     const uint32_t* q;
     const uint32_t* const n = p;
@@ -2480,6 +3559,10 @@ template <bool kCompact> void SlDeltaApplyT(const SlEntry& e) {
     uint32_t cls = 0;
     uint64_t kh = 0;
     constexpr uint32_t kBpKeyRec = kCompact ? 1 : 3, kXfKeyRec = kCompact ? 2 : 4;
+    if (kPart == 2) {
+        p += n[kDBpKey] * kBpKeyRec + n[kDBp] + n[kDBpMask] * 2 + n[kDTex] + n[kDTev] + n[kDTevBp] + n[kDXfWKey] * kXfKeyRec + n[kDXfW] * 2;
+        goto eager;
+    }
     for (q = p + n[kDBpKey] * kBpKeyRec; p < q; p += kBpKeyRec) {
         const uint32_t reg = p[0] >> 24, nv = p[0] & 0x00FFFFFFu, ov = g.bp[reg];
         if (ov == nv) continue;
@@ -2547,6 +3630,8 @@ template <bool kCompact> void SlDeltaApplyT(const SlEntry& e) {
         uint32_t& d = g.xfReg[p[0]];
         if (d != p[1]) { const uint32_t o = d; d = p[1]; MarkXFReg(p[0], o, p[1]); }
     }
+    if (kPart == 1) goto flags;
+eager:
     for (uint32_t i = 0; i < n[kDXfB]; ++i) {
         const uint32_t addr = p[0] & 0xFFFFu, cnt = p[0] >> 16;
         if (cnt > 1) WriteXF(addr, cnt, p + 1);
@@ -2554,6 +3639,8 @@ template <bool kCompact> void SlDeltaApplyT(const SlEntry& e) {
         p += 1 + cnt;
     }
     for (q = p + n[kDCp] * 2; p < q; p += 2) WriteCPInline(static_cast<uint8_t>(p[0]), p[1]);
+    if (kPart == 2) return;
+flags:
     if (cls) {
         if (cls & kMarkKey) g.bpKeyDirty = true;
         if (cls & (kMarkKey | kMarkTev)) g.bpDirty = true;
@@ -2605,6 +3692,480 @@ inline void SlRun(SlEntry& e, int bpFast) {
     SlReplay(e, bpFast);
 }
 } // namespace
+namespace {
+// ------------------------------------------------------- mixed display lists: exact plans (GXV_FEPLAN, feplan31)
+// A list that holds state commands AND draws (or a CALL_DL, which a list ignores, or an opcode the parser stops at) is not a state
+// list (SlParse refuses it) and not a geometry entry (vgx_dlcache.cpp Build refuses it): until now every call of it went to
+// ProcessStream, the opcode walk with its per-command tests. Its plan keeps the list as ProcessStream would walk it: state sections
+// (SlParse's operations, each section its own SlEntry, so replayed by SlRun: SlReplay or the section's register deltas, GXV_SLDELTA),
+// and between them, in list order, the barriers: draws, CALL_DLs, the unknown opcode. A draw is made at the replay exactly as the
+// parse makes it: the vertex plan of its format (GetPlan, now), the same source pointer into the list, count and room left
+// ("avail"), DrawStreamPlan, the same counters. What a parse decides from the state rather than from the bytes is the length of a
+// draw (its vertex size: the vertex descriptor and the format's attribute table); the plan keeps the size it was made with, and a
+// replay that finds another size at a draw parses the rest of the list from that draw with ProcessStream (the state up to there is
+// the parse's, and the parse from a command boundary to the end is the parse's own) and makes the plan again at the next call. A list
+// that writes the vertex descriptor or a format table (CP 0x50..0x9F) before a draw has no plan (its draw sizes are not known before
+// the replay): it is parsed as before. Validity is the state list's: the write generation of the list's bytes or, after a write near
+// them, the bytes compared with the copy kept at the parse (GXV_SLBYTES), the same churn back-off.
+//   GXV_FEPLAN=0 (default) off: such lists are parsed every call, as before
+//   GXV_FEPLAN=1 on
+//   GXV_FEPLAN=2 verify (diagnostics builds; a quiet build takes it as 0): the list is parsed for real, every draw it makes recorded with the
+//                whole register state (State) before and after it; then, from the state before the call, the plan is run with its
+//                draws checked instead of made: each draw's opcode, source, count and room, and the State before it, must be the parse's
+//                (then the State after the parse's draw is put in place); the State the plan leaves must be the parse's. A difference is
+//                logged ("feplan: MISMATCH ...") and the parse's State kept. Lists with a trigger (draw done, token, EFB copy, palette load,
+//                marker) are not compared (it would run twice). Summary every 2^14 checks and on the census line.
+// Not with the two-core front end or the J3D-native hooks (GXV_FE_TWOCORE, GXV_J3DNATIVE: lists are parsed as before), not in the second
+// worker. Counters: FePlanCounters.
+struct MixStep {
+    uint8_t kind;   // 0 state section secs[sec], 1 draw, 2 CALL_DL inside the list (ignored, as ProcessStream does), 3 unknown opcode (the parse stops)
+    uint8_t cmd;    // draw / unknown: the opcode
+    uint16_t sec;
+    uint32_t off;   // draw: where its vertex data starts in the list (after opcode and count); unknown: the bytes left after the opcode
+    uint32_t count; // draw: vertices
+    uint32_t vsize; // draw: the vertex size the plan was made with
+};
+struct MixPlan {
+    std::vector<MixStep> steps;
+    std::vector<std::unique_ptr<SlEntry>> secs;
+    uint32_t stateCmds = 0;   // (statistics: what the parse counts)
+    bool trigger = false;     // a BP write with an effect outside the registers (verify does not compare such a list)
+};
+void MixPlanDel::operator()(MixPlan* m) const { delete m; }
+
+uint64_t g_fpBuilds = 0, g_fpRefusedFmt = 0, g_fpReplays = 0, g_fpFallbacks = 0, g_fpChecked = 0, g_fpBad = 0, g_fpUncompared = 0, g_fpTriggers = 0;
+inline int FePlanMode() {
+#if defined(VGX_CLONE_B)
+    return 0;
+#else
+    const int m = static_cast<int>(VGX_KNOB([] {
+        const long v = EnvInt("GXV_FEPLAN", 0);
+        if (v == 2) return diag::kEnabled ? 2 : 0; // (verify needs a diagnostics build; a quiet build stays off rather than on unverified)
+        return v == 1 ? 1 : 0;
+    }()));
+    return m;
+#endif
+}
+// The vertex size of format `fmt` from the registers as they are, without touching the player's plan cache (GetPlan's answer: the
+// same function of the descriptor and the format table).
+uint32_t FpStreamSize(int fmt) {
+    static PlanCache scratch;
+    bool dirty = true;
+    return GetPlanIn(scratch, dirty, g.vcd, g.vat, fmt, false).streamSize;
+}
+inline bool FpVtxFmtReg(uint8_t reg) { return reg >= 0x50 && reg < 0xA0; } // (CP: the descriptor and the format tables)
+
+// The plan of a list SlParse refused; false (no plan): a vertex-format write before a draw, or no state command at all. The walk is
+// ProcessStream's for a list.
+bool MixBuild(SlEntry& e, const uint8_t* list, uint32_t nbytes, uint64_t frame) {
+    std::unique_ptr<MixPlan, MixPlanDel> m(new MixPlan);
+    const bool shadow = RegShadow() != 0;
+    const uint8_t* p = list;
+    const uint8_t* const end = list + nbytes;
+    SlEntry* cur = nullptr;
+    bool fmtWritten = false;
+    while (p < end) {
+        const uint8_t cmd = *p++;
+        if (cmd == 0x00) {
+            while (end - p >= 4) {
+                uint32_t w;
+                std::memcpy(&w, p, 4);
+                if (w) break;
+                p += 4;
+            }
+            continue;
+        }
+        if (cmd == 0x44 || cmd == 0x48) continue;
+        if (cmd == 0x61 || cmd == 0x08 || cmd == 0x10 || cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) {
+            if (!cur) {
+                if (m->secs.size() >= 0xFFFF) return false;
+                m->secs.emplace_back(new SlEntry);
+                cur = m->secs.back().get();
+                cur->usable = true;
+                cur->live = true;
+                cur->parseFrame = frame;
+                m->steps.push_back(MixStep{0, 0, static_cast<uint16_t>(m->secs.size() - 1), 0, 0, 0});
+            }
+            if (cmd == 0x08 && end - p >= 5 && FpVtxFmtReg(p[0])) fmtWritten = true;
+            const size_t ops0 = cur->ops.size();
+            const int r = SlParseCmd(*cur, cmd, p, end, shadow);
+            if (r == 0) break; // (cut by the end: the parse stops there)
+            ++m->stateCmds;
+            if (cur->ops.size() > ops0 && cur->ops.back().kind == 1 && (cur->ops.back().v >> 24) != 0xFE) m->trigger = true;
+            continue;
+        }
+        if (cmd == 0x40) {
+            if (end - p < 8) break;
+            p += 8;
+            cur = nullptr;
+            m->steps.push_back(MixStep{2, cmd, 0, 0, 0, 0});
+            continue;
+        }
+        if (cmd & 0x80) {
+            if (end - p < 2) break;
+            if (fmtWritten) { ++g_fpRefusedFmt; return false; }
+            const uint32_t count = be16(p);
+            const uint32_t vsize = FpStreamSize(cmd & 7);
+            const uint32_t avail = static_cast<uint32_t>(end - p) - 2u;
+            const uint64_t used = static_cast<uint64_t>(count) * vsize;
+            p += 2;
+            cur = nullptr;
+            m->steps.push_back(MixStep{1, cmd, 0, static_cast<uint32_t>(p - list), count, vsize});
+            if (used > avail) break;
+            p += used;
+            continue;
+        }
+        m->steps.push_back(MixStep{3, cmd, 0, static_cast<uint32_t>(end - p), 0, 0});
+        break;
+    }
+    // (a list of draws (and calls) only: no state section, nothing a plan saves over the parse but its walk; left to the parser, as before.
+    // The census counts such lists as "draws only")
+    if (m->stateCmds == 0) return false;
+#if defined(GXV_FEPLAN_MUTANT) && GXV_FEPLAN_MUTANT == 1
+    // (test-only negative control: the last state operation of every section after the first draw is left out; the tests must see it)
+    {
+        bool drawn = false;
+        for (const MixStep& st : m->steps) {
+            if (st.kind == 1) drawn = true;
+            if (st.kind == 0 && drawn && !m->secs[st.sec]->ops.empty()) m->secs[st.sec]->ops.pop_back();
+        }
+    }
+#endif
+    e.mix = std::move(m);
+    ++g_fpBuilds;
+    return true;
+}
+
+} // namespace
+// The State the parse records around its draws (GXV_FEPLAN=2)
+struct FpRec {
+    struct D { uint8_t cmd; const uint8_t* src; uint32_t count, avail; };
+    std::vector<D> d;
+    std::vector<std::unique_ptr<State>> before, after;
+    size_t n = 0;
+};
+static void FpRecBefore(uint8_t cmd, const uint8_t* src, uint32_t count, uint32_t avail) {
+    FpRec& r = *g_fpRec;
+    if (r.before.size() <= r.n) { r.before.emplace_back(new State); r.after.emplace_back(new State); }
+    if (r.d.size() <= r.n) r.d.resize(r.n + 1);
+    r.d[r.n] = FpRec::D{cmd, src, count, avail};
+    std::memcpy(r.before[r.n].get(), &g, sizeof(State));
+}
+static void FpRecAfter() {
+    FpRec& r = *g_fpRec;
+    std::memcpy(r.after[r.n].get(), &g, sizeof(State));
+    ++r.n;
+}
+namespace {
+
+// Run the plan of e (the list's bytes are the plan's). chk null: for real; 0 done, 1 a draw's vertex size differed (the rest parsed by
+// ProcessStream; the plan is to be made again). chk set (GXV_FEPLAN=2): draws checked against the parse's record instead of made:
+// 0 equal so far (the caller compares the State left), 2 a difference (*at: the draw, *what: 1 opcode / source / count / room,
+// 2 State before it, 3 the parse made fewer draws, 4 more), 3 a vertex size differed (not compared).
+int MixRun(SlEntry& e, const uint8_t* list, uint32_t nbytes, int bpFast, const FpRec* chk, uint32_t* at, int* what) {
+    MixPlan& m = *e.mix;
+    stats::Frame& fr = stats::Cur();
+    const uint32_t s0 = fr.streams, sb0 = fr.streamBytes;
+    size_t di = 0;
+    int result = 0;
+    for (const MixStep& st : m.steps) {
+        if (st.kind == 0) {
+            SlRun(*m.secs[st.sec], bpFast);
+            continue;
+        }
+        if (st.kind == 1) {
+            const Plan& plan = GetPlan(st.cmd & 7);
+            const uint32_t vsize = plan.streamSize;
+#if !(defined(GXV_FEPLAN_MUTANT) && GXV_FEPLAN_MUTANT == 2) // (test-only negative control: the size is not checked)
+            if (vsize != st.vsize) {
+                if (chk) { result = 3; break; }
+                fr.streams = s0;
+                fr.streamBytes = sb0;
+                ++fr.streams;
+                fr.streamBytes += nbytes;
+                ++g_sd.calls[1];
+                g_sd.bytes[1] += nbytes;
+                const uint32_t from = st.off - 3u; // (the draw's opcode)
+                ProcessStreamT<false>(list + from, nbytes - from, true, true);
+                return 1;
+            }
+#endif
+            const uint32_t avail = nbytes - st.off;
+            const uint64_t used = static_cast<uint64_t>(st.count) * vsize;
+            if (used > avail && !chk) VGX_LOG_N(16, "draw in a display list runs past its end: %u verts x %u bytes > %u\n", st.count, vsize, avail);
+            if (vsize != 0 && st.count != 0) {
+                if (chk) {
+                    if (di >= chk->n) { *at = static_cast<uint32_t>(di); *what = 3; result = 2; break; }
+                    const FpRec::D& d = chk->d[di];
+                    if (d.cmd != st.cmd || d.src != list + st.off || d.count != st.count || d.avail != avail) { *at = static_cast<uint32_t>(di); *what = 1; result = 2; break; }
+                    if (std::memcmp(chk->before[di].get(), &g, sizeof(State)) != 0) { *at = static_cast<uint32_t>(di); *what = 2; result = 2; break; }
+                    std::memcpy(&g, chk->after[di].get(), sizeof(State));
+                    ++di;
+                } else {
+                    ++g_sd.draws[1];
+                    g_sd.verts[1] += st.count;
+                    DrawStreamPlan(st.cmd & 0xF8, st.cmd & 7, plan, list + st.off, st.count, avail, 1);
+                    ++fr.primsDL;
+                    fr.vertsDL += st.count;
+                }
+            }
+            continue;
+        }
+        if (chk) continue;
+        if (st.kind == 2) VGX_LOG_N(8, "CALL_DL inside a display list ignored\n");
+        else VGX_LOG_N(16, "unknown GX opcode 0x%02X in a %s (%u bytes left)\n", st.cmd, "display list", st.off);
+    }
+    if (chk) {
+        if (result == 0 && di != chk->n) { *at = static_cast<uint32_t>(di); *what = 4; result = 2; }
+        fr.streams = s0;
+        fr.streamBytes = sb0;
+        return result;
+    }
+    // (ProcessStream's statistics for the call: one stream of nbytes, the list counters)
+    fr.streams = s0 + 1;
+    fr.streamBytes = sb0 + nbytes;
+    ++g_sd.calls[1];
+    g_sd.bytes[1] += nbytes;
+    g_sd.stateCmds[1] += m.stateCmds;
+    return 0;
+}
+
+// ------------------------------------------------------- the census of lists parsed again (GXV_FEPLAN_CENSUS, feplan31)
+// Count only (default 0; any build): every display-list call that ends in a full parse (ProcessStream) is timed and sorted by the
+// way it got there (vgx_dlcache.cpp CallListBody: tiny, not guest RAM, bypassed after Build refused it, bypassed for rewrites or a
+// variant streak, refused now, cache off / traced picture) and by what the list holds (the barriers that keep it from being a state
+// list: draws, CALL_DLs, an unknown opcode; or nothing: state only / draws only), with its bytes, state commands and draws; the plan
+// replays (GXV_FEPLAN=1) are timed the same way. Every 300 pictures (GXV_FEPLAN_CENSUS=<n> >= 2: every n) two "feplan-census:" lines (port_log_summary): per picture, the
+// lists by way and by barrier (count, ms), what a plan could take (state with barriers, not tiny, guest RAM, no vertex-format write
+// before a draw), the plans' own counters, and the eight costliest lists (address, bytes, way, barrier, calls, ms, first bytes).
+// The time is the parse only (the classification is outside the timed part); the timer's own cost (one clock read pair a list) is in it.
+enum : uint8_t { FpTiny, FpNotGuest, FpBypassState, FpBypassOther, FpRefusedNow, FpBypassSetNow, FpOff, FpPlan, FpPaths };
+enum : uint8_t { FcState, FcDraw, FcStateDraw, FcStateCall, FcStateDrawCall, FcDrawCall, FcUnknown, FcEmpty, FcClasses };
+struct FpShape {
+    uint32_t stateCmds = 0, draws = 0, verts = 0, calls = 0, stateBytes = 0, drawBytes = 0;
+    uint8_t cls = FcEmpty;
+    bool fmtBeforeDraw = false, unknown = false;
+};
+FpShape FpClassify(const uint8_t* list, uint32_t nbytes) {
+    FpShape s;
+    const uint8_t* p = list;
+    const uint8_t* const end = list + nbytes;
+    bool fmt = false;
+    while (p < end) {
+        const uint8_t* const c0 = p;
+        const uint8_t cmd = *p++;
+        if (cmd == 0x00 || cmd == 0x44 || cmd == 0x48) continue;
+        size_t len = 0;
+        if (cmd == 0x61) len = 4;
+        else if (cmd == 0x08) { len = 5; if (end - p >= 5 && FpVtxFmtReg(p[0])) fmt = true; }
+        else if (cmd == 0x10) { if (end - p < 4) break; len = 4u + ((be16(p) & 0xFu) + 1u) * 4u; }
+        else if (cmd == 0x20 || cmd == 0x28 || cmd == 0x30 || cmd == 0x38) len = 4;
+        else if (cmd == 0x40) { if (end - p < 8) break; p += 8; ++s.calls; continue; }
+        else if (cmd & 0x80) {
+            if (end - p < 2) break;
+            const uint32_t count = be16(p);
+            const uint64_t used = static_cast<uint64_t>(count) * FpStreamSize(cmd & 7);
+            ++s.draws;
+            s.verts += count;
+            if (fmt) s.fmtBeforeDraw = true;
+            const uint64_t room = static_cast<uint64_t>(end - p) - 2u;
+            s.drawBytes += static_cast<uint32_t>(3u + (used < room ? used : room));
+            if (used > room) break;
+            p += 2 + used;
+            continue;
+        } else { s.unknown = true; break; }
+        if (static_cast<size_t>(end - p) < len) break;
+        p += len;
+        ++s.stateCmds;
+        s.stateBytes += static_cast<uint32_t>(p - c0);
+    }
+    if (s.unknown) s.cls = FcUnknown;
+    else if (s.stateCmds) s.cls = s.draws ? (s.calls ? FcStateDrawCall : FcStateDraw) : (s.calls ? FcStateCall : FcState);
+    else s.cls = s.draws ? (s.calls ? FcDrawCall : FcDraw) : FcEmpty;
+    return s;
+}
+struct FpAcc { uint64_t n = 0, ns = 0, bytes = 0, stateCmds = 0, draws = 0; };
+struct FpTop { const uint8_t* list = nullptr; uint32_t nbytes = 0, calls = 0, stateCmds = 0, draws = 0; uint64_t ns = 0; uint8_t path = 0, cls = 0; uint8_t head[8] = {}; };
+struct FpCensus {
+    uint64_t first = 0, last = 0, lost = 0;
+    FpAcc path[FpPaths], cls[FcClasses], eligible, fmtBlocked, tinyMixed;
+    FpTop top[256];
+    uint64_t c0[8] = {}; // (the plans' counters at the window's start)
+} g_fpc;
+inline bool FpEligible(uint8_t path, const FpShape& s) {
+    return (path == FpBypassState || path == FpBypassOther || path == FpRefusedNow || path == FpBypassSetNow) && s.stateCmds != 0 &&
+           (s.draws != 0 || s.calls != 0 || s.unknown) && !s.fmtBeforeDraw;
+}
+void FpCensusReport();
+// (GXV_FEPLAN_CENSUS=1: lines every 300 pictures; =<n>, n >= 2: every n pictures)
+inline uint64_t FpCensusWindow() {
+    const int n = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_FEPLAN_CENSUS", 0))));
+    return n >= 2 ? static_cast<uint64_t>(n) : 300u;
+}
+void FpCensusNote(const uint8_t* list, uint32_t nbytes, uint8_t path, uint64_t ns, const FpShape& s) {
+    const uint64_t frame = CurrentFrame();
+    if (frame != g_fpc.last) {
+        if (!g_fpc.first) g_fpc.first = frame;
+        g_fpc.last = frame;
+        if (frame - g_fpc.first >= FpCensusWindow()) FpCensusReport();
+    }
+    auto add = [&](FpAcc& a) { ++a.n; a.ns += ns; a.bytes += nbytes; a.stateCmds += s.stateCmds; a.draws += s.draws; };
+    add(g_fpc.path[path < FpPaths ? path : FpOff]);
+    add(g_fpc.cls[s.cls < FcClasses ? s.cls : FcEmpty]);
+    if (path != FpPlan) {
+        if (FpEligible(path, s)) add(g_fpc.eligible);
+        else if (s.fmtBeforeDraw && s.stateCmds) add(g_fpc.fmtBlocked);
+        if (path == FpTiny && s.stateCmds && s.draws) add(g_fpc.tinyMixed);
+    }
+    uint32_t h = static_cast<uint32_t>((reinterpret_cast<uintptr_t>(list) >> 5) * 0x9E3779B1u) >> 24; // (8 bits: 256 slots)
+    for (uint32_t k = 0; k < 8; ++k, h = (h + 1) & 255u) {
+        FpTop& t = g_fpc.top[h];
+        if (t.list && !(t.list == list && t.path == path)) continue;
+        if (!t.list) {
+            t.list = list;
+            t.path = path;
+            std::memcpy(t.head, list, nbytes < 8 ? nbytes : 8);
+        }
+        t.nbytes = nbytes;
+        t.cls = s.cls;
+        t.stateCmds = s.stateCmds;
+        t.draws = s.draws;
+        ++t.calls;
+        t.ns += ns;
+        return;
+    }
+    ++g_fpc.lost;
+}
+void FpCensusReport() {
+    FpCensus& c = g_fpc;
+    const uint64_t pics = c.last - c.first;
+    const uint64_t now[8] = {g_fpReplays, g_fpBuilds, g_fpRefusedFmt, g_fpFallbacks, g_fpChecked, g_fpBad, g_fpUncompared, g_fpTriggers};
+    if (port_log_summary && pics) {
+        static const char* const kPath[FpPaths] = {"tiny", "not guest RAM", "bypassed (Build refused)", "bypassed (rewrites/streak)", "refused now",
+                                                   "bypass set now", "cache off/traced", "plan replays"};
+        static const char* const kCls[FcClasses] = {"state only", "draws only", "state+draw", "state+CALL", "state+draw+CALL", "draw+CALL", "unknown opcode", "empty"};
+        const double p = static_cast<double>(pics);
+        FpAcc all;
+        for (int i = 0; i < FpPaths; ++i) {
+            if (i == FpPlan) continue;
+            all.n += c.path[i].n; all.ns += c.path[i].ns; all.bytes += c.path[i].bytes; all.stateCmds += c.path[i].stateCmds; all.draws += c.path[i].draws;
+        }
+        char bp[520], bc[520];
+        int ap = 0, ac = 0;
+        bp[0] = bc[0] = 0;
+        for (int i = 0; i < FpPaths; ++i)
+            if (c.path[i].n && ap < static_cast<int>(sizeof bp) - 80)
+                ap += std::snprintf(bp + ap, sizeof bp - ap, " %s %.1f (%.3f ms, %.0f state cmds, %.1f draws);", kPath[i], c.path[i].n / p, c.path[i].ns / 1e6 / p,
+                                    c.path[i].stateCmds / p, c.path[i].draws / p);
+        for (int i = 0; i < FcClasses; ++i)
+            if (c.cls[i].n && ac < static_cast<int>(sizeof bc) - 80)
+                ac += std::snprintf(bc + ac, sizeof bc - ac, " %s %.1f (%.3f ms, %.0f state cmds);", kCls[i], c.cls[i].n / p, c.cls[i].ns / 1e6 / p, c.cls[i].stateCmds / p);
+        auto d = [&](int i) { return (now[i] - c.c0[i]) / p; };
+        port_log_summary("feplan-census: %llu pictures (GXV_FEPLAN=%d); lists parsed again per picture %.1f (%.1f KB, %.0f state cmds, %.1f draws, %.3f ms); by way:%s by barrier "
+                         "(plan replays included):%s a plan could take %.1f (%.0f state cmds, %.1f draws, %.3f ms); vertex format before a draw %.1f (%.3f ms); tiny with state and "
+                         "draws %.1f (%.3f ms); plans per picture: replays %.1f, made %.2f, refused (vertex format) %.2f, vertex size changed %.2f; verify: checked %.1f, mismatching "
+                         "%.2f, not compared (size changed %.2f, trigger %.2f)",
+                         static_cast<unsigned long long>(pics), FePlanMode(), all.n / p, all.bytes / 1024.0 / p, all.stateCmds / p, all.draws / p, all.ns / 1e6 / p,
+                         ap ? bp : " -", ac ? bc : " -", c.eligible.n / p, c.eligible.stateCmds / p, c.eligible.draws / p, c.eligible.ns / 1e6 / p, c.fmtBlocked.n / p,
+                         c.fmtBlocked.ns / 1e6 / p, c.tinyMixed.n / p, c.tinyMixed.ns / 1e6 / p, d(0), d(1), d(2), d(3), d(4), d(5), d(6), d(7));
+        FpTop* top[8] = {};
+        for (FpTop& s : c.top) {
+            if (!s.list || !s.calls) continue;
+            for (int i = 0; i < 8; ++i)
+                if (!top[i] || s.ns > top[i]->ns) {
+                    for (int k = 7; k > i; --k) top[k] = top[k - 1];
+                    top[i] = &s;
+                    break;
+                }
+        }
+        static const char* const kPathShort[FpPaths] = {"tiny", "notguest", "bypass-build", "bypass-rw", "refused", "bypass-set", "off", "plan"};
+        static const char* const kClsShort[FcClasses] = {"state", "draws", "state+draw", "state+call", "state+draw+call", "draw+call", "unknown", "empty"};
+        char line[1100];
+        int at = 0;
+        for (int i = 0; i < 8 && top[i]; ++i) {
+            const FpTop& s = *top[i];
+            at += std::snprintf(line + at, sizeof line - at, " [%p %uB %s %s %.2f/pic %.3fms %.1fus %u/%u %02X%02X%02X%02X%02X%02X%02X%02X]", static_cast<const void*>(s.list),
+                                s.nbytes, kPathShort[s.path < FpPaths ? s.path : 0], kClsShort[s.cls < FcClasses ? s.cls : 0], s.calls / p, s.ns / 1e6 / p,
+                                s.ns / 1e3 / s.calls, s.stateCmds, s.draws, s.head[0], s.head[1], s.head[2], s.head[3], s.head[4], s.head[5], s.head[6], s.head[7]);
+            if (at >= static_cast<int>(sizeof line) - 140) break;
+        }
+        port_log_summary("feplan-census: costliest lists (address, bytes, way, barrier, calls a picture, ms a picture, us a call, state cmds/draws a call, first bytes):%s%s",
+                         at ? line : " none", c.lost ? " (table full: some not listed)" : "");
+    }
+    const uint64_t keepLast = c.last;
+    c = FpCensus{};
+    c.first = c.last = keepLast;
+    for (int i = 0; i < 8; ++i) c.c0[i] = now[i];
+}
+inline bool FpCensusOnK() { return VGX_KNOB(EnvInt("GXV_FEPLAN_CENSUS", 0) != 0) != 0; }
+} // namespace
+bool FePlanCensusOn() { return FpCensusOnK(); }
+void FePlanCensusParse(const uint8_t* list, uint32_t nbytes, uint8_t path) {
+    const FpShape s = FpClassify(list, nbytes);
+    const int64_t t0 = port_host_time_ns ? port_host_time_ns() : 0;
+    ProcessStream(list, nbytes, true);
+    const uint64_t ns = port_host_time_ns ? static_cast<uint64_t>(port_host_time_ns() - t0) : 0;
+    FpCensusNote(list, nbytes, path, ns, s);
+}
+void FePlanCounters(uint64_t out[8]) {
+    out[0] = g_fpReplays; out[1] = g_fpBuilds; out[2] = g_fpRefusedFmt; out[3] = g_fpFallbacks; out[4] = g_fpChecked; out[5] = g_fpBad; out[6] = g_fpUncompared; out[7] = g_fpTriggers;
+}
+namespace {
+// A mixed list's plan run for StateListCall (e valid, e.mix set): true when handled (always, unless the switch is off).
+bool MixCall(SlEntry& e, const uint8_t* list, uint32_t nbytes, int bpFast, int mode) {
+    if (diag::kEnabled && mode == 2) {
+        // the parse for real, its draws recorded; then the plan, checked against it, from the same start; the parse's State kept
+        static State before, byParse;
+        static FpRec rec;
+        std::memcpy(&before, &g, sizeof(State));
+        rec.n = 0;
+        g_fpRec = &rec;
+        ProcessStream(list, nbytes, true);
+        g_fpRec = nullptr;
+        if (e.mix->trigger) { ++g_fpTriggers; return true; }
+        std::memcpy(&byParse, &g, sizeof(State));
+        std::memcpy(&g, &before, sizeof(State));
+        uint32_t at = 0;
+        int what = 0;
+        int r = MixRun(e, list, nbytes, bpFast, &rec, &at, &what);
+        if (r == 0 && std::memcmp(&g, &byParse, sizeof(State)) != 0) { r = 2; what = 5; at = static_cast<uint32_t>(rec.n); }
+        std::memcpy(&g, &byParse, sizeof(State));
+        if (r == 3) { ++g_fpUncompared; e.live = false; return true; }
+        ++g_fpChecked;
+        if (r == 2) {
+            ++g_fpBad;
+            static const char* const kWhat[6] = {"?", "a draw's opcode / source / count / room", "the State before a draw", "the parse made fewer draws",
+                                                 "the parse made more draws", "the State after the list"};
+            VGX_LOG_N(16, "feplan: MISMATCH for list %p (%u bytes): %s (draw %u of %u)\n", static_cast<const void*>(list), nbytes, kWhat[what < 6 ? what : 0], at,
+                      static_cast<unsigned>(rec.n));
+        }
+        if ((g_fpChecked & 0x3FFFu) == 0)
+            VGX_LOG_N(100, "feplan: %llu plans checked, %llu mismatching\n", static_cast<unsigned long long>(g_fpChecked), static_cast<unsigned long long>(g_fpBad));
+        return true;
+    }
+    const bool census = FpCensusOnK();
+    const int64_t t0 = census && port_host_time_ns ? port_host_time_ns() : 0;
+    ++g_fpReplays;
+    if (MixRun(e, list, nbytes, bpFast, nullptr, nullptr, nullptr) == 1) {
+        ++g_fpFallbacks;
+        e.live = false; // (made again at the next call)
+        if (++e.mixMiss >= 3) {
+            // (a list called with vertex formats that keep changing: parsed as before for a few seconds, as a churning state list)
+            e.mixMiss = 0;
+            e.quietUntil = CurrentFrame() + 300;
+            e.quietWhy = 4;
+        }
+    } else if (e.mixMiss) {
+        e.mixMiss = 0;
+    }
+    if (census) {
+        const uint64_t ns = port_host_time_ns ? static_cast<uint64_t>(port_host_time_ns() - t0) : 0;
+        FpCensusNote(list, nbytes, FpPlan, ns, FpClassify(list, nbytes));
+    }
+    return true;
+}
+} // namespace
+
 uint64_t g_slFastHits = 0; // (StateListFastHit's replays, for the "fe cuts" line)
 void FeCutCounters(uint64_t out[4]) { out[0] = g_slFastHits; out[1] = g_slCompactApplied; out[2] = out[3] = 0; }
 void SlDeltaCounters(uint64_t out[5]) {
@@ -2620,6 +4181,18 @@ void SlDeltaCounters(uint64_t out[5]) {
 // on as before; so a list is replayed here only where StateListCall would replay it, and with the same SlReplay.
 // (Replaying a state-only list instead of the geometry cache's attempt is what that cache does itself: a list with a state
 // command is never one of its entries, vgx_dlcache.cpp Build.)
+#if defined(VGX_CLONE_B)
+// GXV_FE_TWOCORE, the second worker in a segment: a list with a trigger (draw done, token, EFB copy, marker) is the player's to replay.
+inline bool SlHard(const SlEntry& e) {
+    if (!two::g_decoding) return false;
+    for (const SlOp& op : e.ops)
+        if (op.kind == 1) {
+            const uint32_t r = op.v >> 24;
+            if (r == 0x45 || r == 0x47 || r == 0x48 || r == 0x52 || r == 0xFF) return true;
+        }
+    return false;
+}
+#endif
 bool StateListFastHit(const uint8_t* list, uint32_t nbytes) {
     const int mode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_STATELIST", 1))));
     if (mode != 1) return false;
@@ -2659,6 +4232,9 @@ bool StateListFastHit(const uint8_t* list, uint32_t nbytes) {
     ++g_slFastHits;
     if (fromTable) ++g_slFastTable; else ++g_slFastFront;
     if (same) ++g_slFastSame;
+#if defined(VGX_CLONE_B)
+    if (SlHard(e)) return false;
+#endif
     SlRun(e, bpFastMode == 2 ? 1 : bpFastMode);
     return true;
 }
@@ -2700,16 +4276,111 @@ void StateListPrefetch(const uint8_t* list, uint32_t nbytes, int stage) {
     }
 }
 
+// GXV_CACHE24 (vgx_state.h): what StateListFastHit of `list` reads, hinted in three stages, each from lines the stage before hinted a call
+// ago: 1 the front slot (an address worked out from the list's address alone); 2 the entry's hot fields (the front holds the entry: it holds
+// valid entries or none); 3 the compiled delta the replay walks (from the entry's hot fields: dp and dbytes). The list's generation counter
+// and the table's home slot (a front miss) are left alone: the counters of a picture's lists share a few lines and the front hits.
+void StateListAhead(const uint8_t* list, int stage) {
+    const SlFront& f = SlFrontOf(list);
+    if (stage == 1) { Pf24(&f); return; }
+    if (f.list != list || !f.e) return;
+    const SlEntry* e = f.e;
+    if (stage == 2) { Pf24Lines(e, static_cast<uint32_t>(reinterpret_cast<const uint8_t*>(&e->quietUntil + 1) - reinterpret_cast<const uint8_t*>(e)), 2); return; }
+    if (e->delta0 == 2 || e->delta0 == 4) Pf24Lines(e->dp, e->dbytes, Cache24DeltaLines());
+}
+
 void StateListCounters(uint64_t out[5]) { out[0] = g_slHits; out[1] = g_slBuilds; out[2] = g_slRefused; out[3] = g_slChecked; out[4] = g_slBad; }
 void StateListFastCounters(uint64_t out[3]) { out[0] = g_slFastFront; out[1] = g_slFastTable; out[2] = g_slFastSame; }
 
-bool StateListCall(const uint8_t* list, uint32_t nbytes) {
+// heap23b (GXV_SL_SCENEDROP, vgx_state.h): the store at a scene's destruction. Every entry is in the table exactly once (SlFind puts
+// it in both; the clear at kSlMax empties both), so the table gives each entry's list address. Freed entries leave the store; the kept
+// ones are put back into an emptied table (linear probing from their home slot, as SlFind places them) and the front is emptied
+// (it is a cache in front of the table: a miss there looks the table up, StateListFastHit / StateListCall). Nothing outside this file
+// holds an entry, and nothing here runs while a list is being replayed (the caller is the front end, between published bytes).
+StateListStore StateListsSceneGone(const void* const* lo, const void* const* hi, int ranges, int mode) {
+    StateListStore s;
+    s.clears = g_slClears;
+    auto bytesOf = [](const SlEntry& e) {
+        uint64_t n = static_cast<uint64_t>(sizeof(SlEntry)) + e.bytes.capacity() + e.ops.capacity() * sizeof(SlOp) + e.words.capacity() * sizeof(uint32_t) +
+                     e.delta.capacity() * sizeof(uint32_t);
+        if (e.mix) { // (GXV_FEPLAN: a mixed list's plan and its sections)
+            n += sizeof(MixPlan) + e.mix->steps.capacity() * sizeof(MixStep);
+            for (const auto& x : e.mix->secs)
+                n += sizeof(SlEntry) + x->ops.capacity() * sizeof(SlOp) + x->words.capacity() * sizeof(uint32_t) + x->delta.capacity() * sizeof(uint32_t);
+        }
+        return n;
+    };
+    std::vector<const SlEntry*> gone;
+    for (const SlSlot& slot : g_slTable) {
+        if (!slot.list || !slot.e) continue;
+        bool drop = mode == 2;
+        for (int i = 0; mode == 1 && !drop && i < ranges; ++i) {
+            const uint8_t* const a = static_cast<const uint8_t*>(lo[i]);
+            const uint8_t* const b = static_cast<const uint8_t*>(hi[i]);
+            drop = a && b && a < b && slot.list >= a && slot.list < b;
+        }
+        const uint64_t n = bytesOf(*slot.e);
+        if (drop) {
+            ++s.dropped;
+            s.droppedBytes += n;
+            gone.push_back(slot.e);
+        } else {
+            ++s.entries;
+            s.bytes += n;
+        }
+    }
+    if (gone.empty()) return s;
+    J3n2SceneGone(); // (GXV_J3DNATIVE=4 / 5: an active chain ends while the entries its tokens name are alive)
+    ++g_slEpoch; // (GXV_J3DNATIVE: its records point at entries; they die with them)
+    J3nSceneGone();
+    for (SlFront& x : g_slFront) x = SlFront{};
+    if (gone.size() == g_slStore.size()) {
+        std::memset(g_slTable, 0, sizeof g_slTable);
+        g_slStore.clear();
+        return s;
+    }
+    std::sort(gone.begin(), gone.end());
+    auto isGone = [&gone](const SlEntry* e) { return std::binary_search(gone.begin(), gone.end(), e); };
+    // The table first (while every entry is alive): the kept slots, put back from their home slots in table order.
+    std::vector<SlSlot> keep;
+    keep.reserve(s.entries);
+    for (const SlSlot& slot : g_slTable)
+        if (slot.list && slot.e && !isGone(slot.e)) keep.push_back(slot);
+    std::memset(g_slTable, 0, sizeof g_slTable);
+    for (const SlSlot& k : keep) {
+        uint32_t i = SlHash(k.list) & (kSlSlots - 1);
+        while (g_slTable[i].list) i = (i + 1) & (kSlSlots - 1);
+        g_slTable[i] = k;
+    }
+    // Then the store: the kept entries move to the front in order; the freed ones are deleted (by the move over them or the resize).
+    size_t kept = 0;
+    for (size_t i = 0; i < g_slStore.size(); ++i) {
+        if (isGone(g_slStore[i].get())) continue;
+        if (kept != i) g_slStore[kept] = std::move(g_slStore[i]);
+        ++kept;
+    }
+    g_slStore.resize(kept);
+    return s;
+}
+
+uint8_t StateListWhyLast(uint8_t* cmd) { if (cmd) *cmd = g_slBadCmd; return g_slWhy; }
+namespace {
+// (tinylist31: StateListCall's body; `plans` false: no mixed-list plan is made or run for this call, GXV_TINYLIST's tiny lists)
+inline bool StateListCallP(const uint8_t* list, uint32_t nbytes, bool plans) {
+    g_slWhy = 0;
     const int mode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_STATELIST", 1))));
-    if (mode == 0) return false;
+    if (mode == 0) { g_slWhy = 1; return false; }
     const int bpFastMode = static_cast<int>(VGX_KNOB(static_cast<int>(EnvInt("GXV_BPFAST", 1))));
     const int bpFast = bpFastMode == 2 ? 1 : bpFastMode;
+    // (GXV_FEPLAN: plans for mixed lists; not with the two-core front end or the J3D-native hooks)
+#if defined(VGX_CLONE_B)
+    const int fpMode = 0;
+    (void)plans;
+#else
+    const int fpMode = (plans && FePlanMode() != 0 && vgx2_mode == 0 && J3nMode() == 0) ? FePlanMode() : 0;
+#endif
     const uint64_t gen = GuestWriteGeneration(list, nbytes);
-    if (gen == kNotGuest) return false;
+    if (gen == kNotGuest) { g_slWhy = 2; return false; }
     const uint64_t frame = CurrentFrame();
     SlFront& f = SlFrontOf(list);
     SlEntry* e;
@@ -2720,12 +4391,16 @@ bool StateListCall(const uint8_t* list, uint32_t nbytes) {
             for (SlFront& x : g_slFront) x = SlFront{};
             std::memset(g_slTable, 0, sizeof g_slTable);
             g_slStore.clear();
+            ++g_slClears;
+            J3n2SceneGone();
+            ++g_slEpoch;
+            J3nSceneGone();
         }
         e = SlFind(list);
         f.list = list;
         f.e = e;
     }
-    if (frame < e->quietUntil) return false;
+    if (frame < e->quietUntil) { g_slWhy = e->quietWhy ? e->quietWhy : 4; g_slBadCmd = e->quietCmd; return false; }
     bool valid = e->nbytes == nbytes && e->gen == gen && e->live;
     // A list whose memory was written since: the same bytes again (J3D writes its materials' lists every picture, mostly
     // with what they held) are told by comparing them with the copy kept at the parse (GXV_SLBYTES=1, default; a quarter of
@@ -2741,12 +4416,17 @@ bool StateListCall(const uint8_t* list, uint32_t nbytes) {
             // rewritten for most calls (animated material colours): parse as before for a few seconds
             e->changes = 0;
             e->quietUntil = frame + 300;
+            e->quietWhy = 4;
             e->live = false;
+            g_slWhy = 6;
             return false;
         }
         const uint64_t epoch0 = GuestWriteEpoch();
         e->nbytes = nbytes;
         e->usable = SlParse(*e, list, nbytes);
+        e->mix.reset();
+        // (GXV_FEPLAN: a list with draws / calls: its exact plan, made inside the same write-epoch window as the parse)
+        if (!e->usable && fpMode != 0) MixBuild(*e, list, nbytes, frame);
         e->delta0 = 0; // (GXV_SLDELTA: compiled at its first replay in a later frame, so a list made again for every picture is not)
         e->parseFrame = frame;
         if (keepBytes) e->bytes.assign(list, list + nbytes);
@@ -2756,19 +4436,26 @@ bool StateListCall(const uint8_t* list, uint32_t nbytes) {
         ++g_slBuilds;
         if (GuestWriteEpoch() != epoch0) {
             HostRange r{list, nbytes};
-            if (GuestWritesTouch(epoch0, GuestWriteEpoch(), &r, 1)) { e->live = false; return false; }
+            if (GuestWritesTouch(epoch0, GuestWriteEpoch(), &r, 1)) { e->live = false; g_slWhy = 7; return false; }
         }
-        if (!e->usable) {
+        if (!e->usable && !e->mix) {
             ++g_slRefused;
             e->quietUntil = frame + 600;
+            e->quietWhy = 3;
+            e->quietCmd = g_slBadCmd;
+            g_slWhy = 5;
             return false;
         }
     } else {
         e->changes = 0;
-        if (!e->usable) return false;
-        ++g_slHits;
+        if (!e->usable && (!e->mix || fpMode == 0)) { g_slWhy = 5; g_slBadCmd = e->quietCmd; return false; }
+        if (e->usable) ++g_slHits;
     }
     e->live = frame != 0;
+#if defined(VGX_CLONE_B)
+    if (SlHard(*e)) return false;
+#endif
+    if (e->mix) return MixCall(*e, list, nbytes, bpFast, fpMode); // (GXV_FEPLAN: a mixed list's plan)
     bool sideEffects = false;  // (a copy trigger, token or palette load must not run twice: such lists are not compared)
     if (diag::kEnabled && mode == 2)
         for (const SlOp& op : e->ops) sideEffects = sideEffects || (op.kind == 1 && kBpEffect.t[op.v >> 24]);
@@ -2795,5 +4482,55 @@ bool StateListCall(const uint8_t* list, uint32_t nbytes) {
     SlRun(*e, bpFast);
     return true;
 }
+} // namespace
+bool StateListCall(const uint8_t* list, uint32_t nbytes) { return StateListCallP(list, nbytes, true); }
+#include "vgx_tinylist.inc" // GXV_TINYLIST, GXV_TINYLIST_CENSUS (tinylist31)
 
+#include "vgx_j3native.inc" // GXV_J3DNATIVE
+#include "vgx_j3native2.inc" // GXV_J3DNATIVE=4 / 5 (stage 2)
+
+// ---- GXV_FE_TWOCORE (vgx_twocore.h): this file's per-stream state for the hand-overs, and the second worker's cold start
+extern "C" uint64_t VGX2_SIDE(regs_hash)(void) {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, size_t n) { const uint8_t* b = static_cast<const uint8_t*>(p); for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull; };
+    uint64_t r = 0;
+    auto part = [&](int k) { r |= (h & 0xFFull) << (8 * k); h = 1469598103934665603ull; };
+    mix(g.bp, sizeof g.bp); part(0);
+    mix(g.xfPos, sizeof g.xfPos); part(1);
+    mix(g.xfNrm, sizeof g.xfNrm); mix(g.xfPost, sizeof g.xfPost); part(2);
+    mix(g.xfLight, sizeof g.xfLight); part(3);
+    mix(g.xfReg, sizeof g.xfReg); part(4);
+    mix(g.vcd, sizeof g.vcd); mix(g.vat, sizeof g.vat); part(5);
+    mix(g.cpBase, sizeof g.cpBase); mix(g.cpStride, sizeof g.cpStride); part(6);
+    mix(&g.matIdxA, 8); mix(&g.bpMask, 4); part(7);
+    return r;
+}
+// (twocore25: the register file without its palette slots, as two pieces: before and after State::tlut. The slots are 32 KiB of the 39.5 KiB;
+// the player never took B's (Adopt kept its own, copying them aside and back: three 32 KiB copies at every segment taken, the hand-over's
+// main cost), and the verify compares no slot. vgx2_state_split gives the pieces' sizes for the player's checks.)
+extern "C" int VGX2_SIDE(state_objs)(Vgx2Obj* out) {
+    constexpr size_t a = offsetof(State, tlut), b = offsetof(State, tlut) + sizeof(State::tlut);
+    out[0] = Vgx2Obj{&g, static_cast<uint32_t>(a)};
+    out[1] = Vgx2Obj{reinterpret_cast<uint8_t*>(&g) + b, static_cast<uint32_t>(sizeof(State) - b)};
+    return 2;
+}
+#if defined(VGX_CLONE_B)
+// (the second worker's scan: state commands parsed in lists so far, to tell a list of draws only)
+extern "C" uint64_t vgx2_b_list_state_cmds(void) { return g_sd.stateCmds[1]; }
+// Every dirty flag up: the segment's first resolution builds and sends everything (vgx_twocore.cpp).
+extern "C" void vgx2_b_state_cold(void) {
+    g.bpDirty = g.bpKeyDirty = g.bpRsDirty = g.xfRegDirty = g.xfKeyDirty = g.xfViewDirty = g.xfProjDirty = g.xfColorDirty = g.xfMtxDirty = g.xfLightDirty = true;
+    g.texDirty = true;
+    g.xfPosRowsDirty = ~0ull;
+    g.tevColDirty = 0xFF;
+    g.texSlotDirty = 0xFF;
+    g.bpTexStale = 0xFF;
+}
+#endif
 } // namespace vgx
+#if !defined(VGX_CLONE_B)
+extern "C" void port_vgx_verify_summary(void) {
+    char line[420];
+    if (vgx::VerifySummaryLine(line, sizeof line)) port_log_summary("verify: %s(cumulative)", line);
+}
+#endif

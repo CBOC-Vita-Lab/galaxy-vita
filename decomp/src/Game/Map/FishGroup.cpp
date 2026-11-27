@@ -9,6 +9,7 @@
 #include "Game/Util/ObjUtil.hpp"
 #include "Game/Util/PlayerUtil.hpp"
 #include "Game/Util/RailUtil.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 
 void FishGroup_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -61,6 +62,12 @@ Fish::Fish(const char* pName, FishGroup* pGroup, int fishType, bool canEscape)
                        MR::getRandom(-::sFollowPosOffsetMax, ::sFollowPosOffsetMax)),
       mFront(1.0f, 0.0f, 0.0f), mDistanceToApproach(MR::getRandom(::sDistanceToApproachMin, ::sDistanceToApproachMax)),
       mTimeToSearchPlayer(MR::getRandom(::sTimeToSearchPlayerMin, ::sTimeToSearchPlayerMax)), mStepToMove(), mEscapePos() {
+#ifdef TARGET_PC
+    // (GXV_BOWL_POSE, bowl31; port/bowl_pose.h) nothing but the picture reads a fish's pose: no hit sensor, effect, shadow, star-pointer target, collision
+    // or part, MR::getJointMtx is never asked for its joints, and its animation never changes after init ("Swim", only its rate follows the speed). The
+    // rule checks each of these again at run time before it leaves a pose out.
+    mBowlPose = port::bowlpose::kFish;
+#endif
 }
 
 void Fish::init(const JMapInfoIter& rIter) {
@@ -207,11 +214,25 @@ void Fish::control() {
 }
 
 void Fish::calcAndSetBaseMtx() {
+#ifdef TARGET_PC
+    // Translation changes every turn even when steering and local gravity do not.
+    static_assert(sizeof(TVec3f) == 3 * sizeof(f32), "compare only the three axis components");
+    if (!mHaveBasis || __builtin_memcmp(&mBasisFront, &mFront, sizeof(mFront)) != 0 ||
+        __builtin_memcmp(&mBasisUp, &mGroup->mUp, sizeof(mBasisUp)) != 0) {
+        MR::makeMtxFrontUp(&mBasisMtx, mFront, mGroup->mUp);
+        mBasisFront = mFront;
+        mBasisUp = mGroup->mUp;
+        mHaveBasis = true;
+    }
+    mBasisMtx.setTrans(mPosition);
+    MR::setBaseTRMtx(this, mBasisMtx);
+#else
     TPos3f mtx;
     mtx.identity();
     MR::makeMtxFrontUp(&mtx, mFront, mGroup->mUp);
     mtx.setTrans(mPosition);
     MR::setBaseTRMtx(this, mtx);
+#endif
 }
 
 bool Fish::tryEscapeFromPlayer() {

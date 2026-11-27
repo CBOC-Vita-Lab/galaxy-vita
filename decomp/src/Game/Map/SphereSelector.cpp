@@ -109,8 +109,19 @@ void SphereSelector::invalidatePointing() {
 }
 
 void SphereSelector::sendMsgToAllActor(u32 msg) {
+#ifdef TARGET_PC
+    // New dome poses depend on the opening handle's basis, not map placement order.
+    const bool handleFirst = msg == ACTMES_SPHERE_SELECTOR_SELECT_START && mHandle && !mHandle->mIsFileSelectMode;
+    if (handleFirst)
+        MR::sendSimpleMsgToActor(msg, mHandle);
+#endif
     for (int i = 0; i < mSphereGroup->getObjNum(); i++) {
-        MR::sendSimpleMsgToActor(msg, mSphereGroup->getActor(i));
+        LiveActor* a = mSphereGroup->getActor(i);
+#ifdef TARGET_PC
+        if (handleFirst && a == mHandle)
+            continue;
+#endif
+        MR::sendSimpleMsgToActor(msg, a);
     }
 }
 

@@ -2,6 +2,7 @@
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Screen/ButtonPaneController.hpp"
 #include "Game/Util/EffectUtil.hpp"
+#include "Game/Util/GamePadUtil.hpp"
 #include "Game/Util/LayoutUtil.hpp"
 #include "Game/Util/NerveUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
@@ -33,6 +34,9 @@ YesNoController::YesNoController(LayoutActor* pHost)
 
 void YesNoController::appear() {
     _C = true;
+#ifdef TARGET_PC
+    mPortPad = port::yesno::PadState();   // (the focus starts on No each time)
+#endif
 
     setNerve(GET_NERVE(YesNoController, YesNoControllerNrvSelecting));
 }
@@ -54,6 +58,16 @@ void YesNoController::update() {
 bool YesNoController::isSelected() const {
     return isNerve(GET_NERVE(YesNoController, YesNoControllerNrvSelected));
 }
+
+#ifdef TARGET_PC
+void YesNoController::setPortPad(bool on) {
+    mPortPadOn = on;
+    mPortPad = port::yesno::PadState();
+    // the buttons then show the focus (fed every frame by exeSelecting through onPointing) instead of testing the pointer themselves
+    mButtonYesPaneCtrl->_23 = on;
+    mButtonNoPaneCtrl->_23 = on;
+}
+#endif
 
 bool YesNoController::isSelectedYes() const {
     return mButtonYesPaneCtrl->mIsSelected;
@@ -136,6 +150,28 @@ void YesNoController::exeSelecting() {
     // The answer is the player's: a cutscene fast-forward stops here, and
     // the A it pressed does not choose.
     if (port_skip_interrupt()) {
+        return;
+    }
+#endif
+
+#ifdef TARGET_PC
+    if (mPortPadOn) {   // setfix31: the pad and the pointer (port/yesno_pad.h)
+        if (mButtonYesPaneCtrl->isAppearing() || mButtonNoPaneCtrl->isAppearing()) {
+            return;
+        }
+        port::yesno::PadIn in;
+        in.left = MR::testCorePadTriggerLeft(0) || MR::testSubPadStickTriggerLeft(0);
+        in.right = MR::testCorePadTriggerRight(0) || MR::testSubPadStickTriggerRight(0);
+        in.decide = MR::testCorePadTriggerA(0) || MR::testDPDMenuPadDecideTrigger();
+        in.back = MR::testCorePadTriggerB(0);
+        in.pointed = mButtonYesPaneCtrl->isPointingPaneDirect() ? port::yesno::kYes : (mButtonNoPaneCtrl->isPointingPaneDirect() ? port::yesno::kNo : port::yesno::kNone);
+        const int answer = port::yesno::Step(mPortPad, in);
+        if (answer != port::yesno::kNone) {
+            (answer == port::yesno::kYes ? mButtonYesPaneCtrl : mButtonNoPaneCtrl)->decide();
+            setNerve(GET_NERVE(YesNoController, YesNoControllerNrvDecided));
+            return;
+        }
+        (mPortPad.focus == port::yesno::kYes ? mButtonYesPaneCtrl : mButtonNoPaneCtrl)->onPointing();   // (the focused button looks pointed at)
         return;
     }
 #endif

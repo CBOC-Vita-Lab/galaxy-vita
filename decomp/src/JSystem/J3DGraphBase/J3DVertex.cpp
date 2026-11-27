@@ -55,9 +55,10 @@ J3DVertexBuffer::~J3DVertexBuffer() {
 }
 
 void J3DVertexBuffer::setArray() const {
-    j3dSys.setVtxPos(mCurrentVtxPos);
-    j3dSys.setVtxNrm(mCurrentVtxNrm);
-    j3dSys.setVtxCol(mCurrentVtxCol);
+    // (GXV_DRAWPIPE: the draw path's J3DSys, J3DSys.hpp; only J3DShapePacket::prepareDraw calls this)
+    J3D_DSYS.setVtxPos(mCurrentVtxPos);
+    J3D_DSYS.setVtxNrm(mCurrentVtxNrm);
+    J3D_DSYS.setVtxCol(mCurrentVtxCol);
 }
 
 J3DDrawMtxData::J3DDrawMtxData() {

@@ -1,5 +1,10 @@
 #include "Game/System/FileHolder.hpp"
 #include "Game/Util.hpp"
+#ifdef TARGET_PC
+#include <stdint.h>
+extern "C" int64_t port_host_time_ns(void);
+extern "C" void port_io_note_wait(int64_t ns) __attribute__((weak));  // (disc26: the "io:" census, platform/src/dvd/dvd.cpp)
+#endif
 
 #define FILE_HOLDER_STATE_NONE 0
 #define FILE_HOLDER_STATE_READING 1
@@ -24,8 +29,14 @@ FileHolderFileEntry::~FileHolderFileEntry() {
 void FileHolderFileEntry::waitReadDone() {
     if (mState != FILE_HOLDER_STATE_DONE) {
         OSMessage msg;
+#ifdef TARGET_PC
+        const int64_t ioT0 = port_host_time_ns();  // (disc26) how long the calling thread really sat here (the game thread in play = a hitch)
+#endif
         OSReceiveMessage(&mQueue, &msg, OS_MESSAGE_BLOCK);
         mState = FILE_HOLDER_STATE_DONE;
+#ifdef TARGET_PC
+        if (port_io_note_wait) port_io_note_wait(port_host_time_ns() - ioT0);
+#endif
     }
 }
 

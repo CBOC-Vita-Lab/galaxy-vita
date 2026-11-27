@@ -1,0 +1,28 @@
+# STRENGTHENED (rigfix, from chk-harness): the old rules judged almost nothing (a host-only line, or crash/stall only). Every log pattern below was
+# checked against the format strings in platform/src/mp, decomp/src/Game/MP and net/src; NOT run against the game (the first real run decides).
+# (mp_conntest.cpp logs "conntest: started", "conntest: done wifi=.. local=.. net=.. host=.. delay=.. (n ms) -> headline=..", "conntest: report saved|FAILED")
+# harness3: the Connection Test screen (Square from the Multiplayer menu); runs to the end, saves a report; report.txt must hold no
+# addresses or tokens (check by hand: see the run folder's report.txt / the game's data dir).
+name: mp_conntest
+description: "Connection Test from the Multiplayer menu: run to the end, save report.txt"
+seconds: 230
+requires: {strings: ["entry: chose %s"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000}
+processes:
+  - name: game
+    input: "@entry_conntest"
+    env: {}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'metric * wall_s >= 184'
+  - 'expect game /\[mp\] ui: screen conntest/'
+  - 'expect game /\[mp\] conntest: started/'
+  - 'expect game /\[mp\] conntest: done wifi=-?\d+ local=-?\d+ net=-?\d+ host=-?\d+ delay=-?\d+ /'
+  - 'expect game /\[mp\] conntest: report saved/'
+  - 'absent game /\[mp\] (hosting|joined|session started)/'
+  - 'shots game >= 5'

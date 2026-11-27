@@ -21,6 +21,31 @@ static uint32_t harnessMem2Size() {
 #define PORT_MEM2_SIZE harnessMem2Size()
 #endif
 
+#if !defined(PORT_ARMHF_HARNESS) && !defined(__vita__)
+// MP3 emu (desktop only): PETARI_VITA_LIMITS=1 gives the desktop game the Vita's two memory banks (MEM1 24 MiB, MEM2 64 MiB; the
+// desktop default is 128 + 128 MiB). The game's JKR heaps (HeapMemoryWatcher) are carved from these arenas, so a galaxy that exhausts a
+// heap on the console exhausts it here too (the same OSPanic path). PETARI_MEM2_MB=<n> (>= 64) still enlarges MEM2, as on the armhf
+// harness. Unset: the desktop sizes, byte for byte as before. Read once, before the banks are mapped.
+static bool desktopVitaLimits() {
+    static const bool v = [] { const char* e = getenv("PETARI_VITA_LIMITS"); return e && *e && *e != '0'; }();
+    return v;
+}
+static uint32_t desktopMem1Size() { return desktopVitaLimits() ? 0x01800000u : (uint32_t)PORT_MEM1_SIZE; }
+static uint32_t desktopMem2Size() {
+    static const uint32_t v = [] {
+        if (!desktopVitaLimits()) return (uint32_t)PORT_MEM2_SIZE;
+        const char* e = getenv("PETARI_MEM2_MB");
+        const int mb = e ? atoi(e) : 0;
+        return mb >= 64 ? (uint32_t)mb << 20 : 0x04000000u;
+    }();
+    return v;
+}
+#undef PORT_MEM1_SIZE
+#undef PORT_MEM2_SIZE
+#define PORT_MEM1_SIZE desktopMem1Size()
+#define PORT_MEM2_SIZE desktopMem2Size()
+#endif
+
 #if defined(__vita__)
 #include "memory.h"
 #else
@@ -86,6 +111,8 @@ void addRegion(uintptr_t base, uintptr_t alias, uint32_t physical, uint32_t size
 // scan answers. Zero-byte ranges always take the scan (one past a bank's end is also the start of the next region).
 struct FastBank { uintptr_t base, alias; uint32_t size; const Region* region; };
 FastBank sFastBank[2];
+struct BankFast { uintptr_t base; uint32_t physical, kind, size; };
+BankFast sBank[2];  // (cpu24)
 bool lcNativeFast() {
     return PORT_HOT_KNOB(int, [] { const char* e = getenv("GXV_LC_NATIVE"); return e && *e ? atoi(e) : 0; }()) != 0;
 }
@@ -100,6 +127,20 @@ void noteFastBank(unsigned slot) {  // (port_mem_init, right after the bank's ad
     const unsigned n = sRegionCount.load(std::memory_order_acquire);
     const Region& r = sRegions[n - 1];
     sFastBank[slot] = {r.base, r.alias, r.size, &r};
+    // cpu24: the same bank as plain integers for the one-byte question below (size last: 0 until published = never a hit).
+    sBank[slot].base = r.base; sBank[slot].physical = r.physical; sBank[slot].kind = (unsigned)r.kind; sBank[slot].size = r.size;
+}
+// cpu24 (exact, no switch): where the base range of MEM1 / MEM2 answers without the region table, the knob read, the alias tests or the
+// 3-branch contains(). Same answer as nativeRegion: the banks are regions 0 and 1, regions never overlap, and `contains` with `bytes` >= 1
+// is `address - base < size && bytes <= size - (address - base)` (one unsigned compare for bytes == 1). Alias addresses (host builds only; the
+// Vita has none), zero-byte ranges, other regions and addresses before port_mem_init (size 0) all miss and take the old path unchanged.
+// Returns the bank (0 MEM1, 1 MEM2) or -1, and the offset in *off.
+inline int bankHit(uintptr_t address, size_t bytes, uintptr_t* off) {
+    const uintptr_t d0 = address - sBank[0].base;
+    if (__builtin_expect(d0 < sBank[0].size && bytes - 1 < (size_t)(sBank[0].size - d0), 1)) { *off = d0; return 0; }
+    const uintptr_t d1 = address - sBank[1].base;
+    if (d1 < sBank[1].size && bytes - 1 < (size_t)(sBank[1].size - d1)) { *off = d1; return 1; }
+    return -1;
 }
 
 const Region* nativeRegion(const void* p, size_t bytes, uintptr_t* start = nullptr) {
@@ -130,7 +171,7 @@ bool sLowReserved;  // the whole low pool's address range is ours (reserved at s
 int makeSharedFd(const char* name, size_t size) {
     int fd = (int)syscall(__NR_memfd_create, name, 1u);
     if (fd < 0) port_fatal("memfd_create failed: %s", strerror(errno));
-    if (ftruncate(fd, (off_t)size) != 0) port_fatal("ftruncate(%zu) failed: %s", size, strerror(errno));
+    if (ftruncate(fd, (off_t)size) != 0) port_fatal("ftruncate(%lu) failed: %s", (unsigned long)size, strerror(errno));
     return fd;
 }
 void* mapAt(uintptr_t address, size_t size, int fd) {
@@ -145,7 +186,7 @@ void* mapAt(uintptr_t address, size_t size, int fd) {
         if (maps) { char line[1024]; while (fgets(line, sizeof(line), maps)) port_log("mem map: %s", line); fclose(maps); }
         errno = error;
 #endif
-        port_fatal("mmap at %08lx (+%zx) failed: %s", (unsigned long)address, size, strerror(errno));
+        port_fatal("mmap at %08lx (+%lx) failed: %s", (unsigned long)address, (unsigned long)size, strerror(errno));
     }
     if ((uintptr_t)p != address) port_fatal("mmap landed outside its requested 32-bit range");
     return p;
@@ -223,7 +264,13 @@ extern "C" int port_mem_init(void) {
     scratch = allocateVita("galaxy-lc", 0x4000);
 #else
     const char* mode = getenv("PETARI_NATIVE_ADDRESSES");
+#if defined(PORT_ARMHF_HARNESS)
+    // armhf harness: the image sits at 0x80000000, where the Wii MEM1 window would go: always use the rebased layout
+    // (PETARI_NATIVE_ADDRESSES=0 is ignored here).
+    const bool rebased = true;
+#else
     const bool rebased = mode && strcmp(mode, "0") != 0;
+#endif
     sMem1 = rebased ? 0x60000000u : PORT_MEM1_BASE;
     sMem2 = rebased ? 0x70000000u : PORT_MEM2_BASE;
 #if defined(PORT_ARMHF_HARNESS)
@@ -308,6 +355,7 @@ extern "C" void* port_low_alloc(size_t size) {
     return (void*)base;
 }
 extern "C" int port_is_native_range(const void* p, size_t size) {
+    { uintptr_t off; if (size != 0 && bankHit((uintptr_t)p, size, &off) >= 0) return 1; }  // (cpu24; p == 0 is no bank: base >= 0x40000000)
     if (nativeRegion(p, size)) return 1;
 #if defined(__vita__)
     // Native pthread stacks are kernel-owned, not allocations in the low pool.
@@ -315,9 +363,17 @@ extern "C" int port_is_native_range(const void* p, size_t size) {
 #endif
     return 0;
 }
-extern "C" int port_is_mem1(const void* p) { const Region* r = nativeRegion(p, 1); return r && r->kind == Mem1; }
-extern "C" int port_is_mem2(const void* p) { const Region* r = nativeRegion(p, 1); return r && r->kind == Mem2; }
-extern "C" int port_is_game_memory(const void* p) { const Region* r = nativeRegion(p, 1); return r && (r->kind == Mem1 || r->kind == Mem2); }
+extern "C" int port_is_mem1(const void* p) {
+    uintptr_t off; const int b = bankHit((uintptr_t)p, 1, &off);  // (cpu24)
+    if (b >= 0) return b == 0;
+    const Region* r = nativeRegion(p, 1); return r && r->kind == Mem1; }
+extern "C" int port_is_mem2(const void* p) {
+    uintptr_t off; const int b = bankHit((uintptr_t)p, 1, &off);  // (cpu24)
+    if (b >= 0) return b == 1;
+    const Region* r = nativeRegion(p, 1); return r && r->kind == Mem2; }
+extern "C" int port_is_game_memory(const void* p) {
+    uintptr_t off; if (bankHit((uintptr_t)p, 1, &off) >= 0) return 1;  // (cpu24)
+    const Region* r = nativeRegion(p, 1); return r && (r->kind == Mem1 || r->kind == Mem2); }
 extern "C" void* port_phys_to_host(uint32_t physical) {
     const Region* r = physicalRegion(physical);
     if (!r) port_fatal("unmapped logical physical address %08x (caller %p)",
@@ -369,6 +425,7 @@ extern "C" void* port_phys_to_uncached(uint32_t physical) {
 }
 extern "C" uint32_t port_host_to_phys(const void* p) {
     if (!p) return 0;  // GX permits an empty/default image binding at physical zero.
+    { uintptr_t off; const int b = bankHit((uintptr_t)p, 1, &off); if (b >= 0) return sBank[b].physical + (uint32_t)off; }  // (cpu24)
     uintptr_t start;
     const Region* r = nativeRegion(p, 1, &start);
     if (!r) port_fatal("unregistered native physical-address source %p (caller %p)", p, __builtin_return_address(0));

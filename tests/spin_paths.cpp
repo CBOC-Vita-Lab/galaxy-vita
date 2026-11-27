@@ -38,6 +38,7 @@ int sceCtrlGetControllerPortInfo(SceCtrlPortInfo* out) {
 int sceMotionStartSampling() { return -1; }
 int sceMotionStopSampling() { return 0; }
 int sceMotionGetState(SceMotionState*) { return -1; }
+int sceMotionGetSensorState(SceMotionSensorState*, int) { return -1; }
 int sceTouchGetPanelInfo(SceUInt32 port, SceTouchPanelInfo* out) {
     *out={}; out->maxDispX=1919; out->maxDispY=port==SCE_TOUCH_PORT_FRONT ? 1087 : 889; return 0;
 }
@@ -51,6 +52,9 @@ int port_rear_aim_toggle() { return 0; }
 int port_star_bit_reach_next() { return 1; }
 int port_stick_pointer_enabled() { return 0; }
 int port_stick_pointer_toggle() { return 0; }
+int port_tap_jump_enabled() { return 1; }
+int port_settings_hint_visible() { return 0; }
+void port_settings_open_request() {}
 int64_t port_host_time_ns() { return 1; }
 int port_skip_inject_a() { return -1; }
 int port_handheld() { return 1; }

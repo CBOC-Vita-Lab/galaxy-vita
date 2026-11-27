@@ -6,6 +6,11 @@
 #include "JSystem/J3DGraphBase/J3DVertex.hpp"
 #include <revolution/gd.h>
 #include <stdint.h>
+#ifdef TARGET_PC
+#include "port/array_skip.h"
+#include "port/gx_capture.h"
+extern "C" int __PortGXFifoInStream(void);
+#endif
 
 void J3DShape::initialize() {
     mMaterial = nullptr;
@@ -117,7 +122,7 @@ u16 J3DShape::countBumpMtxNum() const {
 
 void J3DLoadCPCmd(u8 addr, u32 val) {
 #ifdef TARGET_PC
-    __PortGXFifo_op_u8_u32(8, addr, val);  // (the same 6 bytes, batched: GXV_FIFO_BATCH, port/gx_fifo.h)
+    __PortGXWriteCP(addr, val);  // (the same 6 bytes, batched: GXV_FIFO_BATCH, port/gx_fifo.h; behind GXV_GX_DEDUP's gate, port/gx_dedup.h)
 #else
     GXCmd1u8(8);
     GXCmd1u8(addr);
@@ -128,20 +133,37 @@ void J3DLoadCPCmd(u8 addr, u32 val) {
 static void J3DLoadArrayBasePtr(GXAttr attr, void* data) {
     u32 idx = (attr == GX_VA_NBT) ? 1 : (attr - GX_VA_POS);
 #if TARGET_PC
-    J3DLoadCPCmd(0xA0 + idx, GX_PHY_ADDR(data));
+    // GXV_ARRAYSKIP (port/array_skip.h): a base the stream already holds is not written again (2: written behind a check for the front end)
+    const u32 phys = GX_PHY_ADDR(data);
+    const int skipMode = port_arrayskip_mode();
+    if (__builtin_expect(skipMode != 0, 0) && idx < 3 && __PortGXCapFifo == 0 && __PortGXFifoInStream()) {
+        const u32 bit = 1u << idx;
+        if ((__PortArrValid & bit) != 0 && __PortArrShadow[idx] == phys) {
+            port_arrayskip_note(1);
+            if (skipMode == 1) {
+                return;
+            }
+            port_arrayskip_verify_mark(0xA0 + idx, phys);
+        } else {
+            port_arrayskip_note(0);
+        }
+        __PortArrShadow[idx] = phys;
+        __PortArrValid |= bit;
+    }
+    J3DLoadCPCmd(0xA0 + idx, phys);
 #else
     J3DLoadCPCmd(0xA0 + idx, ((uintptr_t)data & 0x7FFFFFFF));
 #endif
 }
 
 void J3DShape::loadVtxArray() const {
-    J3DLoadArrayBasePtr(GX_VA_POS, j3dSys.getVtxPos());
+    J3DLoadArrayBasePtr(GX_VA_POS, J3D_DSYS.getVtxPos());
 
     if (!mHasNBT) {
-        J3DLoadArrayBasePtr(GX_VA_NRM, j3dSys.getVtxNrm());
+        J3DLoadArrayBasePtr(GX_VA_NRM, J3D_DSYS.getVtxNrm());
     }
 
-    J3DLoadArrayBasePtr(GX_VA_CLR0, j3dSys.getVtxCol());
+    J3DLoadArrayBasePtr(GX_VA_CLR0, J3D_DSYS.getVtxCol());
 }
 
 bool J3DShape::isSameVcdVatCmd(J3DShape* other) {
@@ -260,8 +282,8 @@ void J3DShape::loadPreDrawSetting() const {
 void J3DShape::setArrayAndBindPipeline() const {
     J3DShapeMtx::setCurrentPipeline((mFlags & 0x1C) >> 2);
     loadVtxArray();
-    j3dSys.setModelDrawMtx(mDrawMtx[*mCurrentViewNo]);
-    j3dSys.setModelNrmMtx(mNrmMtx[*mCurrentViewNo]);
+    J3D_DSYS.setModelDrawMtx(mDrawMtx[*mCurrentViewNo]);
+    J3D_DSYS.setModelNrmMtx(mNrmMtx[*mCurrentViewNo]);
     J3DShapeMtx::sCurrentScaleFlag = mScaleFlagArray;
     J3DShapeMtx::sNBTFlag = mHasNBT;
     sEnvelopeFlag = mHasPNMTXIdx;
@@ -289,8 +311,8 @@ void J3DShape::drawFast() const {
                 mShapeDraw[i]->draw();
         }
     } else {
-        J3DFifoLoadPosMtxImm(*j3dSys.getShapePacket()->getBaseMtxPtr(), GX_PNMTX0);
-        J3DFifoLoadNrmMtxImm(*j3dSys.getShapePacket()->getBaseMtxPtr(), GX_PNMTX0);
+        J3DFifoLoadPosMtxImm(*PortBaseMtx(J3D_DSYS.getShapePacket()->getBaseMtxPtr()), GX_PNMTX0);
+        J3DFifoLoadNrmMtxImm(*PortBaseMtx(J3D_DSYS.getShapePacket()->getBaseMtxPtr()), GX_PNMTX0);
         for (u16 n = mMtxGroupNum, i = 0; i < n; i++)
             if (mShapeDraw[i] != nullptr)
                 mShapeDraw[i]->draw();

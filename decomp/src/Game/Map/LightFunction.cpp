@@ -11,6 +11,17 @@
 #include <cstring>
 #include "port/hot_knob.h"
 #include "port/light_memo.h"
+#ifdef TARGET_PC
+#include "Game/System/PortDrawPipe.hpp"
+// GXV_DRAWPIPE (dpengine; Game/System/PortDrawPipe.hpp): the camera's view matrix for a light load. In a pass drawn from a frozen
+// frame it is the one the hand-over saw (the pass may be drawn beside the next update, which moves the camera); else the camera's.
+// The same TPos3f arithmetic either way, so a light's position is the same bytes.
+static inline const TPos3f& portLightViewMtx() {
+    return gPortPipeScene != nullptr ? gPortPipeScene->mView : MR::getCameraViewMtx();
+}
+#else
+#define portLightViewMtx() MR::getCameraViewMtx()
+#endif
 
 const GXLightID cLightDataIDs[8] = {GX_LIGHT0, GX_LIGHT1, GX_LIGHT2, GX_LIGHT3, GX_LIGHT4, GX_LIGHT5, GX_LIGHT6, GX_LIGHT7};
 
@@ -162,10 +173,40 @@ void LightFunction::blendActorLightInfo(ActorLightInfo* pResult, const ActorLigh
     pResult->mAlpha2 = MR::getInterpolateValue(rate, rFrom.mAlpha2, rTo.mAlpha2);
 }
 
+#ifdef TARGET_PC
+// GXV_PIPE25 (hazard32, 13 Nov): the game never sets the DIRECTION of its diffuse lights and of the point light (loadLightDiffuse,
+// loadPointLightInfo below: position, attenuation and colour only), so the three direction words GXLoadLightObjImm sends are whatever
+// lay in the caller's stack at the GXLightObj. They are never used (angle attenuation 1, 0, 0: the direction's term is multiplied
+// by 0), but they are bytes of the stream that depend on the THREAD that runs the load: the game thread's stack holds the leftovers
+// of the turn's matrix arithmetic there, the draw helper's holds its own (0xCC.. on a stack not yet written that deep). That was
+// every GXV_PIPE25=2 mismatch of run p31c-m2: byte 195 of a pass = the direction of the third light of the pass's first light
+// set-up (3 x 69 bytes: 138 + 5 header + 12 zero words + colour 4 + a 12 + k 12 + position 12 = 195).
+//   With GXV_PIPE25 on the direction is set to a constant, the one LightFunction::initLightRegisterAll gives every light at start-up,
+// on both threads: the pass is the same bytes wherever it runs. With GXV_PIPE25 off nothing changes (the stack's bytes, as ever).
+extern "C" int port_pipe25_active(void);  // (platform/src/port/perf.cpp)
+static u32 sPortLightDirSet = 0;
+static inline void portLightDirFixed(GXLightObj* pObj) {
+    if (port_pipe25_active() != 0) {  // (a hot knob: read once, perf.cpp)
+        GXInitLightDir(pObj, 0.0f, -1.0f, 0.0f);
+        ++sPortLightDirSet;  // (a census counter: the game thread's and the helper's loads never run at the same time in mode 2;
+                             // in mode 1 a lost increment is a count off by one)
+    }
+}
+// (the "pipe25: light directions" line, SceneFunction.cpp: how many since the last call)
+extern "C" u32 port_light_dir_fixed_take(void) {
+    const u32 n = sPortLightDirSet;
+    sPortLightDirSet = 0;
+    return n;
+}
+#else
+#define portLightDirFixed(pObj) ((void)0)
+#endif
+
 namespace {
     void loadLightDiffuse(GXColor color, const TVec3f& rPos, GXLightID lightID) NO_INLINE {
         GXLightObj lightObj;
 
+        portLightDirFixed(&lightObj);
         GXInitLightPos(&lightObj, rPos.x, rPos.y, rPos.z);
         GXInitLightAttn(&lightObj, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
@@ -196,7 +237,7 @@ namespace {
             world.y += head[1 * 4 + i] * axis[i];
             world.z += head[2 * 4 + i] * axis[i];
         }
-        MR::getCameraViewMtx().mult(world, *pViewPos);
+        portLightViewMtx().mult(world, *pViewPos);
         return true;
     }
 #endif
@@ -214,7 +255,7 @@ namespace {
             ::loadCameraLight(rInfo, lightID);
         } else {
             TVec3f v14(rInfo.mPos);
-            MR::getCameraViewMtx().mult(v14, v14);
+            portLightViewMtx().mult(v14, v14);
             ::loadLightDiffuse(GXColor(rInfo.mColor), v14, lightID);
         }
     }
@@ -254,7 +295,7 @@ namespace {
             port::LightMemoDrop(sActorLightMemo);
             return false;  // (the headset moves the camera lights: not memoised)
         }
-        const Mtx* view = MR::getCameraViewMtx().toCMtx();
+        const Mtx* view = portLightViewMtx().toCMtx();
         *pSame = port::LightMemoSame(sActorLightMemo, __PortGXLightGen, pInfo, sizeof(ActorLightInfo), *view, sizeof(Mtx));
         return true;
     }
@@ -343,8 +384,9 @@ void LightFunction::loadLightInfoCoin(const LightInfoCoin* pInfo) {
 
 void LightFunction::loadPointLightInfo(const PointLightInfo* pInfo) {
     TVec3f v7(pInfo->mPos);
-    MR::getCameraViewMtx().mult(v7, v7);
+    portLightViewMtx().mult(v7, v7);
     GXLightObj obj;
+    portLightDirFixed(&obj);  // (GXV_PIPE25: the direction is never set either; see loadLightDiffuse)
     GXInitLightPos(&obj, v7.x, v7.y, v7.z);
     GXInitLightDistAttn(&obj, pInfo->mRefDistance, pInfo->mRefBrightness, pInfo->mDistAttnFn);
     GXInitLightSpot(&obj, 0.0, GX_SP_OFF);

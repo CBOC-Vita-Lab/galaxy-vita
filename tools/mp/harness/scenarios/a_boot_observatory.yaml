@@ -1,0 +1,21 @@
+# BASELINE (runs now). Boot -> title -> file select -> file 2 -> the Comet Observatory, one process, headless.
+# The Observatory is recognised by the player's start position there (PETARI_POSLOG=1: once a second while Mario exists).
+name: a_boot_observatory
+description: boot to the file select and load file 2 into the Observatory; screenshots; save guard
+seconds: 110
+env: {PETARI_GAME_CLOCK: 1, PETARI_POSLOG: 1, PETARI_SHOT_MS: 5000}
+processes:
+  - name: game
+    input: "@file2_observatory"
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|cannot alloc memory/'
+  - 'expect * /boot: the title screen has appeared/ within 45s'
+  - 'expect * /\[mp\] ui: system ready/ within 10s'
+  - 'expect * /port: player at 2825\.0 787\.3 -3750\.0 \(on the ground\)/ within 100s'
+  - 'absent * /\[mp\] (session|hosting|joined|flow session start)/'
+  - 'shots * >= 15'
+  - '?metric * rss_mib <= 1200'

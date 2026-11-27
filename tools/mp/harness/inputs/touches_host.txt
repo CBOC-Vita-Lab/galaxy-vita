@@ -1,0 +1,21 @@
+# Title -> entry screen -> Single Player -> file select -> file 2 (Yoshi icon, 50 stars) -> "Play This File" -> the Observatory
+# (Comet Observatory, AstroGalaxy). Times are seconds of the run; use with PETARI_GAME_CLOCK=1 (game frames / 59.94), found 8 Nov 2026
+# on the mp-int desktop build. The title ("Press both A and B") shows at ~22 s; the file select at ~44 s; file info at ~58 s; the
+# Observatory ~10 s after Play. File 1 (Mario, 0 stars) would start the prologue (storybook), not the Observatory: use file 2.
+# entry (9 Nov): the entry screen (Single Player / Multiplayer) comes up ~2 s after A+B; its cursor starts on Single Player (a fresh
+# mp.cfg; the last choice otherwise): one A at 35 s, inside the time the title already took to reach the files (later times unchanged).
+30-30.5:A|B
+35-35.2:A                  # entry screen: Single Player
+50-58:PX=0.25|PY=0.3       # pointer on file 2 (screen 400,310 of 640x456; pointer -1..1, y down)
+53-53.2:A
+66-74:PX=0.52|PY=0.78      # pointer on "Play This File" (485,405)
+69-69.2:A
+# touches: a jump now and then keeps the host from going 'away' (30 s without input)
+100-100.1:A
+120-120.1:A
+140-140.1:A
+160-160.1:A
+180-180.1:A
+200-200.1:A
+220-220.1:A
+240-240.1:A

@@ -1,0 +1,14 @@
+# env-hrw36-bowser-5-stills.txt (warp36, 14 Nov 2026): the candidate with stills (see obs-5): 12 pairs to ux0:data/smg/hrw31 (GXV_HRW_WARP_DIR, the folder of the earlier stills); the 'hrw: warp stills' line's B against B0 is the plane's gain in numbers. Bowser's Star Reactor (KoopaBattleVs1Galaxy:1). Run the first long path and the stairs without stopping, through the coins, 2-3 minutes. Look at the path's texture and the coins near him while he runs. Keep running while pairs 300-800 pass.
+# Performance mode (its table sets GXV_HRW=5, depth mode 4 and the rest); needs a build with commit 'warp36:'. Judge on the 'hrw: warp36' line (every 5 s): ground parallax mean / max / bins, 'pairs on his ground plane', 'shaped boxes'; beside it 'fps:', 'even:', 'hrw: warp' (warp pass ms, fell back by reason).
+GXV_CHARAA_AUTO=0
+GXV_SHADERPACK=1
+GXV_PICTURE_MODE=60
+PETARI_STAGE=KoopaBattleVs1Galaxy:1
+PETARI_STAGE_HOLD=0
+GXV_HRW36_PLANE=1
+GXV_HRW36_BOX=1
+GXV_HRW_WARP_DUMP=12
+GXV_HRW_WARP_TRUTH=1
+GXV_HRW_WARP_DUMP_FROM=300
+GXV_HRW_WARP_EVERY=40
+GXV_HRW_WARP_DUMP_MIN_PX=0

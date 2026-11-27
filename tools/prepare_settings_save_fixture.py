@@ -4,6 +4,11 @@ import pathlib
 import sys
 
 
+def line(source, start_text):   # (setfix31b: one whole line, e.g. a declaration)
+    start = source.index(start_text)
+    return source[start:source.index("\n", start)]
+
+
 def block(source, signature):
     start = source.index(signature)
     opening = source.index("{", start)
@@ -34,6 +39,7 @@ parts = [
     + block(functions, "bool isPrepareResetSaveDataHandleSequence()") + "\n}\n"
 )
 (out / "settings_save_nand_actual.inc").write_text("\n".join([
+    line(nand, "static std::atomic<unsigned> sNandProgress"), block(nand, "static s32 noteNandProgress("),   # (setfix31b: the restart wait's counters)
     block(nand, "s32 NANDWrite("), block(nand, "s32 NANDClose("),
     block(manager, "void* NANDManagerThread::run()"),
     block(manager, "void NANDManagerThread::executeWriteSequence("),

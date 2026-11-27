@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "scope": "Galaxy 3.0 multiplayer: pinned network dependencies of the vendored net/ stack (from Strikers Charged 1.3 dependencies/lock.json)",
+  "network_dependencies": [
+    {
+      "name": "Mbed-TLS_mbedtls",
+      "url": "https://github.com/Mbed-TLS/mbedtls.git",
+      "commit": "82e69999f91126589a28b70dd75b69fbcabe2711",
+      "tag": "mbedtls-3.6.8",
+      "license": "Apache-2.0 OR GPL-2.0-or-later",
+      "recipe": "net/deps/Makefile.mbedtls",
+      "profile": "net/deps/mbedtls/np_user_config.h",
+      "patches": [],
+      "tarball": {
+        "url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.8/mbedtls-3.6.8.tar.bz2",
+        "sha256": "bc54b818e87f49c0b3281dd85d24adaede0e63b4e822e3fbd49c005a38b9595b",
+        "use": "reference only: the build fetches the pinned commit through git; this is the release tarball whose contents were compared with it"
+      },
+      "note": "TLS for the HTTPS client (net/src/np_https*), built into a private prefix by tools/mp/build-mbedtls.py from the pinned, unmodified checkout. The 3.6.7 one-file TLS 1.3 transform-cleanup backport (afa648aa) is retired: 3.6.8 contains it upstream (CVE-2026-93843). Recipe vendored from Strikers Charged 1.3 dependencies/ (see net/GALAXY-CHANGES.txt)."
+    }
+  ]
+}

@@ -53,6 +53,12 @@ public:
     /* 0x28 */ const bool* _28;
     /* 0x2C */ s16 mViewGroupID;
     /* 0x30 */ ActorLightCtrl* mActorLightCtrl;
+#ifdef TARGET_PC
+    u8 mPortCapLog = 0;  // (GXV_CAPREAD, water23: 1 once its models were checked; 2 one has IndDummy materials; 3 its first line written)
+    void PortLodGuard(int& level, int shown, f32 distance, f32 middle, f32 low, f32 origMiddle, f32 origLow, f32 hystPct);  // (popin31, LodCtrl.cpp)
+    u16 mPbFloorAt = 0;      // (popin31, GXV_PB_MINPX: the turn the High model's extent was measured; port/popin_site.h CachedExtent)
+    f32 mPbFloorExt = -1.0f; // (... the extent, -1 = never)
+#endif
 };
 
 class LodCtrlFunction {

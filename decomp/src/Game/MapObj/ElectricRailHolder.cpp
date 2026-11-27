@@ -2,6 +2,7 @@
 #include "Game/LiveActor/HitSensor.hpp"
 #include "Game/LiveActor/ModelObj.hpp"
 #include "Game/MapObj/ElectricRailMoving.hpp"
+#include "Game/MP/MpGame.hpp"  // MP3: shared world (the rail model is made by the first row of its type)
 #include "Game/Scene/SceneFunction.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
 #include "Game/Util/CameraUtil.hpp"
@@ -184,7 +185,9 @@ void ElectricRailHolder::init(const JMapInfoIter& rIter) {
 
 void ElectricRailHolder::registerRail(const LiveActor* pActor, ElectricRailType railType) {
     if (mRailModels[railType] == nullptr) {
+        const int mpPool = mp_active() ? MpWorldSync::sceneObjBegin() : -1;   // MP3: made by the first row of this type: no row's actor
         mRailModels[railType] = createModel(railType);
+        if (mpPool != -1) MpWorldSync::sceneObjEnd(mpPool);
     }
 
     RailItem* pItem = new RailItem();

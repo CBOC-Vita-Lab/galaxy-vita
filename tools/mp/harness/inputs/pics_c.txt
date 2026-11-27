@@ -1,0 +1,31 @@
+# integ pictures C (13 Nov): ONE console. A character is picked first (mp.cfg exists = there is data), then How to Play -> Safe Copies: two real copies
+# are made through the menu (Make a Copy, Make a Copy to Share), then the list "Bring Back a Copy" with the two copies.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark chars /ui: screen chars/ ~60
+mark gather /ui: screen gather/ ~70
+mark howto /ui: window MP_HOWTO/ ~90
+mark safe /ui: window answer/ ~100
+mark keep /ui: screen keep/ ~110
+mark keeplist /ui: screen keeplist/ ~140
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+6-6.2:A
+chars+6-6.2:A
+gather+10-10.2:B
+gather+16-16.2:C
+howto+6-6.2:A
+howto+12-16:PX=0.38|PY=0.6
+howto+14-14.2:A
+keep+4-4.2:A
+keep+8-8.2:A
+keep+12-12.2:DOWN
+keep+14-14.2:A
+keep+18-18.2:A
+keep+22-22.2:DOWN
+keep+24-24.2:DOWN
+keep+26-26.2:A
+keeplist+6-6.2:DOWN
+keeplist+12-12.2:B

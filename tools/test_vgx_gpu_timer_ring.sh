@@ -17,6 +17,8 @@ assert source.count('#include "shared.h"') == 1
 source = source.replace('#include "shared.h"', '')
 if 'void vglRtSetRingGuard(' in source:
     source = '#define FIXTURE_HAS_RING_GUARD\n' + source
+if 'uint32_t vglRtGpuFrameSize(' in source:
+    source = '#define FIXTURE_HAS_FRAME_SIZE\n' + source
 pathlib.Path(sys.argv[2], 'rt_gpu_fixture.inc').write_text(source)
 PY
 "${CC:-clang}" -std=c11 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \

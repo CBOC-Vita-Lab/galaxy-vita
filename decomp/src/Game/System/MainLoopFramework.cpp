@@ -13,6 +13,9 @@
 #include <runtime.h>
 
 #if defined(TARGET_PC)
+#include <atomic>
+#include "port/drawdone_other.h"
+#include "port/turn_prof.h"  // (GXV_ENDWAIT_LOG: port_endwait_begin / _end)
 // GXV_DRAWDONE_DEFER (platform/include/port/drawdone_defer.h, platform/src/port/perf.cpp): the end-of-turn wait for the front end may be made later.
 extern "C" int port_gx_drawdone_defer_mode(void);
 extern "C" void port_gx_drawdone_armed(void);
@@ -20,6 +23,8 @@ extern "C" int port_gx_drawdone_must_wait(int point);
 extern "C" void port_gx_drawdone_waited(int64_t ns);
 extern "C" void port_gx_drawdone_settle(int point);
 extern "C" void GXWaitDrawDone(void);
+// GXV_DRAWDONE_OTHER (port/drawdone_other.h): the thread that arms the deferred wait (the game thread), set at its first arm.
+static OSThread* sDrawDoneOwner = nullptr;
 #endif
 
 MainLoopFramework* MainLoopFramework::sManager;
@@ -123,6 +128,13 @@ void MainLoopFramework::prepareCopyDisp() {
     }
 }
 #pragma pop
+
+#ifdef TARGET_PC
+// GXV_HRW (hrw27): the draw-done a partial draw owes the GX FIFO, as a picture's end owes it (the writes after it wait while the front end decodes it; vgx_galaxy.cpp port_hrw_fresh_draw).
+extern "C" void port_hrw_fresh_finish(void) {
+    ::waitDrawDoneAndSetAlarm();
+}
+#endif
 
 void MainLoopFramework::drawendXfb_single() {
     JUTXfb* pXfbMgr = JUTXfb::sManager;
@@ -497,6 +509,7 @@ namespace {
             // the next turn's update() or calcAnim() (or before the next GXSetDrawDone, which settles an older one itself). The abort
             // alarm below is an hour long on the port and is not used for the deferred wait.
             PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_DRAW_DONE);
+            sDrawDoneOwner = OSGetCurrentThread();  // (GXV_DRAWDONE_OTHER: whose wait this is)
             GXSetDrawDone();
             port_gx_drawdone_armed();
             return;
@@ -562,11 +575,51 @@ extern "C" void port_gx_flush_scope(int on) { sFlushScope = on; }
 extern "C" int port_gx_in_flush_scope(void) { return sFlushScope; }
 extern "C" int port_gx_drawdone_defer_mode(void);
 extern "C" int port_gx_drawdone_pending(void);
+extern "C" int port_gx_drawdone_would_wait(int point);
+extern "C" void port_gx_wait_finish_other(void);  // (GXMisc.c)
 extern "C" void port_log_summary(const char* fmt, ...);
 extern "C" void port_gx_view_write_from(void* from);
+// GXV_DRAWDONE_OTHER (port/drawdone_other.h, default 1): the caller is a guest thread other than the one whose deferred wait is armed
+// (the loading thread building a stage). Such a thread never takes the game thread's wait (Deferral::MustWait); it waits for the
+// outstanding finish by itself (port_gx_wait_finish_other), which the game thread's next GXSetDrawDone cannot hide from it.
+static int sDrawDoneOther = -1;
+static bool DrawDoneOtherThread() {
+    if (sDrawDoneOther < 0) sDrawDoneOther = port_drawdone_other_parse(getenv("GXV_DRAWDONE_OTHER"));  // (guest threads run one at a time)
+    return sDrawDoneOther != 0 && sDrawDoneOwner != nullptr && OSGetCurrentThread() != sDrawDoneOwner;
+}
+static unsigned sOtherWaits = 0;
+// (cook24, port/load_split.h) how long the loading thread (any thread but the game thread's) waited for the front end's finish, in all
+static std::atomic< uint64_t > sOtherWaitNs{0}, sOtherWaitCount{0};
+extern "C" void port_load_split_finish_waits(uint64_t* count, uint64_t* ns) {
+    *count = sOtherWaitCount.load(std::memory_order_relaxed);
+    *ns = sOtherWaitNs.load(std::memory_order_relaxed);
+}
+static void OtherThreadWait(void* from) {
+    ++sOtherWaits;
+    const int64_t lsT0 = port_host_time_ns();
+    if (sOtherWaits <= 4 || (sOtherWaits & 0x3FF) == 0) {
+        port_log_summary("drawdone-defer: another thread (%p, priority %d; the loading thread) waits for the front end's finish on its own: "
+                         "%u such waits so far (from %p)", (void*)OSGetCurrentThread(), (int)OSGetThreadPriority(OSGetCurrentThread()),
+                         sOtherWaits, from);
+    }
+    port_gx_wait_finish_other();
+    sOtherWaitCount.fetch_add(1, std::memory_order_relaxed);
+    sOtherWaitNs.fetch_add(static_cast< uint64_t >(port_host_time_ns() - lsT0), std::memory_order_relaxed);
+}
+// GXV_DRAWPIPE=4 (dpengine; SceneFunction.cpp): a view matrix or list written outside the flushes while the draw thread still
+// draws the turn's picture: the draw is joined first (the draw thread reads the halves and lists the write would touch), and
+// the next turns are serial. Nothing when no draw is out, and nothing on the draw thread itself.
+extern "C" void port_drawpipe_game_enter(void);
 extern "C" void port_gx_view_write(void) { port_gx_view_write_from(__builtin_return_address(0)); }
 extern "C" void port_gx_view_write_from(void* from) {
+    if (!sFlushScope) {
+        port_drawpipe_game_enter();
+    }
     if (sFlushScope || port_gx_drawdone_defer_mode() < 3 || !port_gx_drawdone_pending()) {
+        return;
+    }
+    if (DrawDoneOtherThread()) {
+        OtherThreadWait(from);
         return;
     }
     ++sOutsideWaits;
@@ -580,13 +633,19 @@ extern "C" void port_gx_view_write_from(void* from) {
     }
 }
 extern "C" void port_gx_drawdone_settle(int point) {
+    if (port_gx_drawdone_would_wait(point) && DrawDoneOtherThread()) {
+        OtherThreadWait(__builtin_return_address(0));  // (ModelManager::updateDL on the loading thread, modes 1-3)
+        return;
+    }
     if (!port_gx_drawdone_must_wait(point)) {
         return;
     }
     const int64_t begin = port_host_time_ns();
+    const int64_t endWaitT0 = port_endwait_begin();  // (GXV_ENDWAIT_LOG: 0 when off; a deferred wait is reported with where = point + 1)
     GXWaitDrawDone();
     PORT_GAME_PROGRESS(PORT_GAME_PHASE_FRAME_RESET_SYNC);
     DrawSyncManager::resetIfAborted();
     port_gx_drawdone_waited(port_host_time_ns() - begin);
+    if (endWaitT0) port_endwait_end(endWaitT0, point + 1);
 }
 #endif

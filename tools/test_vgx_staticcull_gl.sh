@@ -15,17 +15,17 @@ out=${1:-$(mktemp -d)}
 mkdir -p "$out"
 src="$root/platform/vgx/src"
 khr=${KHR_INCLUDE:-/work/khr/include}
-sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_shadergen vgx_texcache vgx_texdecode vgx_stats vgx_backend_gl vgx_autoq)
+sources=(vgx_state vgx_draw vgx_fesplit vgx_dlcache vgx_guestmem vgx_bpsync vgx_shadergen vgx_texcache vgx_texdecode vgx_texcomp vgx_stats vgx_backend_gl vgx_autoq)
 args=()
 for unit in "${sources[@]}"; do args+=("$src/$unit.cpp"); done
 if [[ "${GXV_STATICCULL_SKIP_BUILD:-0}" != 1 ]]; then
-  nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/vgx/third_party" -I"$khr" \
+  nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$src" -I"$root/platform/vgx/third_party" -I"$root/platform/include" -I"$khr" \
     "$root/tests/vgx_staticcull_gl.cpp" "${args[@]}" "$root/platform/vgx/host/vgx_host_egl.cpp" \
     -lEGL -lGLESv2 -pthread -o "$out/vgx_staticcull_gl"
 fi
 run() { # <tag> env assignments...
   local tag=$1; shift
-  env -u GXV_STATICCULL -u GXV_DRAWREPLAY -u GXV_RIGIDMERGE -u GXV_SPLIT -u GXV_RSCACHE -u GXV_SOFTXFORM -u GXV_ABSIDX -u GXV_CHARAA \
+  env -u GXV_STATICCULL -u GXV_STATICCULL_PAL -u GXV_DYNCULL -u GXV_DLWELD -u GXV_DLVCACHE -u GXV_DLVCACHE_SIZE -u GXV_DRAWREPLAY -u GXV_RIGIDMERGE -u GXV_SPLIT -u GXV_RSCACHE -u GXV_SOFTXFORM -u GXV_ABSIDX -u GXV_CHARAA \
     LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_EFBSWAP=0 \
     "$@" "$out/vgx_staticcull_gl" 30 2>&1 | grep -v '^libunwind' > "$out/$tag.log" || true
   grep -q -E "FAIL|MISMATCH" "$out/$tag.log" && { echo "FAILED: $tag"; grep -E "FAIL|MISMATCH" "$out/$tag.log" | head -5; exit 1; }
@@ -33,6 +33,9 @@ run() { # <tag> env assignments...
   grep -E '^picture' "$out/$tag.log" | sed 's/.*hash //' > "$out/$tag.hash"
   grep -E '^records ' "$out/$tag.log" | sed 's/records //' > "$out/$tag.records"
   grep -E '^culled ' "$out/$tag.log" | sed 's/culled //' > "$out/$tag.culled"
+  grep -E '^palculled ' "$out/$tag.log" | sed 's/palculled //' > "$out/$tag.palculled"
+  grep -E '^dynculled ' "$out/$tag.log" | sed 's/dynculled //' > "$out/$tag.dynculled"
+  grep -E '^vcachetook ' "$out/$tag.log" | sed 's/vcachetook //' > "$out/$tag.vcache"
 }
 n=0
 for soft in 128 0; do
@@ -61,6 +64,60 @@ for abs in 0 1; do
     run "abs$abs-cha$cha-on" GXV_ABSIDX=$abs GXV_CHARAA=$cha GXV_STATICCULL=1
   done
 done
+# (ta23) GXV_STATICCULL_PAL (runs with a matrix index per vertex: the two-joint shapes) and GXV_DYNCULL (dynamic draws: the 24-vertex
+# CPU-transformed shapes; with GXV_SOFTXFORM=0 those are static buffers too, and with GXV_SPLIT=1/2 their vertices are copied by the
+# finishing thread, so GXV_DYNCULL leaves them alone: counted as "not decoded yet"), with and without the rigid cull
+for soft in 128 0; do
+  for split in 0 1 2; do
+    for rm in 0 1; do
+      base=(GXV_RIGIDMERGE=$rm GXV_SOFTXFORM=$soft GXV_SPLIT=$split GXV_RSCACHE=1)
+      run "t23-soft$soft-split$split-rm$rm-pal" "${base[@]}" GXV_STATICCULL_PAL=1
+      run "t23-soft$soft-split$split-rm$rm-dyn" "${base[@]}" GXV_DYNCULL=1
+      run "t23-soft$soft-split$split-rm$rm-both" "${base[@]}" GXV_STATICCULL_PAL=1 GXV_DYNCULL=4
+      run "t23-soft$soft-split$split-rm$rm-norigid" "${base[@]}" GXV_STATICCULL=0 GXV_STATICCULL_PAL=1 GXV_DYNCULL=1
+    done
+  done
+done
+# (ta23) GXV_DLVCACHE (with GXV_DLWELD=1): the folded strip grids; the depth-writing ones are drawn in the reordered block, the others
+# (depth test without writes, no test) in the list's order; every picture the same
+for abs in 0 1; do
+  for split in 0 1 2; do
+    for vc in 1 2; do
+      for size in 16 8; do
+        run "t23-vc$vc-s$size-abs$abs-split$split" GXV_ABSIDX=$abs GXV_SPLIT=$split GXV_DLWELD=1 GXV_DLVCACHE=$vc GXV_DLVCACHE_SIZE=$size \
+          GXV_STATICCULL_PAL=1 GXV_DYNCULL=1
+      done
+    done
+  done
+  run "t23-weld-abs$abs" GXV_ABSIDX=$abs GXV_DLWELD=1
+done
+for f in "$out"/t23-vc*-s16-*.vcache; do [[ "$(cat "$f")" -gt 0 ]] || { echo "FAIL: $(basename "$f" .vcache): no run drawn in the vertex-cache order"; exit 1; }; done
+for f in "$out"/*.vcache; do
+  case $(basename "$f") in t23-vc*) ;; *) [[ "$(cat "$f")" == 0 ]] || { echo "FAIL: $(basename "$f" .vcache): reordered with GXV_DLVCACHE off"; exit 1; } ;; esac
+done
+echo "ta23: GXV_DLVCACHE=1 drew $(cat "$out/t23-vc1-s16-abs0-split0.vcache") runs reordered, =2 $(cat "$out/t23-vc2-s16-abs0-split0.vcache")"
+for rp in 0 2; do
+  run "t23-replay$rp" GXV_DRAWREPLAY=$rp GXV_STATICCULL_PAL=1 GXV_DYNCULL=1
+done
+for f in "$out"/*.palculled; do
+  t=$(basename "$f" .palculled)
+  case $t in
+    t23-*-norigid) [[ "$(cat "$f")" == 0 ]] || { echo "FAIL: $t: GXV_STATICCULL=0 must turn GXV_STATICCULL_PAL off too"; exit 1; } ;;
+    t23-vc*|t23-weld*) ;;
+    t23-*-pal|t23-*-both|t23-replay*) [[ "$(cat "$f")" -gt 0 ]] || { echo "FAIL: $t: no per-vertex-matrix run culled"; exit 1; } ;;
+    *) [[ "$(cat "$f")" == 0 ]] || { echo "FAIL: $t: GXV_STATICCULL_PAL culled with the switch off"; exit 1; } ;;
+  esac
+done
+for f in "$out"/*.dynculled; do
+  t=$(basename "$f" .dynculled)
+  case $t in
+    t23-soft128-split0-*-dyn|t23-soft128-split0-*-both|t23-soft128-split0-*-norigid|t23-replay*)
+      [[ "$(cat "$f")" -gt 0 ]] || { echo "FAIL: $t: no dynamic draw culled"; exit 1; } ;;
+    t23-*) ;;
+    *) [[ "$(cat "$f")" == 0 ]] || { echo "FAIL: $t: GXV_DYNCULL culled with the switch off"; exit 1; } ;;
+  esac
+done
+echo "ta23: per-vertex-matrix runs culled $(cat "$out/t23-soft128-split0-rm1-pal.palculled"), dynamic draws culled $(cat "$out/t23-soft128-split0-rm1-dyn.dynculled") (GXV_SPLIT=1: $(cat "$out/t23-soft128-split1-rm1-dyn.dynculled"))"
 ref=$(cat "$out/soft128-split0-rs1-rm1-off.hash")
 n=0
 for f in "$out"/*.hash; do
@@ -73,9 +130,11 @@ if [[ -n "${REF_ROOT:-}" ]]; then
   rargs=()
   for unit in "${sources[@]}"; do rargs+=("$REF_ROOT/platform/vgx/src/$unit.cpp"); done
   grep -q StaticCullCounters "$REF_ROOT/platform/vgx/src/vgx_state.h" || rargs+=("$out/ref_stub.cpp")
-  nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g -I"$REF_ROOT/platform/vgx/src" -I"$REF_ROOT/platform/vgx/third_party" -I"$khr" \
+  rdef=()
+  grep -q CullCounters23 "$REF_ROOT/platform/vgx/src/vgx_state.h" || rdef+=(-DVGX_NO_CULL23)
+  [[ -x "$out/vgx_staticcull_gl_ref" && "${GXV_STATICCULL_SKIP_BUILD:-0}" == 1 ]] || nice -n 10 "${CXX:-g++}" -std=c++20 -O1 -g "${rdef[@]}" -I"$REF_ROOT/platform/vgx/src" -I"$REF_ROOT/platform/vgx/third_party" -I"$khr" \
     "$root/tests/vgx_staticcull_gl.cpp" "${rargs[@]}" "$REF_ROOT/platform/vgx/host/vgx_host_egl.cpp" -lEGL -lGLESv2 -pthread -o "$out/vgx_staticcull_gl_ref"
-  env LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_EFBSWAP=0 \
+  env LIBGL_ALWAYS_SOFTWARE=1 LP_NUM_THREADS=1 GXV_LOG=0 GXV_AUTOQ=0 GXV_FXHALF=0 GXV_PASSHALF=0 GXV_CROWD=0 GXV_EFBSWAP=0 GXV_STATICCULL=0 \
     "$out/vgx_staticcull_gl_ref" 30 2>&1 | grep -v '^libunwind' > "$out/ref.log" || true
   rh=$(grep -E '^picture' "$out/ref.log" | sed 's/.*hash //')
   [[ "$rh" == "$ref" ]] || { echo "FAIL: the reference tree $REF_ROOT draws $rh, this one $ref"; exit 1; }

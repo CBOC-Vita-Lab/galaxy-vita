@@ -1,0 +1,16 @@
+name: mp_entry_cycle
+description: "entry -> Multiplayer -> Back -> Single Player (file heads) -> Back -> entry -> Multiplayer again: no file heads behind the menus (look at the screenshots)"
+seconds: 130
+requires: {strings: ["entry: chose %s"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: game
+    input: "@entry_cycle"
+    env: {}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect * /\[mp\] entry: chose multiplayer/'
+  - 'expect * /\[mp\] entry: chose single/'

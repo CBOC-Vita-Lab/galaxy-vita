@@ -1,0 +1,5 @@
+# env-hrw36-obs-0-control.txt (warp36, 14 Nov 2026): the control: Performance defaults, no warp36 key. The Comet Observatory (the hub: no stage line; load the save and walk out). Stand still, then jump on the spot 20 times, then run-and-jump across the deck, 2 minutes in all. Look at the ground round his feet and his shadow on each jump.
+# Performance mode (its table sets GXV_HRW=5, depth mode 4 and the rest); needs a build with commit 'warp36:'. Judge on the 'hrw: warp36' line (every 5 s): ground parallax mean / max / bins, 'pairs on his ground plane', 'shaped boxes'; beside it 'fps:', 'even:', 'hrw: warp' (warp pass ms, fell back by reason).
+GXV_CHARAA_AUTO=0
+GXV_SHADERPACK=1
+GXV_PICTURE_MODE=60

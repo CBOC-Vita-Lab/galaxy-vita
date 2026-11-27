@@ -1,0 +1,1 @@
+{"action": "batch", "steps": [{"action": "close"}, {"sleep": 4}, {"action": "ls", "path": "ux0:data/smg/shadercache"}, {"action": "pull_tree", "path": "ux0:data/smg/shadercache", "max_mb": 64}, {"action": "ls", "path": "ux0:data/smg"}]}

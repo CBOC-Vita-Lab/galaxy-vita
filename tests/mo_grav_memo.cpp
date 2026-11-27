@@ -29,6 +29,13 @@ extern "C" int port_move_sys_flag;
 int port_move_sys_flag = 0;
 extern "C" void port_move_sys_begin(int) {}
 extern "C" void port_move_sys_end(int) {}
+// (logic23: GXV_LOGIC_PROF's hooks, off here; GXV_GRAV_GRID is off unless set, and its log line reads the clock)
+extern "C" int port_logic_prof_flag;
+int port_logic_prof_flag = 0;
+extern "C" void port_logic_prof_sys_begin(int) {}
+extern "C" void port_logic_prof_sys_end(int) {}
+extern "C" void port_logic_prof_count(int, unsigned) {}
+extern "C" int64_t port_host_time_ns(void) { return 0; }
 static unsigned sMismatchLines, sLastMismatches;
 extern "C" void port_log_summary(const char* fmt, ...) {
     char buf[512];

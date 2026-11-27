@@ -1,5 +1,6 @@
 #include "vgx_workload.h"
 #include <cstdarg>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,7 +11,8 @@
 static thread_local int64_t Wall = 1000000000, Cpu = 1000;
 static std::atomic<unsigned> WallReads{0}, CpuReads{0};
 static std::string Log;
-extern "C" int64_t port_host_time_ns() { ++WallReads; return Wall; }
+static bool ClockChangesErrno = false;
+extern "C" int64_t port_host_time_ns() { ++WallReads; if (ClockChangesErrno) errno = EDOM; return Wall; }
 extern "C" int64_t port_thread_cpu_us() { ++CpuReads; return Cpu; }
 extern "C" void port_log_summary(const char* fmt, ...) {
     char line[2048]; va_list ap; va_start(ap, fmt); std::vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
@@ -20,12 +22,68 @@ static void require(bool yes, const char* why) { if (!yes) { std::fprintf(stderr
 using namespace vgx::workload;
 static void spend(int64_t wallUs, int64_t cpuUs) { Wall += wallUs * 1000; Cpu += cpuUs; }
 static void off() {
+    errno = E2BIG;
+    require(!Enabled() && errno == E2BIG, "disabled control lookup preserves errno");
+    BeginViewEntry(); EndViewEntry();
     BeginTurn(); FinishWait(true); { Scope s(Dsp); spend(100, 60); } FinishWait(false); EndTurn();
+    for (unsigned lane = 0; lane < LaneCount; ++lane) { Scope s(static_cast<Lane>(lane)); }
     { Scope s(FrontSample, SampleProcess()); } FrontPicture(); CandidateRun(800); Picture(4, 3, 1, 2, 6, 2, 3, 1); Report();
     require(WallReads == 0 && CpuReads == 0 && Log.empty(), "default off never queries clocks or logs");
     require(Counters[Turn].Read().calls == 0 && Pictures.pictures == 0, "default off never records observations");
     setenv("GXV_WORKLOAD_PROBE", "1", 1);
     require(!Enabled(), "environment switch is read once, cannot enable after initialization");
+}
+static void view() {
+    Report();
+    const unsigned lane = GameViewEntry;
+    const unsigned initialWall = WallReads, initialCpu = CpuReads;
+    BeginViewEntry(); EndViewEntry();
+    require(WallReads == initialWall && CpuReads == initialCpu, "orphan view hooks outside a turn read no clocks");
+    BeginTurn();
+    const unsigned cpu = CpuReads;
+    ClockChangesErrno = true; errno = E2BIG;
+    BeginViewEntry(); require(errno == E2BIG, "view begin preserves errno");
+    spend(400, 300);
+    EndViewEntry(); require(errno == E2BIG, "view end preserves errno");
+    ClockChangesErrno = false;
+    require(CpuReads == cpu, "view span never queries the fine-grained CPU counter");
+    const Totals t = Counters[lane].Read();
+    require(t.calls == 1 && t.wallSamples == 1 && t.wallUs == 400 && t.cpuSamples == 0 && t.matchedWallUs == 0 && t.cpuUs == 0,
+            "view span publishes wall-only observations");
+    const unsigned wall = WallReads;
+    EndViewEntry();
+    require(WallReads == wall, "orphan view end cannot duplicate a sample or query a clock");
+    BeginViewEntry();
+    std::thread foreign([] { EndViewEntry(); }); foreign.join();
+    spend(100, 10); EndViewEntry();
+    require(Counters[lane].Read().calls == 2 && Counters[lane].Read().wallUs == 500, "foreign end cannot consume another thread's paired span");
+    BeginViewEntry(); BeginViewEntry(); EndViewEntry();
+    require(Counters[lane].Read().calls == 2, "ambiguous nested view spans are rejected");
+    BeginViewEntry(); EndViewEntry(); EndViewEntry();
+    require(Counters[lane].Read().calls == 2, "nested rejection remains sticky until the next turn");
+    EndTurn(); BeginTurn();
+    BeginViewEntry(); EndTurn(); BeginTurn(); EndViewEntry();
+    require(Counters[lane].Read().calls == 2, "view spans cannot bridge turn generations");
+    BeginViewEntry(); EndTurn(); EndViewEntry();
+    require(Counters[lane].Read().calls == 2, "view end after its turn is ignored");
+    spend(4999500, 0); Report();
+    require(Log.find("game-view-entry calls=2 wall_samples=2 wall_us=500 cpu_samples=0 matched_wall_us=0 cpu_us=0") != std::string::npos,
+            "view report labels the lane and intentional absence of CPU samples");
+}
+static void backend() {
+    Report();
+    unsigned lane = 0;
+    while (lane < LaneCount && std::strcmp(Names[lane], "backend-execute")) ++lane;
+    require(lane < LaneCount, "report must expose the backend execution lane");
+    { Scope s(static_cast<Lane>(lane)); spend(750, 300); }
+    const Totals t = Counters[lane].Read();
+    require(t.calls == 1 && t.wallSamples == 1 && t.wallUs == 750 && t.cpuSamples == 1 && t.matchedWallUs == 750 && t.cpuUs == 300,
+            "backend scope publishes paired calling-thread CPU and elapsed wall time");
+    require(Counters[Turn].Read().calls == 0 && Counters[FrontFrame].Read().calls == 0,
+            "backend execution cannot be charged to the game or front-end lane");
+    spend(4999250, 0); Report();
+    require(Log.find("backend-execute calls=1 wall_samples=1 wall_us=750 cpu_samples=1 matched_wall_us=750 cpu_us=300") != std::string::npos,
+            "five-second report includes the paired backend scope sample");
 }
 static void timing() {
     BeginTurn();
@@ -108,10 +166,14 @@ int main(int argc, char** argv) {
     if (mode == "off") off();
     else {
         setenv("GXV_WORKLOAD_PROBE", "1", 1);
+        errno = E2BIG;
+        require(Enabled() && errno == E2BIG, "enabled control lookup preserves errno");
         if (mode == "timing") timing();
         else if (mode == "invalid") invalid();
         else if (mode == "concurrent") concurrent();
         else if (mode == "reporting") reporting();
+        else if (mode == "backend") backend();
+        else if (mode == "view") view();
         else if (mode == "sampling") sampling(argc > 2 ? static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10)) : 32);
         else return 2;
     }

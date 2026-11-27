@@ -1,0 +1,25 @@
+# ingame: the in-play presentation (toasts only for what cannot be seen, brief name tags, edge heads, the strip's arrivals, the
+# watch badge, the bubble's button prompt, the life counter's own head). Built on touches_shots: the host (Cosmic Mario) takes both
+# to Good Egg 1; the guest (Toad) joins, says a phrase ("Hello!") and "Be right back", the host walks off (off the guest's screen:
+# the edge head), then the guest falls into a bubble and watches the host.
+name: ingame_shots
+description: in-play presentation after the ingame changes
+shot_size: 960x544
+seconds: 330
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_CHAT, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@file2_observatory+30,150-160:SY=-1,161-170:SX=1|SY=-1,236-240:MINUS|RIGHT,250-250.3:PLUS,255-255.3:MINUS,262-262.3:B,265-265.3:C,270-270.3:A,275-275.3:B,278-278.3:B,281-281.3:B"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3, SMG_MP_TEST_CHAT: "30@1:2"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2, SMG_MP_TEST_CHAT: "6@1:4,14@1:11,40@1:text:See you up top,52@1:text:WWWWWWWWWWWWWWWWWWWWWWWW", SMG_MP_TEST_DIE: "75"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] ui: toast 0x\w+ not shown|ui: toast not shown/'
+  - 'expect guest /\[mp\] bubble on slot=1 /'
+  - 'shots * >= 20'

@@ -1,0 +1,20 @@
+# stage-presets-pace32.txt (pace32, 13 Nov 2026): stage-presets-far30.txt + rate_pin=2 (the stage is held at an even 30 from its load; needs GXV_RATE_AUTO=1) on the three heavy stages. PROPOSAL, not run anywhere.
+# ff_start = the level the stage OPENS at (in place behind the load cover: the governors' fader is Set to it, no walk), chosen so the opening holds 60; from the first settled second the
+# governors give quality back by recover30's rules. Basis per row (tools/far-est.py, EST.txt; [C] = census c93 in play, [P] = proxy shape, no census yet, started one level deeper than the estimate):
+#   Honeyhive    3  [C] no level reaches 60 (best 18.9 ms front end at level 4): the deepest level that stays out of the 25 m floor
+#   Beach Bowl   3  [P] GPU 24.9 ms; no level reaches it, deepest allowed
+#   Freezeflame  3  [P] GPU fill 22.8 ms; far cuts buy 1.4 ms at most, deepest allowed (they cost little: a few far plants)
+#   Dreadnought  3  [C] game 23.2 / GPU 21.9: no level reaches 60; 3 is the deepest outside the floor
+#   Space Junk   3  [P] first level that holds is 3 (16.4 ms GPU); level 4 would be the last resort
+#   Good Egg     2  [C] holds at level 2 (12.8 ms), 5 ms of room; levels 3-4 only add far-plant removal
+@class far30 start=6 floor=6 ceil=6 size=fixed fx=hold edge=off ff=1
+
+* class=far30 ff_start=0
+HoneyBeeKingdomGalaxy class=far30 ff_start=3 rate_pin=2
+HoneyBeeKingdomGalaxy:1 class=far30 ff_start=3 rate_pin=2
+HoneyBeeKingdomGalaxy:2 class=far30 ff_start=3 rate_pin=2
+HeavenlyBeachGalaxy class=far30 ff_start=3 rate_pin=2
+IceVolcanoGalaxy class=far30 ff_start=3
+CannonFleetGalaxy class=far30 ff_start=3 rate_pin=2
+StarDustGalaxy class=far30 ff_start=3
+EggStarGalaxy class=far30 ff_start=2

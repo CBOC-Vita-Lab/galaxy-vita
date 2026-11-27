@@ -1,3 +1,7 @@
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include <cstdlib>
+#endif
 #include "Game/Animation/BckCtrl.hpp"
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/AudioLib/AudAnmSoundObject.hpp"
@@ -33,6 +37,9 @@
 #include "Game/Util/FurMulti.hpp"
 #include "Game/Util/LiveActorUtil.hpp"
 #include <cstdio>
+#ifdef TARGET_PC
+#include <JSystem/J3DGraphBase/J3DPortNative.hpp> // (after the game's headers: first, its <revolution.h> would define NO_INLINE before Inline.hpp)
+#endif
 
 void LiveActorUtil_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -98,6 +105,18 @@ namespace {
         PartsModel* parts = new PartsModel(pActor, objName, subModelName, pMtx, drawBufferType, false);
         parts->initWithoutIter();
         MR::tryStartAllAnim(parts, subModelName);
+#ifdef TARGET_PC
+        {
+            // GXV_CAPREAD (water23 round 2, diagnostic): sub-models with screen-capture ("IndDummy") materials and their draw buffer
+            // (0x19..0x1D: the Indirect buffers, drawn after the "Indirect" capture; any other: before it)
+            const char* e = getenv("GXV_CAPREAD");
+            if (e && *e && *e != '0' && MR::isExistIndirectTexture(parts)) {
+                port_log_summary("capread-model: %s (sub-model %s of %s) has IndDummy materials, draw buffer 0x%X (%s the Indirect capture)", subModelName,
+                                 pSubModelName, modelResName, static_cast< unsigned >(drawBufferType),
+                                 drawBufferType >= 0x19 && drawBufferType <= 0x1D ? "after" : "BEFORE");
+            }
+        }
+#endif
         return parts;
     }
 
@@ -222,6 +241,7 @@ namespace {
 
 #ifdef TARGET_PC
 bool port_dl_defer(LiveActor*, ModelManager*);
+extern const LiveActor* gPortDLOwner;  // (ModelManager.cpp, GXV_DL_GUARD)
 #endif
 namespace MR {
     bool isExistIndirectTexture(const LiveActor* pActor) {
@@ -1624,8 +1644,12 @@ namespace MR {
         if (port_dl_defer(pActor, pActor->mModelManager)) {
             return;
         }
-#endif
+        gPortDLOwner = pActor;  // (GXV_DL_GUARD's log line names it)
         pActor->mModelManager->updateDL(true);
+        gPortDLOwner = nullptr;
+#else
+        pActor->mModelManager->updateDL(true);
+#endif
     }
 
     void setMirrorReflectionInfoFromMtxYUp(const TPos3f& rMtx) {
@@ -2054,6 +2078,10 @@ namespace MR {
     }
 
     void showModel(LiveActor* pActor) {
+#ifdef TARGET_PC
+        J3DPortVerBump(J3DPortVer_Member);  // (GXV_J3DNATIVE: show / hide; the drawers' own serials bump at add / remove)
+        J3DPortCensusAdd(J3DPortCen_MemberBumps);
+#endif
         if (isNoCalcAnim(pActor)) {
             onCalcAnim(pActor);
         }
@@ -2068,6 +2096,10 @@ namespace MR {
     }
 
     void hideModel(LiveActor* pActor) {
+#ifdef TARGET_PC
+        J3DPortVerBump(J3DPortVer_Member);
+        J3DPortCensusAdd(J3DPortCen_MemberBumps);
+#endif
         if (!isNoCalcAnim(pActor)) {
             offCalcAnim(pActor);
         }

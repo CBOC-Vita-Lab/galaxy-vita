@@ -37,6 +37,15 @@ public:
     void prepareReset();
     bool isPreparedReset() const;
     void frameLoop();
+#ifdef TARGET_PC
+    // (GXV_DRAWPIPE, dpengine: the drawn turn's draw in three functions: beginRender; draw(); endRender. GameSystem.cpp)
+    void portDrawBegin();
+    void portDrawMiddle();
+    void portDrawEnd();
+    static void portDrawBeginEntry(void* pSelf);
+    static void portDrawMiddleEntry(void* pSelf);
+    static void portDrawEndEntry(void* pSelf);
+#endif
     void draw();
     void update();
     void updateSceneController();

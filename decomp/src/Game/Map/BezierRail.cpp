@@ -6,6 +6,22 @@
 #include "Game/Util/StringUtil.hpp"
 #include <JSystem/JGeometry/TMatrix.hpp>
 #include <revolution/mtx.h>
+#ifdef TARGET_PC
+#include "port/hot62_memo.h"  // (hot62: GXV_RAIL_MEMO)
+#include "port/hot_knob.h"
+#include <cstdlib>
+#include <cstring>
+extern "C" int port_on_frame_thread(void);
+namespace {
+port::hot62::RailMemo sRailMemo;
+inline bool RailMemoOn() {
+    return PORT_HOT_KNOB(bool, [] {
+        const char* e = getenv("GXV_RAIL_MEMO");
+        return e && *e && atoi(e) != 0;   // (w24: default off until a console A/B)
+    }());
+}
+}  // namespace
+#endif
 
 void BezierRail_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -172,7 +188,31 @@ f32 BezierRailPart::getLength(f32 t1, f32 t2, int k) const {
     return len;
 }
 
+#ifdef TARGET_PC
+// hot62 GXV_RAIL_MEMO: getParam is a pure function of the part's 13 float words and t; the memo keys on all 14 (bitwise) and returns the bits the same inputs gave.
 f32 BezierRailPart::getParam(f32 t) const {
+    static_assert(sizeof(BezierRailPart) == 13 * sizeof(u32), "BezierRailPart: 13 words");
+    if (RailMemoOn() && port_on_frame_thread()) {
+        uint32_t w[13], tb, r;
+        std::memcpy(w, this, sizeof w);
+        std::memcpy(&tb, &t, sizeof tb);
+        r = port::hot62::RailParam(sRailMemo, w, tb, [this, t] {
+            const f32 v = getParamPlain(t);
+            uint32_t b;
+            std::memcpy(&b, &v, sizeof b);
+            return b;
+        });
+        f32 out;
+        std::memcpy(&out, &r, sizeof out);
+        return out;
+    }
+    return getParamPlain(t);
+}
+
+f32 BezierRailPart::getParamPlain(f32 t) const {
+#else
+f32 BezierRailPart::getParam(f32 t) const {
+#endif
     f32 param = t / mLength;
     f32 railLength = getLength(0.0f, param, 10);
 
@@ -218,12 +258,15 @@ f32 BezierRailPart::getNearestParam(const TVec3f& rPos, f32 delta) const {
 
 f32 BezierRail::normalizePos(f32 t, int direction) const {
     if (mIsClosed) {
-        f32 pos = MR::mod(t, getTotalLength());
+        const f32 total = getTotalLength();
+        // Most rider queries are already on this lap. Preserve -0 and the
+        // reverse-at-origin rule; wrap endpoints and outliers normally.
+        f32 pos = (t >= 0.0f && t < total) ? t : MR::mod(t, total);
         if (direction < 0 && MR::isNearZero(pos)) {
-            pos = getTotalLength();
+            pos = total;
         }
         if (pos < 0.0f) {
-            pos += getTotalLength();
+            pos += total;
         }
         return pos;
     } else {

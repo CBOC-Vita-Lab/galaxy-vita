@@ -1,0 +1,50 @@
+# QA-FUNC 10/15. WRONG CODE: a guest types a syntactically valid Play-by-Address code whose address is right (127.0.0.1:42611, the host's port) but whose
+# SECRET is wrong. The host must log "hello rejected reason=proof (wrong code secret?)" and answer NOTHING (so a guesser learns nothing); the guest
+# never gets a slot or a snapshot and its join ends after the 10 s HELLO timeout ("session ended reason=timeout (no answer from the host)"; there
+# is no "rejected by host" line for this case). A second guest by the host's real address (join_addr) is admitted, so the refusal is not "everybody".
+# Hook: SMG_MP_AUTO=join_code:wrong (platform/src/mp/mp_core.cpp AutoStep, desktop build only) builds the code of 127.0.0.1:$SMG_MP_DIRECT_PORT
+# with the secret 01 02 03 04 05 and joins through mp_ui_join_direct_code, the call the menu's "Join with a Code" keyboard makes (the autopilot
+# then ticks the gathering driver as the screen would); join_code:<code> joins with that code as given. Logs "auto: join by code <code>: started|refused".
+# SKIPs until the binary has "join_code:".
+name: qa_wrong_code
+description: "valid-looking code with the wrong secret: refused at hello (reason=proof), no slot, no snapshot; a guest by address is admitted"
+seconds: 260
+requires: {strings: ["join_code:"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+link: false
+processes:
+  # joinfix: every process ran `seconds` (260) from ITS OWN start, so the host (first up) was shut down at ~+318 s wall, 18 s BEFORE the last
+  # console (started after the wrong-code console dialed: it boots ~75 s, so it dials at ~+336 s) sent its first hello: the host's log is
+  # clean (no block, no rate limit, the room open) and the 'good' console's hellos went to a closed port. The host outlives the staggered starts.
+  - name: host
+    seconds: 420
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_CONN: direct, SMG_MP_DIRECT_PORT: 42611, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together,
+          SMG_MP_AUTO_START: 2, SMG_MP_NAME: host}
+  - name: badcode
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: "join_code:wrong", SMG_MP_NAME: badcode, SMG_MP_LOOK: 2, HARNESS_START_ON: 'host|\[mp\] hosting session=|2'}   # (harness: it dialed at +73 s, 100 s before the host opened its room)
+  - name: good
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: "join_addr:127.0.0.1:42611", SMG_MP_NAME: good, SMG_MP_LOOK: 1, HARNESS_START_ON: 'badcode|\[mp\] auto: join by code .*: started|5'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect host /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect good /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=direct/'
+  - 'expect badcode /\[mp\] auto: join by code .*: started/'
+  - 'expect host /\[mp\] hello rejected reason=proof/'
+  - 'expect badcode /\[mp\] join start conn=direct addr=127\.0\.0\.1:42611/'
+  - 'expect badcode /\[mp\] session ended reason=timeout \(no answer from the host\)/ within 40s after badcode /\[mp\] auto: join by code/'
+  - 'absent badcode /\[mp\] rejected by host/'
+  - 'absent host /\[mp\] slot \d joined name=badcode/'
+  - 'absent badcode /\[mp\] (joined slot=|snapshot received|puppet slot=\d appear|flow barrier release)/'
+  - 'count host /\[mp\] snapshot sent slot=/ <= 1'
+  - 'absent host /\[mp\] snapshot sent slot=2/'
+  - 'expect host /\[mp\] slot 1 joined name=good rejoin=0 .*players=2/'
+  - 'expect good /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 /'
+  - 'absent host /\[mp\] (session ended reason=(?!none \(shutdown\))|bad message from slot)/'

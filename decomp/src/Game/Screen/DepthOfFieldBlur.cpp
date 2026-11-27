@@ -10,6 +10,10 @@
 #include <JSystem/JUtility/JUTVideo.hpp>
 #ifdef TARGET_PC
 #include "port/depth_of_field.h"
+// mario24 (agents/mario24/REPORT.txt): the blur reports its ramp for the "player-look:" line (once a scene), and with GXV_PLAYER_DOF=0 the ramp
+// starts behind the player (platform/src/gx/vgx_galaxy.cpp; absent from builds without the vgx front end: weak)
+extern "C" void port_player_look_dof(int minDist, int maxDist, float intensity) __attribute__((weak));
+extern "C" int port_player_dof_clamp(int* pMin, int* pMax) __attribute__((weak));
 #endif
 
 void DepthOfFieldBlur_FORCE_MATCH_SDATA2() {
@@ -47,11 +51,20 @@ void DepthOfFieldBlur::draw() const {
     if (!isSomething()) {
         return;
     }
+#ifdef TARGET_PC
+    ImageEffectLocalUtil::portBloomTexturesTouched();  // (PETARI_BLOOM_HALFRATE: it uses the bloom's textures as scratch)
+#endif
 
     // Settings > Display > Depth of field = Off (GXV_DOF=0): the blur is not drawn at all.
 #ifdef TARGET_PC
     if (!port::dof::Enabled()) {
         return;
+    }
+#endif
+
+#ifdef TARGET_PC
+    if (port_player_look_dof != nullptr) {
+        port_player_look_dof(mBlurMinDist, mBlurMaxDist, mIntensity * get_10());
     }
 #endif
 
@@ -120,6 +133,16 @@ void DepthOfFieldBlur::drawZAlphaTex() const {
         if (mBlurMinDist >= 0) {
             blurMinDist = mBlurMinDist;
         }
+
+#ifdef TARGET_PC
+        if (port_player_dof_clamp != nullptr) {  // (GXV_PLAYER_DOF=0: the ramp's start moved behind the player; unchanged when he is in front of it)
+            int pMin = blurMinDist, pMax = blurMaxDist;
+            if (pMin <= pMax && port_player_dof_clamp(&pMin, &pMax)) {
+                blurMinDist = static_cast< u8 >(pMin);
+                blurMaxDist = static_cast< u8 >(pMax);
+            }
+        }
+#endif
 
         if (blurMaxDist >= blurMinDist) {
             GXPosition3f32(0.0f, 1.0f, 0.0f);

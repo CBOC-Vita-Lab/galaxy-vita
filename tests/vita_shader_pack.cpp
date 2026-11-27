@@ -44,6 +44,21 @@ std::vector<uint8_t> Pack() {
     }
     Seal(v); return v;
 }
+std::vector<uint8_t> SizedPack(size_t bytes) {
+    constexpr unsigned count = 16;
+    std::vector<uint8_t> v(bytes, 0);
+    std::memcpy(v.data(), "VGXRAM01", 8); U32(v, 8, 1); U32(v, 12, count);
+    U64(v, 16, bytes); U64(v, 24, abi);
+    size_t at = 40 + count * 24;
+    for (unsigned i = 0; i < count; ++i) {
+        const size_t length = i + 1 == count ? bytes - at : ((bytes - at) / (count - i)) & ~size_t(3);
+        const size_t e = 40 + i * 24;
+        U32(v, e, 1); U32(v, e + 4, length); U64(v, e + 8, i); U64(v, e + 16, at);
+        std::memcpy(v.data() + at + 4, "GXP", 4); U32(v, at + 12, length - 4);
+        at += length;
+    }
+    Seal(v); return v;
+}
 void Put(const std::string& file, const std::vector<uint8_t>& v) {
     FILE* f = std::fopen(file.c_str(), "wb"); Require(f != nullptr, "fixture opens output");
     Require(std::fwrite(v.data(), 1, v.size(), f) == v.size() && std::fclose(f) == 0, "fixture writes a complete pack");
@@ -84,6 +99,35 @@ int main() {
     const std::string file = "/tmp/vgx-shader-pack-unit.bin";
     ShaderPack p;
     Miss(p, "/root/v/78/78AF5F94892F3950.gxp");
+    for (const size_t bytes : {size_t(2u << 20), size_t(4u << 20)}) {
+        const auto large = SizedPack(bytes); Put(file, large);
+        Require(p.LoadFile(file.c_str(), "/root/v3", abi) && p.Bytes() == bytes && p.Entries() == 16,
+                "existing RAM format admits the full seed size and bounded 4 MiB boundary");
+        const void* data = nullptr; size_t size = 0;
+        Require(p.Find("/root/v3/v/00/F.gxp", &data, &size) && size <= ShaderPack::kMaxRecordBytes,
+                "large pack keeps exact indexed last-record lookup");
+    }
+    {   // (pack25) the limits are 8192 records / 8 MiB: a pack of kMaxEntries records builds, loads and answers every lookup; one more is refused
+        static_assert(ShaderPack::kMaxEntries == 8192 && ShaderPack::kMaxBytes == (8u << 20), "pack25 limits");
+        const auto base = Pack();
+        const uint8_t* rec = base.data() + 112;   // a valid 180-byte stage image (vertex)
+        for (const unsigned n : {4097u, 8192u, 8193u}) {
+            std::vector<ShaderPack::Record> rs(n);
+            for (unsigned i = 0; i < n; ++i) rs[i] = {1u, uint64_t(i) + 1u, rec, 180u};
+            std::vector<uint8_t> img;
+            if (n > ShaderPack::kMaxEntries) { Require(!ShaderPack::Build(rs.data(), n, abi, img), "Build refuses more than kMaxEntries records"); continue; }
+            Require(ShaderPack::Build(rs.data(), n, abi, img) && img.size() == 40 + size_t(n) * (24 + 180), "Build packs > 4096 records");
+            Put(file, img);
+            Require(p.LoadFile(file.c_str(), "/root/v3", abi) && p.Entries() == n && p.Bytes() == img.size(), "pack of more than 4096 records loads");
+            for (unsigned i = 0; i < n; ++i) {
+                char path[96]; std::snprintf(path, sizeof path, "/root/v3/v/00/%llX.gxp", static_cast<unsigned long long>(i) + 1u);
+                const void* data = nullptr; size_t size = 0;
+                Require(p.FindIndex(path, &data, &size) == static_cast<int>(i) && size == 180 && std::memcmp(data, rec, 180) == 0, "every record of a large pack answers its own lookup");
+            }
+            // a header that claims one record more than the limit is refused even with a matching checksum
+            if (n == 8192) { auto bad = img; U32(bad, 12, 8193); Seal(bad); Put(file, bad); Require(!p.LoadFile(file.c_str(), "/root/v3", abi), "count over kMaxEntries refused"); }
+        }
+    }
     const auto original = Pack(); Put(file, original);
     Require(p.LoadFile(file.c_str(), "/root", abi), "valid bounded shader pack loads before rendering");
     Require(p.Bytes() == original.size() && p.Entries() == 3, "retained memory and record count are exact");

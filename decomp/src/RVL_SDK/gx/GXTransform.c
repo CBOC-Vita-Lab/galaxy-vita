@@ -3,6 +3,8 @@
 #include "revolution/gx/GXRegs.h"
 #include "revolution/gx/GXTypes.h"
 #include "revolution/mtx.h"
+#define PORT_GXCAP_HOOKS 1  // (GX capture: the hook in each entry point, port/gx_capture.h)
+#include "port/gx_capture.h"
 
 #pragma optimizewithasm off
 
@@ -89,6 +91,7 @@ void __GXSetProjection(void) {
 }
 
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
+    PORT_GXCAP(GXSetProjection, (mtx, type));
     gx->projType = type;
     gx->projMtx[0] = mtx[0][0];
     gx->projMtx[2] = mtx[1][1];
@@ -107,12 +110,14 @@ void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
 }
 
 void GXSetProjectionv(const f32* ptr) {
+    PORT_GXCAP(GXSetProjectionv, (ptr));
     gx->projType = (ptr[0] == 0.0f ? GX_PERSPECTIVE : GX_ORTHOGRAPHIC);
     Copy6Floats(&ptr[1], gx->projMtx);
     gx->dirtyState |= 0x8000000;
 }
 
 void GXGetProjectionv(f32* ptr) {
+    PORT_GXCAP(GXGetProjectionv, (ptr));
     ptr[0] = gx->projType ? 1.0f : 0.0f;
     Copy6Floats(gx->projMtx, &ptr[1]);
 }
@@ -218,6 +223,7 @@ static void WriteMTXPS4x2(const f32 mtx[3][4], volatile void* dest) {
 #endif
 
 void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
+    PORT_GXCAP(GXLoadPosMtxImm, (mtx, id));
     u32 reg, addr;
 
     addr = id << 2;
@@ -234,6 +240,7 @@ void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) {
 }
 
 void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
+    PORT_GXCAP(GXLoadNrmMtxImm, (mtx, id));
     u32 reg, addr;
 
     addr = 0x400 + (id * 3);
@@ -264,11 +271,13 @@ void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
 }
 
 void GXSetCurrentMtx(u32 id) {
+    PORT_GXCAP(GXSetCurrentMtx, (id));
     SC_CP_MATIDX_REG_A_SET_POSIDX(gx->matIdxA, id);
     gx->dirtyState |= 0x04000000;
 }
 
 void GXLoadTexMtxImm(const f32 mtx[3][4], u32 id, GXTexMtxType type) {
+    PORT_GXCAP(GXLoadTexMtxImm, (mtx, id, type));
     u32 reg;
     u32 addr;
     u32 count;
@@ -298,6 +307,7 @@ void GXLoadTexMtxImm(const f32 mtx[3][4], u32 id, GXTexMtxType type) {
 }
 
 void GXLoadTexMtxIndx(u16 mtx_indx, u32 id, GXTexMtxType type) {
+    PORT_GXCAP(GXLoadTexMtxIndx, (mtx_indx, id, type));
     u32 offset;
     u32 count;
     u32 reg;
@@ -344,6 +354,7 @@ void __GXSetViewport(void) {
 }
 
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32 field) {
+    PORT_GXCAP(GXSetViewportJitter, (left, top, wd, ht, nearz, farz, field));
     if (field == 0) {
         top -= 0.5f;
     }
@@ -359,14 +370,17 @@ void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz,
 }
 
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
+    PORT_GXCAP(GXSetViewport, (left, top, wd, ht, nearz, farz));
     GXSetViewportJitter(left, top, wd, ht, nearz, farz, 1);
 }
 
 void GXGetViewportv(f32* vp) {
+    PORT_GXCAP(GXGetViewportv, (vp));
     Copy6Floats(&(gx->vpLeft), vp);
 }
 
 void GXSetZScaleOffset(f32 scale, f32 offset) {
+    PORT_GXCAP(GXSetZScaleOffset, (scale, offset));
     f32 sz, oz;
 
     oz = offset * (f32)0x00FFFFFF;
@@ -378,6 +392,7 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
 }
 
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
+    PORT_GXCAP(GXSetScissor, (left, top, wd, ht));
     u32 tp, lf, bm, rt;
     tp = top + (u32)342.0f;
     lf = left + (u32)342.0f;
@@ -396,6 +411,7 @@ void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
 }
 
 void GXGetScissor(u32* left, u32* top, u32* wd, u32* ht) {
+    PORT_GXCAP(GXGetScissor, (left, top, wd, ht));
     u32 tp, lf, bm, rt;
 
     tp = SU_SCIS0_GET_SY0(gx->suScis0);
@@ -411,6 +427,7 @@ void GXGetScissor(u32* left, u32* top, u32* wd, u32* ht) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
+    PORT_GXCAP(GXSetScissorBoxOffset, (x_off, y_off));
     u32 reg = 0;
     u32 hx, hy;
 
@@ -426,6 +443,7 @@ void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
 }
 
 void GXSetClipMode(GXClipMode mode) {
+    PORT_GXCAP(GXSetClipMode, (mode));
     GX_WRITE_XF_REG(0x1005, mode, 0);
     __GXData->bpSentNot = GX_TRUE;
 }

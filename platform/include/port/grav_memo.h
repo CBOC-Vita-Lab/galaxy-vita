@@ -28,3 +28,12 @@ template < class T > static inline void PortGravSet(T& rField, T value) {
         ++port_grav_gen;
     }
 }
+
+// GXV_GRAV_GRID (logic23, 8 Nov; PlanetGravityManager.cpp): port_grav_geo_gen counts the changes of what the gravity grid is built from:
+// the manager's array (constructor, registerGravity), the priorities (setPriority: the grid needs the array sorted), and the reach
+// sphere of every gravity that no follower moves (PlanetGravity::updateReach; a follower marks its gravity mPortMoving first, bumping
+// once, and such a gravity is a candidate for every position instead). The validity flags, type and host are read live by the walk.
+extern "C" uint32_t port_grav_geo_gen;
+static inline void PortGravGeoBump() {
+    ++port_grav_geo_gen;
+}

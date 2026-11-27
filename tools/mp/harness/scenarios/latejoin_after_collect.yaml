@@ -1,0 +1,42 @@
+# netlog: a console that joins AFTER Purple Coins were collected gets them (worldsync OBJMAP kind 2). The host is alone in Beach Bowl scenario 5 (HeavenlyBeachGalaxy:5, the
+# Purple Coin scenario: 100 coins in the registry); 5 s after the scene is live it collects 3 of them through the game's own pickup steps (SMG_MP_TEST_COLLECT, desktop hook
+# next to SMG_MP_TEST_KILL: Coin::mpRemoteGet runs the same noticeGetCoin as an ItemGet, so world sync sees an ordinary pickup). No guest yet: the PURPLE messages go to
+# nobody. The guest console is STARTED by that mark (HARNESS_START_ON), boots, joins as a drop-in and lands in the host's galaxy; the host answers its REGCRC with the objmap and
+# the guest applies the 3 coins (each one taken and killed on the guest, so it does not show them).
+# Star Chips: the hook collects them too ("<secs>:<purple>:<chips>"), but in every scene tried (Good Egg 1-4, Beach Bowl 1) the registry holds no chip entry although the scene's ChipGroups
+# exist (the "world test collect: registry ... scene chip groups" line), so no chip scenario can pass yet: see the report of the netlog branch.
+name: latejoin_after_collect
+description: "guest joins a galaxy after the host collected 3 Purple Coins: the guest gets them (OBJMAP kind 2)"
+seconds: 420
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_COLLECT]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "HeavenlyBeachGalaxy:5", SMG_MP_TEST_COLLECT: "5:3:0"}
+  - name: guest
+    seconds: 300
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, HARNESS_START_ON: 'host|\[mp\] world test collect: purple=3 chip=0 |0'}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed|Assertion|OSPanic|FATAL/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] world test collect: purple=3 chip=0 \(registry purple=[1-9]\d* chip=\d+\) serial=\d+/'
+  - 'expect host /\[mp\] world purple key=\S+ src=local/'
+  - 'count host /\[mp\] world purple key=\S+ src=local/ == 3'
+  - 'expect host /\[mp\] slot 1 joined name=guest/ after host /\[mp\] world test collect: purple=3 chip=0/'
+  - 'expect guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy .*role=guest/ within 120s after host /\[mp\] slot 1 joined/'
+  - 'expect guest /\[mp\] world reg n=\d+ crc=[0-9a-f]+ / after guest /\[mp\] flow move type=\d+ galaxy=HeavenlyBeachGalaxy/'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  # the state map: the host answers the joiner's REGCRC with the collected coins and chips, the guest applies exactly those
+  - 'expect host /\[mp\] world objmap sent kill=\d+ purple=3 chip=0 chunks=[1-9]\d* to=1/ within 60s after guest /\[mp\] world reg n=/'
+  - 'expect guest /\[mp\] world objmap applied kind=2 start=\d+ bits=3/ within 60s after guest /\[mp\] world reg n=/'
+  - 'count guest /\[mp\] world purple key=\S+ src=remote/ == 3'   # idempotent: the repeated summaries never re-apply
+  - 'absent guest /\[mp\] world drop type=purple/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

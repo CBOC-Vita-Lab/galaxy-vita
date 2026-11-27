@@ -150,6 +150,7 @@ void port_vclock_idle_step(int (*irqPending)(void)) {
     while (sOutstanding > 0 || sExternal > 0) {
         if (irqPending()) return;
         if (sSettleCv.wait_until(lk, limit) == std::cv_status::timeout) {
+            fprintf(stderr, "ARMHF_VCLOCK_FALLBACK outstanding=%d external=%d\n", sOutstanding, sExternal);
             port_log("vclock: sleepers did not settle (outstanding %d external %d); continuing", sOutstanding, sExternal);
             for (const Sleeper* t : sAll)
                 port_log("vclock:   thread '%s' owes=%d queued=%d wake=%lld", t->name, (int)t->owesSettle, (int)t->queued, (long long)t->wake);

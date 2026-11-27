@@ -5,6 +5,8 @@
 
 #ifdef TARGET_PC
 extern "C" void port_irq_poll(void);
+extern "C" int64_t port_host_time_ns(void);
+extern "C" void port_load_note_decomp(uint32_t bytes, int64_t ns) __attribute__((weak));  // (cook24: the load-split census, platform/src/dvd/dvd.cpp)
 #endif
 
 JKRDecomp* JKRDecomp::sDecompObject;
@@ -103,11 +105,17 @@ bool JKRDecomp::orderSync(unsigned char* pSrc, unsigned char* pDst, unsigned int
 void JKRDecomp::decode(unsigned char* pSrc, unsigned char* pDst, unsigned int compressedSize, unsigned int decompressedSize) {
     EJKRCompression compression = checkCompressed(pSrc);
 
+#ifdef TARGET_PC
+    const int64_t lsT0 = compression != JKR_COMPRESSION_NONE ? port_host_time_ns() : 0;
+#endif
     if (compression == JKR_COMPRESSION_SZP) {
         decodeSZP(pSrc, pDst, compressedSize, decompressedSize);
     } else if (compression == JKR_COMPRESSION_SZS) {
         decodeSZS(pSrc, pDst, compressedSize, decompressedSize);
     }
+#ifdef TARGET_PC
+    if (lsT0 && port_load_note_decomp) port_load_note_decomp(JKRDecompExpandSize(pSrc), port_host_time_ns() - lsT0);
+#endif
 }
 
 #define READU32_BE(ptr, offset) (((u32)ptr[offset] << 24) | ((u32)ptr[offset + 1] << 16) | ((u32)ptr[offset + 2] << 8) | (u32)ptr[offset + 3])

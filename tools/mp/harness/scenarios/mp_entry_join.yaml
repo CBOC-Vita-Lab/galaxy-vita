@@ -1,0 +1,40 @@
+# entry (9 Nov): two players through the new entry screen and the menus (no autopilot): both choose Multiplayer on the entry screen;
+# the host opens a Same Wi-Fi room (Host: the lobby at once), the guest joins it from the Join list, the host starts and picks
+# "Start from My Own File" > file 2 > "Make a Co-op Copy" (co-op file 1) (flow, 10 Nov) (host Mario, guest Luigi; the formation places them near the Observatory's start). The host's launch loads co-op file 1 the way "Play This File" does; the guest loads the session's slot and takes
+# the host's progress (snapshot). Neither single-player GameData.bin changes.
+name: mp_entry_join
+description: entry screen -> Multiplayer -> host (Host, Start, co-op copy of file 2) / guest (Join list) -> both in the session with the host's progress
+seconds: 230
+requires: {strings: ["entry: chose %s"]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@entry_host"
+    env: {SMG_MP_NAME: host, SMG_KEYBOARD_NAME: host, SMG_MP_LOOK: 0}
+  - name: guest
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: guest, SMG_KEYBOARD_NAME: guest, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect * /\[mp\] entry: screen shown cursor=single/ within 45s'
+  - 'expect * /\[mp\] entry: chose multiplayer/ within 50s'
+  - 'expect * /\[mp\] ui: multiplayer menu from the entry screen/ within 5s after * /\[mp\] entry: chose multiplayer/'
+  - 'expect host /\[mp\] ui: single-player file 2 picked for copy/'
+  - 'expect host /\[mp\] ui: save choice kind=2 coop=1 sp=2/'
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/'
+  - 'expect host /\[mp\] ui: host save kind=2 coop=1 sp=2 ready/'
+  - 'expect host /\[mp\] entry: launch file=1/'
+  - 'expect guest /\[mp\] entry: launch file=1/'
+  - 'absent * /\[mp\] entry: chose single/'
+  - 'absent guest /\[mp\] ui: (save choice|single-player file \d picked)/'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30s'
+  - 'expect guest /\[mp\] save snapshot applied slot=/'
+  - 'expect host /port: player at 2[89]\d\d\.\d 78\d\.\d -3[789]\d\d\.\d \(on the ground\)/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=Luigi self=0/'
+  - 'absent * /\[mp\] (rejected by host|hello rejected|bad message from slot|events lost)/'
+  - '?metric * rss_mib <= 2500'

@@ -17,6 +17,47 @@ NameObjExecuteInfo::NameObjExecuteInfo()
     : mExecutedObj(), _4(), _5(), mMovementType(-1), mCalcAnimType(-1), mDrawType(-1), mDrawBufferType(-1), _A(-1) {
 }
 
+#ifdef TARGET_PC
+// GXV_HOTPROF_REQSCAN (hotprof25, from the console's execution-count profile: 18,906 + 18,890 scans of ~1,130 entries each in a 12 minute
+// run, i.e. one movement scan and one draw scan of the whole table in every second turn, for the one or two objects that asked to leave).
+// An entry reaches the "asked to leave" state 6 only in requestDisconnect, called only from NameObjExecuteHolder::disconnectToScene /
+// disconnectToDraw below, which know its index. The span of the indices asked for since the last scan is kept (per holder, movement and draw
+// apart); the scan walks that span, in the same ascending order, and finds exactly the entries the whole walk would: after any scan no
+// entry is in state 6 (the scan turned each into 5), and none outside the span was asked for since. A holder the span is not of (the first
+// request of a new scene) takes the whole walk. 0: the whole walk, as before (default until a verify run). 1: the span. 2: verify (the whole walk; an entry in
+// state 6 outside the span is counted and logged: "req-scan:").
+extern "C" int port_hotprof_reqscan_mode(void);
+extern "C" void port_log_summary(const char* fmt, ...);
+namespace {
+    struct PortReqSpan {
+        const NameObjExecuteHolder* owner = nullptr;
+        s32 lo = 0x7FFFFFFF, hi = -1;
+        void note(const NameObjExecuteHolder* h, s32 idx) {
+            if (owner != h) {  // (not this holder's: everything is in doubt until its next scan)
+                owner = h;
+                lo = 0;
+                hi = 0x7FFFFFFF;
+                return;
+            }
+            if (idx < lo) {
+                lo = idx;
+            }
+            if (idx > hi) {
+                hi = idx;
+            }
+        }
+        void done(const NameObjExecuteHolder* h) {
+            owner = h;
+            lo = 0x7FFFFFFF;
+            hi = -1;
+        }
+    };
+    PortReqSpan sPortReqMove, sPortReqDraw;
+    unsigned sPortReqScans = 0, sPortReqOutside = 0;
+    u64 sPortReqWalked = 0, sPortReqWhole = 0;
+}  // namespace
+#endif
+
 void NameObjExecuteInfo::setConnectInfo(NameObj* pObj, int movementType, int calcAnimType, int drawBufferType, int drawType) {
     _4 = 2;
     mExecutedObj = pObj;
@@ -251,6 +292,9 @@ void NameObjExecuteHolder::disconnectToScene(NameObj* pObj) {
     }
 
     pInfo->requestDisconnect(reinterpret_cast< u8* >(&pInfo->_4), false);
+#ifdef TARGET_PC
+    sPortReqMove.note(this, static_cast< s32 >(pInfo - mExecuteArray));  // (GXV_HOTPROF_REQSCAN)
+#endif
 
     _19 = true;
 }
@@ -263,6 +307,9 @@ void NameObjExecuteHolder::disconnectToDraw(NameObj* pObj) {
     }
 
     pInfo->requestDisconnect(reinterpret_cast< u8* >(&pInfo->_5), false);
+#ifdef TARGET_PC
+    sPortReqDraw.note(this, static_cast< s32 >(pInfo - mExecuteArray));  // (GXV_HOTPROF_REQSCAN)
+#endif
 
     _1B = true;
 }
@@ -291,9 +338,44 @@ void NameObjExecuteHolder::executeRequirementDisconnectMovement() {
         return;
     }
 
+#ifdef TARGET_PC
+    {  // (GXV_HOTPROF_REQSCAN, above)
+        const int mode = port_hotprof_reqscan_mode();
+        PortReqSpan& span = sPortReqMove;
+        const bool known = mode != 0 && span.owner == this;
+        s32 lo = 0, hi = mExecuteArraySize - 1;
+        if (known) {
+            lo = span.lo;
+            hi = span.hi < hi ? span.hi : hi;
+        }
+        if (mode == 2) {
+            for (s32 i = 0; i < mExecuteArraySize; i++) {
+                if (known && (i < lo || i > hi) && mExecuteArray[i]._4 == 6) {
+                    ++sPortReqOutside;
+                    if (sPortReqOutside <= 8) {
+                        port_log_summary("req-scan: MISMATCH: entry %d asks to leave outside the span %d..%d", static_cast< int >(i), static_cast< int >(lo), static_cast< int >(hi));
+                    }
+                }
+                mExecuteArray[i].executeRequirementDisconnectMovement();
+            }
+            sPortReqWalked += known && hi >= lo ? static_cast< u64 >(hi - lo + 1) : (known ? 0 : static_cast< u64 >(mExecuteArraySize));
+            sPortReqWhole += static_cast< u64 >(mExecuteArraySize);
+            if ((++sPortReqScans & 0x3FF) == 0) {
+                port_log_summary("req-scan: GXV_HOTPROF_REQSCAN=2: %u scans, %llu entries in the spans of %llu, %u mismatches", sPortReqScans,
+                                 static_cast< unsigned long long >(sPortReqWalked), static_cast< unsigned long long >(sPortReqWhole), sPortReqOutside);
+            }
+        } else {
+            for (s32 i = lo; i <= hi; i++) {
+                mExecuteArray[i].executeRequirementDisconnectMovement();
+            }
+        }
+        span.done(this);
+    }
+#else
     for (s32 i = 0; i < mExecuteArraySize; i++) {
         mExecuteArray[i].executeRequirementDisconnectMovement();
     }
+#endif
 
     _19 = false;
 }
@@ -315,9 +397,44 @@ void NameObjExecuteHolder::executeRequirementDisconnectDraw() {
         return;
     }
 
+#ifdef TARGET_PC
+    {  // (GXV_HOTPROF_REQSCAN, above)
+        const int mode = port_hotprof_reqscan_mode();
+        PortReqSpan& span = sPortReqDraw;
+        const bool known = mode != 0 && span.owner == this;
+        s32 lo = 0, hi = mExecuteArraySize - 1;
+        if (known) {
+            lo = span.lo;
+            hi = span.hi < hi ? span.hi : hi;
+        }
+        if (mode == 2) {
+            for (s32 i = 0; i < mExecuteArraySize; i++) {
+                if (known && (i < lo || i > hi) && mExecuteArray[i]._5 == 6) {
+                    ++sPortReqOutside;
+                    if (sPortReqOutside <= 8) {
+                        port_log_summary("req-scan: MISMATCH: entry %d asks to leave outside the span %d..%d", static_cast< int >(i), static_cast< int >(lo), static_cast< int >(hi));
+                    }
+                }
+                mExecuteArray[i].executeRequirementDisconnectDraw();
+            }
+            sPortReqWalked += known && hi >= lo ? static_cast< u64 >(hi - lo + 1) : (known ? 0 : static_cast< u64 >(mExecuteArraySize));
+            sPortReqWhole += static_cast< u64 >(mExecuteArraySize);
+            if ((++sPortReqScans & 0x3FF) == 0) {
+                port_log_summary("req-scan: GXV_HOTPROF_REQSCAN=2: %u scans, %llu entries in the spans of %llu, %u mismatches", sPortReqScans,
+                                 static_cast< unsigned long long >(sPortReqWalked), static_cast< unsigned long long >(sPortReqWhole), sPortReqOutside);
+            }
+        } else {
+            for (s32 i = lo; i <= hi; i++) {
+                mExecuteArray[i].executeRequirementDisconnectDraw();
+            }
+        }
+        span.done(this);
+    }
+#else
     for (s32 i = 0; i < mExecuteArraySize; i++) {
         mExecuteArray[i].executeRequirementDisconnectDraw();
     }
+#endif
 
     _1B = false;
 }

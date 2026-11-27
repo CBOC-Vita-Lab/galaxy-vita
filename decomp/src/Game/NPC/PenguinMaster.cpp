@@ -1,4 +1,5 @@
 #include "Game/NPC/PenguinMaster.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Util/ActorSensorUtil.hpp"
 #include "Game/Util/NPCUtil.hpp"
@@ -15,6 +16,9 @@ namespace NrvPenguinMaster {
 };  // namespace NrvPenguinMaster
 
 PenguinMaster::PenguinMaster(const char* pName) : NPCActor(pName) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
 }
 
 void PenguinMaster::init(const JMapInfoIter& rIter) {

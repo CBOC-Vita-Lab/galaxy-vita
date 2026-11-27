@@ -1,0 +1,18 @@
+# settingsnative heap numbers: a galaxy entered with PETARI_STAGE=<Galaxy>:1; the pause menu 18 s after the scene start, Settings opened by the
+# harness trigger (SMG_SETTINGS_PAUSE_TEST=1, 150 frames later), shut again with Back, the pause menu shut. Run with PETARI_MEM_PROBE=1.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose single/ ~36
+title+8-8.5:A|B
+entry+3-3.2:A
+chose+12-20:PX=0.25|PY=0.3
+chose+15-15.2:A
+chose+28-36:PX=0.52|PY=0.78
+chose+31-31.2:A
+mark play /mem scene start probe galaxy=(?!AstroGalaxy|FileSelect)/ ~120
+mark open /settings: opened \(pause\)/ ~140
+play+18-18.3:PLUS
+open+4-4.2:RIGHT
+open+7-7.2:B
+open+10-10.2:A               # (the leave question, if asked: Save)
+open+14-14.2:PLUS

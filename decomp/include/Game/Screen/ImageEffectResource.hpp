@@ -23,4 +23,7 @@ public:
     /* 0x18 */ JUTTexture* _18;
     /* 0x1C */ JUTTexture* _1C;
     /* 0x20 */ JUTTexture* _20;
+#ifdef TARGET_PC
+    JUTTexture* _24 = nullptr;  // GXV_BLOOM_FOLD=2 (bloomfold25): the reduced glow, 1/16 of the picture (40x28 at 640x456), RGB565
+#endif
 };

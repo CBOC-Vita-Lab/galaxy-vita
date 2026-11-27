@@ -96,6 +96,10 @@ static int scenes_test(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "scenes")) return scenes_test();
     assert(argc == 3);
+#ifdef FIXTURE_HAS_FRAME_SIZE
+    // (the size handshake: the renderer's own copy of the struct, platform/vgx/src/vgx_autoq.cpp VgxRtGpuFrame, is 3 x u32 + 2 x u16 = 16 bytes; the library says its own)
+    assert(vglRtGpuFrameSize() == sizeof(vglRtGpuFrame) && vglRtGpuFrameSize() == 16u);
+#endif
     inject_count = (unsigned)strtoul(argv[1], NULL, 10);
     const int guard = atoi(argv[2]);
 #ifdef FIXTURE_HAS_RING_GUARD

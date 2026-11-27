@@ -1,0 +1,36 @@
+# flow (11 Nov): screenshots of the simplified menus, host side (PETARI_SHOT_MS=2000, PETARI_GAME_CLOCK=1, PETARI_HANDHELD_UI=1,
+# SMG_MP_NAME set, a fresh mp folder). Multiplayer (55) -> How to Play (48) -> Play Together -> the character select once (55) ->
+# Join / Host (59) -> Host: the lobby alone (65) -> Room Settings (73) -> lobby; the guest joins (~93) -> lobby with two (100) ->
+# the guest's choices (106) -> Start -> Which File? (118) -> Start from My Own File (123) -> file 2 (129) -> Make a Co-op Copy ->
+# play (~140) -> session menu (152) -> Players (156) -> a player's choices (160)
+mark title /boot: the title screen has appeared/ ~31
+title+8-8.5:A|B
+title+13-13.2:DOWN               # entry: Multiplayer
+title+15-15.2:A
+title+24-24.2:C                  # How to Play (one window)
+title+28-28.2:A
+title+31-31.2:A                  # Play Together
+title+35-35.2:A                  # character (the first play)
+title+39-39.2:DOWN               # Join -> Host
+title+40-40.2:A                  # Host: the lobby at once
+title+48-48.2:MINUS              # Room Settings
+title+54-54.2:B
+title+80-80.2:DOWN             # Start -> me -> the guest
+title+81-81.2:DOWN
+title+82-82.2:A                # the guest's choices
+title+87-87.2:B
+title+89-89.2:UP
+title+90-90.2:UP
+title+93-93.2:A                # Start: Which File?
+title+98-98.2:DOWN
+title+99-99.2:A                # Start from My Own File...
+title+103-103.2:DOWN             # file 1 -> file 2
+title+104-104.2:A
+title+109-109.2:A                # Make a Co-op Copy (Recommended): the session starts
+title+128-128.2:PLUS             # the session menu
+title+132-132.2:C                # Players
+title+135-135.2:DOWN
+title+136-136.2:A                # the guest's choices (in play)
+title+140-140.2:B
+title+142-142.2:B
+title+144-144.2:B

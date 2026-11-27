@@ -1,0 +1,125 @@
+# Galaxy 3.0 online service (smg-online): the SAME code as the Strikers service, a SECOND deployment with its own Worker, its own
+# Durable Object namespace (and so its own SQLite database), its own secrets. It never shares anything with msc-online.
+# Deploy steps: DEPLOY-SMG.txt. Nothing here is tied to an account (wrangler picks it from the login / CLOUDFLARE_ACCOUNT_ID); the one id below is a D1 DATABASE id, not an account id.
+
+name = "smg-online"                # the old public URL: smg-online.<subdomain>.workers.dev
+main = "src/worker.js"
+compatibility_date = "2025-10-01"
+# The service's public address is https://galaxy.psvita.dev. THIS CONFIG DECLARES NO ROUTE AND NO CUSTOM DOMAIN, on purpose: wrangler then never touches
+# the zone or the account's Worker domains. Why (wrangler 4.156.0, wrangler-dist/cli.js): triggersDeploy (line 166157) sorts the config's routes into
+# routesOnly and customDomainsOnly (166178-166186) and calls publishRoutes only when routesOnly is not empty (166266) and publishCustomDomains only when
+# customDomainsOnly is not empty (166285). publishCustomDomains posts a domain changeset with replace_state=true and, without a terminal, overrides an
+# existing origin and DNS record without asking, and it removes domains that are not in the config. The routes come from this file or from a --routes flag
+# (192326), and the deploy script never passes that flag. The custom domain is attached ONCE, by the owner, in the Cloudflare dashboard (Workers, smg-online,
+# Settings, Domains and Routes), where Cloudflare shows and refuses conflicts at the point of change; removing it is a dashboard step too.
+# scripts/deploy-smg-online.sh refuses a config that has any route or custom domain. The paths the Worker does not serve are blocked by a WAF rule
+# on the zone: docs/ONLINE-DOMAIN-SETUP.md.
+# workers.dev is OFF for the 3.0 public release: all traffic goes through https://galaxy.psvita.dev (protected by WAF & rate-limiting rules).
+workers_dev = false
+# Preview URLs (<version>-smg-online.<subdomain>.workers.dev) would be a second public way to reach each uploaded version: OFF. The deploy script refuses a config without this line.
+preview_urls = false
+
+# Workers Logs (the beta's problem reports and session summaries are written as structured console.log lines: reports.js, summaries.js), read in the Cloudflare
+# dashboard. Per-request invocation logs are OFF: invocation_logs = false (wrangler 4.156.0: observability.logs.invocation_logs); traces are OFF too. The CODE logs no URL,
+# header or address itself (reports are masked first). What metadata the PLATFORM adds to each log line (for example the request URL or the client address) is to be
+# checked in the dashboard after the first deploy: this file does not promise it.
+[observability]
+enabled = true
+head_sampling_rate = 1
+[observability.logs]
+invocation_logs = false
+[observability.traces]
+enabled = false
+
+# The beta's problem reports and session summaries (tables reports, summaries, summary_days: created on first use). The database must exist on the account first
+# (it already exists: this is its id; never create one by hand, and no wrangler command without --config wrangler.smg.toml); the deploy script refuses a config without this binding.
+[[d1_databases]]
+binding = "REPORTS_DB"
+database_name = "galaxy-beta-reports"
+database_id = "272224ff-51e9-4ad0-8575-a5ab999e8358"
+
+# wrangler's own dependency instrumentation (it reports which packages a bundle uses): off.
+[dependencies_instrumentation]
+enabled = false
+
+# The binding is called GAME in the code (worker.js / do.js). A Durable Object namespace belongs to the Worker that declares it:
+# this one is new and empty, separate from msc-online's.
+[[durable_objects.bindings]]
+name = "GAME"
+class_name = "GameServer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["GameServer"]
+
+[vars]
+# Which game this deployment serves. (The variable cannot be called GAME on Cloudflare: that name is the Durable Object binding.)
+SERVICE_GAME = "smg"
+KILL_SWITCH = ""                   # comma list: all, register, rooms, turn, friends, quick, times, report
+MAINTENANCE_MESSAGE = ""
+REQUIRE_APP_VERSION = "1"          # every request must carry X-Msc-App (version gating fails closed)
+MIN_APP_VERSION = "3.0.0"          # older Galaxy builds get 426 update_required
+LATEST_APP_VERSION = "3.0.0"
+# Sign-up (SMG-PROTOCOL.txt "Sign-up"; DEPLOY-SMG.txt "Launch week"). The daily ceiling is a SAFETY VALVE against abuse, not a gate:
+# per-address limits (10 at once, then 3 an hour; 60 a day per /24 or /48) and the proof of work do the anti-abuse work. When the ceiling
+# is reached, new consoles read "Online is busy right now" until 00:00 UTC; existing accounts are never affected. Raise it for launch
+# week without a code change (wrangler deploy --config wrangler.smg.toml after editing, or the dashboard's variables).
+#   launch week: 10000 (free plan: each sign-up costs ~2 requests of the shared 100,000: see DEPLOY-SMG.txt before going higher)
+#   afterwards:   2000
+REGISTER_MAX_PER_DAY = "10000"
+# Quota defence (README.md "Quota defence"; core/budget.js). The free plan's 100,000 Worker requests a day belong to the whole ACCOUNT, shared with
+# the Strikers service: Galaxy admits at most DAILY_REQUEST_BUDGET of them. New sessions stop at (100 - LIVE_RESERVE_PCT) %; members of a live room
+# are served to the whole budget. Refused requests (abuse ceilings) do not use the budget up. The edge bucket is per isolate (best effort).
+DAILY_REQUEST_BUDGET = "45000"   # Strikers takes 45,000: the two sums must stay at 90,000 or less (the account's 100,000 a day is shared)
+# The object's own count (every request that reaches the Durable Object, refused ones and alarm runs included) is a second ceiling. Set here on
+# purpose, with the sum behind it: the account's 100,000 a day = Galaxy 50,000 + Strikers 45,000 = 95,000, leaving 5,000 for the requests the
+# Worker answers by itself (refused from its verdict memory, the switches, static pages). It must not be below DAILY_REQUEST_BUDGET (the
+# config raises it to that, with a warning in the log).
+DAILY_OBJECT_BUDGET = "50000"
+# Sign-up (challenge + register) may use at most this share of the NEW-session limit; past it sign-up gets "busy" with retry-after while
+# rooms, joins and Quick Match keep working. 0 = no separate share. Counted apart in the admin stats ("signup").
+SIGNUP_SHARE_PCT = "20"
+LIVE_RESERVE_PCT = "20"
+POLL_PACE_MAX_PCT = "140"          # the clients are asked to stretch their room polls up to this much (liveness limits cap it at 140)
+ADDR_DAILY_OPEN = "1000"           # per address per UTC day: requests without a token (info, servers, time, challenge, register, junk paths)
+ADDR_DAILY_PLAYER = "3000"         # ... with a token that is not a live room member's room traffic (wrong tokens count here)
+ADDR_DAILY_LIVE = "10000"          # ... a live room member's room and relay calls (about 160 player-hours behind one NAT)
+PID_DAILY_MAX = "4000"             # per account per UTC day, everything (about 65 player-hours)
+ADDR_BAD_DAY = "2000"               # per address per UTC day: requests that FAIL authentication (wrong, missing or unknown token); the Worker then refuses tokens it has not seen succeed, except 3 unknown tokens a minute
+EDGE_IP_BURST = "120"              # the Worker's own bucket per address+token (no token: per address), per isolate
+EDGE_IP_PER_SEC = "1"
+EDGE_IP_AGG_BURST = "300"          # ... and the address's aggregate for requests with a token (consoles behind one NAT are not throttled together)
+EDGE_IP_AGG_PER_SEC = "5"
+MAX_PLAYERS = "50000"              # accounts in total; when full, the account unseen longest (60+ days) makes room, else server_full
+REGISTER_EVICT_SILENT_MIN_MINUTES = "30" # a full service with no silent account a day old still removes the oldest silent one at least this old (never one a console just made)
+REGISTER_EVICT_FRIENDLESS_DAYS = "14"     # then an account with no friend and no star time unseen this long; the 60-day rule (REGISTER_EVICT_IDLE_DAYS) comes last
+REGISTER_EVICT_UNUSED_HOURS = "24" # a full service removes a SILENT account (signed up, never used, no friend, no time) this old first
+PRUNE_UNUSED_DAYS = "3"            # and the hourly sweep removes silent accounts this old; 0 turns either off
+ACCOUNT_EXPIRE_DAYS = "365"        # an account unseen this long is removed (its console registers again quietly, with a new friend code)
+REGISTER_POW_BITS = "15"           # proof of work: ESTIMATED 0.5 s on a Vita on average (6 ms of every 16 ms frame; a laptop: 30 ms); +1 bit per sign-up beyond 3 a day, at most 17 (client limit)
+REGISTER_NET_PER_DAY = "60"        # sign-ups per IPv4 /24 or IPv6 /48 per day
+SMG_TIME_BUILDS = "3.0.0"          # builds whose star times are accepted (the client's SMG_TIME_BUILD)
+SMG_TIME_FLOOR_FRAMES = "600"      # 10 s: the floor of every star without a row in the shipped table or in SMG_STAR_FLOORS
+SMG_STAR_FLOORS = "{}"             # {"<galaxy>:<star>": frames, ...} overrides single stars of the shipped table src/core/smg_floors.js
+TURN_PROVIDER = "cloudflare"       # cloudflare | stub | "" (off)
+TURN_TTL_SEC = "3600"
+TURN_MAX_CREDS_PER_DAY = "300"
+TURN_NEW_ACCOUNT_DAILY = "200"         # launch week: every account is new, so the new-account share of the day (Check Connection and first-day relay passes) is 200 of the 300, not the default 60. Lower it to the default (60) after the first week
+TURN_MAX_CREDS_PER_PLAYER_DAY = "12"   # 4-player rooms: a guest may need credentials again after a host change
+TURN_MAX_CREDS_PER_ROOM = "8"          # svcfix3 (review S5): a room takes at most this many credentials per clock hour (4 members + 4 renewals; a long room renews every hour)
+TURN_MAX_CREDS_PER_ADDR_DAY = "24"     # one source address, per UTC day (a household of consoles)
+TURN_UNNEEDED_SHARE_PCT = "50"         # credentials without a visible reason (no relay steer, no failed punch) use at most this share of TURN_MAX_CREDS_PER_DAY
+TURN_MONTHLY_BUDGET_MB = "100000"
+# Hard usage stop (core/turn-usage.js): when the secrets TURN_USAGE_TOKEN and TURN_ACCOUNT_ID exist, the Worker reads Cloudflare's own relay egress
+# (GraphQL, at most every 10 minutes) and stops minting passes, and revokes the ones still valid, when any limit is reached (gigabytes = 10^9 bytes):
+TURN_HARD_MONTH_GB = "300"             # Galaxy's key, this month
+TURN_HARD_ACCOUNT_MONTH_GB = "700"     # the whole account this month (the free 1,000 GB is shared with Strikers)
+TURN_HARD_DAY_GB = "25"                # Galaxy's key, today (UTC)
+
+# Secrets (wrangler secret put NAME --config wrangler.smg.toml; never in this file):
+#   ADMIN_TOKEN              long random string for /v1/admin/* (backup, restore, kill switches, bans, flags). NOT the Strikers one.
+#   TURN_KEY_ID              Cloudflare Realtime TURN key id (may be a separate key from Strikers', for a separate budget)
+#   TURN_KEY_API_TOKEN       Cloudflare Realtime TURN key API token
+#   TURN_USAGE_TOKEN         optional: a read-only Account Analytics token, for the hard usage stop above (without it the estimate caps are the only limit)
+#   TURN_ACCOUNT_ID          the account id for that read (deploy-smg-online.sh sets it from ACCOUNT_ID whenever TURN_USAGE_TOKEN exists)
+# RANK_HMAC_KEY_HEX is not needed: GAME smg has no DWC ranking.

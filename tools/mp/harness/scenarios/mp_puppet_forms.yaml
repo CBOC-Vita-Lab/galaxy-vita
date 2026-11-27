@@ -1,0 +1,25 @@
+# Player forms on the other console (puppetprep): host + guest in Good Egg 1. The host's STATE carries a form from SMG_MP_TEST_FORM
+# (<secs after the scene's first capture>:<form id>; 3 Bee, 4 Boo, 2 Ice, 1 Fire, 5 Spring, 6 Rainbow, 7 Flying, 8 Bone, 0 normal): the
+# guest's scene has none of those forms' models (Good Egg preloads none), so every one is the puppet's fallback look (plain Mario with
+# the form's colour, which the desktop render does not show: only the Boo's see-through look and Fire's white suit are visible). Nothing may crash, assert or hide the puppet. The shots (every 2 s) show each form.
+name: mp_puppet_forms
+description: a watcher's puppet for every form of the player, none of them loaded in its scene
+seconds: 190
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_FORM]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_LOOK: 0, SMG_MP_TEST_FORM: "10:3,16:4,22:2,28:1,34:5,40:6,46:7,52:8,58:0"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] puppet test form: from 52.0 s after the first capture of a scene: form 8/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=Mario self=0/'
+  - 'absent * /\[mp\] puppet slot=\d+ (joints missing|model fallback)/'
+  - '?count * /\[mp\] puppet slot=\d+ anim miss/ <= 3'
+  - 'shots * >= 20'

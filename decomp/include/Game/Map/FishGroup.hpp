@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Game/LiveActor/LiveActor.hpp"
+#ifdef TARGET_PC
+#include "JSystem/JGeometry/TMatrix.hpp"
+#endif
 
 class FishGroup;
 
@@ -31,6 +34,13 @@ public:
     /* 0xC0 */ s32 mTimeToSearchPlayer;
     /* 0xC4 */ s32 mStepToMove;
     /* 0xC8 */ TVec3f* mEscapePos;
+#ifdef TARGET_PC
+private:
+    bool mHaveBasis = false;
+    TVec3f mBasisFront;
+    TVec3f mBasisUp;
+    TPos3f mBasisMtx;
+#endif
 };
 
 class FishGroup : public LiveActor {

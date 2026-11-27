@@ -9,6 +9,15 @@
 #include "Game/Scene/SceneObjHolder.hpp"
 #include <algorithm>
 #include <cstring>
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include "port/logic_prof.h"  // (GXV_LOGIC_PROF, logic23: the manager search timed as "area-manager")
+#include "port/gt71.h"
+#include "port/obj_cut.h"     // (GXV_AREA_GRID's manager-name memo: port_area_geo_gen)
+extern "C" int port_area_grid_mode(void);  // (AreaObj.cpp)
+extern "C" int port_on_frame_thread(void);
+extern "C" uint32_t gPortAreaGridStats[10];
+#endif
 
 namespace {
     struct IsManagerName : std::binary_function< AreaObjMgr*, const char*, bool > {
@@ -371,6 +380,9 @@ namespace {
 
 AreaObjContainer::AreaObjContainer(const char* pName) : NameObj(pName) {
     mNumManagers = 0;
+#ifdef TARGET_PC
+    PortAreaGeoBump();  // (GXV_AREA_GRID: the manager-name memo is the old container's)
+#endif
 }
 
 void AreaObjContainer::init(const JMapInfoIter& rIter) {
@@ -384,7 +396,68 @@ void AreaObjContainer::init(const JMapInfoIter& rIter) {
     }
 }
 
+#ifdef TARGET_PC
+// GXV_AREA_GRID's manager-name memo (logic23, 8 Nov; on with GXV_AREA_GRID=1 or 2; exact): every named area lookup (MR::getAreaObj,
+// MR::isInAreaObj, ...) first finds its manager by name: a walk over the ~60 managers, each a heap object, until one's name is a
+// prefix of the asked name. The answer depends only on the asked text and on the managers' names and order, which are set when the
+// container is initialised (init appends; nothing renames or reorders them). The memo keeps, per asked pointer, the text (up to 31
+// characters), the container, the manager count and port_area_geo_gen; a lookup whose pointer, text, container, count and generation
+// are the same gets the same index, read live from the array. A text that did not fit, or no manager found (the original's find_if
+// would read past the array: left to the original), is not kept. GXV_AREA_GRID=2: every hit also searches; a different manager is
+// counted ("area-grid: ... mismatches X / Y", Y) and the searched one used.
+namespace {
+struct MgrMemo {
+    const AreaObjContainer* owner;
+    const char* key;
+    uint32_t gen;
+    u32 num;
+    u32 index;
+    char text[32];
+};
+MgrMemo sMgrMemo[64];
+}  // namespace
+#endif
+
 AreaObjMgr* AreaObjContainer::getManager(const char* pName) const {
+#ifdef TARGET_PC
+    PORT_LOGIC_SYS(PORT_LS_AREA_MGR);
+    int mode = port_area_grid_mode();
+    if (mode == 0 && ::port::gt71::On(::port::gt71::kArea)) {
+        mode = 1;  // (gt71 AREA: the name memo alone, without the grid: the memo's own checks (pointer, text, container, count, generation) make it exact)
+    }
+    if (mode != 0 && port_on_frame_thread()) {  // (the memo is the game thread's: a scene's areas are made on the loading thread)
+        gPortAreaGridStats[6]++;
+        const uint32_t h = (static_cast< uint32_t >(reinterpret_cast< uintptr_t >(pName)) * 0x9E3779B1u) >> 26;
+        MgrMemo& e = sMgrMemo[h];
+#ifndef PORT_LGRID_NEG
+        const bool hit = e.key == pName && e.owner == this && e.gen == port_area_geo_gen && e.num == mNumManagers &&
+                         std::strncmp(e.text, pName, sizeof(e.text)) == 0;
+#else
+        const bool hit = e.key == pName && e.owner == this && e.gen == port_area_geo_gen && e.num == mNumManagers;  // (negative control)
+#endif
+        if (hit) {
+            gPortAreaGridStats[7]++;
+            if (mode == 1) {
+                return mManagerArray[e.index];
+            }
+        }
+        AreaObjMgr* const* pFound =
+            std::find_if(mManagerArray, mManagerArray + mNumManagers, std::binder2nd< IsManagerName, const char* >(IsManagerName(), pName));
+        const u32 index = static_cast< u32 >(pFound - mManagerArray);
+        if (hit && index != e.index && gPortAreaGridStats[9]++ < 16) {
+            port_log_summary("area-grid: manager memo MISMATCH for \"%.31s\": memo %u search %u", pName, e.index, index);
+        }
+        if (!hit && index < mNumManagers && std::strlen(pName) < sizeof(e.text)) {
+            e.owner = this;
+            e.key = pName;
+            e.gen = port_area_geo_gen;
+            e.num = mNumManagers;
+            e.index = index;
+            std::strncpy(e.text, pName, sizeof(e.text));
+        }
+        return *pFound;
+    }
+#endif
     return *std::find_if(mManagerArray, mManagerArray + mNumManagers, std::binder2nd< IsManagerName, const char* >(IsManagerName(), pName));
 }
 

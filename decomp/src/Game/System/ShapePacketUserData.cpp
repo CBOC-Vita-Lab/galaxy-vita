@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "Game/System/PortDrawPipe.hpp"
+#endif
 #include "Game/System/ShapePacketUserData.hpp"
 #include "Game/Util/CameraUtil.hpp"
 #include "Game/Util/ModelUtil.hpp"
@@ -71,13 +74,18 @@ void ShapePacketUserData::loadTexMtx(J3DMaterial* pMaterial, int slot, u16 index
     for (u32 i = 0; i < mTexGenNum; i++) {
         if (mTexMtxInfo[i].mType != 0) {
             if (mTexMtxInfo[i].mType == 2) {
-                mtx.set(j3dSys.getModelDrawMtx(index));
+                mtx.set(J3D_DSYS.getModelDrawMtx(index));  // (GXV_DRAWPIPE: the draw path's J3DSys, J3DSys.hpp)
                 mtx.setTrans(0.0f, 0.0f, 0.0f);
                 GXLoadTexMtxImm(mtx, GX_TEXMTX0 + slot * 3, static_cast< GXTexMtxType >(pMaterial->getTexCoord(i)->getTexGenType()));
             }
 
             J3DTexMtx* const pTexMtx = pMaterial->getTexMtx(i);
+#ifdef TARGET_PC
+            // (GXV_DRAWPIPE, dpengine: in a pass drawn from a frozen frame the camera's inverse view matrix is the hand-over's)
+            pTexMtx->calcPostTexMtx(gPortPipeScene != nullptr ? gPortPipeScene->mInvView : MR::getCameraInvViewMtx());
+#else
             pTexMtx->calcPostTexMtx(MR::getCameraInvViewMtx());
+#endif
             GXLoadTexMtxImm(pTexMtx->getMtx(), mTexMtxInfo[i].mPostMtx, GX_MTX3x4);
         }
     }

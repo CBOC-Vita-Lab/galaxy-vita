@@ -67,6 +67,9 @@ public:
     /* 0x20 */ SysInfoWindowType mWindowType;
     /* 0x24 */ SysInfoType mType;
     /* 0x28 */ YesNoController* mYesNoSelector;
+#ifdef TARGET_PC
+    void setPortPadYesNo(bool on);   // setfix31: the pad answers this window's Yes / No too (YesNoController::setPortPad)
+#endif
     /* 0x2C */ IconAButton* mIconAButton;
     /* 0x30 */ const char* mTextParentPaneName;
     /* 0x34 */ const char* mWindowParentPaneName;

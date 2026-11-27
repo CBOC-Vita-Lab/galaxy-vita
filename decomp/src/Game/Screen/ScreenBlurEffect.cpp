@@ -32,6 +32,9 @@ void ScreenBlurEffect::notifyTurnOn() {
 
 void ScreenBlurEffect::draw() const {
     if (isSomething()) {
+#ifdef TARGET_PC
+        ImageEffectLocalUtil::portBloomTexturesTouched();  // (PETARI_BLOOM_HALFRATE: it uses the bloom's textures as scratch)
+#endif
         drawBlur();
         captureBlur();
     }

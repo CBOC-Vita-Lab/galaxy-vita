@@ -30,6 +30,12 @@ void GraviryFollower::update() {
         TPos3f followMtx;
         calcFollowMatrix(&followMtx);
 
+#ifdef TARGET_PC
+        if (!mGravity->mPortMoving) {
+            mGravity->mPortMoving = true;  // (GXV_GRAV_GRID: from now on a candidate everywhere, never filed)
+            PortGravGeoBump();
+        }
+#endif
         mGravity->updateMtx(followMtx);
 #ifdef TARGET_PC
         PortGravBump();  // (the world shape follows the matrix)

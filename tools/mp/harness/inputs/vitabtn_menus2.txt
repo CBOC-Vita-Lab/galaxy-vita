@@ -1,0 +1,16 @@
+# vitabtn (12 Nov): the Multiplayer menu's side screens, for screenshots (PETARI_BACKEND=vgx PETARI_HANDHELD_UI=1 PETARI_GAME_CLOCK=1 PETARI_SHOT_MS=3000).
+# title -> entry screen -> Multiplayer -> power-save tip -> (a long idle: the machine's load shifts the menu's time by up to 20 s)
+# -> How to Play (70) -> Leaderboards (88) -> Friends (105). Presses are far apart on purpose.
+30-30.5:A|B
+36-36.2:DOWN
+38-38.2:A
+46-46.2:A
+70-70.2:C
+78-78.2:A
+84-84.2:DOWN
+86-86.2:DOWN
+88-88.2:A
+100-100.2:B
+103-103.2:DOWN
+105-105.2:A
+117-117.2:B

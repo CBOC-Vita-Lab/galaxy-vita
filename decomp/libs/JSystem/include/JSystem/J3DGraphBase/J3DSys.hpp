@@ -190,3 +190,49 @@ public:
 
 extern u32 j3dDefaultViewNo;
 extern J3DSys j3dSys;
+
+#ifdef TARGET_PC
+// GXV_PAR_DL (gamedraw23; decomp/src/Game/LiveActor/ModelManager.cpp): the drawn turn's material lists may be made by a worker while the
+// game thread makes the view pass. The material path (J3DModel::calcMaterial, J3DMaterial::calc / diff / makeDisplayList / patch, the
+// texture-generator calc, the GD loads of the differed lists, DisplayListMaker::diff) reads and writes the J3DSys J3D_MSYS names: j3dSys
+// itself, except during that overlap, when it is the worker's private copy (made from j3dSys at the dispatch; merged back at the join).
+// gPortParDlRun: the overlap is open; the material path is the worker's (the guest-OS calls it makes on the game thread, interrupts and
+// the scheduler, are made once for the whole overlap by the game thread instead). PortDlGameEnter() at each way into the material path:
+// on the game thread during the overlap it first finishes the overlap (port_par_dl_game_enter), so the material path never runs on two
+// threads at once. All three are defined in J3DPacket.cpp (the function is weak there: J3D alone, in a host test, has no overlap).
+// gPortParDlStackLo / _Hi: the worker's stack (set by the game thread before each dispatch): a frame inside it is the worker's, which goes
+// on without a call (anything else asks port_par_dl_game_enter, which also knows the game thread running a job it took).
+extern J3DSys* gPortJ3DSysMat;
+extern bool gPortParDlRun;
+extern unsigned long gPortParDlStackLo, gPortParDlStackHi;
+extern "C" void port_par_dl_game_enter(void);
+#define J3D_MSYS (*gPortJ3DSysMat)
+inline void PortDlGameEnter() {
+    if (__builtin_expect(gPortParDlRun, 0)) {
+        const unsigned long sp = reinterpret_cast< unsigned long >(__builtin_frame_address(0));
+        if (sp - gPortParDlStackLo < gPortParDlStackHi - gPortParDlStackLo) {
+            return;  // (the worker)
+        }
+        port_par_dl_game_enter();
+    }
+}
+// GXV_DRAWPIPE (dpengine, 11 Nov; port/draw_pipe.h, decomp/src/Game/System/DrawBufferHolder.cpp): the draw path's J3DSys. The J3D draw
+// passes (DrawBufferGroup / DrawBufferShapeDrawer -> J3DShapePacket::prepareDraw -> J3DShape::drawFast -> J3DShapeMtx, the user lists'
+// texture-matrix loads) read and write the J3DSys J3D_DSYS names: j3dSys itself, except while a pass is drawn from a frame frozen at
+// the hand-over. Then it is the draw side's own (DrawBufferHolder.cpp: j3dSys as it stood at the hand-over, plus every word the game
+// thread's draw lists changed up to the pass, plus what the passes before it wrote), so that a pass drawn later, on another thread
+// beside the next update, reads the J3DSys the serial draw would have shown it; j3dSys gets the passes' words back when the draw is
+// joined. A shape packet's base matrix may point INTO j3dSys (the view matrix, J3DModel::prepareShapePackets): PortBaseMtx follows the
+// same indirection.
+extern J3DSys* gPortJ3DSysDraw;
+extern const J3DShapePacket* gPortPipePrepared;  // (J3DPacket.cpp)
+#define J3D_DSYS (*gPortJ3DSysDraw)
+inline Mtx* PortBaseMtx(Mtx* pBase) {
+    return pBase == reinterpret_cast< Mtx* >(j3dSys.mViewMtx) ? reinterpret_cast< Mtx* >(gPortJ3DSysDraw->mViewMtx) : pBase;
+}
+#else
+#define J3D_MSYS j3dSys
+#define J3D_DSYS j3dSys
+inline void PortDlGameEnter() {}
+inline Mtx* PortBaseMtx(Mtx* pBase) { return pBase; }
+#endif

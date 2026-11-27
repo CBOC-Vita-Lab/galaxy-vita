@@ -23,8 +23,13 @@ struct JPAEmitterWorkData {
         /* 0x18 */ JGeometry::TVec3< f32 > mVelAxis;
     };
 
+#ifdef TARGET_PC
+    JPAEmitterWorkData() : mRndm(0), mPortLookSkipP(false), mPortLookSkipC(false) {
+    }
+#else
     JPAEmitterWorkData() : mRndm(0) {
     }
+#endif
 
     /* 0x00 */ JPABaseEmitter* mpEmtr;
     /* 0x04 */ JPAResource* mpRes;
@@ -64,6 +69,12 @@ struct JPAEmitterWorkData {
     /* 0x210 */ u32 mPrjType;
     /* 0x214 */ s16 mClrKeyFrame;
     /* 0x216 */ u8 mDrawCount;
+#ifdef TARGET_PC
+    // GXV_JPA_LOOK (JPAResource.cpp): which look functions the running calc leaves to the next draw. These were file statics; they are
+    // per work area now so that GXV_PAR_PTCL's threads, each with a work area of its own, do not share them.
+    bool mPortLookSkipP;
+    bool mPortLookSkipC;
+#endif
 };
 
 enum {
@@ -390,6 +401,15 @@ public:
     // GXV_JPA_LOOK (logic12, 5 Nov; JPAResource.cpp): set when a calc left out its particles' look functions (colour, alpha,
     // scale and texture-index animation); the next draw of this emitter runs them first, for the particles as they are then.
     /* 0x114 */ u8 mPortLookStale = 0;
+    // GXV_PTCL_LOOKPAR (gamecpu23, 8 Nov; JPAEmitterManager.cpp): set before a parallel particle turn for the emitters of the parallel chains
+    // when a picture is expected before the next calc: their calc runs the look functions itself (the original way) instead of leaving them
+    // to the draw (GXV_JPA_LOOK), so that work is done on the particle worker (core 3) and not in the game thread's draw. ByPar: the last
+    // calc did so (GXV_PTCL_LOOKPAR=2 checks such emitters at the draw).
+    /* 0x115 */ u8 mPortLookNow = 0;
+    /* 0x116 */ u8 mPortLookByPar = 0;
+    // GXV_PAR_PTCL: the work area of the JPAResource::calc that is running on this emitter (createParticle / createChild use it instead
+    // of the manager's pWd, which only the game thread's own serial calcs use); null outside a calc.
+    JPAEmitterWorkData* mPortWork = nullptr;
 #endif
 };
 

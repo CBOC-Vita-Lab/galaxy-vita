@@ -13,6 +13,8 @@
 
 #ifdef TARGET_PC
 extern "C" void port_irq_poll(void);
+extern "C" int64_t port_host_time_ns(void);
+extern "C" void port_load_note_decomp(uint32_t bytes, int64_t ns) __attribute__((weak));  // (cook24: the load-split census, platform/src/dvd/dvd.cpp)
 #endif
 
 int JKRDecompressFromDVDToAram(JKRDvdFile*, u32, u32, u32, u32, u32, u32*);
@@ -292,7 +294,13 @@ int JKRDecompressFromDVDToAram(JKRDvdFile* dvdFile, u32 param_1, u32 fileSize, u
     *tsPtr = 0;
     u8* first = firstSrcData();
     if (first) {
+#ifdef TARGET_PC
+        const int64_t lsT0 = port_host_time_ns();
+#endif
         result = decompSZS_subroutine(first, param_1);
+#ifdef TARGET_PC
+        if (port_load_note_decomp) port_load_note_decomp(*tsPtr, port_host_time_ns() - lsT0);
+#endif
     } else {
         result = -1;
     }

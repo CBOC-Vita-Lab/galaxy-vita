@@ -8,6 +8,7 @@ public:
 
     virtual ~BenefitItemInvincible();
     virtual void init(const JMapInfoIter&);
+    virtual bool receiveOtherMsg(u32, HitSensor*, HitSensor*);
     virtual void appearThrowUp();
     virtual void initModelAndEfx();
     virtual void exeCatch();

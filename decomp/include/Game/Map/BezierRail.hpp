@@ -18,6 +18,9 @@ public:
 
     f32 getLength(f32, f32, int) const;
     f32 getParam(f32) const;
+#ifdef TARGET_PC
+    f32 getParamPlain(f32) const;  // (hot62: the original body)
+#endif
 
     f32 getNearestParam(const TVec3f&, f32) const;
 

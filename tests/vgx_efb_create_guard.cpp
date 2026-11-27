@@ -6,6 +6,7 @@ size_t vglMemFree(int) { return 128u << 20; }
 size_t vglMemTotal(int) { return 128u << 20; }
 void* vglGetTexDataPointer(GLenum) { static unsigned char storage; return &storage; }
 extern "C" { unsigned char vgxvita_maskGuardDue = 0; }
+#include "vgx_native_capacity_stub.h"
 #include "../platform/vgx/src/vgx_backend_gl.cpp"
 #include "../platform/vgx/src/vgx_autoq.cpp"
 #include <EGL/egl.h>

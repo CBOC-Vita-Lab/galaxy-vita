@@ -45,6 +45,10 @@ set(DECOMP_INCLUDES
 )
 
 set(PORT_DEFS TARGET_PC=1 NDEBUG=1 VERSION=0)
+include(${CMAKE_SOURCE_DIR}/cmake/MpBuildDefs.cmake)   # core2: NP_ONLINE_URL (default https://galaxy.psvita.dev), MP_BUILD_ID (default dev): the
+                                                       # port's own units only (target game below; the decomp objects stay as they were)
+# MP3 perf: the multiplayer cost counter (port/mp_prof.h): "[mp] prof ..." lines every SMG_MP_PROF=<turns> (default 600). Off in releases.
+option(SMG_MP_PROF "Multiplayer cost counter (ms per turn in the MP hooks, puppets, net)" OFF)
 
 # Paths in the binaries (__FILE__, debug info) relative to the repository
 # and the NDK, not the machine that built them.
@@ -104,6 +108,10 @@ if(NOT ANDROID AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 add_library(decomp OBJECT ${GAME_SRCS} ${JSYSTEM_SRCS} ${NW4R_SRCS} ${SDK_SRCS})
+if(SMG_MP_PROF)   # (only the multiplayer files: every other object stays the same)
+  file(GLOB _mp_prof_srcs ${DECOMP}/src/Game/MP/*.cpp ${CMAKE_SOURCE_DIR}/platform/src/mp/*.cpp)
+  set_source_files_properties(${_mp_prof_srcs} PROPERTIES COMPILE_DEFINITIONS SMG_MP_PROF=1)
+endif()
 target_include_directories(decomp PRIVATE ${DECOMP_INCLUDES})
 target_compile_definitions(decomp PRIVATE ${PORT_DEFS})
 target_compile_options(decomp PRIVATE ${PORT_COMMON_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:${PORT_CXX_FLAGS}> $<$<COMPILE_LANGUAGE:C>:${PORT_C_FLAGS}>)
@@ -131,14 +139,34 @@ else()
   list(FILTER PLATFORM_SRCS EXCLUDE REGEX "/xr/xr_app\\.cpp$")
   find_package(SDL2 REQUIRED)
   add_executable(game $<TARGET_OBJECTS:decomp> ${PLATFORM_SRCS} platform/desktop/main.cpp)
+  # MP3 (harness): the game's operator new (JKRHeap gameAlloc) gives 4-byte aligned blocks, as on the Wii and the Vita, but
+  # x86-64 clang assumes 16 (__STDCPP_DEFAULT_NEW_ALIGNMENT__) and zeroes new objects with movaps: #GP (SIGSEGV, address 0)
+  # in the first constructor that gets a block not 16-aligned (StarPointerOnOffController, at boot). 8: no aligned SSE
+  # stores to new'd memory (x86 allows unaligned scalar access); -fno-aligned-allocation keeps over-aligned types on the
+  # game's operator new instead of libc++'s aligned one (host memory). Every C++ target here (decomp, game, vgx, net).
+  string(APPEND CMAKE_CXX_FLAGS " -fnew-alignment=8 -fno-aligned-allocation")
   target_compile_options(decomp PRIVATE -mcmodel=large -fno-pie $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
   target_compile_options(game PRIVATE -mcmodel=large -fno-pie $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
   set(GALAXY_NATIVE_IMAGE_BASE "0x98000000" CACHE STRING "32-bit diagnostic game image base")
   target_link_options(game PRIVATE -stdlib=libc++ -fuse-ld=lld -no-pie -Wl,--image-base=${GALAXY_NATIVE_IMAGE_BASE})
+  # MP3 integ (8 Nov): this toolchain's crtbegin.o (GCC 13) addresses .tm_clone_table with 32-bit sign-extended relocations, which
+  # cannot reach an image at 0x98000000 (lld: "R_X86_64_32S out of range"). The position-independent start files
+  # (crtbeginS.o / crtendS.o) have no such relocation: the executable stays non-PIE at the documented base.
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    foreach(_f crt1.o crti.o crtbeginS.o crtendS.o crtn.o)
+      execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=${_f} OUTPUT_VARIABLE _p OUTPUT_STRIP_TRAILING_WHITESPACE)
+      string(REPLACE "." "_" _v ${_f})
+      set(GALAXY_START_${_v} ${_p})
+    endforeach()
+    if(EXISTS "${GALAXY_START_crtbeginS_o}" AND EXISTS "${GALAXY_START_crt1_o}")
+      target_link_options(game PRIVATE -nostartfiles ${GALAXY_START_crt1_o} ${GALAXY_START_crti_o} ${GALAXY_START_crtbeginS_o})
+      target_link_libraries(game PRIVATE ${GALAXY_START_crtendS_o} ${GALAXY_START_crtn_o})
+    endif()
+  endif()
   target_link_libraries(game PRIVATE SDL2::SDL2 EGL GLESv2 pthread m dl)
 endif()
 target_include_directories(game PRIVATE ${DECOMP_INCLUDES})
-target_compile_definitions(game PRIVATE ${PORT_DEFS} PORT_PLATFORM_CODE=1)
+target_compile_definitions(game PRIVATE ${PORT_DEFS} PORT_PLATFORM_CODE=1 ${MP_BUILD_DEFS})
 
 # ---------------------------------------------------------------------------
 # vgx: the GLES2-class GX renderer (platform/vgx), the Vita's renderer. On the
@@ -152,6 +180,9 @@ if(PORT_GX_VGX AND NOT ANDROID)
   list(FILTER VGX_SRCS EXCLUDE REGEX "/vgx_backend_null\\.cpp$")
   add_library(vgx STATIC ${VGX_SRCS} platform/vgx/host/vgx_host_egl.cpp)
   target_include_directories(vgx PRIVATE platform/vgx/src platform/vgx/third_party)
+  # (merge with the performance line: vgx sources include "port/hitch24.h"; searched after the system directories, so the game's own libc
+  # shim headers in platform/include never shadow the host's)
+  target_compile_options(vgx PRIVATE -idirafter ${CMAKE_SOURCE_DIR}/platform/include)
   target_compile_features(vgx PRIVATE cxx_std_20)
   target_compile_options(vgx PRIVATE -O2 -fno-exceptions -fno-rtti -mcmodel=large -fno-pie -stdlib=libc++ -Wall -Wno-unused-function)
   target_compile_definitions(game PRIVATE PORT_GX_VGX=1)
@@ -160,6 +191,32 @@ if(PORT_GX_VGX AND NOT ANDROID)
 endif()
 target_compile_options(game PRIVATE ${PORT_COMMON_FLAGS} $<$<COMPILE_LANGUAGE:CXX>:${PORT_CXX_FLAGS}> $<$<COMPILE_LANGUAGE:C>:${PORT_C_FLAGS}>)
 target_link_options(game PRIVATE -Wl,--no-undefined -Wl,--error-limit=0)
+
+# ---------------------------------------------------------------------------
+# MP3: net/ = the vendored Strikers Charged online stack (VLink over POSIX UDP and the online transport; NpNet: STUN, punching, TURN,
+# session crypto, signaling over plain http to a local fake service). Game-agnostic, its own flags (not the game's forced compat.h);
+# no TLS on the desktop (np_https answers UNAVAILABLE for https://). net/GALAXY-CHANGES.txt lists what differs from Strikers.
+# ---------------------------------------------------------------------------
+set(SMG_NET_SRC ${CMAKE_SOURCE_DIR}/net/src)
+if(TRUE)   # (every build that has the game: platform/src/mp/mp_keyboard.cpp calls into it)
+  add_library(smg_net STATIC
+    ${SMG_NET_SRC}/vlink.cpp ${SMG_NET_SRC}/vlink_udp.cpp ${SMG_NET_SRC}/vlink_online.cpp ${SMG_NET_SRC}/np_glue.cpp
+    ${SMG_NET_SRC}/np_keyboard_host.cpp ${SMG_NET_SRC}/np_https.cpp ${SMG_NET_SRC}/np_https_sys.cpp
+    ${SMG_NET_SRC}/online/np_net.cpp ${SMG_NET_SRC}/online/np_crypto.cpp ${SMG_NET_SRC}/online/np_hash.cpp ${SMG_NET_SRC}/online/np_turn.cpp
+    ${SMG_NET_SRC}/online/np_stun.cpp ${SMG_NET_SRC}/online/np_peer.cpp ${SMG_NET_SRC}/online/np_online.cpp ${SMG_NET_SRC}/online/np_fault.cpp
+    ${SMG_NET_SRC}/online/np_signal_fake.cpp ${SMG_NET_SRC}/online/np_signal_http.cpp ${SMG_NET_SRC}/online/np_http.cpp
+    ${SMG_NET_SRC}/online/np_http_plain.cpp ${SMG_NET_SRC}/online/np_udp_posix.cpp ${SMG_NET_SRC}/online/np_upnp.cpp ${SMG_NET_SRC}/online/np_natpmp.cpp
+    ${SMG_NET_SRC}/online/third_party/monocypher/monocypher.c)
+  target_include_directories(smg_net PUBLIC ${CMAKE_SOURCE_DIR}/net/include)
+  target_compile_features(smg_net PRIVATE cxx_std_20)
+  target_compile_options(smg_net PRIVATE -O2 -fsigned-char -fno-short-enums -fno-strict-aliasing -fwrapv
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -Wno-unused-function> $<$<COMPILE_LANGUAGE:C>:-w>)
+  if(NOT ANDROID)   # (the desktop game's code model and C++ library)
+    target_compile_options(smg_net PRIVATE -mcmodel=large -fno-pie $<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
+    target_link_libraries(smg_net PUBLIC pthread)
+  endif()
+  target_link_libraries(game PRIVATE smg_net)
+endif()
 if(ANDROID)
   # -Bsymbolic: game code must bind to the port's operator new/delete, not the
   # system C++ runtime's.

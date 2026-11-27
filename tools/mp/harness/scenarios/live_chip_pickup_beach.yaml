@@ -1,0 +1,35 @@
+# chipsync (second scene, see live_chip_pickup): a chip picked up by a GUEST in a live session reaches the host (CHIP message, applied there), and nothing is applied twice. Both consoles play Beach Bowl 1
+# (as mp_join); 40 s after its scene is live the guest collects 3 Star Chips of the yellow group through the game's own pickup steps (SMG_MP_TEST_COLLECT). This group has 5 chips but is NOT collectable
+# whole from a hook: one is dead until its stage switch fires and one is carried by a Shellfish (a child actor, not a placement of its own), so 3 of 5 are taken and the group must NOT complete on
+# either console (no launch star). (The full group-complete case is live_chip_pickup on Good Egg 1.)
+name: live_chip_pickup_beach
+description: "live 2 consoles: the guest collects 3 of the 5 Star Chips in Beach Bowl 1, the host applies the 3 once, the group does not complete"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_COLLECT]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_LOOK: 0, PETARI_STAGE: "HeavenlyBeachGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_COLLECT: "40:0:5"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect * /\[mp\] session started/ within 150s'
+  - 'expect guest /\[mp\] world test collect: purple=0 chip=[3-5] \(registry purple=\d+ chip=[5-9]\d*\)/'
+  - 'expect * /\[mp\] world reg chips plain=\d+ carried=[1-9]/'
+  - 'same host,guest /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) / last'
+  - 'same host,guest /\[mp\] world reg chips plain=(\d+) carried=(\d+)/ last'
+  - 'count guest /\[mp\] world chip key=\S+ src=local/ == 4'
+  - 'expect host /\[mp\] world chip key=\S+ src=remote/ within 30s after guest /\[mp\] world test collect: registry purple=0 chip=5/'
+  - 'count host /\[mp\] world chip key=\S+ src=remote/ == 4'
+  - 'count host /\[mp\] world chip key=\S+ src=local/ == 0'
+  - 'count guest /\[mp\] world chip key=\S+ src=remote/ == 0'
+  # 4 of 5 taken: the group is not complete, so no completion demo and no launch star on either console
+  - 'absent * /\[mp\] world chip group done/'
+  - 'absent * /\[mp\] world drop type=chip/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

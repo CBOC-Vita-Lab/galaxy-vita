@@ -29,11 +29,14 @@ namespace MR {
     bool isStarPointerPointing1PWithoutCheckZ(const LiveActor*, const char*, bool, bool);
     bool isStarPointerPointing2P(const LiveActor*, const char*, bool, bool);
     bool isStarPointerPointing2POnPressButton(const LiveActor*, const char*, bool, bool);
+    bool isStarPointerPointing2POnPressButtonNoMp(const LiveActor*, const char*, bool, bool);   // MP3 costar: bosses (never held by other players)
     bool isStarPointerPointing2POnTriggerButton(const LiveActor*, const char*, bool, bool);
     bool isStarPointerPointingFileSelect(const LiveActor*);
     bool isStarPointerPointing1Por2P(const LiveActor*, const char*, bool, bool);
 #ifdef TARGET_PC
     bool isStarPointerPointingStarPieceAssist(const LiveActor*);
+    bool portStarPointerReaches(const LiveActor*, s32);  // (GXV_IDLE25: the core's tests without onReaction)
+    bool portStarPointerAssistMayAct();                  // (GXV_IDLE25)
 #endif
     bool requestTicoSeedGuidanceForce();
     bool requestPointerGuidanceNoInformation();

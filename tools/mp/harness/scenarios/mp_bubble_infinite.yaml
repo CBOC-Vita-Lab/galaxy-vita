@@ -1,0 +1,34 @@
+# Falls = Infinite lives (SMG_MP_DOWNED=1 on the host; the setting travels in WELCOME's MpSettings): the guest falls with 1 life
+# left (SMG_MP_TEST_LIVES=1): no bubble; the game's own miss runs and he restarts from the checkpoint (his own move type 5)
+# without losing the life: no game over (that would be move type 7, the title) at 0 lives. The host keeps playing.
+name: mp_bubble_infinite
+description: Infinite lives setting - a fall is the game's own miss + reload, no bubble, no life lost, no game over
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE, SMG_MP_DOWNED]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 4000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_DOWNED: 1}
+  - name: guest
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25:1", SMG_MP_TEST_LIVES: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect guest /\[mp\] bubble test die: slot 1 serial=1 damage lives=1/'
+  - 'absent * /\[mp\] bubble (on|msg|remote on|restart)/'
+  # the game's own miss: DEAD to the host, lives kept (clamp), the checkpoint reload of the same scene serial
+  - 'expect guest /\[mp\] flow dead slot=1 serial=1/ within 2s after guest /\[mp\] bubble test die/'
+  - 'order guest /\[mp\] flow dead slot=1 serial=(\d+)/ before host /\[mp\] flow dead slot=1 serial=$1/ within 5s'
+  - 'expect guest /\[mp\] flow lives clamp/'
+  - 'expect guest /\[mp\] flow own move type=5 galaxy=EggStarGalaxy serial=1 role=guest/ within 20s after guest /\[mp\] flow dead slot=1/'
+  - 'absent guest /\[mp\] flow own move type=7/'
+  - 'absent host /\[mp\] flow (local move type=5|dead slot=0)/'
+  - 'expect guest /\[mp\] puppet slot=0 appear/ within 40s after guest /\[mp\] flow own move type=5/'
+  - 'absent * /\[mp\] (session ended|slot \d left)/ before * /session ended reason=none \(shutdown\)|desktop: terminal/'
+  - 'exit * == 0'

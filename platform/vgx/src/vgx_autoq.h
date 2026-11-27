@@ -183,6 +183,25 @@
 //     the cadence (more than holdMissFrac of the trial's) or a GPU-limited window against 33.3 ms go back at once to the rung it came from
 //     and block the rung tried (blockSec, doubling; Why::CadenceBack). Steps down on the cadence are as before (DownBudgetMs); anisotropic
 //     filtering is not touched by it.
+// Performance mode: fast60 (Config::fast60, GXV_AUTOQ_FAST60=1|0, default on in the back end and entry.cpp; target 60 only, Config::fast60 is
+// forced off for any other target, so Quality and Locked 30 never run it). The console (r100): Good Egg zoom 2.0 held 720x404 at 48.6 a
+// second, Honeyhive 41.8, Beach Bowl dropped to a steady 30, because a step below today's size waits for a quiet moment or 4-8 s of a
+// GPU-limited stretch and then for a GPU-timed trial, and a spike took seconds to answer. With it, per picture (after the existing
+// rejections: a movie, a quiet moment, a stall over gapResetMs, the settling after a change, a picture on the steady 30 are not looked at):
+//   - a picture is "late for the GPU" as in the floor census (the budget + 3 %, the GPU the largest stage by causeShare and every other
+//     measured stage within the budget + 3 %); a picture late for the game's CPU, the renderer or the front end never counts;
+//   - fast60Late (8) of the last fast60Pics (12) pictures late for the GPU, those 12 within fast60SpanSec, and fast60GapSec since the
+//     last change: one step down (about 0.2-0.4 s after the spike began). In this order: anisotropic filtering off (as the other rules),
+//     the present's edge smoothing off (Config::edgeStep, with its GPU-timed trial, at today's rung), then ONE RUNG down. Above today's
+//     rung the rung left is blocked as after an overload (blockSec, doubling to maxBlockSec: the hysteresis, no climb into a size that was
+//     just too slow); at or below today's it joins the existing series of steps below (pathFrom_, checking_): the series is judged after
+//     belowCheckSec by the GPU's time (any real saving, missGainFrac, because the floor is missed) and by the pictures (pathRateFrac), and
+//     is undone as a whole, blocked and remembered with the scene when it buys nothing. The rung left is blocked for climbs as well.
+//   - it goes on one rung at a time while the pictures stay late for the GPU (each step needs 12 fresh pictures after the change), down to
+//     the floor rung, even when the predicted gain of a single step is small (the GPU's fixed per-scene cost makes each step a few percent);
+//   - not when even the floor rung cannot hold ~fast60ReachFps: the floor rung's predicted GPU time (falling with the pixels) or the other
+//     stages over 18.2 ms, or the existing "cannot gain" test: that is the steady 30's case, left to it (GXV_STEADY30) as before;
+//   - the way back is the existing one (room at 16.7 ms for recoverHoldSec with the rung's block run out); nothing here steps up.
 // The pacing hint (port_autoq_picture_work_us) stays a 30 Hz feasibility cost in both targets (two turns): the 20/30 pacing of
 // GXV_PACE reads it against 30 Hz limits. The bounded slip (GXV_SLIP) is a 30-floor tool: it engages only when a pair of turns
 // does not fit two retraces (a game slower than 30 at full speed), where 60 is out of reach anyway, and it only paces turns, so
@@ -264,6 +283,30 @@
 //     change (Why::Severe). A step below today is judged as any other (kept when it saved GPU time; undone otherwise). Another
 //     second of it goes further. At least 1 s and 6 pictures between two such steps. The way back is the usual one.
 //
+// pace60 (Config::p60, GXV_PACE60=1, target 60 only, default off): 60 where the GPU can reach it, an even 30 at once where it cannot. The console
+// (2.3 c5, Honeyhive, Performance): 720x404 on the steady 30 with the GPU at TA 12.7 ms (vertex work, the same at any size), 3D 18.9 ms (pixel
+// work), busy 22.2 ms (the two overlap); the rules above judge "can a smaller size reach 60" by busy x Cost(floor) / Cost(now) (all of it
+// falls with the pixels: 16.0 ms at 608x348) or p23Scale (60 %), and neither knows the quality steps, so 60 looked reachable where it is not
+// and the controller chased it down the sizes (Beach Bowl r98: 720 -> 608 for nothing, then the steady 30 anyway). With the option:
+//   model   per picture, from the scene timers (vgx_backend_gl.cpp gpuscenes, which GXV_PACE60 turns on): TA, the EFB and pass scenes' 3D, the
+//           display scene's 3D (capped at its own minimum + 50 % + 0.5 ms, so a wait for the display is not cost) and busy (the timers' sum less
+//           that wait), smoothed (1/24 a picture). The prediction at another size and steps: 3D(efb) x ((1 - p60PixShare) + p60PixShare x
+//           Cost(to)/Cost(now)), x p60BgFrac / p60FxFrac for those steps (and + p60FxTaMs of TA for half-size effects); the display 3D with the
+//           edge smoothing on / off as measured both ways (else +- p60EdgeMs, which the back end sets to the upscaler's cost when GXV_UPSCALE is
+//           on); busy = max(TA, 3D) + k x min(TA, 3D), k the overlap measured now ((busy - max) / min). Kept through changes of size and
+//           step (the smoothed values are moved to the new state by the same model; the first pictures after a change are not taken).
+//   verdict "60 reachable" = the floor rung (minRung, 608x348) with every step the configuration has (edge smoothing off, cheaper background,
+//           half-size effects if GXV_AUTOQ_FXSTEP has them) predicted within p60FitIn (100 %) of 16.7 ms AND the other stages (one game turn,
+//           the renderer, the front end) as well; it is lost over p60FitOut (105 %: 17.5 ms, 57 a second, the steady 30's release with
+//           GXV_PACE23's thresholds, which perf.cpp also takes under GXV_PACE60: engage below 50, release at 57); either change must hold
+//           p60HoldSec (2 s). Until the model is filled the rules above decide as before.
+//   uses    out of reach: the fast step does nothing (no edge step either); off the steady 30 a GPU-limited stretch takes no step and no smaller
+//           size (Config::p60NoChase; the back end sets it only when the steady 30 is on); the stage hint tells the steady 30 nothing can be
+//           lowered (it engages at today's size) and holds its release (the pipeline estimate is put just under the release rate); the
+//           climb on the steady 30 (cadenceUp) counts it as "60 out of reach". On the steady 30 a GPU over 33.3 ms still steps down (to hold 30).
+//           Reachable: the fast step's "can the floor reach 55" and its direct target, cannotGain, and the steady 30's release use the model's
+//           prediction; the way back of a step (edge smoothing on again) needs room for the step's modelled cost too (with the upscaler the edge
+//           step is ~3 ms, not edgeRatio's 12 %).
 // Floor census (Controller::TakeFloor, target mode): for the basic log's "floor:" line, the pictures of a window, those later
 // than the budget (+3 %), the time they took, and for each late picture which stage was the largest.
 //
@@ -301,10 +344,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 #include "../../include/port/hot_knob.h"
 #include "../../include/port/frame_pace.h"  // (kSteady30AboveFps: the steady 30's release, Config::cadenceReachFps)
 
 namespace vgx::autoq {
+// seam68: the back end answers whether every piece of a picture size (EFB target, render textures, the 60 Assist pair path's targets) is made ahead, so that the change to it
+// makes nothing in play. A ladder size step is taken only to such a rung. No hook set (host tests, the desktop): every rung is ready.
+using RungReadyFn = bool (*)(int rung);
+void SetRungReadyHook(RungReadyFn fn);
+bool RungReadyNow(int rung);
+
 
 struct Rung {
     uint16_t w, h;   // render size for a 640x456 EFB
@@ -325,6 +375,14 @@ inline constexpr Rung kEmergencySize{480, 340, 1};
 inline constexpr Rung kWideLadder[] = {{608, 348, 1}, {664, 376, 1}, {720, 404, 1}, {784, 440, 1}, {848, 480, 1},
                                        {896, 512, 1}, {960, 544, 1}, {960, 544, 2}, {960, 544, 4}};
 inline constexpr Rung kWideEmergencySize{536, 304, 1};
+// aa25, GXV_ANAMORPHIC=1 (with GXV_WIDE_RUNGS=1; default 0: the wide ladder above): rungs 4 and 5 keep all 544 lines and give up width
+// only, at the same pixel count as the rungs they replace (848x480 = 407k -> 752x544 = 409k; 896x512 = 459k -> 848x544 = 461k), so the
+// controller's cost model and every decision built on it stay as they are. The picture is enlarged along x alone (a one-dimensional
+// filter: the upscaler's 3-read form, GXV_UPSCALE); every vertical detail (text rows, horizon, thin horizontal edges) stays native.
+// The EFB -> render target mapping is already non-uniform on every wide rung (960/640 across, 544/456 down), so the game's projection,
+// copies, captures, HUD and pointer need nothing: the present maps the picture back to 960x544 and circles stay round.
+inline constexpr Rung kAnaLadder[] = {{608, 348, 1}, {664, 376, 1}, {720, 404, 1}, {784, 440, 1}, {752, 544, 1},
+                                      {848, 544, 1}, {960, 544, 1}, {960, 544, 2}, {960, 544, 4}};
 static_assert(sizeof kWideLadder == sizeof kLadder, "the wide ladder has the same rungs");
 // The image effects work in a corner of the EFB (a half or a quarter of it: 320x228, 160x114) and draw the saved corner back; the
 // corner must end on whole render pixels. At 592x422 the quarter ended at row 105.5 and at 608x346 at row 86.5, a pixel's centre,
@@ -335,15 +393,20 @@ constexpr bool CornersOnPixels() {
         if (r.w % 4 != 0 || r.h % 4 != 0) return false;
     for (const Rung& r : kWideLadder)
         if (r.w % 4 != 0 || r.h % 4 != 0) return false;
+    for (const Rung& r : kAnaLadder)
+        if (r.w % 4 != 0 || r.h % 4 != 0) return false;
     return kEmergencySize.w % 4 == 0 && kEmergencySize.h % 4 == 0 && kWideEmergencySize.w % 4 == 0 && kWideEmergencySize.h % 4 == 0;
 }
 static_assert(CornersOnPixels(), "every render size keeps the EFB's quarter on whole pixels");
 inline bool WideRungs() {  // (GXV_HOT_KNOBS: read without a barrier, port/hot_knob.h): every rung lookup of the back end and the controller
     return PORT_HOT_KNOB(bool, [] { const char* v = std::getenv("GXV_WIDE_RUNGS"); return v && std::atoi(v) == 1; }());
 }
+inline bool AnamorphicRungs() { // (aa25, GXV_ANAMORPHIC=1: rungs 4 and 5 full height; only with the wide rungs)
+    return PORT_HOT_KNOB(bool, [] { const char* v = std::getenv("GXV_ANAMORPHIC"); return v && std::atoi(v) == 1; }());
+}
 // Keep the public 0..8 rung IDs unchanged; the extra floor exists only in target mode.
 inline const Rung& RungAt(int rung) {
-    if (WideRungs()) return rung == kEmergency ? kWideEmergencySize : kWideLadder[rung];
+    if (WideRungs()) return rung == kEmergency ? kWideEmergencySize : (AnamorphicRungs() ? kAnaLadder[rung] : kWideLadder[rung]);
     return rung == kEmergency ? kEmergencySize : kLadder[rung];
 }
 inline double MsaaCost(int samples) { return samples >= 4 ? 1.9 : (samples >= 2 ? 1.3 : 1.0); }
@@ -387,6 +450,7 @@ struct Config {
     // and blur before the emergency rung, back off first when room returns (see above).
     bool fxStep = false;         // bit 1: effects and blur at half size (the only step in mode 1)
     bool bgStep = false;         // bit 2: cheaper background, tried before bit 1 in mode 2
+    bool glowStep = false;       // halfglow38 (GXV_PERF_HALFGLOW): the Performance ladder may take the half-rate glow + shadow texture step (the back end must also say it is allowed)
     // GXV_AUTOQ_EDGESTEP=1 (target mode only; default off, and then every decision is the one made without it): the whole-picture edge
     // smoothing of the present (GXV_EDGE_AA, the FXAA-style pass; ~2.2 ms of GPU time a picture with GXV_PRESENT_FAST) as the first
     // step at today's rung, before the cheaper background and half-size effects, and the last one back (see "Performance mode").
@@ -445,6 +509,36 @@ struct Config {
     bool cadenceUp = false;
     double cadenceUpFrac = 0.90;    // the predicted GPU time and the other stages within this share of 33.3 ms
     double cadenceReachFps = port::pace::kSteady30AboveFps; // 60 out of reach: the floor rung's GPU or the other stages miss this rate
+    // GXV_STEADY30_GPUSCALE=<percent> (default 100 = as before): the share of the GPU's busy time that is taken to fall with the pixels when the
+    // steady 30's release estimate (port_autoq_stages) is made with the GPU at the smallest size the controller may take. 100 scales all of
+    // it (busy x Cost(min) / Cost(now)). The console says much of the picture's GPU time is fixed per picture, not per pixel (Honeyhive
+    // r107, 720x404 -> 664x376: 25.3/22.3/21.4 ms -> 23.4/22.5 ms against the 14 % the pixels predict), so the estimate released the
+    // cadence for 54 pictures a second at a GPU of 22 ms and the pictures then came at 37-45 with the GPU late (p107hh10 18:36:11-18:36:23).
+    double cadenceGpuScale = 1.0;
+    // s1117b (Strikers 1117b), GXV_AUTOQ_GPUGATE=1|0 (default ON, a bug fix): no step down is taken for a picture rate the GPU does not hold.
+    // Strikers' controller stepped live play down on a "GPU mean" that was really the back end's CPU-starved wait (26.9 ms reported against
+    // ~16 ms of real GPU time a lane); Galaxy's 12 Nov lesson 7 (a stage's time inflated by a backlog) is the same trap. The gate is an AND on
+    // every rule that lowers anything for the GPU's sake (the windows' over / bound, the free-down, the severe overload, fast60, the table's
+    // steps): over the last gateWindow pictures (the GPU timers' own busy time of the pictures that carry one against those pictures'
+    // periods: the interval, at most the budget, so a GPU a little over the budget whose pictures then take two retraces still reads over 100 %)
+    // the GPU's busy share must be gateBusy (85 %) or more, or gateBusyLate (70 %) or more with gateLateFrac (8 %) of the pictures
+    // late; or the last gateRecent (12) pictures alone say so (a GPU that has just become the limit is not held back by the mean). Less than gateMinPics measured pictures, or no GPU timers (the fence clock cannot tell the wait from work): the gate is open, i.e.
+    // today's rules. It only ever removes step downs, so it can never lower the picture more than the rules without it.
+    bool gpuGate = true;
+    int gateWindow = 90;            // pictures looked at (at most GpuGate::kMax)
+    int gateRecent = 12;            // ... or the last this many pictures alone (at least gateMinPics of them measured) satisfy the same
+    int gateMinPics = 6;            // measured pictures needed before the gate may close
+    double gateBusy = 0.85;         // the GPU's share of the picture interval that is clearly the limit
+    double gateBusyLate = 0.70;     // ... or this much with gateLateFrac of the pictures late
+    double gateLateFrac = 0.08;
+    // GXV_AUTOQ_FAST60=1|0 (target 60 only; off here, on in the back end): Performance mode steps down within about half a second of
+    // sustained pictures late for the GPU, one size at a time, and keeps going while they stay late (see "Performance mode: fast60").
+    bool fast60 = false;
+    int fast60Pics = 12;            // the last this many pictures are looked at ...
+    int fast60Late = 8;             // ... and this many of them late for the GPU (every other stage fitted) is a sustained miss
+    double fast60SpanSec = 1.0;     // ... when they took at most this long (a stall is not a burst)
+    double fast60GapSec = 0.75;     // changes at least this far apart (settleSec, then fast60Pics fresh pictures, are needed anyway)
+    double fast60ReachFps = 55.0;   // no step when even the floor rung's predicted GPU time, or another stage, is over 1000 / this ms
     // GXV_AUTOQ_EDGECHECK=1|0 (target 60 with edgeStep only; off here, on in the back end): the edge step's GPU-timed trial is judged over
     // edgeCheckSec instead of checkSec and kept when the GPU fell by the smaller of half its assumed saving (1 - 1 / edgeRatio) and
     // edgeBetterFrac, instead of betterFrac (5 %): its ~12 % saving read as 5 % in a 2 s trial through the camera's noise (Good Egg,
@@ -452,10 +546,111 @@ struct Config {
     bool edgeCheck = false;
     double edgeCheckSec = 4.0;
     double edgeBetterFrac = 0.03;
+    // GXV_AUTOQ_SHED=1 (gpuheavy25; target 60 only; off here and by default, and then every decision is the one made without it; see "shed" in
+    // vgx_autoq.cpp): the order in which a GPU-limited scene gives things up is a TABLE of levels (Controller::ShedBuild), cheapest to the picture first:
+    //   level 0 full picture (edge pass on), level 1 edge pass off (and, at the native rung with shedDirectMs > 0, direct display), level 2 the
+    //   half-rate captures (Config::shedCuts), then ONE RUNG per level down to today's rung. A burst of pictures late for the GPU (fast60's
+    //   detector, or the severe overload) moves to the first level whose PREDICTED GPU time fits shedFit of the budget (a level that saves less than
+    //   shedMinGainMs is passed over: stepping 960 -> 896 loses the direct display and gains about nothing); a level that was entered is judged by
+    //   the GPU time it really bought (shedTrialSec) and undone and blocked if it bought less than shedGainShare of the prediction. The way back is
+    //   the reverse, one level at a time or as far as the prediction allows, only after shedUpHoldSec of calm and when the GPU after it is predicted
+    //   within shedUpFrac of the budget; a level re-entered is a trial for shedBackSec and a late burst in it goes back and blocks it (doubling).
+    //   60 out of reach (the last level of the table predicted over 1000 / fast60ReachFps) gives up NOTHING: the steady 30 is the way, as before.
+    //   A new kind of step (a multisampled or width-only rung such as 896x544, a geometry-only edge pass) is one more row of the table: its
+    //   `cost` (pixels relative to 640x456), `edgeOff`, `cut` and an extra saving; nothing else changes.
+    bool shed = false;
+    bool shedCuts = false;         // the table has the half-rate captures level (the back end arms the captures with GXV_INDCAP_HALFRATE=2 / PETARI_*_HALFRATE=2)
+    bool shedEdgeAtNative = true;  // the edge pass runs at the native rung (GXV_EDGE_AA_NATIVE=1); with 0 the native rung is already without it
+    double shedFit = 0.99;         // a level is chosen when its predicted GPU time is within this share of the budget (16.5 ms at 60: on time is 16.68)
+    double shedPixShare = 0.5;     // the share of the GPU's busy time (less the display's own terms) that falls with the pixels: busy holds the fixed TA (HH 3D fit 0.65, EFB 0.75, busy of a TA-heavy scene ~0.45)
+    double shedEdgeMs = 3.0;       // the edge pass's GPU time over the plain present, until measured (HH 960x544: 4.58 -> 1.26 ms of the display scene)
+    double shedDirectMs = 0.0;     // direct display's extra saving over the plain present at the native rung with no edge pass (0: not available)
+    double shedCutMs = 1.0;        // the half-rate captures' saving until measured (gpu23: 3D 0.6-1.0, TA 0.25-0.35 at 960)
+    double shedMinGainMs = 0.6;    // a level must be predicted to save this much to be taken
+    double shedGainShare = 0.3;    // ... and must have bought this share of the prediction (measured over shedTrialSec) or it is undone
+    double shedTrialSec = 4.0;
+    double shedUpFrac = 0.90;      // the way back: the GPU predicted after it within this share of the budget ...
+    double shedUpHoldSec = 10.0;   // ... for this long with every picture on time
+    double shedBackSec = 8.0;      // a level re-entered is a trial for this long
+    double shedBlockSec = 60.0;    // a level that failed is blocked this long, doubling to maxBlockSec
+    double shedReach = 1.03;       // 60 is out of reach when even the table's last level is predicted over this share of the budget: nothing is given up
+    bool shedBelow = false;        // GXV_AUTOQ_SHED_BELOW=1: the older rules may still step below today's rung (720x404) under shed; by default the table ends there
+    double shedDwellSec = 3.0;     // minimum time between two changes of the table's level (the severe overload excepted)
+    double shedCycleSec = 0.0;     // GXV_AUTOQ_SHED_CYCLE=<s> (stress): walk the table up and down, one level every <s> s, whatever the load
+    // GXV_PACE23=1 (target 30 and 60; off here and by default; see the "pace23" notes in vgx_autoq.cpp): the GPU's load measured without the
+    // waits for a CPU-paced picture, a late picture blamed on the GPU only when the GPU really held it, the game's CPU judged over the
+    // whole picture span, no size change for p23SettleSec after a load, and Performance mode's size changes few and each one direct.
+    bool pace23 = false;
+    double p23GpuMiss = 0.95;    // a late picture is the GPU's only when the GPU's own busy time is this share of the budget or more (alone it misses it)
+    double p23GameShare = 0.85;  // ... and not while the game thread's CPU over the picture's whole span is this share of the interval or more
+    int p23ElimPictures = 40;    // the GPU timers silent for this many pictures in a row: only then may "late, nothing else measured" mean the GPU
+    double p23SettleSec = 6.0;   // after a load, a stall or a new scene: no size or step change that the GPU's load decides (not a new scene's own rung)
+    double p23GapSec = 4.0;      // size changes in Performance mode at least this far apart ...
+    int p23MaxChanges = 3;       // ... and at most this many in p23WindowSec: the steady 30 is the way out after that
+    double p23WindowSec = 30.0;
+    double p23Scale = 0.6;       // the share of the GPU's time that falls with the pixel count (the rest is per picture: scenes, display pass)
+    double p23Fit = 0.92;        // a direct step is the smallest size whose predicted GPU time is within this share of the budget
+    // GXV_PACE60=1 (target 60 only; off here and by default; see "pace60" in vgx_autoq.cpp): the GPU's time per size and per quality step
+    // modelled from the scene timers' split (vertex TA, the EFB/pass scenes' 3D, the display scene's 3D, their overlap), and ONE verdict, with
+    // hysteresis, of whether 60 can be reached at the floor rung with every quality step on. The verdict gates the fast step, the slow steps
+    // below today, the steady 30's stage hint (release and "lowerable") and the climb on the steady 30, so 60 is chased only where it can be
+    // had and the even 30 is taken at once (at today's size) where it cannot.
+    bool p60 = false;
+    double p60PixShare = 0.7;    // the share of the EFB/pass scenes' 3D that falls with the pixel count (the rest is per scene / per tile)
+    double p60FitIn = 1.0;       // 60 becomes reachable when the predicted floor (and the other stages) fit this share of the budget ...
+    double p60FitOut = 1.05;     // ... and stops being reachable over this share (57 a second: the steady 30's release); each must hold p60HoldSec
+    double p60HoldSec = 2.0;
+    double p60EdgeMs = 2.2;      // the present's edge smoothing (or the upscaler in its place) over the plain present, until measured
+    double p60BgFrac = 0.95;     // the EFB/pass 3D with the cheaper background / without it
+    double p60FxFrac = 0.85;     // ... with half-size effects / without
+    double p60FxTaMs = 2.0;      // ... and the TA half-size effects add (more scenes: 0.5-0.9 ms TA each on the console)
+    int p60MinPics = 20;         // GPU pictures with a split before the model is used
+    double p60StepSec = 1.0;     // reachable, off the steady 30, GPU-limited this long: the steps and size the model says, in one change
+    double p60RepeatSec = 30.0;  // a "reachable" lost within this long: the next one must hold twice as long (p60HoldSec doubling) ...
+    double p60MaxHoldSec = 64.0; // ... up to this; forgotten after p60ForgetSec without such a loss
+    double p60ForgetSec = 120.0;
+    bool p60NoChase = true;      // 60 out of reach: no step down off the steady 30 for pictures' sake (the back end: only with GXV_STEADY30)
+    // GXV_AUTOQ_QGUARD=1 (quality23; target 60 only; off here, so every other configuration decides as before; see "qguard" in vgx_autoq.cpp):
+    // the owner's rule "if giving up graphics doesn't help anything, we shouldn't be doing it". (a) No verdict and no step from pictures that
+    // are not play (FrameTimes::loading / noStage, quiet moments, movies): after them, and after a load or a new scene, qgPlayWindows windows
+    // and qgPlaySec of play first; pace60's verdict smoothed (qgNeedSec) and "reachable" held qgReachHoldSec at least. (b) Every reduction (a
+    // smaller size, a quality step on, anisotropic filtering off) records the picture rate, the GPU and the other stages before it; after
+    // qgTrialSec of play it is kept only when the pictures came qgRateFrac faster AND the GPU was the stage that limited them, else everything
+    // it took is restored ("quality: ... restored: bought no speed") and that reduction blocked qgBlockSec (doubling). (c) On a 30 cadence (the
+    // steady 30, or cap30) with 60 out of reach: room for qgRestoreSec restores, in one change, every size up to today's and every step that the
+    // measured GPU time says fits cadenceUpFrac of 33.3 ms, sharpest first (size, half-size effects, background, edge smoothing, anisotropic).
+    bool qg = false;
+    bool cap30 = false;          // (with qg) target 60 under the fixed 30 cap (GXV_FPS_LIMIT=30): every picture is on a 30 cadence, 60 never reachable
+    int qgPlayWindows = 8;
+    double qgPlaySec = 3.0;
+    double qgNeedSec = 2.0;
+    double qgReachHoldSec = 6.0;
+    double qgTrialSec = 4.0;
+    double qgRateFrac = 0.03;
+    double qgBlockSec = 20.0;
+    // (gov77, GXV_AUTOQ_QGUARD_STAGEBLOCK) a step that bought nothing is blocked longer each time within a stage even when the GPU was the limit (20, 40, 80, ... to maxBlockSec): Dreadnought took edge
+    // smoothing and the cheaper background off, put them back as no gain and took them again 20 s later, three times in a minute (console night57). Off: the old 20 s every time.
+    bool qgStageBlock = false;
+    double qgRestoreSec = 2.0;
+    double qgGpuHoldFrac = 1.45; // off a 30 cadence: pictures this much slower than the GPU's own time (and the other stages') are not the GPU's to buy
+    // GXV_SEAMLESS_CUT=1 (seamless23; off here, so every other configuration decides as before): the owner's "no visible quality step in play".
+    // Every step that RAISES the quality the player sees (a bigger size: Headroom, CadenceUp, HoldClimb, the undo of a smaller size that bought
+    // nothing, QGUARD's restores; a quality step off: FxOff; anisotropic filtering on; edge smoothing back under hold30) and FreeDown (a smaller
+    // size that no late picture asks for) waits until a camera cut, a closed fade or the pause menu (FrameTimes::cut, or quiet) is at most
+    // seamCutMemSec old, or seamWaitSec have passed since the first such step was held. Reductions that late pictures ask for (an overload, a
+    // GPU-limited stretch, fast60, pace60, the trials' backs) are not held: the overload has already persisted for the rule's own hold time.
+    bool seam = false;
+    double seamWaitSec = 15.0;
+    double seamCutMemSec = 0.35;
+    // GXV_SEAM72=1 (default off): a size step DOWN taken by the ladder also waits for a quiet moment (a cut, a closed fade, the pause menu: the same notes as seam);
+    // when none comes for seam72WaitSec the step is not taken (the size is kept; the wish is asked again) and one line says so.
+    bool seam72 = false;
+    double seam72WaitSec = 20.0;
     // The rules before calm mode (GXV_AUTOQ_CALM=0).
     static Config Legacy() {
         Config c;
         c.calm = false;
+        c.gpuGate = false;   // (s1117b: Legacy is "the rules above unchanged")
         c.downAbove = 0.90;
         c.upTarget = 0.78;
         c.downHoldSec = 0.5;
@@ -478,6 +673,43 @@ struct Config {
 };
 
 // One presented frame (microseconds on one clock).
+// s1117b: the GPU gate's ring (Config::gpuGate). One entry per picture of play: its period (the picture interval, at most the budget), the GPU timers' busy time when the picture carried
+// one, and whether it was late. Pure arithmetic, testable alone (tests/vgx_autoq_gpugate.cpp).
+struct GpuGate {
+    static constexpr unsigned kMax = 90;
+    struct Pic { uint32_t periodUs = 0, busyUs = 0; bool known = false, late = false; };
+    Pic ring[kMax];
+    unsigned head = 0, n = 0;
+    void Clear() { head = n = 0; }
+    void Add(uint64_t periodUs, uint64_t busyUs, bool known, bool late) {
+        Pic& p = ring[head];
+        p.periodUs = static_cast<uint32_t>(periodUs > 0xFFFFFFFFu ? 0xFFFFFFFFu : periodUs);
+        p.busyUs = static_cast<uint32_t>(busyUs > 0xFFFFFFFFu ? 0xFFFFFFFFu : busyUs);
+        p.known = known;
+        p.late = late;
+        head = (head + 1) % kMax;
+        if (n < kMax) ++n;
+    }
+    // The last `window` pictures: measured ones, the busy share of their periods, the share of all of them that was late.
+    void Stats(unsigned window, unsigned& measured, double& busyShare, double& lateFrac) const {
+        if (window > kMax) window = kMax;
+        if (window > n) window = n;
+        uint64_t busy = 0, span = 0;
+        unsigned late = 0;
+        measured = 0;
+        for (unsigned i = 0; i < window; ++i) {
+            const Pic& p = ring[(head + kMax - 1 - i) % kMax];
+            late += p.late ? 1u : 0u;
+            if (!p.known) continue;
+            ++measured;
+            busy += p.busyUs;
+            span += p.periodUs;
+        }
+        busyShare = span ? static_cast<double>(busy) / static_cast<double>(span) : 0.0;
+        lateFrac = window ? static_cast<double>(late) / window : 0.0;
+    }
+};
+
 struct FrameTimes {
     uint64_t startUs = 0;      // the back end began executing the frame
     uint64_t presentUs = 0;    // its present (swap) returned: all of its GPU work has been submitted
@@ -493,14 +725,20 @@ struct FrameTimes {
     bool timers = false;       // GPU timers clock: gpuBusyUs is used, gpuDoneUs is not
     bool busyKnown = false;    // ... a frame finished on the GPU since the previous present, and this is its busy time
     uint32_t gpuBusyUs = 0;
+    uint32_t gpuRawUs = 0;     // GXV_PACE23: the timers' own busy time when gpuBusyUs is the corrected one (0: the same, or not known)
+    uint32_t gpuFrames = 1;    // GXV_PACE23: GPU frames finished since the last present that carried a busy time (their count)
     bool quiet = false;        // calm mode: a quiet moment (pause menu, closed fade or wipe): not measured, a step up may be taken
     bool wipe = false;         // ... the quiet moment is a closed fade or wipe (not the pause menu): Config::wipe
     bool movie = false;        // calm mode: a movie is playing: not measured, and no change of size (forkB, from Producdevity's fork)
     uint32_t scene = 0;        // calm mode: the scene's key (0 = unknown)
+    bool loading = false;      // Config::qg: not play: a stage's loading thread runs (the loading screen, a transition) or a menu layer (star select) drew
+    bool noStage = false;      // Config::qg: not play: no stage yet (the title and its menus before the first stage)
+    bool cut = false;          // Config::seam: a camera cut (or a quiet moment) at this picture: a visible step may be taken now
 };
 
 enum class Why : uint8_t { None, Headroom, Overload, Saturated, GpuBound, NoGain, NewScene, Forced, NoMemory, FxOn, FxOff, FxNoGain, AnisoOn, AnisoOff, Wipe, FreeDown, Severe,
-                           HoldMiss, HoldClimb, HoldBack, HoldEdgeOff, HoldEdgeOn, HoldEdgeBack, CadenceUp, CadenceBack };
+                           HoldMiss, HoldClimb, HoldBack, HoldEdgeOff, HoldEdgeOn, HoldEdgeBack, CadenceUp, CadenceBack, FastDown, Pace60, QgNoGain, QgRestore, QgBack,
+                           ShedEdgeOff, ShedEdgeOn, ShedCutOn, ShedCutOff, ShedDown, ShedUp, ShedBack, LadderDown, LadderUp };
 const char* WhyText(Why w);
 
 struct Change {
@@ -519,14 +757,24 @@ struct FloorWindow {
     uint64_t worstUs = 0;                  // the longest late picture
     uint32_t gpu = 0, game = 0, renderer = 0, other = 0, unknown = 0; // late pictures by their largest stage
     uint32_t front = 0;                    // ... the front end's CPU (when it is measured)
+    uint32_t frontPics = 0;                // (fe26, GXV_FE_GOV) pictures of the window with a measured front-end time ...
+    uint64_t frontSumUs = 0;               // ... and the sum of those times (the front end's CPU microseconds a picture, held when a present brought none)
     uint32_t cadence = 0;                  // pictures on Performance mode's steady 30 (judged against 33.3 ms, not 16.7)
     uint32_t stalls = 0;                   // intervals over gapResetMs (a load, a shader build): not in `late`
     uint64_t stallUs = 0;
     uint32_t quiet = 0;                    // pictures of quiet moments (pause menu, fades): not counted
+    // (GXV_FLOOR_SPAN, census only, no decision reads these) The late pictures counted in `other` ("none of these"), told apart: the
+    // pictures that spanned two or more game turns (the skip rule left turns out, so the picture interval is several turns long and
+    // the one-turn game stage cannot reach its share of the budget), and of those or any, the ones whose game thread CPU over ALL the
+    // turns since the last picture was gameShare (0.85) of the interval or more: the game thread itself was the limit.
+    uint32_t p23GameSpan = 0, p23CpuPaced = 0; // (GXV_PACE23) late pictures blamed on the game's span CPU; late pictures the GPU's busy time reached the share on but did not hold
+    uint32_t otherMulti = 0, otherGameSpan = 0;
+    uint64_t otherGameSpanUs = 0, otherSpanUs = 0; // ... the CPU and the interval of those, for the log's mean share
 };
 
 class Controller {
 public:
+    struct ShedRowView { double cost; bool cut; double extraMs; };
     explicit Controller(const Config& c = Config());
     // One presented frame, in order. True when the wanted rung changed with this frame (LastChange()).
     bool Add(const FrameTimes& f);
@@ -558,6 +806,59 @@ public:
     unsigned Steps() const { return steps_; }
     const Change& LastFxChange() const { return lastFx_; }
     unsigned FxChanges() const { return fxChanges_; }
+    // GXV_PACE23: what the rules did (diagnostics, log lines and tests), counted since the start.
+    struct Pace23Stats {
+        uint32_t noElim = 0;        // late pictures NOT blamed on the GPU by elimination (timers silent or the other stages not cleared)
+        uint32_t lowUtil = 0;       // late pictures not blamed on the GPU: its busy time alone was under p23GpuMiss of the budget (it waited for a CPU-paced picture)
+        uint32_t gameSpan = 0;      // late pictures not blamed on the GPU: the game thread's span CPU was p23GameShare of the interval or more
+        uint32_t settleHeld = 0;    // pictures judged inside a settle window (a load, a stall, a new scene)
+        uint32_t rateHeld = 0;      // size changes the gap or the rate limit refused
+        uint32_t direct = 0;        // direct steps taken (more than one rung at once)
+        double util = 0;            // the smoothed GPU share of the picture interval now (-1 not known)
+    };
+    const Pace23Stats& Pace23() const { return p23_; }
+    // GXV_PACE60: one finished GPU picture's split from the scene timers (us): vertex (TA) of all its scenes, pixel (3D) of the EFB and pass
+    // scenes, 3D of the display scene, and the timers' busy time (the sum of the scenes' spans). Called by the back end in order, any time.
+    void AddSplit(uint32_t taUs, uint32_t efbUs, uint32_t dispUs, uint32_t busyUs);
+    struct Pace60Stats {
+        bool ready = false;         // the model has been filled once
+        bool reach = true;          // the verdict: 60 can be reached at the floor rung with every step on
+        double taMs = 0, efbMs = 0, dispMs = 0, busyMs = 0, overlap = 0; // the model now (display 3D without its wait; busy likewise)
+        double floorMs = 0;         // the predicted GPU busy time at the floor rung with every step on
+        double otherMs = -1;        // the other stages of the last window
+        double edgeMs = -1;         // the display scene's measured cost of the edge smoothing (-1: not measured both ways)
+        double shareMeasured = -1;  // the share of the EFB/pass 3D that fell with the pixels at the last measured change of size (-1: none)
+        int shareFrom = 0, shareTo = 0;
+        uint32_t verdicts = 0;      // verdict changes
+        uint32_t pictures = 0;      // pictures with a split, in all
+        uint32_t heldSteps = 0;     // windows in which a GPU-limited stretch was not acted on (60 out of reach: the steady 30's case)
+        uint32_t direct = 0;        // direct changes to the size and steps the model says (P60Step)
+        double reachHoldSec = 0;    // what a "reachable" verdict must hold now (p60HoldSec, doubling after a quick loss)
+    };
+    const Pace60Stats& Pace60() const { return p60_; }
+    // Config::qg: what the guard did (diagnostics, log lines and tests), counted since the start
+    struct QualityStats {
+        uint32_t nonPlay = 0;       // pictures not play (loading, no stage, menu layer, quiet, movie)
+        uint32_t unsettles = 0;     // times the play had to settle again (a load, a new scene, a stretch of non-play pictures)
+        uint32_t trials = 0;        // reductions judged
+        uint32_t kept = 0;          // ... kept (faster pictures, the GPU the limit)
+        uint32_t reverts = 0;       // ... restored: bought no speed
+        uint32_t restores = 0;      // restores on the 30 cadence with 60 out of reach
+        uint32_t restoreBacks = 0;  // ... taken back (pictures late for the GPU on the cadence)
+    };
+    const QualityStats& Quality() const { return qgStats_; }
+    // GXV_SEAMLESS_CUT (Config::seam): quality-up steps held for a cut, taken at one, and taken when the wait ran out.
+    struct SeamStats { uint32_t held = 0, atCut = 0, timedOut = 0, cuts = 0; };
+    const SeamStats& Seam() const { return seamStats_; }
+    struct Seam72Stats { uint32_t quiet = 0, kept = 0, asked = 0; };
+    const Seam72Stats& Seam72() const { return seam72Stats_; }
+    bool SeamHoldDown(uint64_t now);
+    bool SeamWaiting() const { return cfg_.seam && seamSince_ != 0; } // (a quality-up step is held for a cut now: the back end makes the rung above ahead)
+    bool QualitySettled() const { return QgSettled(); }
+    // GXV_PACE60's prediction of the GPU's busy time (ms) at `rung` with the quality steps `steps` (Steps() bits; 4 = edge smoothing off)
+    double Pace60Predict(int rung, unsigned steps) const;
+    unsigned Pace60AllSteps() const; // every step the configuration has
+    bool Pace23Settling(uint64_t now) const { return cfg_.pace23 && now < p23SettleUntil_; }
     // The floor census since the last call (target mode): returns it and starts a new window.
     FloorWindow TakeFloor();
     // Anisotropic filtering (Config::aniso): whether the back end should have it on now (only at the top rung), the last change of it,
@@ -678,21 +979,116 @@ private:
     uint64_t cadTrialUntil_ = 0;                // ... until then
     unsigned cadTrialPics_ = 0, cadTrialLate_ = 0; // ... its pictures on the cadence and those late for the GPU
     bool cadTrialMiss_ = false;                 // ... it missed: back at the next change allowed
-    void Climb(int to, uint64_t now);           // a step up the room allowed (Why::Headroom, or Why::CadenceUp with its trial)
+    bool Climb(int to, uint64_t now);           // a step up the room allowed (Why::Headroom, or Why::CadenceUp with its trial); false: held (Config::seam)
     void ForgetFxBlocks();
     void SetAniso(bool to, Why why, uint64_t now);
     void SetSceneAniso(bool to, uint64_t now);
     static constexpr unsigned kAnisoMem = 8u;
     unsigned Mem() const { return steps_ | (aniso_ ? kAnisoMem : 0u); } // what a scene remembers beside its rung (bit 3: anisotropic filtering)
-    int FxRung() const { return cfg_.minRung > kToday ? cfg_.minRung : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
+    // (gpu896) the Performance ladder: levels {rung, steps}, see LadderStep in vgx_autoq.cpp
+    struct LadLevel { int rung; unsigned steps; bool glow = false; };   // glow: GXV_PERF_HALFGLOW's step (half-rate glow + shadow texture), a flag beside the steps' bits
+    bool LadderOn() const;
+    int LadderTable(LadLevel* t) const;
+    double LadderCost(const LadLevel& l) const;
+    bool LadderEntryBlocked(const LadLevel* t, int m, uint64_t now) const;
+    void LadderBlockEntry(const LadLevel* t, int m, uint64_t now);
+    bool LadderStep(uint64_t now, double dt, bool mayChange, bool over, bool known, double gpuMs);
+    bool LadderRoomDown() const;   // (gov5)
+    struct LadChk { bool on = false; unsigned bits = 0; int fromLevel = 0; double before = 0, beforeIv = 0, pred = 0, t = 0, gpu = 0, iv = 0; unsigned frames = 0; char what[24] = ""; };
+    LadChk ladChk_;
+    double ladEmaGpu_ = 0, ladEmaIv_ = 0;
+    double winOtherMs_ = -1;   // (seam49: the longest of the game thread, back end and front end in the last window: what a smaller picture does not shorten)
+    double ladOtherLogAt_ = 0;
+    unsigned ladEmaN_ = 0, ladRefused_ = 0, ladUndone_ = 0, ladMemNext_ = 0;
+    uint32_t ladMemScene_[16] = {};
+    unsigned ladMemMask_[16] = {};
+    // seam68: what the stage's earlier size trials really bought, as a share of what was predicted (0 = no trial yet), kept per scene for the session beside the refused mask:
+    // the next prediction for the stage is scaled by it, so a stage whose GPU time did not fall with the pixels (Beach Bowl: 848x480 bought 0.5 ms of a predicted 2.2) is not tried again.
+    float ladMemRatio_[16] = {};
+    float ladSceneRatio_ = 1.0f;        // (the current scene's)
+    double ladMinMs_ = 1.0;             // seam68: a size step's predicted saving must be at least this many ms (GXV_AUTOQ_LADDER_MINMS)
+    double ladSizeOver_ = 1.10;         // seam68: a size step only while the GPU time is this far over the budget (GXV_AUTOQ_LADDER_SIZE_OVER; 0 = off)
+    bool ladRefuseAllSizes_ = true;     // seam68: a size trial that was undone refuses every size step of the stage, not only the rung it tried (GXV_AUTOQ_LADDER_REFUSE_ALL)
+    double ladSeamLogAt_ = 0;
+    double ladMinGain_ = 0.05, ladChkSec_ = 1.0, ladKeepFrac_ = 0.6;
+    double LadderStepF(unsigned steps) const;
+    double LadderStepF(const LadLevel& l) const { return LadderStepF(l.steps) * (l.glow ? 1.0 - ladGlowFrac_ : 1.0); }
+    bool glow_ = false, glowAllowed_ = false;   // (halfglow38) the step is on / may be offered (set by the back end: GXV_PERF_HALFGLOW, no HRW pairs, neither knob already on)
+    double ladGlowFrac_ = 0.06, glowBlockLen_ = 0;   // the saving the step is expected to give (a share of the GPU time; Beach Bowl measured 8 %), the block's length
+    uint64_t glowBlockedUntil_ = 0;
+    void SetGlow(bool on, Why why, uint64_t now);
+    double LadderPredict(const LadLevel& a, const LadLevel& b, double gpuMs) const;
+    unsigned LadderEntryBit(const LadLevel* t, int m) const;
+    uint32_t ladScene_ = ~0u;
+    int ladTrial_ = -1, ladTrialFrom_ = 0;
+    uint64_t ladTrialUntil_ = 0;
+    double ladDownT_ = 0, ladRoomT_ = 0;
+    unsigned ladDowns_ = 0, ladUps_ = 0;
+    double ladDownHold_ = 0.6, ladUpHold_ = 2.0, ladUpMargin_ = 0.85, ladTrialSec_ = 4.0;   // (justified in LadderStep's note)
+    int FxRung() const { const int b = presetActive_ && preset_.ladder ? preset_.maxRung : cfg_.minRung; return b > kToday ? b : kToday; } // the rung the steps belong to (today's, or the lowest allowed)
     // (returns the late picture's stage: 0 GPU, 1 game, 2 renderer, 3 front end, 4 none of these, 5 not measured; -1 on time or not counted)
+    // (gameSpanUs / spanTurns: the game thread's CPU over every turn since the last picture and their number, 0 when not known; they only
+    // feed FloorWindow::otherMulti / otherGameSpan, GXV_FLOOR_SPAN, and never change the returned stage)
     int FloorCount(uint64_t interval, bool quiet, bool measured, bool gpuKnown, bool gameKnown, bool backendKnown,
-                   uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown = false, uint64_t front = 0, bool cadence = false);
+                   uint64_t gpu, uint64_t game, uint64_t backend, bool frontKnown = false, uint64_t front = 0, bool cadence = false,
+                   uint64_t gameSpanUs = 0, uint32_t spanTurns = 0);
 public:
     unsigned QuietUps() const { return quietUps_; }
+    unsigned LadderDowns() const { return ladDowns_; }   // (gpu896)
+    unsigned LadderUps() const { return ladUps_; }
+    bool LadderActive() const { return LadderOn(); }
+    // halfglow38 (GXV_PERF_HALFGLOW): the Performance ladder's step "half-rate glow + shadow texture" (PETARI_BLOOM_HALFRATE=1 + PETARI_SHADOWTEX_HALFRATE=1, switched live by the back end), after the cheap
+    // picture steps and BEFORE the first resolution step. HalfGlowOn: the step is taken. SetHalfGlowAllowed: the back end says whether it may be offered at all (switch on, not under 60 Assist pairs
+    // (GXV_HRW_CAPFIX refuses every half rate there), neither knob already on). Off by default: Config::glowStep.
+    bool HalfGlowOn() const { return glow_; }
+    void SetHalfGlowAllowed(bool on) { glowAllowed_ = on; }
+    void LadderGlowFrac(double f) { ladGlowFrac_ = f; }
+    unsigned LadderUndone() const { return ladUndone_; }
+    unsigned LadderRefused() const { return ladRefused_; }
+    void LadderTune(double downHold, double upHold, double upMargin, double trialSec) { ladDownHold_ = downHold; ladUpHold_ = upHold; ladUpMargin_ = upMargin; ladTrialSec_ = trialSec; }
     // Quality mode judged by the pictures (Config::hold30): the last closed hold window (diagnostics, tests): its pictures, those late,
     // those late for the GPU (the size could have helped), and the hold windows in a row that missed / were calm.
     struct HoldWindow { uint32_t pictures = 0, late = 0, lateGpu = 0; double gpuMs = 0; bool miss = false, calm = false; };
+    // GXV_AUTOQ_SHED (Config::shed): the table's level now (-1: not on the table: shed off, or a rung/step the table does not own), whether the
+    // half-rate captures are engaged, the levels' count and what the table holds (tests, log)
+    bool ShedOn() const { return cfg_.shed && cfg_.targetFps == 60; }
+    int ShedLevelNow() const { return ShedFind(); }
+    bool ShedCutOn() const { return shedCut_; }
+    unsigned ShedChanges() const { return shedChanges_; }
+    unsigned ShedHitches() const { return shedHitches_; }
+    unsigned ShedTransitions() const { return shedTxCount_; }
+    const char* ShedRowName(int i) const { return i >= 0 && i < ShedLevels() ? shedTab_[static_cast<size_t>(i)].name : ""; }
+    int ShedLevels() const { return static_cast<int>(shedTab_.size()); }
+    double ShedPredictMs(double gpuMs, int fromLevel, int toLevel) const { return ShedPredict(gpuMs, fromLevel, toLevel); }
+    // ---- stagepreset25 (GXV_STAGE_PRESETS; platform/vgx/src/vgx_stagepreset.h, agents/stagepreset25/REPORT.txt): a stage's preset, applied by the back end
+    // when the game starts loading the stage (the screen is closed). It only sets the controller's frame: the rungs it may use, the one a new scene starts
+    // at (the stage's own, never the rung remembered from a visit and never the wipe cap, because the preset knows the stage), what the shed ladder does,
+    // and the effect steps engaged from the first picture. The rung itself changes where the controller already changes it for a new scene (the load's gap,
+    // the scene key), so a visible picture is never resized. With no preset (or after ClearStagePreset) every rule is the one it was.
+    struct StagePreset {
+        int start = kNoRung, minRung = kNoRung, maxRung = kNoRung; // kNoRung: the global default (the configuration's)
+        bool fixedSize = false;  // min = max = start: no automatic change of size in this stage
+        bool noSizeUp = false;   // size may go down in play (a boss), the ceiling then comes down to that rung: never up again until the stage ends
+        bool edgeOff = false;    // the present's edge pass is off from the start (the shed ladder's first level, or the edge step)
+        bool cuts = false;       // the half-rate captures are engaged from the start (needs Config::shedCuts)
+        bool twoSize = true;     // only the floor and the ceiling are sizes: no rung between (the owner's two sizes); the steps between are jumps
+        bool ladder = false;     // (gpu896, 21 Nov) the Performance ladder (Controller::LadderStep): cheaper picture, 896x512, 848x480, edge smoothing off, GPU-limited only, two ways
+        int fx = 0;              // the effect steps: 0 as the controller decides, 1 down only (no way back up), 2 hold (no step either way: the preset is the whole answer)
+    };
+    void ApplyStagePreset(const StagePreset& p);
+    void ClearStagePreset() { ApplyStagePreset(StagePreset()); }
+    // GXV_SMOOTH60 (policy26): the per-stage controller moves the picture to `to` now (after ApplyStagePreset gave a frame that holds only that rung). True when the
+    // rung changed; the back end then takes Current() as the wanted rung, as for any other change (Why::Forced is urgent: no wait for a pre-built size).
+    bool ForceRung(int to, uint64_t now) {
+        const int before = rung_;
+        SetRung(to, Why::Forced, now);
+        return rung_ != before;
+    }
+    bool StagePresetActive() const { return presetActive_; }
+    bool StagePresetTwoSize() const { return presetActive_ && preset_.twoSize; }
+    const StagePreset& CurrentStagePreset() const { return preset_; }
+    int StagePresetMinRung() const { return cfg_.minRung; }
+    int StagePresetMaxRung() const { return cfg_.maxRung; }
     const HoldWindow& LastHold() const { return lastHold_; }
     unsigned HoldWindows() const { return holdWindows_; }
     int HoldMissRun() const { return missRun_; }
@@ -702,6 +1098,46 @@ public:
     bool HoldEdgeOff() const { return holdEdge_; }
     double HoldEdgeSavingMs() const { return edgeSave_; }
 private:
+    // ---- GXV_AUTOQ_SHED state (see Config::shed). The table: one row per level, from the full picture down.
+    struct ShedRow { int rung; bool edgeOff; bool cut; double cost; double extraMs; const char* name; };
+    std::vector<ShedRow> shedTab_;
+    bool shedCut_ = false;                  // the half-rate captures are engaged now (the table's cut rows)
+    unsigned shedChanges_ = 0;
+    double shedCalmT_ = 0;                  // seconds of calm in a row (every picture on time, the next level up predicted to fit)
+    int shedTrialFrom_ = kNoRung;           // a level entered on the way UP: the level index it came from (kNoRung: none)
+    uint64_t shedTrialUntil_ = 0;
+    int shedJudge_ = -1;                    // a level entered on the way DOWN is being judged: the level it came from (-1 none) ...
+    double shedJudgeBefore_ = 0, shedJudgePred_ = 0, shedJudgeT_ = 0, shedJudgeSum_ = 0;
+    uint32_t shedJudgeN_ = 0;
+    int shedJudgeTo_ = -1;
+    uint64_t shedBlockedUntil_[16] = {};    // per level: not entered before then (after a failed trial)
+    double shedBlockLen_[16] = {};
+    double shedEdgeSave_ = -1;              // measured edge saving (ms, -1 unknown)
+    double shedCutSave_ = -1;
+    // the transition log: the pictures before, at and after every change of level (GXV_AUTOQ_SHED)
+    double shedRing_[8] = {};
+    unsigned shedRingN_ = 0, shedRingHead_ = 0;
+    struct ShedTx { bool active = false; int from = 0, to = 0; double before = 0, median = 0, v[4] = {}; unsigned n = 0; const char* what = ""; };
+    ShedTx shedTx_;
+    unsigned shedTxCount_ = 0, shedHitches_ = 0;
+    uint64_t shedLastAt_ = 0, shedCycleNext_ = 0;
+    int shedCycleDir_ = 1;
+    void ShedNotePicture(double intervalMs);
+    bool ShedCycleStep(uint64_t now);
+    void ShedBlock(int level, uint64_t now);
+    void ShedBuild();
+    int ShedFind() const;
+    double ShedPredict(double gpuMs, int from, int to) const;
+    double ShedPredictState(double gpuMs, int to) const; // from the state as it is now (which may be off the table's path)
+    double ShedEdgeMs() const { return shedEdgeSave_ >= 0.0 ? shedEdgeSave_ : cfg_.shedEdgeMs; }
+    double ShedCutMs() const { return shedCutSave_ >= 0.0 ? shedCutSave_ : cfg_.shedCutMs; }
+    bool ShedEdgeActive(const ShedRow& r) const { return !r.edgeOff && (r.rung != kTopSingle || cfg_.shedEdgeAtNative); }
+    bool ShedDirect(const ShedRow& r) const { return cfg_.shedDirectMs > 0.0 && r.rung == kTopSingle && !ShedEdgeActive(r); }
+    int ShedDownStep(uint64_t now, double gpuMs, double otherMs, bool severe); // 0 nothing (decided elsewhere), 1 rung changed, 2 other level, 3 handled: out of reach
+    bool ShedUpStep(uint64_t now, double gpuMs, double otherMs, double intervalMs, double dt);
+    void ShedEnter(int to, Why why, uint64_t now, double gpuMs, double predicted, bool judge);
+    void ShedJudgeAdd(uint64_t now, double gpuMs, double dt, uint32_t frames);
+    bool ShedOwnsRung() const { return ShedOn() && ShedFind() >= 0; }
     bool Hold30() const { return cfg_.hold30 && cfg_.targetFps == 30; }
     // the picture handed to Add last (Config::hold30): measured, late, late for the GPU (every other stage fitted)
     bool picLate_ = false, picLateGpu_ = false;
@@ -727,6 +1163,129 @@ private:
     bool HoldEdgeRule() const { return Hold30() && cfg_.edgeStep; }
     void SetHoldEdge(bool off, Why why, uint64_t now);
     unsigned quietUps_ = 0;
+    // GXV_PACE23 state
+    bool P23() const { return cfg_.pace23 && Target(); }
+    Pace23Stats p23_;
+    uint64_t p23SettleUntil_ = 0;               // no change the GPU's load decides before this (a load, a stall, a new scene)
+    uint64_t p23Chg_[8] = {};                   // the times of the last size changes (ring), p23ChgN_ of them counted
+    unsigned p23ChgHead_ = 0, p23ChgN_ = 0;
+    double p23PendSpan_ = 0;                    // picture intervals since the last picture that carried a busy time (us)
+    double p23UtilBusy_ = 0, p23UtilSpan_ = 0;  // smoothed: the GPU's busy time and the picture intervals (us), 7/8 per picture
+    unsigned p23BusyAge_ = 1u << 30;            // pictures since a busy time was known
+    uint32_t p23LastBusyUs_ = 0;                // ... and that busy time
+    bool P23ChangeAllowed(uint64_t now, bool count, double gapScale = 1.0);
+    void P23NoteChange(uint64_t now);
+    double P23Pred(double gpuMs, int from, int to) const; // the GPU's time at size `to` from its time at `from`: p23Scale of it falls with the pixels
+    // GXV_PACE60 state: the model's smoothed split, the state it describes (rung, steps), the verdict
+    bool P60() const { return cfg_.p60 && cfg_.targetFps == 60; }
+    bool P60Ready() const { return P60() && p60_.ready; }
+    Pace60Stats p60_;
+    double mTa_ = 0, mEfb_ = 0, mDisp_ = 0, mBusy_ = 0;  // ms, smoothed
+    double mDispOn_ = -1, mDispOff_ = -1;               // the display scene's 3D with edge smoothing on / off (smoothed; -1 unknown)
+    unsigned mN_ = 0, mSkip_ = 0;                        // samples since the last reset; samples still to skip after a change
+    int mRung_ = kNoRung;                                // the state the model describes
+    unsigned mSteps_ = 0;
+    uint32_t mDispRing_[64] = {};                        // the display scene's 3D of the last pictures: its cost without a wait
+    unsigned mDispHead_ = 0, mDispN_ = 0;
+    bool mGap_ = false;                                  // a stall / load since the last sample: the next one starts the model afresh
+    double reachT_ = 0;                                  // seconds the opposite verdict has held
+    double shareEfbBefore_ = -1;                         // the EFB 3D before the last change of size (the measured share)
+    int shareFrom_ = kNoRung;
+    unsigned StepsNow() const { return steps_ | (holdEdge_ ? 4u : 0u); }
+    bool mFirst_ = true;                                 // the first verdict is taken at once (the middle of the two thresholds)
+    double shareSum_ = 0;                                // the EFB 3D summed since that change (raw), over shareN_ pictures
+    unsigned shareN_ = 0;
+    void P60Parts(int rung, unsigned steps, double& ta, double& efb, double& disp) const; // the model's parts moved to (rung, steps)
+    double P60Busy(double ta, double efb, double disp) const;                              // ... and their busy time (the overlap now)
+    double P60Floor() const { return Pace60Predict(cfg_.minRung, Pace60AllSteps()); }
+    void P60Verdict(double dt, double otherMs);
+    bool P60Holds() const { return P60Ready() && !p60_.reach; } // 60 out of reach by the model
+    double p60OverT_ = 0;                                // seconds GPU-limited off the steady 30 while reachable
+    uint64_t p60ReachAt_ = 0, p60LossAt_ = 0;            // when the verdict last became reachable / was lost soon after
+    int P60Step(uint64_t now, double gpuMs);            // the size and steps the model says fit, in one change (0 none, 1 the rung, 2 steps only)
+    // Config::qg state ("qguard" in vgx_autoq.cpp)
+    bool QG() const { return cfg_.qg && cfg_.targetFps == 60; }
+    bool QgSettled() const { return !QG() || (qgPlayWins_ >= static_cast<unsigned>(cfg_.qgPlayWindows) && qgPlayT_ >= cfg_.qgPlaySec); }
+    void QgUnsettle();                                   // a load, a new scene, pictures that are not play: settle again, verdict anew
+    static bool QgJudged(Why w);                         // a reduction of this kind is judged (not a new scene's, memory's, or an undo)
+    void QgNoteDown(uint64_t now);                       // a reduction is about to be made: record the state and the play before it
+    int QgJudge(uint64_t now, double dt, bool mayChange, double gpuMs, double otherMs); // the open trial after a window (0 nothing, 1 the rung, 2 steps)
+    bool QgOutOfReach(double gpuMs, double otherMs) const; // 60 out of reach (cap30, pace60's verdict, or the floor rung's GPU / the others)
+    double QgPredict(int rung, unsigned steps, double gpuMs) const; // the GPU at (rung, steps) from the measured time now
+    int QgRestore(uint64_t now, double gpuMs, double otherMs); // the 30 cadence's restore (0 nothing, 1 the rung changed, 2 steps only)
+    int QgBack(uint64_t now);                            // a restore that lost pictures to the GPU on the cadence: back (as QgRestore)
+    QualityStats qgStats_;
+    // Config::seam
+    bool SeamHold(uint64_t now);       // true: a quality-up step must wait (no cut lately, the wait not run out)
+    uint64_t seamLastCutUs_ = 0, seamSince_ = 0, seamLastAsk_ = 0, seamEvalCut_ = 0;
+    SeamStats seamStats_;
+    Seam72Stats seam72Stats_;
+    uint64_t seam72Since_ = 0, seam72LastAsk_ = 0;
+    bool qgNonPlay_ = false;                             // the last picture handed to Add was not play
+    unsigned qgPlayWins_ = 0;                            // windows of play since the last unsettling (and their seconds)
+    double qgPlayT_ = 0;
+    double qgSettleOtherSum_ = 0;                        // the other stages over those windows (ms x windows): the first verdict's
+    unsigned qgSettleOtherN_ = 0;
+    double qgNeedOther_ = -1;                            // the other stages smoothed over qgNeedSec (pace60's verdict; -1 not yet)
+    double qgIv_ = 0, qgGpu_ = 0, qgOther_ = 0;          // the recent play, smoothed over ~2 s of windows (picture interval, GPU, others)
+    bool qgRecent_ = false;
+    double qgLastIv_ = 0, qgLastGpu_ = 0;                // ... and the last window's own (a scene that just got heavier: the EMA lags)
+    struct QgTrial {
+        bool open = false;
+        int rung = kToday;                               // the state before the reduction(s)
+        unsigned steps = 0;
+        bool aniso = false;
+        double ivBefore = 0, gpuBefore = 0, otherBefore = 0;
+        double t = 0, ivSum = 0, gpuSum = 0, otherSum = 0;
+        unsigned frames = 0;
+        unsigned extends = 0;                            // trials extended: the GPU fell but is still over the budget (a series under way)
+    } qgTrial_;
+    bool qgInRevert_ = false;                            // the guard's own changes are not reductions to judge
+    double qgBlockLen_ = 0;                              // a reduction that bought nothing: its block (doubling)
+    unsigned qgGpuNoGainN_ = 0;                          // (gov77) reductions undone as no gain in this stage while the GPU was the limit (Config::qgStageBlock)
+    uint64_t qgAnisoKeepUntil_ = 0;                      // ... anisotropic filtering off that bought nothing: not off again before this
+    double qgRoomT_ = 0;                                 // the 30 cadence's room for the restore, in a row
+    int qgBackRung_ = kNoRung;                           // a restore on trial: the state before it ...
+    unsigned qgBackSteps_ = 0;
+    uint64_t qgBackUntil_ = 0;                           // ... until then
+    bool qgBackMiss_ = false;                            // ... it lost pictures to the GPU: back at the next change allowed
+    uint64_t qgRestoreBlockedUntil_ = 0;                 // a restore taken back: none again before this (doubling)
+    double qgRestoreBlockLen_ = 0;
+    // s1117b: the GPU gate (Config::gpuGate)
+    GpuGate gate_;
+    unsigned gateClosedPics_ = 0, gateVetoes_ = 0;   // pictures judged with the gate closed; step-down rules it stopped (Evaluate, severe)
+    void GateNote(const FrameTimes& f, uint64_t interval);
+public:
+    // false: the GPU's busy share of the last pictures is below what makes it the limit (the picture rate is held by something else: the game's
+    // CPU, a wait for the front end, the pacing): no rule lowers the picture for the GPU's sake. True with too few measured pictures.
+    bool GpuGateOpen() const {
+        if (!cfg_.gpuGate) return true;
+        const unsigned minPics = static_cast<unsigned>(std::max(1, cfg_.gateMinPics));
+        unsigned measured = 0;
+        double share = 0, lateFrac = 0;
+        gate_.Stats(static_cast<unsigned>(std::max(1, cfg_.gateWindow)), measured, share, lateFrac);
+        if (measured < minPics) return true;
+        if (share >= cfg_.gateBusy || (share >= cfg_.gateBusyLate && lateFrac >= cfg_.gateLateFrac)) return true;
+        // (the last gateRecent pictures alone, when enough of them were measured: a GPU that has just become the limit opens the gate at once,
+        // as the fast rules' own 12 pictures do, instead of after the 90 pictures' mean has caught up)
+        gate_.Stats(static_cast<unsigned>(std::max(1, cfg_.gateRecent)), measured, share, lateFrac);
+        return measured >= minPics && (share >= cfg_.gateBusy || (share >= cfg_.gateBusyLate && lateFrac >= cfg_.gateLateFrac));
+    }
+    unsigned GateClosedPictures() const { return gateClosedPics_; }
+    unsigned GateVetoes() const { return gateVetoes_; }
+private:
+    // Performance mode, Config::fast60: the last pictures (ring), the step and its state
+    bool Fast60() const { return cfg_.fast60 && cfg_.targetFps == 60; }
+    struct FastPic { uint32_t intervalUs = 0, gpuUs = 0, otherUs = 0; bool lateGpu = false; };
+    static constexpr unsigned kFastRing = 32;
+    FastPic fastRing_[kFastRing];
+    unsigned fastN_ = 0, fastHead_ = 0;            // pictures in the ring (since the last change, quiet moment, stall ...), next slot
+    unsigned fastSteps_ = 0;
+    void FastNote(const FrameTimes& f, uint64_t interval, bool lateGpu, uint64_t gpuUs, uint64_t otherUs);
+    int FastStep(uint64_t now);                     // 0: nothing, 1: the rung changed, 2: a step or anisotropic filtering changed
+public:
+    unsigned FastSteps() const { return fastSteps_; }
+private:
     // floor protection by degrees (Config::fxStep)
     unsigned steps_ = 0;                    // bit 0 half-size effects and blur, bit 1 cheaper background
     Change lastFx_;
@@ -769,7 +1328,13 @@ private:
     bool AnisoRungOk(int rung) const { return rung >= AnisoMinRung() && rung <= cfg_.maxRung; }
     // (a change of rung keeps it only when it is the old top-rung option and the rung is the top: any change has it off otherwise)
     bool AnisoKeptAt(int rung) const { return cfg_.anisoRung == kNoRung && rung == cfg_.maxRung; }
-    int WipeCap(int rung) const { return cfg_.wipe && rung > std::max(kToday, cfg_.minRung) ? std::max(kToday, cfg_.minRung) : rung; }
+    int WipeCap(int rung) const { return !presetActive_ && cfg_.wipe && rung > std::max(kToday, cfg_.minRung) ? std::max(kToday, cfg_.minRung) : rung; }
+    // ---- stagepreset25 state (ApplyStagePreset)
+    StagePreset preset_;
+    bool presetActive_ = false, presetSaved_ = false, presetForcedEdge_ = false, presetForcedCuts_ = false;
+    int savedMin_ = 0, savedMax_ = 0, savedStart_ = 0;
+    void ApplyPresetStart(uint64_t now); // at a new scene: the preset's edge pass and captures (or the defaults back), and its steps
+    unsigned PresetSteps() const { return presetActive_ && !ShedOn() && preset_.edgeOff && cfg_.edgeStep ? 4u : 0u; }
 };
 
 // The log of automatic quality: the Vita's port_log (the console's log file; the back end's stderr goes nowhere there),
@@ -777,7 +1342,16 @@ private:
 void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 // The same, into the basic log (the Vita's port_log_summary, which every build writes; stderr elsewhere): the "floor:" line.
 void LogSummary(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-int TargetFps();        // GXV_AUTOQ_TARGET (30 or 60; anything else 0), read once for both the controller and game CPU sampling
+// GXV_PACE23: the back end's scene timers' GPU busy time of a finished picture, the display scene's wait for its buffer taken out, and the
+// timers' raw busy time beside it. Enabled once the scene timers run; the GPU clock then reports these instead of its own figure.
+void HonestBusyEnable(bool on);
+bool HonestBusyEnabled();
+void HonestBusyPublish(uint32_t busyUs, uint32_t rawUs);
+// GXV_PACE60: the scene timers' split of a finished GPU picture (us: TA, EFB/pass 3D, display 3D, busy), handed from the scene reader to the
+// controller (Controller::AddSplit) through a small ring; both ends on the back end's thread. SplitNext: false when none is waiting.
+void SplitPublish(uint32_t taUs, uint32_t efbUs, uint32_t dispUs, uint32_t busyUs);
+bool SplitNext(uint32_t out[4]);
+int TargetFps();       // GXV_AUTOQ_TARGET (30 or 60; anything else 0), read once for both the controller and game CPU sampling
 bool TargetEnabled();   // a whole-picture target (30 or 60): game CPU sampling on, complete GPU timings required
 bool Target30Enabled(); // exactly the 30 target (Quality mode)
 

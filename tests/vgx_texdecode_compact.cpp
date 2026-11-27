@@ -27,6 +27,14 @@ int main() {
         }
         for (unsigned i=0;i<31;++i) Require(compact[i]==0xCD && compact[compact.size()-1-i]==0xCD,
                                            "tile edge/NEON writes stay within the requested output");
+        if (fmt <= 1) {
+            std::vector<uint8_t> i8(size_t(w)*h+62, 0xCE), back(size_t(w)*h*4);
+            Require(vgx::DecodeTextureI8(source.data()+1,w,h,fmt,i8.data()+31),"eligible I8 1-byte decode succeeds");
+            vgx::ExpandI8ToRGBA8(i8.data()+31,size_t(w)*h,back.data());
+            Require(back==rgba,"scalar/NEON 1-byte I8 decode expands to exact RGBA for randomized tiles");
+            for (unsigned i=0;i<31;++i) Require(i8[i]==0xCE && i8[i8.size()-1-i]==0xCE,
+                                               "1-byte I8 writes stay within the requested output");
+        }
         ++cases;
     }
     std::array<uint8_t,64> guard; guard.fill(0xAF); const auto original=guard;
@@ -34,7 +42,12 @@ int main() {
             !vgx::DecodeTextureLA88(guard.data(),1,1,4,guard.data()) &&
             !vgx::DecodeTextureLA88(guard.data(),0,1,0,guard.data()) &&
             !vgx::DecodeTextureLA88(guard.data(),1,0,0,guard.data()) &&
-            !vgx::DecodeTextureLA88(guard.data(),1,1,0,nullptr) && guard==original,
+            !vgx::DecodeTextureLA88(guard.data(),1,1,0,nullptr) &&
+            !vgx::DecodeTextureI8(nullptr,1,1,0,guard.data()) &&
+            !vgx::DecodeTextureI8(guard.data(),1,1,2,guard.data()) &&
+            !vgx::DecodeTextureI8(guard.data(),0,1,1,guard.data()) &&
+            !vgx::DecodeTextureI8(guard.data(),1,0,1,guard.data()) &&
+            !vgx::DecodeTextureI8(guard.data(),1,1,1,nullptr) && guard==original,
             "invalid requests fail without touching destination bytes");
 #if defined(__ARM_NEON)
     constexpr const char* path="NEON and scalar";

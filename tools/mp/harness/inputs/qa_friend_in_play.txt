@@ -1,0 +1,20 @@
+# QA-FUNC 11: in play, add the other player as a friend from the pause screen's Players page ("Played With" is filled by the same code: ui: played with).
+# MARKS only. The route PLUS -> C (Players) -> A (a player's page) is the one door_host.txt uses (proven by the door run); the key that chooses
+# "Add Friend" on that page is NOT proven: row 1 is assumed (look at the door_shots "a player" picture and fix the one line marked GUESS).
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+mark play /\[mp\] flow barrier release serial=1 / ~160
+mark session /ui: screen session/ ~175
+mark player /ui: screen player/ ~185
+title+8-8.5:A|B
+entry+3-3.2:A
+single+15-23:PX=0.25|PY=0.3
+single+18-18.2:A
+single+31-39:PX=0.52|PY=0.78
+single+34-34.2:A
+play+50-50.2:PLUS          # the pause screen (START); the guest's own page visit (qa_friend_guest_signup.txt, play+20) has announced its code by now
+session+3-3.2:C            # Players: with ONE other player their page opens at once (MpMenuSession.cpp I_PLAYERS)
+player+3-3.2:A             # Add Friend is the first row once the guest's code is known (itemsSession S_PLAYER); the first press makes the host's account (needAccount)
+player+8-8.2:A             # linkfix: a second A: the first Add may only trigger the silent sign-up (needAccount); a second press after an add is harmless
+player+14-14.2:B

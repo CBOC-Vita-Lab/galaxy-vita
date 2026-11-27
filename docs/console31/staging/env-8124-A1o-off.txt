@@ -1,0 +1,6 @@
+# 8124 A1o-off: control for A1o, owner plays the same route (the owner plays or watches)
+# console session 3.1: this file REPLACES env.txt for the run; the relay puts the owner's own env.txt back afterwards
+PETARI_BOOT=1
+PETARI_STAGE=AstroGalaxy:1,HoneyBeeKingdomGalaxy:1
+PETARI_STAGE_HOLD=7200
+PETARI_FLOW_LOG=1

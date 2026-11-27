@@ -43,6 +43,9 @@ private:
 #ifdef TARGET_PC
     // GXV_MO_GRAVMEMO (mapobjcut, PlanetGravityManager.cpp): the original query, which the memo wraps.
     bool calcTotalGravityVectorRaw(TVec3f* pGravity, GravityInfo* pInfo, const TVec3f& rPosition, u32 gravityType, u32 requester) const;
+    // GXV_GRAV_GRID (logic23, PlanetGravityManager.cpp): the same walk over only the gravities whose reach can hold the position
+    // (*pUsed = 0: the grid could not answer; the caller then walks them all).
+    bool portGridWalk(TVec3f* pGravity, GravityInfo* pInfo, const TVec3f& rPosition, u32 gravityType, u32 requester, int* pUsed) const;
 #endif
     /// @brief Sorts all PlanetGravity instances by their priority in reverse order. The higher the priority is, the lower
     /// it gets positioned in the array.

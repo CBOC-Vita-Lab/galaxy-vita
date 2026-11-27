@@ -51,6 +51,9 @@ public:
     /* 0x00 */ JMapInfo* mScenarioData;
     /* 0x04 */ char* mGalaxyName;
     /* 0x08 */ JMapInfo* mZoneList;
+#ifdef TARGET_PC
+    u32 mGalaxySortIndex;
+#endif
 };
 
 namespace ScenarioDataFunction {

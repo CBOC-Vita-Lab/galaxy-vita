@@ -1,0 +1,10 @@
+LLVM compiler-rt, profile runtime (the part that writes a raw profile), version 18.1.3, unchanged.
+Taken from compiler-rt-18.1.3.src.tar.xz of https://github.com/llvm/llvm-project/releases/tag/llvmorg-18.1.3
+  sha256 9a7df9300413696b0c4f7ff1e2729cb82aca375f35c05d698c44f26a4edf1c27
+Licence: Apache-2.0 with LLVM exceptions, in licenses/LLVM-compiler-rt-LICENSE.TXT.
+Files (all verbatim): profile/InstrProfiling.{c,h}, InstrProfilingBuffer.c, InstrProfilingInternal.{c,h},
+InstrProfilingPort.h, InstrProfilingUtil.h, InstrProfilingValue.c, InstrProfilingWriter.c;
+include/profile/InstrProfData.inc, instr_prof_interface.h.
+Not taken: InstrProfilingVersionVar.c and InstrProfilingNameVar.c (a weak __llvm_profile_raw_version there would
+turn the profile into a front-end one; the instrumented objects define it), the file, platform, merge and memprof parts.
+Only built when VITA_PGO_GENERATE=1 (vita/vgx-game/CMakeLists.txt); the release eboot does not contain it.

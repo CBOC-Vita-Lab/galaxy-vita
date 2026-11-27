@@ -18,7 +18,18 @@ void WipeFade::init(const JMapInfoIter& rIter) {
     kill();
 }
 
+#ifdef TARGET_PC
+// (hitch33 5a, GXV_WIPE_OPEN_HOLD; platform/vgx/src/vgx_backend_gl.cpp) 1 while the first opening wipe after a stage load should stay fully closed: the stage's first pictures
+// (hundreds of texture uploads, render targets, a long first turn) are made behind it instead of inside the moving fade.
+extern "C" int port_wipe_open_hold(void) __attribute__((weak));
+#endif
+
 void WipeFade::control() {
+#ifdef TARGET_PC
+    if (mIsWipeIn && mStep == 0 && mFrame > 1 && port_wipe_open_hold && port_wipe_open_hold()) {
+        return;  // (still at the first step: alpha 1, the screen is the fill colour; the fade starts when the port lets it)
+    }
+#endif
     mStep++;
 
     if (isOpen()) {

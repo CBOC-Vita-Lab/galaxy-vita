@@ -1,4 +1,5 @@
 #include "Game/Player/GhostPlayer.hpp"
+#include "Game/MP/MpFlow.hpp"   // MP3: Cosmic Mario races are the host's in Play Together
 #include "Game/Animation/XanimeCore.hpp"
 #include "Game/Animation/XanimePlayer.hpp"
 #include "Game/Camera/CameraTargetArg.hpp"
@@ -213,6 +214,10 @@ void GhostPlayer::init(const JMapInfoIter& rIter) {
 }
 
 void GhostPlayer::appear() {
+    // MP3: in Play Together only the host races Cosmic Mario; a guest's ghost stays away (the host's race still syncs its switches).
+    if (mp_active() && !MpFlowHooks::guestMayStartGhostRace()) {
+        return;
+    }
     LiveActor::appear();
     setNerve(GET_NERVE(GhostPlayer, HostTypeNrvPreStartDemo0));
     mIsHidden = true;

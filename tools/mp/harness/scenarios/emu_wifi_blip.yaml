@@ -1,0 +1,35 @@
+# (runs agent 13 Nov: the outage is now triggered 25 s AFTER 'session started', mid-play; guest frames every 2 s at 960x544)
+# PROPOSED (emu): a 10 s Wi-Fi blip. Two consoles in Good Egg 1; when the guest has seen the host's puppet, the relay cuts EVERY packet between them for 10 s
+# (below the 15 s liveness timeout), then the link comes back. Nobody may be dropped, the puppets must come back, the clock/turns resume, no crash.
+# (A cut longer than the timeout is the other half: set outage_s to 25 and expect the host to drop slot 1 and the guest to end the session without a hang.)
+name: emu_wifi_blip
+description: "10 s total outage in a galaxy; both stay in the session and the puppets move again"
+seconds: 240
+requires: {strings: [SMG_MP_AUTO_MODE]}
+link:
+  profile: home_wifi
+  events:
+    - {'on': 'guest /\[mp\] session started/', delay: 25, outage_s: 10}
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, PETARI_SHOT_MS: 2000}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 1 joined name=guest/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'absent host /\[mp\] slot 1 left /'
+  - 'expect guest /\[mp\] ui: reconnecting/'
+  - 'expect guest /\[mp\] reconnected after=\d+ms/'
+  - 'absent guest /\[mp\] (reconnect: gave up|ui: reconnect over)/'
+  - 'absent * /\[mp\] host lost/'
+  - 'exit host,guest == 0'

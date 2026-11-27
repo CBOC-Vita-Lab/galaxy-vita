@@ -1,4 +1,5 @@
 #include "Game/Scene/SceneObjHolder.hpp"
+#include "Game/MP/MpGame.hpp"  // MP3: shared world (SceneObjHolder::create hook)
 #include "Game/AreaObj/AreaObjContainer.hpp"
 #include "Game/Boss/BossAccessor.hpp"
 #include "Game/Boss/SkeletalFishBabyRailHolder.hpp"
@@ -132,8 +133,11 @@ NameObj* SceneObjHolder::create(int id) {
         return pObj;
     }
 
+    // MP3: shared world: actors a scene object creates here (CoinHolder's shared Coins) belong to no placement row
+    const int mpPool = (mp_active() && id != SceneObj_AllLiveActorGroup) ? MpWorldSync::sceneObjBegin() : -1;
     pObj = newEachObj(id);
     pObj->initWithoutIter();
+    if (mpPool != -1) MpWorldSync::sceneObjEnd(mpPool);
 
     mObj[id] = pObj;
 

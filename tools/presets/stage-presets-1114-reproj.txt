@@ -1,0 +1,21 @@
+# stage-presets-1114-reproj.txt (pace33 PATCH6, 14 Nov 2026): the per-stage choice for the 2.3 Performance table under GXV_HRW=5. ONE switch: point GXV_STAGE_PRESETS_FILE at this file
+# (GXV_STAGE_PRESETS=1). Read after the compiled-in table, which is unchanged; without this file every stage is "as the mode says" (reproj 0).
+#   reproj=2 warp_depth=4   the re-projected 60, rotation + the player's box (the c118-c125 console candidate): every stage, through the root class
+#   reproj=1                a locked even 30 with the same low-delay path (no pairs, no snapshot): the heavy stages
+# Heavy = the stages the far30 table marks as not reaching 60 at any far level (stage-presets-far30.txt: Honeyhive, Beach Bowl, Freezeflame, Dreadnought). Space Junk (holds only at
+# far level 3, 16.4 ms GPU estimate) and Good Egg stay re-projected. The owner's eye tests decide each row: change 1 <-> 2 here, nothing else.
+# A later row replaces the compiled-in row of the same stage and scenario, so each heavy row repeats its compiled-in class. The choice changes only behind a covered screen.
+
+# the root class of every other class, as compiled in, plus the default choice
+@class base start=6 floor=6 ceil=6 size=fixed fx=down clip_skipempty=1 cpulod=3 pb_lod=0.45 pb_decor=4000 pb_ptcl=0.4 pb_fur=2000 pb_shadow=1800 ptcl_thin=0.35 ptcl_thin_d0=2000 ptcl_thin_d1=5000 piecethin_dist=4500 reproj=2 warp_depth=4
+
+# Honeyhive (every scenario; :1 and :2 keep their compiled-in classes)
+HoneyBeeKingdomGalaxy class=base reproj=1
+HoneyBeeKingdomGalaxy:1 class=cpu-gov reproj=1
+HoneyBeeKingdomGalaxy:2 class=gpu-light reproj=1
+# Beach Bowl
+HeavenlyBeachGalaxy class=gpu-light reproj=1
+# Freezeflame
+IceVolcanoGalaxy class=gpu-warp reproj=1
+# Dreadnought
+CannonFleetGalaxy class=gpu-heavy reproj=1

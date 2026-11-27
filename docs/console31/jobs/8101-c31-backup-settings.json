@@ -1,0 +1,1 @@
+{"action": "batch", "steps": [{"action": "get", "path": "ux0:data/smg/player-settings.cfg"}]}

@@ -67,6 +67,9 @@ public:
         ++waits_;
         return true;
     }
+    // What MustWait(point) would answer, without taking the wait: for a thread other than the one that arms (GXV_DRAWDONE_OTHER,
+    // port/drawdone_other.h), which then waits for the outstanding finish on its own and leaves this state to the game thread.
+    bool WouldWait(int point) const { return pending_ && (point == kSetDrawDone || point >= mode_); }
     // The wait that MustWait asked for took `ns`.
     void Waited(int64_t ns) {
         totalNs_ += ns;

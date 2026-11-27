@@ -13,10 +13,11 @@ public:
 #ifdef TARGET_PC
     bool isPointingScaled(const TVec2f&, f32, f32) const;  // (the port's Star Bit reach, MR::isStarPointerPointingStarPieceAssist)
     bool isOnScreen() const;
+    bool isPointingEdge(const TVec2f&, f32, f32) const;  // (the dome map: a centre past the edge is still pointable)
 #endif
     void calcPosition(TVec3f*) const;
     f32 calcRadius2d(f32, f32, f32) const;
-    bool calcScreenPositionFromView(TVec2f*, const TVec3f&) const;
+    bool calcScreenPositionFromView(TVec2f*, const TVec3f&, bool allowOffscreen = false) const;
 
     /* 0x00 */ f32 mRadius3d;
     /* 0x04 */ TVec3f mOffset;

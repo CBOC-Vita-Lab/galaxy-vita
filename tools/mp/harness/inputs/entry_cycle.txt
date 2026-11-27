@@ -1,0 +1,13 @@
+# (11 Nov, harness3: the power-save tip no longer shows on entering the Multiplayer menu (conntest 716f9e1: only after a laggy session / the test): the old "42 A tip" press is gone)
+# harness3 (10 Nov): entry -> Multiplayer -> menu -> Back -> entry -> Single Player (file select heads) -> Back -> title -> A+B -> entry
+# -> Multiplayer again (no file heads behind the menus). PETARI_GAME_CLOCK=1, fresh mp.cfg (the power-save tip shows once).
+30-30.5:A|B
+35-35.2:DOWN               # entry: Multiplayer
+37-37.2:A
+52-52.2:B                  # Back: the entry screen (cursor on Multiplayer)
+56-56.2:UP                 # Single Player
+58-58.2:A
+82-82.2:B                  # file select: back (title)
+92-92.5:A|B                # title -> entry screen
+98-98.2:DOWN
+100-100.2:A                # Multiplayer menu again

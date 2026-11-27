@@ -49,6 +49,9 @@ TSAN_OPTIONS=halt_on_error=1 "$out/host/run" "$rounds" $((seed + 3)) blend rever
 echo "== GXV_PAR_ANIM_CB (the NPC scale joint callback in the walk)"
 TSAN_OPTIONS=halt_on_error=1 "$out/host/run" "$rounds" $((seed + 4)) cb
 TSAN_OPTIONS=halt_on_error=1 "$out/host/run" "$rounds" $((seed + 5)) cb blend reverse
+echo "== GXV_PAR_ANIM_CB2 (KoteBug's posture joint callback in the walk, kind 2)"
+TSAN_OPTIONS=halt_on_error=1 "$out/host/run" "$rounds" $((seed + 6)) cb2
+TSAN_OPTIONS=halt_on_error=1 "$out/host/run" "$rounds" $((seed + 7)) cb2 blend reverse
 # (the console branch: the kernel calls of par_spec.h over tests/par_stubs, as tools/test_par_exec_view.sh does for par_exec.h;
 # only the worker's header sees __vita__ there: the game units are the host build's)
 mkdir -p "$out/vita"
@@ -63,9 +66,10 @@ TSAN_OPTIONS=halt_on_error=1 "$out/vita/run" "$rounds" "$seed"
 # Negative controls: each must fail (the test can see a wrong frame, a wrong base matrix, a missing J3DSys::mParentS, a result read
 # without the claim).
 fail=0
-for neg in NEG_FRAME NEG_BASE NEG_PARENTS NEG_NOCLAIM NEG_PREV NEG_CB; do
+for neg in NEG_FRAME NEG_BASE NEG_PARENTS NEG_NOCLAIM NEG_PREV NEG_CB NEG_CB2; do
     mode=; [ $neg = NEG_PREV ] && mode=blend  # (the copy of the core's joint state exists only for blend-state jobs)
     [ $neg = NEG_CB ] && mode=cb
+    [ $neg = NEG_CB2 ] && mode=cb2
     mkdir -p "$out/$neg"
     "$GAMECXX" "${flags[@]}" -fsanitize=thread -D$neg -c "$root/tests/par_anim_walk.cpp" -o "$out/$neg/test.o"
     "$CXX" -fsanitize=thread -pthread "${vobjs[@]}" "$out/host/stubs.o" "$out/host/mtx.o" "$out/$neg/test.o" \

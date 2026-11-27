@@ -1,0 +1,86 @@
+# THE TRAIN'S SCENARIO (11 Nov, harnessfix): ONE boot of two consoles instead of five (a_boot_observatory, mp_join, mp_entry_join, mp_move, mp_star
+# took ~95 minutes in a row). Through the menus (no autopilot; marker-based inputs: each press waits for the game's own screen, so a changed or slow
+# screen cannot shift the timeline), a joined game in the Observatory with the host's progress, the host moves everyone to Good Egg 1 (PETARI_STAGE),
+# the guest gets the scenario star (SMG_MP_TEST_STAR), both follow the move after the clear, and both leave with a BYE: each process is asked to stop
+# 60 s after the after-clear move (HARNESS_END), not at the end of a fixed timeline.
+# Rules carried over: mp_entry_join (all), mp_join (the autopilot-only lines are the menu's equivalents), mp_move (Good Egg move, barrier, no
+# refused / own moves), mp_star (star credit, one delivery, after-clear move, host save). NOT carried: mp_move's way back to the Observatory by the
+# stage list (the after-clear move replaces it), mp_join's `hello sent`/`auto: joining` (autopilot lines; the menu path has the entry_join lines), mp_star's
+# SMG_MP_AUTO_SAVE path (the menu's Copy a File is checked instead), and every timing that depended on the autopilot's start.
+name: mp_smoke
+description: "menus to a joined game, move to Good Egg, star, after-clear move, leave: mp_entry_join + mp_join + mp_move + mp_star in one run"
+seconds: 700
+min_speed: 0.4
+requires: {strings: ["entry: chose %s", SMG_MP_TEST_STAR]}   # (a binary without "desktop: input mark" falls back to the marks' absolute times)
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    may_end_early: true
+    input: "@entry_host"
+    env: {SMG_MP_NAME: host, SMG_KEYBOARD_NAME: host, SMG_MP_LOOK: 0, PETARI_STAGE: "EggStarGalaxy:1",
+          HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=host|60'}
+  - name: guest
+    may_end_early: true
+    input: "@entry_guest"
+    env: {SMG_MP_NAME: guest, SMG_KEYBOARD_NAME: guest, SMG_MP_LOOK: 1, SMG_MP_TEST_STAR: 15,
+          HARNESS_START_ON: 'host|\[mp\] hosting session|0',
+          HARNESS_END: '\[mp\] flow move type=4 galaxy=\w+ .*role=guest|60'}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'exit * == 0'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  # ---- mp_entry_join: the menus
+  - 'expect * /\[mp\] entry: screen shown cursor=single/ within 45gs'
+  - 'expect * /\[mp\] entry: chose multiplayer/ within 50gs'
+  - 'expect any /\[mp\] ui: multiplayer menu from the entry screen/ within 5gs after any /\[mp\] entry: chose multiplayer/'
+  - 'expect * /\[mp\] ui: gathering mode=1/'   # Play Together (mode 1) chosen on the Multiplayer menu, then the one-door gathering screen
+  - 'absent * /\[mp\] ui: gathering mode=2/'
+  - 'expect host /\[mp\] ui: screen falls/'   # the falls question (first time)
+  - 'expect host /\[mp\] ui: screen save/'   # Which File?
+  - 'expect host /\[mp\] ui: single-player file 2 picked for copy/'
+  - 'expect host /\[mp\] ui: save choice kind=2 coop=1 sp=2/'
+  - 'expect host /\[mp\] ui: host save kind=2 coop=1 sp=2 ready/'
+  - 'expect host /\[mp\] entry: launch file=1/'
+  - 'expect guest /\[mp\] entry: launch file=1/'
+  - 'absent * /\[mp\] entry: chose single/'
+  - 'absent guest /\[mp\] ui: (save choice|single-player file \d picked|screen (falls|save))/'
+  # ---- mp_join: room, join, session, snapshot, puppets
+  - 'expect host /\[mp\] hosting session=([0-9a-f]+) conn=(wifi|nearby)/'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 .*players=2/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 epoch=\d+ players=2/ within 10gs after host /\[mp\] slot 1 joined/'
+  - 'expect * /\[mp\] session started/'
+  - 'expect host /\[mp\] host start conn=(wifi|nearby) mode=1 /'   # Play Together (mode 1; 2 = Star Race: the Play Together press must have landed)
+  - 'expect * /\[mp\] flow session start role=(host|guest)/'
+  - 'order host /\[mp\] snapshot sent slot=1 bytes=(\d+) crc=([0-9a-f]+)/ before guest /\[mp\] snapshot received bytes=$1 crc=$2 ok=1/ within 30gs'
+  - 'order guest /\[mp\] snapshot received bytes=\d+ crc=([0-9a-f]+) ok=1/ before host /\[mp\] snapshot delivered slot=1 crc=$1/ within 5gs tol 15f'
+  - 'expect guest /\[mp\] save snapshot applied slot=/'
+  - 'expect host /port: player at 2[89]\d\d\.\d 78\d\.\d -[34]\d\d\d\.\d \(on the ground\)/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect host /\[mp\] puppet slot=1 appear model=\w+ self=0/'   # (the character is whatever the menus' pointer picked: both consoles press at the centre = Luigi; the host keeps it, the guest is given Mario)
+  # ---- mp_move: the host's jump to Good Egg 1, followed by the guest (same galaxy and serial), barrier
+  - 'expect host /\[OS\] port: jumping to EggStarGalaxy scenario 1/'
+  - 'expect host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=1 serial=\d+ role=host/ within 2gs after host /port: jumping to EggStarGalaxy/'
+  - 'order host /\[mp\] flow move type=\d+ galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=\d+ galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8gs tol 15f each'
+  - 'order host /\[mp\] flow move .* serial=(\d+) role=host/ before host /\[mp\] flow barrier release serial=$1 waited=\d+ms players=2/ within 60gs each'
+  - 'order host /\[mp\] flow barrier release serial=(\d+) / before guest /\[mp\] flow barrier release serial=$1 / within 3gs tol 15f each'
+  - 'absent * /\[mp\] flow (move refused type=(?!6 )|move not taken|drop|move unmirrored|record leave)/'
+  - 'absent guest /\[mp\] flow own move type=(?!6 |4 taken as command)/'
+  # ---- mp_star: the guest's star credited once, delivered natively at the host, both follow the after-clear move
+  - 'expect guest /\[mp\] flow test star: scenario star \d+ to the player serial=\d+ ok=1/ within 60gs after guest /\[mp\] flow move type=0 galaxy=EggStarGalaxy/'
+  - 'order guest /\[mp\] flow star got id=(\d+) grand=\d by=1/ before host /\[mp\] flow star got id=$1 grand=\d by=1/ within 3gs tol 15f'
+  - 'order host /\[mp\] flow star got id=(\d+) grand=\d by=1/ before host /\[mp\] star delivered id=$1 path=(native|synthetic)/ within 15gs'
+  - 'expect host /\[mp\] star delivered id=\d+ path=native/'
+  - 'count * /\[mp\] star delivered id=/ <= 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow star dup|flow star delivery dropped|flow drop STAR|flow clear hold timeout)/'
+  - 'order host /\[mp\] flow move type=4 galaxy=(\w+) scen=-?\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=4 galaxy=$1 scen=-?\d+ serial=$2 role=guest/ within 8gs tol 15f'
+  - 'expect * /\[mp\] flow barrier release serial=\d+ / within 60gs after host /\[mp\] flow move type=4/'
+  - 'mp_save host'
+  - 'absent guest /\[mp\] save autoconfirm/'
+  # ---- the end: both leave with a BYE (the harness asks for the stop); nothing ended the session before that
+  - 'absent guest /\[mp\] session ended reason=host-left/ before shutdown'
+  - 'absent * /\[mp\] (slot \d left reason=(?!leave \(bye\))|session ended reason=(?!none \(shutdown\)|host-left)|rejected by host|hello rejected|bad message from slot|events lost)/'
+  - '?metric * rss_mib <= 2500'

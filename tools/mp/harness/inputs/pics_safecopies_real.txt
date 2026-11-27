@@ -1,0 +1,42 @@
+# checks83 (14 Nov): Safe Copies WITH real copies. Run by the second console of scenarios/pics_safecopies_real.yaml: it continues the first
+# console's data folder, so a Team File already exists (without one "Make a Copy" answers "There is nothing to save yet" and no copy is made:
+# the reason the pictures of pics_c never showed a list). The path is pics_a's: entry screen -> Multiplayer -> Triangle (How to Play) -> OK ->
+# Yes (second page) -> Safe Copies. There: Make a Copy (row 1), Make a Copy to Share (row 2, the cursor stays where it was after the card is closed),
+# then Bring Back a Copy (row 3, there once a copy exists) -> the list with the two copies -> the first copy's page (its Team Files) -> back out.
+# Pictures every PETARI_SHOT_MS: Safe Copies with two rows, the OK card of each copy, Safe Copies with three rows, the list, a copy's page.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark main /ui: screen main/ ~40
+mark howto /ui: window MP_HOWTO/ ~60
+mark safe /ui: window answer/ ~70
+mark keep /ui: screen keep/ ~75
+mark keeplist /ui: screen keeplist/ ~125
+mark keepcopy /ui: screen keepcopy/ ~135
+title+8-8.5:A|B
+entry+3-3.2:DOWN
+entry+5-5.2:A
+main+6-6.2:C
+howto+6-6.2:A
+howto+12-16:PX=0.38|PY=0.6
+howto+14-14.2:A
+# scnfix (14 Nov): the screen does NOT open with the cursor on row 1. The pointer was left on "Yes" of the How to Play card (howto+12-16) and the pointer's hover
+# put the cursor on row 3 (Bring Back a Copy; a copy "Before 3.0.0" already exists, so the row is there): the final run's first A went to the list, no copy was made
+# (shots 30-33: the list at keep+6). So: two UPs first (row 3 -> row 1), then the walk below. If a run still shows the cursor off row 1, the pictures say so.
+keep+4-4.2:UP
+keep+6-6.2:UP
+keep+10-10.2:A
+keep+16-16.2:A
+keep+22-22.2:DOWN
+keep+26-26.2:A
+keep+32-32.2:A
+keep+38-38.2:DOWN
+keep+42-42.2:A
+# scnfix: the list is newest first. The two copies just made equal what is on this console, so the first row says "There is nothing in this copy to bring back" (a card:
+# the second pictures of the run; A closes it). The copy with something to bring back is "Before 3.0.0" (the game's own, the last row): DOWN DOWN, A -> its page.
+keeplist+8-8.2:A
+keeplist+14-14.2:A
+keeplist+18-18.2:DOWN
+keeplist+20-20.2:DOWN
+keeplist+24-24.2:A
+keepcopy+10-10.2:B
+keepcopy+16-16.2:B

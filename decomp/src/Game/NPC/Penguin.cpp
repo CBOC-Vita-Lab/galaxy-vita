@@ -1,4 +1,5 @@
 #include "Game/NPC/Penguin.hpp"
+#include "port/bowl_pose.h"  // (GXV_BOWL_POSE, bowl31)
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Map/HitInfo.hpp"
 #include "Game/MapObj/JetTurtle.hpp"
@@ -82,6 +83,9 @@ bool RemovableTurtle::tryAttach() {
 }
 
 Penguin::Penguin(const char* pName) : NPCActor(pName), mBehavior(Behavior_Default), mStepToDive(0) {
+#ifdef TARGET_PC
+    mBowlPose = port::bowlpose::kPenguin;  // (GXV_BOWL_POSE, bowl31: census and verify only, never cut: port/bowl_pose.h)
+#endif
 }
 
 void Penguin::init(const JMapInfoIter& rIter) {

@@ -1,0 +1,36 @@
+# chipsync: a chip picked up by a GUEST in a live session reaches the host (CHIP message, applied there), and nothing is applied twice. Both consoles play Good Egg 1 together
+# (as mp_join); 40 s after its scene is live the guest collects all 5 Star Chips of the yellow group through the game's own pickup steps (SMG_MP_TEST_COLLECT): the 5th completes the
+# group, so the launch star's switch fires on the guest, and on the host through the same group logic when its 5th applied chip comes in.
+name: live_chip_pickup
+description: "live 2 consoles: the guest collects 5 Star Chips in Good Egg 1, the host applies all 5 once"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_COLLECT]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_LOOK: 0, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_COLLECT: "40:0:5"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'expect * /\[mp\] session started/ within 150s'
+  - 'expect guest /\[mp\] world test collect: purple=0 chip=5 \(registry purple=\d+ chip=[5-9]\d*\)/'
+  - 'count guest /\[mp\] world chip key=\S+ src=local/ == 5'
+  - 'expect host /\[mp\] world chip key=\S+ src=remote/ within 30s after guest /\[mp\] world test collect: purple=0 chip=5/'
+  - 'count host /\[mp\] world chip key=\S+ src=remote/ == 5'
+  - 'count host /\[mp\] world chip key=\S+ src=local/ == 0'
+  - 'count guest /\[mp\] world chip key=\S+ src=remote/ == 0'
+  # the 5th chip completes the group: its completion demo ends and the launch star's switch is on, on the guest that took them and on the host that applied them
+  - 'expect guest /\[mp\] world chip group done type=\d+ id=\S+ src=local appear=0/ within 30s after guest /\[mp\] world test collect: purple=0 chip=5/'
+  - 'expect guest /\[mp\] world chip group done type=\d+ id=\S+ src=local appear=1/ within 90s after guest /\[mp\] world test collect: purple=0 chip=5/'
+  - 'expect host /\[mp\] world chip group done type=\d+ id=\S+ src=remote appear=0/ within 30s after guest /\[mp\] world test collect: purple=0 chip=5/'
+  - 'expect host /\[mp\] world chip group done type=\d+ id=\S+ src=remote appear=1/ within 90s after guest /\[mp\] world test collect: purple=0 chip=5/'
+  - 'count * /\[mp\] world chip group done type=\d+ id=\S+ src=\w+ appear=1/ == 1'
+  - 'same host,guest /\[mp\] world reg chips plain=(\d+) carried=(\d+)/ last'
+  - 'absent * /\[mp\] world drop type=chip/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

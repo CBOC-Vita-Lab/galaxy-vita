@@ -4,7 +4,7 @@
 
 **This is the manual route.** [CBOC Vita Installer](EASY-INSTALL.md) does
 all of this for you. By hand, it works on Windows, macOS or Linux and takes
-four steps: extract your disc, convert it, shrink the movies, copy it.
+four steps: extract your disc, convert it, shrink the movies (optional), copy it.
 
 The port reads the game's files in a form made for the Vita (decompressed,
 converted, and sorted into small folders so the memory card finds them fast),
@@ -39,16 +39,16 @@ On Windows, write `py -3` instead of `python3`. The first command takes a few
 minutes. The second checks that every file is in its place. If either one
 reports an error, extract the disc again into a new folder and repeat.
 
-## 3. Shrink The Movies (Recommended)
+## 3. Shrink The Movies (Optional: Saves About 1 GB)
 
 The game's nine movies (the storybook opening, Bowser's arrival, the ending and
-the rest) are very heavy at full size. Re-encoding them for the Vita's screen
-makes them about half the size (1.4 GB instead of 2.4 GB) and much easier for
-the Vita to play, so they run smoothly instead of skipping pictures. Only the
-movies change: gameplay is the same either way. CBOC Vita Installer always does
-this for you.
+the rest) play smoothly on the Vita at full size, so this step is optional.
+Re-encoding them for the Vita's screen makes them about half the size (1.4 GB
+instead of 2.4 GB). That saves card space only. Only the movies change: gameplay
+is the same either way. CBOC Vita Installer currently shrinks them to save that
+space. To keep the full-size movies, skip the rest of this step.
 
-You build a small tool from the install ZIP once, then run it on the movies. It
+If you want the smaller movies, you build a small tool from the install ZIP once, then run it on the movies. It
 needs a C++ compiler and the libjpeg library.
 
 **Mac:** install Apple's command line tools and [Homebrew](https://brew.sh), then
@@ -86,8 +86,8 @@ for m in prepared-game/files/MovieData/*.thp; do ./thp_transcode "$m" "$m.new" 5
 `prepared-game/files/MovieData/` should be about 1.4 GB. If a movie reports an
 error, its original stays in place, so you can run the line again.
 
-If you skip this step the game still works, but the movies take about 1 GB more
-space on the Vita and play less smoothly.
+If you skip this step the game still works, and the movies play smoothly at full
+size. They take about 1 GB more space on the Vita.
 
 ## 4. Copy It To The Vita
 

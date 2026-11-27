@@ -19,6 +19,10 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include <JSystem/J3DGraphBase/J3DSys.hpp>
 #include <cstdio>
+#ifdef TARGET_PC
+#include "port/hot_knob.h"
+#include <cstdlib>
+#endif
 
 // TODO: mismatch in .data order likely due to a stripped function containing "CAM_TYPE_DPD"
 
@@ -180,6 +184,33 @@ namespace MR {
     f32 getFovy() {
         return ::getCameraContext()->mFovy;
     }
+
+#ifdef TARGET_PC
+    // GXV_ZOOM_LOGIC_VIEW (zoomclip23, 8 Nov; default 1). The handheld zoom (CameraContext.cpp zoomedFovy, perf.cpp port_camera_zoom)
+    // narrows the field of view of the camera context, and everything that read it back saw the narrower view, also the game's object
+    // clipping (ClippingJudge): an actor a little outside the zoomed picture but inside the original game's view was clipped, i.e. it
+    // stopped moving, its hit sensors were switched off (LiveActor::startClipped: a coin, a star bit, a Launch Star or a Pull Star could
+    // not be touched or pointed at), and objects that test MR::isJudgedToClipFrustum changed their behaviour. With the switch on, those
+    // decisions use the game's own field of view (never narrower than the picture's), exactly as with zoom 1.0; the picture, the screen
+    // positions and the Star Pointer keep the zoomed one (they must match what is shown). 0: as 2.2.1 (the zoomed view everywhere).
+    f32 getFovyForLogic() {
+        const CameraContext* pContext = ::getCameraContext();
+        const f32 picture = pContext->mFovy;
+        if (!PORT_HOT_KNOB(bool, [] {
+                const char* e = getenv("GXV_ZOOM_LOGIC_VIEW");
+                return !(e && *e && strtol(e, nullptr, 0) == 0);
+            }())) {
+            return picture;
+        }
+        const f32 game = pContext->mPortFovyGame;
+        return game > picture && game < 170.0f ? game : picture;
+    }
+
+    bool isPictureZoomedIn() {
+        const CameraContext* pContext = ::getCameraContext();
+        return pContext->mPortFovyGame > pContext->mFovy;
+    }
+#endif
 
     void setNearZ(f32 nearZ) {
         ::getCameraContext()->setNearZ(nearZ);

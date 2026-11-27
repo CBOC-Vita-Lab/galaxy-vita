@@ -1,0 +1,37 @@
+# worldsync: defeats that happen while the other console is not live yet are applied once it is. Both consoles follow the host's move to Good Egg 1. The guest
+# stays "not live" for its first 900 scene turns (SMG_MP_TEST_HOLD_LIVE: a console still in its opening demo, desktop hook) while the host, released by the
+# barrier, defeats 3 enemies 1 s into its play (SMG_MP_TEST_KILL). The KILLs reach the guest during its hold.
+# mp-next: the guest queued each one with a 180-turn deadline, which ran out before its first live turn: "dropped" silently, the guest never defeats them.
+# worldsync: a remote defeat has no deadline while the scene is not live; the guest applies all 3 at its first live turn; every drop would be logged.
+name: kill_during_guest_load
+description: "host defeats 3 enemies while the guest is not live yet (opening demo): the guest applies all 3 when it turns live"
+seconds: 360
+min_speed: 0.4
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_KILL, SMG_MP_TEST_HOLD_LIVE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_POSLOG: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_KILL: "1:3"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_HOLD_LIVE: 900}
+rules:
+  - 'absent * /\[mp\] world pool ranges overflow/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed|Assertion|OSPanic|FATAL/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 1 joined name=guest/'
+  - 'order host /\[mp\] flow move type=0 galaxy=EggStarGalaxy scen=\d+ serial=(\d+) role=host/ before guest /\[mp\] flow move type=\d+ galaxy=EggStarGalaxy scen=-?\d+ serial=$1 role=guest/ within 10s tol 250ms'
+  - 'order host /\[mp\] world reg n=(\d+) crc=([0-9a-f]+) .*serial=(\d+)/ near guest /\[mp\] world reg n=$1 crc=$2 .*serial=$3/ within 40s each'
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'expect host /\[mp\] world test kill: killed=3 serial=\d+/ after host /\[mp\] flow barrier release serial=\d+ /'
+  - 'expect host /\[mp\] world kill key=\S+ src=local/'
+  # the guest gets them (within 60 s of the defeats: its hold is 15 s of game time)
+  - 'expect guest /\[mp\] world kill key=\S+ src=remote/ within 60s after host /\[mp\] world test kill: killed=3/'
+  - 'count guest /\[mp\] world kill key=\S+ src=remote/ == 3'
+  # nothing is lost without a line: a drop of a defeat is logged with its reason, and there must be none here
+  - 'absent guest /\[mp\] world drop type=kill/'
+  - 'absent * /\[mp\] bad message from slot|events lost/'

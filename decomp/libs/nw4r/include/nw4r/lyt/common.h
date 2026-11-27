@@ -24,6 +24,13 @@ namespace nw4r {
             }
 
             bool IsModulateVertexColor(ut::Color*, u8);
+#ifdef TARGET_PC
+            // GXV_LAYOUTWARM (layoutwarm24): 0 in every real draw. The warm-up pass of a layout (Game/Screen/LayoutManager.cpp) sets 1 or 2 while it
+            // calls each pane's DrawSelf inside a front-end warm scope: Material::SetupGX then takes (modulate false, alpha 255) for 1 and (true,
+            // alpha 128) for 2, the two ends of what a pane's alpha and vertex colours make of the material's TEV set-up; TextBox::DrawSelf draws one
+            // glyph (pass 1 only). Game thread only.
+            extern int gPortWarmPass;
+#endif
             const ut::Color MultipleAlpha(const ut::Color, u8);
             void MultipleAlpha(ut::Color*, const ut::Color*, u8);
             void SetVertexFormat(bool, u8);

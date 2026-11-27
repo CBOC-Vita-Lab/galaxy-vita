@@ -13,6 +13,23 @@ static Mtx tmpmtx_ry = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0
 
 static Mtx tmpmtx_rz = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f, 0.0f}};
 
+#ifdef TARGET_PC
+// fp40 (A9 VFP): "*a != *b" per element is vcmp + vmrs APSR_nzcv (stalls the Cortex-A9). Elements whose bits are equal are equal
+// unless NaN (bits above 0x7F800000: NaN != NaN, so not the same); any element whose bits differ takes the original float compare
+// (so +0/-0 stay equal). Result identical for every input.
+namespace {
+    inline bool fp40ElemDiffers(const f32* a, const f32* b) {
+        u32 ua, ub;
+        __builtin_memcpy(&ua, a, sizeof(ua));
+        __builtin_memcpy(&ub, b, sizeof(ub));
+        if (ua == ub) {
+            return (ua & 0x7FFFFFFFu) > 0x7F800000u;
+        }
+        return *a != *b;
+    }
+}  // namespace
+#endif
+
 namespace MR {
     void makeMtxRotate(MtxPtr pMtx, s16 rx, s16 ry, s16 rz) {
         f32 sinX = JMASSin(rx);
@@ -700,7 +717,11 @@ namespace MR {
         f32* pA = (f32*)pMtxA;
         f32* pB = (f32*)pMtxB;
         for (int i = 0; i < 12; i++) {
+#ifdef TARGET_PC
+            if (fp40ElemDiffers(pA, pB)) {
+#else
             if (*pA != *pB) {
+#endif
                 return false;
             }
 
@@ -716,7 +737,11 @@ namespace MR {
         f32* pB = (f32*)pMtxB;
         for (u32 i = 0; i < 12; i++) {
             if ((i & 3) != 3) {
+#ifdef TARGET_PC
+                if (fp40ElemDiffers(pA, pB)) {
+#else
                 if (*pA != *pB) {
+#endif
                     return false;
                 }
             }

@@ -1,0 +1,37 @@
+# savefix: the recovery offer, answered both ways. The guest is killed (SIGKILL) after its first recovery checkpoint was written
+# (the session's end when the host leaves, SMG_MP_TEST_LEAVE). The same console is relaunched twice from that state: guest2 keeps the
+# progress in co-op file 3, guest3 (from the same files) discards it. Neither touches its single-player file.
+name: sv_recovery
+description: "guest killed after a recovery checkpoint; relaunch keeps it in co-op file 3; another relaunch discards it"
+seconds: 520
+requires: {strings: [SMG_MP_AUTO_RECOVERY]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000}
+processes:
+  - name: host
+    seconds: 250
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, SMG_MP_TEST_LEAVE: 60}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, HARNESS_KILL: 'save recovery written index=\d+ .*ok=1|1|9'}
+  - name: guest2
+    seconds: 120
+    input: "@file2_charselect"
+    env: {HARNESS_AFTER: guest, HARNESS_CONTINUE: guest, SMG_MP_AUTO_RECOVERY: "keep:3"}
+  - name: guest3
+    seconds: 120
+    input: "@file2_charselect"
+    env: {HARNESS_AFTER: guest2, HARNESS_CONTINUE: guest, SMG_MP_AUTO_RECOVERY: discard}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect guest /\[mp\] save recovery written index=\d+ bytes=\d+ ms=\d+ ok=1/'
+  - 'expect guest /harness: kill signal=9/'
+  - 'expect guest2 /\[mp\] ui: recovery offered stars=\d+/'
+  - 'expect guest2 /\[mp\] save recovery kept index=\d+ mp=3/'
+  - 'expect guest2 /\[mp\] save test: recovery keep:3 ok/'
+  - 'mp_save guest2'
+  - 'expect guest3 /\[mp\] ui: recovery offered stars=\d+/'
+  - 'expect guest3 /\[mp\] save recovery discarded index=\d+ ok=1/'
+  - 'absent * /Assertion|OSPanic|FATAL/'

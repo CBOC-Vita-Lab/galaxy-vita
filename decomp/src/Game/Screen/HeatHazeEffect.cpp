@@ -44,8 +44,19 @@ void HeatHazeDirector::init(const JMapInfoIter& rIter) {
     MR::connectToSceneMapObjMovement(this);
 }
 
+#ifdef TARGET_PC
+// boss23 (decomp/src/Game/Scene/GameScene.cpp): PETARI_BOSS_HAZE, the heat haze left out while a boss fight is on (1 / perf) or
+// everywhere (2), a MINOR CHANGE (no shimmer); also counted for the "boss:" log line. 0 (default): as the game.
+extern "C" int port_boss_haze_off(int hazeHere);
+#endif
+
 void HeatHazeDirector::movement() {
     HazeCube* pHazeCube = static_cast< HazeCube* >(MR::getAreaObj("HazeCube", *MR::getPlayerPos()));
+#ifdef TARGET_PC
+    if (port_boss_haze_off(pHazeCube != nullptr ? 1 : 0)) {
+        pHazeCube = nullptr;
+    }
+#endif
 
     if (pHazeCube != nullptr) {
         if (MR::isDead(mEffect)) {

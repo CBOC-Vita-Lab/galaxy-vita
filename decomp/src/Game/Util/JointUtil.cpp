@@ -9,6 +9,16 @@
 #include <JSystem/JGeometry.hpp>
 #include <JSystem/JUtility/JUTNameTab.hpp>
 
+#ifdef TARGET_PC
+// GXV_UNDRAWN_LEAN (undrawn26): every way the game's logic gets at a model's joint matrices is in this file (and ModelUtil.cpp's buffer copies):
+// the model is then never left out of a turn's joint computation, and a read of one that is left out right now is counted.
+extern "C" void port_undrawn_joint_touch(const void* model);
+#include "Game/LiveActor/PortBowlPose.hpp"  // (GXV_BOWL_POSE, bowl31: the same reads mark the model for the fish pose rule)
+#define PORT_JOINT_TOUCH(model) (PortBowlJointRead(model), port_undrawn_joint_touch(model))
+#else
+#define PORT_JOINT_TOUCH(model) ((void)0)
+#endif
+
 namespace MR {
     J3DJoint* getJoint(J3DModel* pModel, const char* pName) {
         return pModel->mModelData->mJointTree.mJointNodePointer[(u16)pModel->mModelData->mJointTree.mJointName->getIndex(pName)];
@@ -23,6 +33,7 @@ namespace MR {
     }
 
     MtxPtr getJointMtx(J3DModel* pModel, const char* pName) {
+        PORT_JOINT_TOUCH(pModel);
         s32 idx = pModel->mModelData->mJointTree.mJointName->getIndex(pName);
         return pModel->mMtxBuffer->mpAnmMtx[idx];
     }
@@ -32,6 +43,7 @@ namespace MR {
     }
 
     MtxPtr getJointMtx(const LiveActor* pActor, int idx) {
+        PORT_JOINT_TOUCH(MR::getJ3DModel(pActor));
         return MR::getJ3DModel(pActor)->mMtxBuffer->mpAnmMtx[idx];
     }
 
@@ -61,6 +73,7 @@ namespace MR {
     }
 
     void copyJointPos(J3DModel* pModel, int idx, TVec3f* pPos) {
+        PORT_JOINT_TOUCH(pModel);
         MtxPtr jointMtx = pModel->mMtxBuffer->mpAnmMtx[idx];
         pPos->set< f32 >(jointMtx[0][3], jointMtx[1][3], jointMtx[2][3]);
     }

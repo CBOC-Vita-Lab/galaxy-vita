@@ -6,6 +6,21 @@
 #include "Game/Util/LayoutUtil.hpp"
 #include "Game/Util/SoundUtil.hpp"
 
+#include "port/mp_bridge.h"  // MP3: the life counter follows the chosen character in a session
+
+namespace {
+    // MP3: in a session the counter shows the chosen character's family (Luigi / Cosmic Luigi: Luigi's head, the others Mario's;
+    // the layout has no other head); single player: the game's own rule
+    bool counterShowsLuigi() {
+        if (mp_active()) {
+            const MpLook look = mp_slot_look(mp_local_slot());
+            return look == MP_LOOK_LUIGI || look == MP_LOOK_COSMIC_LUIGI;
+        }
+        return MR::isPlayerLuigi();
+    }
+}  // namespace
+
+
 namespace {
     const s32 hCountDownTime = 15;
     const s32 hEndTime = 90;
@@ -59,7 +74,7 @@ void PlayerMissLeft::exeAppear() {
         mLayoutAppearer->appear(TVec2f(0.0f, 0.0f));
         MR::startAnim(this, "Wait", 1);
 
-        if (MR::isPlayerLuigi()) {
+        if (counterShowsLuigi()) {
             MR::startAnim(this, "Luigi", 2);
             MR::setAnimFrameAndStop(this, 1.0f, 2);
         } else {

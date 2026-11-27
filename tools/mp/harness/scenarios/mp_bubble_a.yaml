@@ -1,0 +1,36 @@
+# Bubbles: the guest falls (damage, 25 s after the Good Egg scene starts) and pops his own bubble with A (taps every second
+# from 120 s, inputs/file2_observatory_atap) once the 1.5 s grace is over, next to the host standing on the ground at the
+# start: lands beside the host. Before the fall the taps only make him jump. No restart, the host never touches him.
+name: mp_bubble_a
+description: guest in a bubble pops it himself with A next to a grounded teammate; lands beside him
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory_atap"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25:1"}
+rules:
+  - 'absent * /\[mp\] world regcrc mismatch/'
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect guest /\[mp\] bubble on slot=1 lives=\d+->\d+ out=0 far=0 target=0 serial=1/'
+  - 'expect host /\[mp\] bubble remote on slot=1/ within 3s after guest /\[mp\] bubble on slot=1/'
+  # A after the grace (90 turns), beside the grounded host: own pop (by=-1), lands by 0
+  - 'expect guest /\[mp\] bubble off slot=1 by=-1 land=0 why=button lives=\d+/ within 20s after guest /\[mp\] bubble on slot=1/'
+  - 'absent guest /\[mp\] bubble off slot=1 .*why=button/ before guest /\[mp\] bubble on slot=1/'
+  - 'order guest /\[mp\] bubble off slot=1 by=-1 / before host /\[mp\] bubble msg from=1 on=0 lives=\d+ by=-1 out=0/ within 5s'
+  - 'expect host /\[mp\] bubble remote off slot=1 popped=1/ within 3s after host /\[mp\] bubble msg from=1 on=0/'
+  - 'absent * /\[mp\] bubble off .*why=touch/'
+  - 'absent * /\[mp\] bubble restart/'
+  - 'absent guest /\[mp\] flow own move type=5/'
+  - 'count guest /\[mp\] bubble on slot=1/ == 1'
+  - 'absent * /\[mp\] bubble drop/'
+  - 'exit * == 0'

@@ -1,0 +1,46 @@
+# linkfix (14 Nov): FRIEND CODES IN A SAME-WI-FI (LOCAL) ROOM. Both consoles have an online account (the local fake service), the room itself is a
+# plain Wi-Fi room (no service room, conn=wifi): the consoles announce their own codes to each other (MP_MSG_FRIEND; mp_core_set_own_friend_code, the
+# call that never reached the core before linkfix) and the roster / the player's page shows the other console's code.
+# The code is never logged by the announcement itself, so the proof is behavioural: the host opens the guest's page and adds the guest as a friend,
+# and the service line "service friend add code=X" must carry EXACTLY the code the guest's own sign-up logged ("service register|signin ok code=X"),
+# which the host can only know through the room. "Played With" keeps it: the same add is taken from the page the Played With list is filled by
+# ("ui: played with Luigi", MpMenuFriends.cpp; the code is stored with the name in the flow store, played_code). NOT proven here: re-reading the stored
+# code from the Played With list after the session ended (nothing logs it): that is ui_menu/friends_test.cpp's and flow_store_test's.
+# SETUP (a wrapper, as for qa_friend_from_played_with): start the fake service
+#   (cd server && GAME=smg REGISTER_POW_BITS=0 node fake/server.mjs --no-https --http-port 18797) and mkdir -p the two SMG_ONLINE_DIR folders below.
+#   RUN IT WITH tools/mp/harness/run_with_fake_service.sh (starts the fake on 18797, makes the scratch folders, runs, stops the fake).
+#   The guest gets its account from its own input (inputs/qa_friend_guest_signup.txt: the same Players-page route about 18 s before the host's).
+#   UNRUN: the key presses are inputs/qa_friend_in_play.txt (one line marked GUESS there).
+# friendscn (14 Nov): the GUEST's account is made by run_with_fake_service.sh before the run (seed_online_account.py): the Add Friend row exists only once the
+# other console has announced a code, and an account is made only from that press, so two fresh consoles can never start. The guest's own input stops after the
+# entry screen. The host makes ITS account from its Add Friend press (service register ok), then adds: the fake refuses an add of one's own code, so
+# 'service friend op ok' proves the code that arrived through the room was the guest's. A one-player page opens at once (no "screen players").
+name: qa_lan_friend_codes
+description: "two consoles with accounts in a Same Wi-Fi room: the host's add of the guest uses the code the guest announced (same as the guest's own sign-up code)"
+seconds: 600
+min_speed: 0.4
+requires: {strings: [SMG_ONLINE_URL], files: ['{HARNESS}/../../../server/fake/server.mjs']}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_HANDHELD_UI: 1, SMG_ONLINE_URL: "http://127.0.0.1:18797"}
+processes:
+  - name: host
+    input: "@qa_friend_in_play"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1",
+          SMG_MP_NAME: Alex, SMG_ONLINE_DIR: /home/claude/g3/hruns/lan-codes/host, HARNESS_END: '\[mp\] service friend add code=\S+|40'}
+  - name: guest
+    input: "@qa_friend_guest_signup"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_NAME: Luigi, SMG_ONLINE_DIR: /home/claude/g3/hruns/lan-codes/guest}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'expect host /\[mp\] service (register ok|signin ok) code=\S+/'
+  - 'expect host /\[mp\] hosting session=[0-9a-f]+ conn=wifi/'
+  - 'absent * /\[mp\] (hosting session=\S+ conn=online|join start conn=online|service room hosted)/'
+  - 'expect host /\[mp\] slot 1 joined name=Luigi /'
+  - 'expect host /\[mp\] ui: played with Luigi/'
+  - 'expect host /\[mp\] ui: screen player/ after host /\[mp\] ui: screen session/'
+  - 'order host /\[mp\] service register ok code=\S+/ before host /\[mp\] service friend add code=\S+/'
+  - 'expect host /\[mp\] service friend op ok/ within 20s after host /\[mp\] service friend add/'
+  - 'absent host /\[mp\] (service friend refused|service error op=friend|service op=\S+ needs an account)/'
+  - 'absent * /\[mp\] (service transport error|session ended reason=(?!none \(shutdown\)|host-left))/'

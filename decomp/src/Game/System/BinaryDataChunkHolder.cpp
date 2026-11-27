@@ -1,6 +1,34 @@
 #include "Game/System/BinaryDataChunkHolder.hpp"
 #include "Game/Util/MemoryUtil.hpp"
 
+namespace {
+    // MP3: every chunk header inside dataSize and every chunk size at least its own header (calcBinarySize follows any size,
+    // wherever it leads, and a size below 12 underflows the size handed to deserialize). The game's own data always passes:
+    // makeFileBinary writes header + data for each chunk. Multiplayer validates blocks before they get here
+    // (platform/src/mp/mp_savecheck.cpp); this is the parser's own guard.
+    bool isChunkListInBounds(const u8* pData, u32 dataSize) {
+        if (dataSize < 4) {
+            return false;
+        }
+
+        u32 offset = 4;
+        for (s32 idx = 0; idx < pData[1]; idx++) {
+            if (dataSize - offset < 0xC) {
+                return false;
+            }
+
+            const u32 chunkSize = reinterpret_cast< const BinaryDataChunkHolderChunkData* >(&pData[offset])->mChunkSize;
+            if (chunkSize < 0xC || chunkSize > dataSize - offset) {
+                return false;
+            }
+
+            offset += chunkSize;
+        }
+
+        return true;
+    }
+}  // namespace
+
 BinaryDataChunkHolder::BinaryDataChunkHolder(u32 bufferSize, int maxChunks)
     : mChunks(nullptr), mMaxChunks(0), mNumChunks(0), mData(nullptr), mBufferSize(bufferSize) {
     mData = new u8[mBufferSize];
@@ -38,6 +66,11 @@ u32 BinaryDataChunkHolder::makeFileBinary(u8* pData, u32 a2) {
 
 bool BinaryDataChunkHolder::loadFromFileBinary(const u8* pData, u32 dataSize) {
     s32 offset = 0;
+
+    // MP3: bounds of the chunk list before calcBinarySize walks it (see isChunkListInBounds)
+    if (!isChunkListInBounds(pData, dataSize)) {
+        return false;
+    }
 
     if (dataSize < calcBinarySize(pData)) {
         return false;

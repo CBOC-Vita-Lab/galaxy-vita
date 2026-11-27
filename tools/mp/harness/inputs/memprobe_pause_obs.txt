@@ -1,0 +1,16 @@
+# ingame: file2_observatory anchored on the log (drift-proof): title -> entry (Single Player, which may wait for the save root) ->
+# file 2 -> Play This File. The file select's steps count from "entry: chose single".
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose single/ ~36
+title+8-8.5:A|B
+entry+3-3.2:A                # entry: Single Player
+chose+12-20:PX=0.25|PY=0.3   # pointer on file 2
+chose+15-15.2:A
+chose+28-36:PX=0.52|PY=0.78  # "Play This File"
+chose+31-31.2:A
+mark play /mem scene start probe galaxy=AstroGalaxy/ ~60
+play+18-18.3:PLUS
+play+22-22.3:PLUS
+play+30-30.3:PLUS
+play+34-34.3:PLUS

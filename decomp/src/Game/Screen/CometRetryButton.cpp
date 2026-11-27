@@ -19,6 +19,9 @@ namespace NrvCometRetryButton {
 
 CometRetryButton::CometRetryButton(const char* pName)
     : LayoutActor(pName, true), mButtonYesPaneCtrl(nullptr), mButtonNoPaneCtrl(nullptr), mPlayerMissLeft(nullptr) {
+#ifdef TARGET_PC
+    mPortMenu = true;   // (14 Nov: a menu over a live scene: no re-projected in-between pictures while it is shown; LayoutActor::movement)
+#endif
 }
 
 // FIXME: There are a lot of register swaps.

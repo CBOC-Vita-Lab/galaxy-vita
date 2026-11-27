@@ -224,10 +224,15 @@ void GameSystemErrorWatcher::updateWiiRemoteStatus() {
         }
 
         if (mCounterIgnoreCheckFreeStyle == 0) {
+#ifndef TARGET_PC
+            // On the port the Nunchuk is the handheld's own left stick: it cannot come unplugged, and the game's "stick communication
+            // interrupted" window would only lock the game and its Settings (issue 36). A pad that really is gone still shows the
+            // controller-lost window below.
             if (_1C->getLevel() && !MR::getWPad(WPAD_CHAN0)->mIsSubPadConnected) {
                 mWiiRemoteStatus = WII_REMOTE_STATUS_UNPLAGGED;
                 isOk = false;
             }
+#endif
 
             if (!isWaitDecideDisconnect) {
                 if (mWiiRemoteBattery <= WPAD_BATTERY_LEVEL_LOW) {

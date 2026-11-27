@@ -1,4 +1,7 @@
 #include "Game/MapObj/PowerStar.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpGame.hpp"  // MP3: star sharing / race finish
+#endif
 #include "Game/Camera/CameraTargetArg.hpp"
 #include "Game/LiveActor/LiveActorGroup.hpp"
 #include "Game/LiveActor/ModelObj.hpp"
@@ -202,6 +205,23 @@ bool PowerStar::isEndAppearDemo() const {
 
 void PowerStar::offAppearDemo() {
     mIsInDemo = false;
+}
+
+// MP3: Play Together star delivery. A boss / demo-cast star would go to Weak (no sensors) through appear(), and one still waiting for
+// its appear demo is hidden with its sensors off; either way the player could not touch it. The Wait nerve is the normal
+// collectable state (its first step validates the sensors and starts the light); the player's touch then runs the native get demo.
+void PowerStar::mpMakeCollectable() {
+    mIsInDemo = false;
+    _11C = true;
+    if (MR::isDead(this)) {
+        LiveActor::appear();
+    }
+    MR::showModel(this);
+    MR::invalidateClipping(this);
+    MR::requestMovementOn(this);
+    if (!isNerve(GET_NERVE(PowerStar, PowerStarNrvWait))) {
+        setNerve(GET_NERVE(PowerStar, PowerStarNrvWait));
+    }
 }
 
 void PowerStar::setupColor(LiveActor* pActor, const NameObj* a2, s32 a3) {
@@ -800,6 +820,12 @@ void PowerStar::exeWeakToWait() {
 
 void PowerStar::exeStageClearDemo() {
     if (MR::isFirstStep(this)) {
+#ifdef TARGET_PC
+        // MP3: Play Together: everyone gets this star (STAR); Star Race: this is the finish (FINISH)
+        if (mp_active()) {
+            MpFlow::onStarGet(mPowerStarId, mIsGrandStar);
+        }
+#endif
         mIsGrandStar ? MR::requestGrandStarGetDemo() : MR::requestPowerStarGetDemo();
 
         if (mPowerStarId > 0) {

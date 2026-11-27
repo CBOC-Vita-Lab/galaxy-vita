@@ -15,9 +15,15 @@
 #include "Game/Util/ScreenUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 #include "Game/Util/SystemUtil.hpp"
+#ifdef TARGET_PC
+#include "Game/MP/MpFlow.hpp"  // MP3: the host's star choice goes to the guests
+#endif
 #include <revolution/gx/GXEnum.h>
 #include <JSystem/J3DGraphBase/J3DDrawBuffer.hpp>
 #include <JSystem/J3DGraphBase/J3DSys.hpp>
+#ifdef TARGET_PC
+extern "C" void port_hrw_menu_turn(void);   // (vgx_galaxy.cpp, 14 Nov: no re-projected in-between pictures on the star select)
+#endif
 
 namespace NrvScenarioSelectScene {
     NEW_NERVE(ScenarioSelectSceneNrvDeactive, ScenarioSelectScene, Deactive);
@@ -59,7 +65,16 @@ ScenarioSelectScene::ScenarioSelectScene()
     : Scene("\x83\x56\x83\x69\x83\x8a\x83\x49\x91\x49\x91\xf0\x83\x56\x81\x5b\x83\x93"), _14(), _15(), _16(), mScenarioLayout(), mCinemaFrame(), _28(), mEffectSystem(), mCameraContext() {
 }
 
+#ifdef TARGET_PC
+// flow23 (PETARI_FLOW_LOG, decomp/src/Game/Scene/GameScene.cpp port_flow_beat): the star select's state for the "flow:" lines. The scene
+// object is made once at boot and lives for the whole run; it is read on the game thread only.
+static const ScenarioSelectScene* sPortSelectScene = nullptr;
+#endif
+
 void ScenarioSelectScene::init() {
+#ifdef TARGET_PC
+    sPortSelectScene = this;
+#endif
     _20 = ::createDrawBuffer();
     _24 = ::createDrawBuffer();
     mEffectSystem = new EffectSystem("\x83\x47\x83\x74\x83\x46\x83\x4e\x83\x67\x83\x56\x83\x58\x83\x65\x83\x80", false);
@@ -100,6 +115,9 @@ void ScenarioSelectScene::update() {
     bool res = isExecForeground() && _28 == 0;
 
     if (res) {
+#ifdef TARGET_PC
+        port_hrw_menu_turn();
+#endif
         mScenarioLayout->movement();
         mCinemaFrame->movement();
         MR::Effect::checkEffectSceneUpdate(mEffectSystem);
@@ -130,10 +148,17 @@ void ScenarioSelectScene::calcViewAndEntry() {
     }
 }
 
+#if defined(__vita__)
+extern "C" void port_menu_layer_mark(void);  // platform/src/port/perf.cpp
+#endif
+
 void ScenarioSelectScene::draw() const {
     bool res = isExecForeground() && _28 == 0;
 
     if (res) {
+#if defined(__vita__)
+        port_menu_layer_mark();  // (GXV_STAGEWARM_MENU) the renderer records what is drawn now under the menu list
+#endif
         OSLockMutex(&MR::MutexHolder< 0 >::sMutex);
         setupCameraMtx();
         j3dSys.drawInit();
@@ -145,9 +170,15 @@ void ScenarioSelectScene::draw() const {
         _24->frameInit();
         OSUnlockMutex(&MR::MutexHolder< 0 >::sMutex);
         MR::Effect::drawEffect3D(mEffectSystem, mCameraContext->getViewMtx());
+#ifdef TARGET_PC
+        port_gx_marker(PORT_GX_MARK_HUDN_BEGIN);  // (GXV_HUD_NATIVE: the layouts from here are 2D drawn at the display's resolution)
+#endif
         mScenarioLayout->draw();
         MR::Effect::drawEffect2D(mEffectSystem);
         mCinemaFrame->draw();
+#ifdef TARGET_PC
+        port_gx_marker(PORT_GX_MARK_HUDN_END);
+#endif
     }
 }
 
@@ -227,6 +258,12 @@ bool ScenarioSelectScene::trySetCurrentScenarioNo() const {
             }
 
             MR::setCurrentScenarioNo(placedNo, scenarioNo);
+#ifdef TARGET_PC
+            // MP3: host: send the choice (Play Together: WHERE to the guests in their star select; Star Race: the direct MOVE)
+            if (mp_active()) {
+                MpFlowHooks::onScenarioChosen(placedNo, scenarioNo);
+            }
+#endif
         }
 
         return true;
@@ -364,3 +401,25 @@ void ScenarioSelectScene::exeWaitResumeInitializeThreadIfCanceledSelect() {
         }
     }
 }
+
+#ifdef TARGET_PC
+extern "C" const char* port_star_select_state(void) {
+    const ScenarioSelectScene* p = sPortSelectScene;
+    if (p == nullptr || !p->_14) {
+        return "not made";
+    }
+    if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvDeactive))) return "off";
+    const char* name = "?";
+    if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvInvalidScenarioSelect))) name = "shown, stage not loading yet";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitStartScenarioSelect))) name = "waiting for the wipe";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvStartScenarioSelect))) name = "stars appearing";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitScenarioSelect))) name = "waiting for a choice";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitResumeInitializeThread))) name = "chosen, resuming the stage load";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitInitializeEnd))) name = "chosen, stage loading";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitDisappearLayout))) name = "leaving (white fade-in)";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitResumeInitializeThreadIfRequestedReset))) name = "reset";
+    else if (p->isNerve(GET_NERVE(ScenarioSelectScene, ScenarioSelectSceneNrvWaitResumeInitializeThreadIfCanceledSelect))) name = "cancelled (Back)";
+    // (in the background: the scene's state machine runs without being shown, a galaxy move that skips the select)
+    return p->_15 ? "in the background" : name;
+}
+#endif

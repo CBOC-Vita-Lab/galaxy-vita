@@ -1,0 +1,44 @@
+# QA-FUNC 2/15 (runs agent, 13 Nov: rewritten for the 75 s rejoin core). A guest's Wi-Fi is cut for 12 s MID-PLAY: the relay event fires 25 s after the guest logs
+# "session started" (a mark AFTER the session starts; yesterday's outage window fell before the session and proved nothing). Expected with the
+# corefix: the guest suspects its own link after ~5 s of silence ("connection lost", "ui: reconnecting"), the link is back at 12 s, the rejoin works
+# ("reconnected after=..ms"), the host takes it back on the same slot and never drops it, nobody is removed.
+# Pictures: the guest takes a 960x544 frame every 2 s (the reconnecting notice is in one of them).
+name: qa_guest_wifi_12s
+description: "guest cut off 12 s then back: same slot, host sees the puppet again (outage mid-play, 25 s after session started)"
+seconds: 330
+shot_size: 960x544
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 10000, PETARI_HANDHELD_UI: 1}
+link:
+  profile: home_wifi
+  events:
+    - {'on': 'guest /\[mp\] session started/', delay: 25, outage_s: 12, who: guest}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, PETARI_SHOT_MS: 2000}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'absent * /Assertion|OSPanic|FATAL|ASSERT/'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'expect host /\[mp\] slot 1 joined name=guest rejoin=0 /'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect host /\[mp\] (slot 1 joined name=guest rejoin=1 |slot 1 resumed )/ within 70ws after guest /\[mp\] session started/'
+  - 'expect guest /\[mp\] joined slot=1 session=[0-9a-f]+ host=0 / within 45ws after host /\[mp\] (slot 1 joined name=guest rejoin=1 |slot 1 resumed )/'
+  - 'count host /\[mp\] puppet slot=1 appear model=\w+ self=0/ >= 1'
+  - 'metric guest fps >= 3'
+  - 'expect guest /\[mp\] connection lost reason=\S+/ within 45ws after guest /\[mp\] session started/'
+  - 'expect guest /\[mp\] ui: reconnecting/'
+  - 'expect guest /\[mp\] reconnected after=\d+ms/'
+  - 'expect guest /\[mp\] ui: reconnected/'
+  - 'absent guest /\[mp\] (reconnect: gave up|ui: reconnect over|ui: rejoin offered)/'
+  - 'absent host /\[mp\] slot 1 left /'
+  - 'absent host /\[mp\] (connection lost|reconnected)/'
+  - 'absent host /\[mp\] slot 1 left reason=(?!timeout|leave \(bye\))/'
+  - 'absent host /\[mp\] session ended reason=(?!none \(shutdown\))/ before shutdown'
+  - 'absent * /\[mp\] (bad message from slot|events lost|queue overflow)/'

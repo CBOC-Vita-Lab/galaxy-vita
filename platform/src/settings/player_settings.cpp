@@ -34,7 +34,7 @@ bool KnownAction(const controls::ControlApi& api,const std::string& s) {
 }
 // Keys 1.1 files do not have: absent means the default, and (profile_chosen) marks a file written before the 1.2 pad defaults.
 bool IsOptionalKey(const std::string& key) {
-    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan","gxm_renderer","logic_overlap","material_updates","far_animation","game_speed","motion_gain","motion_level","motion_source","perf_mode"})if(key==k)return true;
+    for(const auto* k:{"mouse_aim","profile_chosen","above_native","mario_first","anti_aliasing","picture_sharpness","hd_textures","effects_quality","depth_of_field","core_plan","gxm_renderer","logic_overlap","material_updates","far_animation","game_speed","motion_gain","motion_level","motion_source","perf_mode","atomic_saves","assist60","allow50"})if(key==k)return true;
     return false;
 }
 bool Managed(const std::string& key,const controls::ControlApi& api) {
@@ -46,7 +46,7 @@ bool Managed(const std::string& key,const controls::ControlApi& api) {
 StoreResult Error(StoreStatus s,const std::string& message) { return {s,message}; }
 bool ValidConfig(const Config& c,const controls::ControlApi& api,std::string& error) {
     if(c.version!=1 || (c.fpsLimit!=0&&c.fpsLimit!=30&&c.fpsLimit!=kSteady30) || static_cast<unsigned>(c.autoQuality)>2 || static_cast<unsigned>(c.profile)>1 ||
-       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1 || static_cast<unsigned>(c.farAnimation)>2 || !tilt::ValidLevel(c.tiltLevel) || (c.performance60&&c.fpsLimit!=0)) {error="Invalid settings value";return false;}
+       static_cast<unsigned>(c.antiAliasing)>1 || static_cast<unsigned>(c.sharpness)>2 || static_cast<unsigned>(c.effects)>1 || static_cast<unsigned>(c.farAnimation)>2 || !tilt::ValidLevel(c.tiltLevel)) {error="Invalid settings value";return false;}
     if(c.language.size()>64 || std::any_of(c.language.begin(),c.language.end(),[](unsigned char ch){return ch<32||ch>126||ch=='=';})) {error="Invalid language name";return false;}
     for(unsigned i=0;i<2;++i) if(!api.validate(c.profiles[i],static_cast<controls::ProfileId>(i),controls::NominalCaps(static_cast<controls::ProfileId>(i)),error)) return false;
     return true;
@@ -60,7 +60,7 @@ std::map<std::string,std::string> Values(const Config& c) {
         {"picture_sharpness",c.sharpness==Sharpness::Auto?"auto":c.sharpness==Sharpness::Off?"off":"strong"},{"hd_textures",c.hdTextures?"1":"0"},
         {"effects_quality",c.effects==EffectsQuality::Adaptive?"adaptive":"full"},{"depth_of_field",c.depthOfField?"1":"0"},{"core_plan",c.coreHelp?"auto":"off"},
         {"gxm_renderer",c.gxmDirect?"direct":"standard"},{"logic_overlap",!c.logicOverlap?"0":c.overlapMax?"max":"1"},{"material_updates",c.lazyMaterials?"per_picture":"every_turn"},{"far_animation",c.farAnimation==FarAnimation::Reduced?"reduced":c.farAnimation==FarAnimation::Full?"full":"aggressive"},{"game_speed",c.fullSpeed?"full":"smooth"},
-        {"motion_level",std::to_string(c.tiltLevel)},{"motion_source",c.tiltStick?"stick":"sensor"},{"perf_mode",c.performance60?"1":"0"}};
+        {"motion_level",std::to_string(c.tiltLevel)},{"motion_source",c.tiltStick?"stick":"sensor"},{"perf_mode",c.performance60&&c.fpsLimit==0?"1":"0"},{"atomic_saves",c.safeSaves?"1":"0"},{"assist60",c.assist60?"1":"0"},{"allow50",c.allow50?"1":"0"}};
     for(unsigned i=0;i<2;++i) for(const auto& b:c.profiles[i].bindings)
         v[std::string("bind.")+(i?"playstation.":"handheld.")+b.action]=b.buttons[0]+(b.buttons[1].empty()?"":","+b.buttons[1]);
     return v;
@@ -71,8 +71,7 @@ Config DefaultConfig(const controls::ControlApi& api) {
 }
 void ApplyPreset(Config& c,Preset preset) {
     if(preset==Preset::Custom)return;
-    // Performance also selects Performance mode (and so leaves Locked 30, which it cannot be); the other two return to Quality but keep a Locked 30.
-    c.performance60=preset==Preset::Performance;if(c.performance60)c.fpsLimit=0;
+    // (modes26: the picture mode is the Frame-rate choice alone; a preset covers only the hidden picture rows below)
     c.autoQuality=AutoQuality::Default;c.prioritizeMario=true;c.effects=EffectsQuality::Adaptive;
     c.aboveNative=preset==Preset::BestPicture;
     c.antiAliasing=preset==Preset::Performance?AntiAliasing::Off:AntiAliasing::Auto;
@@ -85,7 +84,7 @@ Preset PresetOf(const Config& c) {
         // Dynamic resolution "On" and the default are the same choice on the console, so either reads as a preset's.
         const bool on=c.autoQuality!=AutoQuality::Disabled;
         if(on&&c.aboveNative==want.aboveNative&&c.prioritizeMario==want.prioritizeMario&&c.antiAliasing==want.antiAliasing&&c.sharpness==want.sharpness&&
-           c.effects==want.effects&&c.depthOfField==want.depthOfField&&c.performance60==want.performance60&&(!want.performance60||c.fpsLimit==0))return preset;
+           c.effects==want.effects&&c.depthOfField==want.depthOfField)return preset;
     }
     return Preset::Custom;
 }
@@ -115,10 +114,10 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     // intentional defaults before a primary may displace a valid backup.
     for(const auto& value:Values(d.config))if(!IsOptionalKey(value.first)&&!seen.count(value.first))return Error(StoreStatus::Malformed,"Incomplete settings snapshot: "+value.first);
     if(source.empty()||source.back()!='\n')return Error(StoreStatus::Malformed,"Incomplete settings terminator");
-    bool haveLevel=false;int oldGain=0;
+    bool haveLevel=false,fpsUnknown=false,perfUnknown=false;int oldGain=0;   /* (revD: one flag each, so the lines' order in a hand-edited file cannot change the reading) */
     for(const auto& l:lines) {
         const auto& k=l.key; const auto& v=l.value;
-        if(k=="fps_limit") { if(v!="0"&&v!="30"&&v!="steady30")return Error(StoreStatus::Malformed,"Invalid picture rate");d.config.fpsLimit=(v=="30"||v=="steady30")?30:0; /* 1.1's "Steady 30" is the 1.2 locked 30 */ }
+        if(k=="fps_limit") { d.config.fpsLimit=(v=="30"||v=="steady30")?30:0; /* 1.1's "Steady 30" is the 1.2 locked 30 */ fpsUnknown=!(v=="0"||v=="30"||v=="steady30"); /* (modes26: any other value reads as the 60 mode, never an error) */ }
         else if(k=="auto_quality") { if(v!="default"&&v!="on"&&v!="off") return Error(StoreStatus::Malformed,"Invalid dynamic quality");d.config.autoQuality=v=="default"?AutoQuality::Default:v=="on"?AutoQuality::Enabled:AutoQuality::Disabled; }
         else if(k=="profile") { if(v!="handheld"&&v!="playstation")return Error(StoreStatus::Malformed,"Invalid control profile");d.config.profile=v=="handheld"?controls::ProfileId::Handheld:controls::ProfileId::PlayStation; }
         else if(k=="language") d.config.language=v;
@@ -136,7 +135,10 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
         else if(k=="logic_overlap") { if(v!="0"&&v!="1"&&v!="max")return Error(StoreStatus::Malformed,"Invalid logic overlap");d.config.logicOverlap=v!="0";d.config.overlapMax=v=="max"; }
         else if(k=="material_updates") { if(v!="per_picture"&&v!="every_turn")return Error(StoreStatus::Malformed,"Invalid material updates");d.config.lazyMaterials=v=="per_picture"; }
         else if(k=="far_animation") { if(v!="reduced"&&v!="full"&&v!="aggressive")return Error(StoreStatus::Malformed,"Invalid far animation");d.config.farAnimation=v=="reduced"?FarAnimation::Reduced:v=="full"?FarAnimation::Full:FarAnimation::Aggressive; }
-        else if(k=="perf_mode") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid performance mode");d.config.performance60=v=="1"; }
+        else if(k=="perf_mode") { if(v!="0"&&v!="1")perfUnknown=true; /* (modes26: unknown reads as the 60 mode) */ else d.config.performance60=v=="1"; }
+        else if(k=="allow50") d.config.allow50=v=="1";   /* (mp30: any value but 1 reads as the default, off; never an error) */
+        else if(k=="assist60") d.config.assist60=v!="0";   /* (setnat31: any value but 0 reads as the default, on; never an error, as perf_mode) */
+        else if(k=="atomic_saves") { if(v!="0"&&v!="1")return Error(StoreStatus::Malformed,"Invalid safe saves");d.config.safeSaves=v=="1"; }
         else if(k=="game_speed") { if(v!="full"&&v!="smooth")return Error(StoreStatus::Malformed,"Invalid game speed");d.config.fullSpeed=v=="full"; }
         else if(k=="motion_level") {
             int level=0;auto parsed=std::from_chars(v.data(),v.data()+v.size(),level);
@@ -168,21 +170,49 @@ StoreResult ParseDocument(const std::string& source,const controls::ControlApi& 
     if(!haveLevel&&oldGain)d.config.tiltLevel=tilt::LevelOfPercent(oldGain);
     // Performance mode is a way of running up to 60: a file that also asks for Locked 30 keeps the lock (what every earlier build reads).
     if(d.config.fpsLimit!=0)d.config.performance60=false;
+    // modes26: two picture modes. A file without perf_mode is from before the Performance row (or a 1.2 default file) and an fps_limit of 0 there was Quality: it reads as the 30 mode.
+    // perf_mode=1 is Performance (60). An fps_limit nobody knows reads as Performance (60). The file is rewritten only when the player saves.
+    if(fpsUnknown||perfUnknown)d.config.performance60=true,d.config.fpsLimit=0;
+    else if(d.config.fpsLimit==0&&(!seen.count("perf_mode")||!d.config.performance60))d.config.fpsLimit=30,d.config.performance60=false;
     std::string error;
     if(!ValidConfig(d.config,api,error))return Error(StoreStatus::Malformed,error);
     result=std::move(d);return {StoreStatus::Ok,""};
 }
+namespace { std::string& WriterStampRef(){static std::string s;return s;} }
+void SetWriterStamp(const std::string& line) {WriterStampRef()=line;}
+const std::string& WriterStamp() {return WriterStampRef();}
 StoreResult SerializeDocument(const Document& original,const Config& c,const controls::ControlApi& api,std::string& out) {
     if(!original.editable||original.config.version>1)return Error(StoreStatus::UnsupportedVersion,"Newer settings file is read-only");
     std::string error;if(!ValidConfig(c,api,error))return Error(StoreStatus::Malformed,error);
     auto values=Values(c);std::string serialized;
+    // (the native Settings, Document::onlyChanged: what the file had stays as it was unless its value changed; absent keys at their default are not added)
+    std::map<std::string,std::string> before,defaults;
+    const bool minimal=original.onlyChanged&&!original.source.empty();
+    if(minimal){before=Values(original.config);defaults=Values(DefaultConfig(api));}
     for(const auto& l:Lines(original.source)) {
         auto value=values.find(l.key);
         if(value==values.end())serialized+=l.raw;
-        else {serialized+=l.key+"="+value->second+l.ending;values.erase(value);}
+        else {
+            auto was=before.find(l.key);
+            if(minimal&&was!=before.end()&&was->second==value->second)serialized+=l.raw;
+            else serialized+=l.key+"="+value->second+l.ending;
+            values.erase(value);
+        }
+    }
+    if(minimal)for(auto it=values.begin();it!=values.end();) {
+        static const char* const required[]={"schema","fps_limit","auto_quality","profile","language","reduced_motion"};
+        bool must=false;for(const char* k:required)must=must||it->first==k;
+        auto d=defaults.find(it->first);
+        if(!must&&d!=defaults.end()&&d->second==it->second)it=values.erase(it);else ++it;
     }
     if(!values.empty()&&!serialized.empty()&&serialized.back()!='\n')serialized+='\n';
     for(const auto& v:values)serialized+=v.first+"="+v.second+"\n";
+    if(const std::string& stamp=WriterStamp();!stamp.empty()) {   // (setfix31: the release stamp; "<prefix><version>": any line with the prefix is a stamp)
+        const std::string prefix=stamp.substr(0,stamp.rfind(' ')+1);
+        bool stamped=false;size_t at=0;
+        for(int n=0;n<8&&at<serialized.size()&&!stamped;++n) {const size_t end=serialized.find('\n',at);stamped=serialized.compare(at,prefix.size(),prefix)==0;at=end==std::string::npos?serialized.size():end+1;}
+        if(!stamped)serialized=stamp+"\n"+serialized;
+    }
     if(serialized.size()>kDocumentLimit)return Error(StoreStatus::TooLarge,"Settings file exceeds 16384 bytes");
     Document check;auto parsed=ParseDocument(serialized,api,check);if(parsed.status!=StoreStatus::Ok)return parsed;
     out=std::move(serialized);return {StoreStatus::Ok,""};

@@ -7,6 +7,7 @@
 // Never consulted for EFB copies (the cache answers those before), and never per frame.
 // The guest-visible dimensions (TEV texel sizes, texture matrices) stay the original ones: only
 // the back-end texture is larger.
+#include "port/bootio.h"
 #include "vgx_hdtex.h"
 #include "vgx_state.h"
 #include "vgx_texdecode.h"
@@ -22,6 +23,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+extern "C" void port_log_summary(const char* fmt, ...) __attribute__((weak, format(printf, 1, 2))); // the basic log (log.txt of a player's build), when the platform layer has one
 
 namespace vgx::hdtex {
 
@@ -60,12 +63,15 @@ FILE* g_file = nullptr;
 std::vector<PackEntry> g_index;
 std::vector<uint64_t> g_shapes; // sorted ShapeKey()s of the originals: the filter in front of the hash
 std::vector<char> g_names;
-std::vector<uint8_t> g_preload; // the whole pack, when GXV_HDTEX_PRELOAD allows
+std::vector<uint8_t> g_preload; // the pack's first bytes (all of it when GXV_HDTEX_PRELOAD allows): what is read from memory, not from the card
+uint32_t g_fileSize = 0;
+uint64_t g_totalAll = 0, g_totalClamped = 0; // bytes of all the records' levels / down to the last level of at least 4x4 (what the console holds when all are alive)
 uint64_t g_budget = 16ull << 20;
 uint8_t g_mipFilter = FILT_LIN_MIP_NEAR;
 bool g_keepEyes = true; // GXV_HDTEX_EYES=0 (default): eye textures keep the game's own images (players saw white or closed eyes with the pack's)
 long g_logLeft = 48;
 std::atomic<uint64_t> g_hashed{0}, g_hits{0}, g_refused{0}, g_bytesRead{0}, g_lookupNs{0}, g_readNs{0}, g_readMaxNs{0}, g_peakLive{0};
+std::atomic<uint64_t> g_cardReads{0}, g_cardBytes{0}; // reads that went to the file (the card), not to the preloaded prefix
 
 inline uint64_t ShapeKey(uint32_t fmt, uint32_t w, uint32_t h) { return (static_cast<uint64_t>(fmt) << 32) | (w << 16) | h; }
 
@@ -103,7 +109,7 @@ bool IsPlayerEntry(const PackEntry& e) {
 }
 
 void Note(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void Note(const char* fmt, ...) {
+__attribute__((format(printf, 1, 2))) void Note(const char* fmt, ...) {
     char buf[320];
     va_list ap;
     va_start(ap, fmt);
@@ -113,14 +119,57 @@ void Note(const char* fmt, ...) {
     else std::fprintf(stderr, "%s\n", buf);
 }
 
+// One line for the basic log (the player's log.txt: PORT_RUNTIME_DIAGNOSTICS=0 builds drop port_log), else the verbose one.
+void Basic(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+__attribute__((format(printf, 1, 2))) void Basic(const char* fmt, ...) {
+    char buf[480];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (port_log_summary) port_log_summary("%s", buf);
+    else if (g_log) g_log("%s", buf);
+    else std::fprintf(stderr, "%s\n", buf);
+}
+
+// [off, off + n) lies in the preloaded prefix of the pack
+inline bool InMemory(uint32_t off, uint32_t n) { return static_cast<uint64_t>(off) + n <= g_preload.size(); }
+
 bool ReadAt(uint32_t off, void* dst, uint32_t n) {
-    if (!g_preload.empty()) {
-        if (static_cast<uint64_t>(off) + n > g_preload.size()) return false;
+    if (InMemory(off, n)) {
         std::memcpy(dst, g_preload.data() + off, n);
         return true;
     }
     if (!g_file || std::fseek(g_file, static_cast<long>(off), SEEK_SET) != 0) return false;
-    return std::fread(dst, 1, n, g_file) == n;
+    const bool ok = std::fread(dst, 1, n, g_file) == n;
+    g_cardReads.fetch_add(1, std::memory_order_relaxed);
+    g_cardBytes.fetch_add(n, std::memory_order_relaxed);
+    return ok;
+}
+
+// The record's `levels` levels (level 0 first) into `out`, one vector each, as the texture cache wants them: one copy from memory when the
+// record lies in the preloaded prefix, else one read of the whole of it from the card (and one copy into the levels).
+bool ReadLevels(const PackEntry& e, uint32_t levels, uint32_t bytes, std::vector<std::vector<uint8_t>>& out) {
+    out.clear();
+    out.reserve(levels);
+    const bool mem = InMemory(e.off, bytes);
+    std::vector<uint8_t> blob;
+    const uint8_t* src = nullptr;
+    if (mem) {
+        src = g_preload.data() + e.off;
+    } else {
+        blob.resize(bytes);
+        if (!ReadAt(e.off, blob.data(), bytes)) return false;
+        src = blob.data();
+    }
+    for (uint32_t l = 0, lw = e.w, lh = e.h; l < levels; ++l) {
+        const uint32_t n = LevelBytes(e.format, lw, lh);
+        out.emplace_back(src, src + n);
+        src += n;
+        lw = lw > 1 ? lw >> 1 : 1;
+        lh = lh > 1 ? lh >> 1 : 1;
+    }
+    return true;
 }
 
 // The texture cache's hook (player thread).
@@ -164,15 +213,17 @@ bool Replace(const TexReplaceQuery& q, TexUpload& up) {
                  static_cast<unsigned long long>(q.liveBytes >> 10), static_cast<unsigned long long>(g_budget >> 10));
         return false;
     }
-    g_hits.fetch_add(1, std::memory_order_relaxed);
     if (g_logLeft > 0) {
         --g_logLeft;
         Note("hdtex: %s %ux%u -> %ux%u %s, %u levels, %u KiB%s", NameOf(e), q.width, q.height, e.w, e.h, e.format == kPackDxt5 ? "DXT5" : "DXT1", levels,
              bytes >> 10, g_mode == 2 ? " (dry run)" : "");
     }
-    if (g_mode == 2) return false;
-    std::vector<uint8_t> blob(bytes);
-    const bool ok = ReadAt(e.off, blob.data(), bytes);
+    if (g_mode == 2) {
+        g_hits.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    std::vector<std::vector<uint8_t>> lv;
+    const bool ok = ReadLevels(e, levels, bytes, lv);
     const uint64_t rd = NowNs() - t1;
     g_readNs.fetch_add(rd, std::memory_order_relaxed);
     if (rd > g_readMaxNs.load(std::memory_order_relaxed)) g_readMaxNs.store(rd, std::memory_order_relaxed);
@@ -180,21 +231,13 @@ bool Replace(const TexReplaceQuery& q, TexUpload& up) {
         Note("hdtex: %s: read failed (offset %u, %u bytes)", NameOf(e), e.off, bytes);
         return false;
     }
+    g_hits.fetch_add(1, std::memory_order_relaxed);
     g_bytesRead.fetch_add(bytes, std::memory_order_relaxed);
     up.width = e.w;
     up.height = e.h;
     up.format = e.format == kPackDxt5 ? TF_DXT5 : TF_DXT1;
     up.genMips = false;
-    up.levels.clear();
-    up.levels.reserve(levels);
-    const uint8_t* src = blob.data();
-    for (uint32_t l = 0, lw = e.w, lh = e.h; l < levels; ++l) {
-        const uint32_t n = LevelBytes(e.format, lw, lh);
-        up.levels.emplace_back(src, src + n);
-        src += n;
-        lw = lw > 1 ? lw >> 1 : 1;
-        lh = lh > 1 ? lh >> 1 : 1;
-    }
+    up.levels = std::move(lv);
     up.authored = static_cast<uint8_t>(levels);
     const uint64_t live = q.liveBytes + bytes;
     if (live > g_peakLive.load(std::memory_order_relaxed)) g_peakLive.store(live, std::memory_order_relaxed);
@@ -211,7 +254,7 @@ void Install(void (*log)(const char* fmt, ...)) {
         // originals are uploaded (mode 3, identification only; nothing is counted as replaced).
         g_mode = 3;
     } else if (g_mode <= 0) {
-        Note("hdtex: off (GXV_HDTEX=0)");
+        Basic("hdtex: off (GXV_HDTEX=0): the game's own textures");
         return;
     } else if (g_mode != 2) {
         g_mode = 1;
@@ -223,15 +266,25 @@ void Install(void (*log)(const char* fmt, ...)) {
     if (!path || !*path) path = "hdtex.pack";
 #endif
     const uint64_t t0 = NowNs();
-    FILE* f = std::fopen(path, "rb");
+    // (bootio: a failed open is repeated for 100 ms, so a card that answers wrongly for a moment does not take the pack away for the whole session)
+    bootio::Options patience;
+    patience.missingMs = 100;
+    FILE* f = bootio::FopenRetry(path, "rb", "hdtex", patience);
     if (!f) {
-        Note("hdtex: no pack at %s: textures as the game has them", path);
+        Basic("hdtex: no pack at %s: the game's own textures (the pack is optional: tools/hdtex/README.md)", path);
         g_mode = 0;
         return;
     }
+    // Bypass newlib's small default stdio buffer (1 KiB in newer VitaSDK) so the 4.2 MiB preload is one read.
+    std::setvbuf(f, nullptr, _IONBF, 0);
     PackHeader h{};
+    // (a pack copied to the card in part: the header's size must be the file's, else a record near the end would fail on its first use)
+    long actual = -1;
+    if (std::fseek(f, 0, SEEK_END) == 0) actual = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
     bool ok = std::fread(&h, sizeof h, 1, f) == 1 && !std::memcmp(h.magic, "HDTX", 4) && h.version == 1 && h.count < 65536 &&
-              h.indexOff >= sizeof h && h.namesOff >= h.indexOff + h.count * sizeof(PackEntry) && h.dataOff >= h.namesOff;
+              h.indexOff >= sizeof h && h.namesOff >= h.indexOff + h.count * sizeof(PackEntry) && h.dataOff >= h.namesOff && actual >= 0 &&
+              static_cast<uint64_t>(actual) >= h.fileSize;
     if (ok) {
         g_index.resize(h.count);
         g_names.resize(h.dataOff - h.namesOff + 1, 0);
@@ -244,33 +297,93 @@ void Install(void (*log)(const char* fmt, ...)) {
         }
     }
     if (!ok) {
-        Note("hdtex: %s is not a usable pack (version 1 expected): textures as the game has them", path);
+        Basic("hdtex: %s is not a usable pack (version 1 expected, index sorted, formats DXT1/DXT5, data inside the file): the game's own textures", path);
         std::fclose(f);
         g_index.clear();
         g_mode = 0;
         return;
     }
-    for (const PackEntry& e : g_index) g_shapes.push_back(ShapeKey(e.origFmt, e.origW, e.origH));
+    for (const PackEntry& e : g_index) {
+        g_shapes.push_back(ShapeKey(e.origFmt, e.origW, e.origH));
+        uint32_t lw = e.w, lh = e.h, all = LevelBytes(e.format, lw, lh), clamped = all;
+        bool clip = false;
+        for (uint32_t l = 1; l < e.levels; ++l) {
+            if ((lw >> 1) < 4 || (lh >> 1) < 4) clip = true;
+            lw = lw > 1 ? lw >> 1 : 1;
+            lh = lh > 1 ? lh >> 1 : 1;
+            const uint32_t n = LevelBytes(e.format, lw, lh);
+            all += n;
+            if (!clip) clamped += n;
+        }
+        g_totalAll += all;
+        g_totalClamped += clamped;
+    }
     std::sort(g_shapes.begin(), g_shapes.end());
     g_shapes.erase(std::unique(g_shapes.begin(), g_shapes.end()), g_shapes.end());
     g_budget = static_cast<uint64_t>(EnvInt("GXV_HDTEX_BUDGET", 16)) << 20;
     g_mipFilter = EnvInt("GXV_HDTEX_TRILINEAR", 0) ? FILT_LIN_MIP_LIN : FILT_LIN_MIP_NEAR;
     g_logLeft = EnvInt("GXV_HDTEX_LOG", 48);
     g_keepEyes = EnvInt("GXV_HDTEX_EYES", 0) == 0;
+    g_fileSize = h.fileSize;
     // (default: the whole pack, 4.5 MiB today, is read here, so that no texture's first use
-    // during play waits on the memory card: a first Bee Mushroom would otherwise read 100 KiB)
-    const uint64_t preload = g_mode == 3 ? 0 : static_cast<uint64_t>(EnvInt("GXV_HDTEX_PRELOAD", 8)) << 20;
-    if (preload && h.fileSize <= preload) {
-        g_preload.resize(h.fileSize);
-        if (std::fseek(f, 0, SEEK_SET) != 0 || std::fread(g_preload.data(), 1, h.fileSize, f) != h.fileSize) g_preload.clear();
+    // during play waits on the memory card: a first Bee Mushroom would otherwise read 100 KiB.
+    // A pack larger than the limit: its first bytes up to the limit are kept (the builder writes the player's textures first), the rest is read
+    // from the card when a texture of it is first uploaded, and again after the cache freed it. GXV_HDTEX_PRELOAD_KB, when set, replaces the MiB.)
+    uint64_t preload = g_mode == 3 ? 0 : static_cast<uint64_t>(EnvInt("GXV_HDTEX_PRELOAD", 8)) << 20;
+    if (g_mode != 3 && EnvInt("GXV_HDTEX_PRELOAD_KB", -1) >= 0) preload = static_cast<uint64_t>(EnvInt("GXV_HDTEX_PRELOAD_KB", 0)) << 10;
+    if (preload > h.fileSize) preload = h.fileSize;
+    if (preload) {
+        g_preload.resize(preload);
+        if (std::fseek(f, 0, SEEK_SET) != 0 || std::fread(g_preload.data(), 1, preload, f) != preload) g_preload.clear();
     }
-    if (!g_preload.empty()) std::fclose(f);
+    if (g_preload.size() == h.fileSize) std::fclose(f); // (all of it in memory: the file is not needed again)
     else g_file = f;
     SetTextureReplaceHook(&Replace, g_mipFilter);
-    Note("hdtex: %s: %u textures in %u shapes, %u KiB; opened in %.1f ms%s; budget %llu MiB%s", path, h.count, static_cast<unsigned>(g_shapes.size()),
-         h.fileSize >> 10, (NowNs() - t0) / 1e6, g_preload.empty() ? ", data read on first use" : ", whole pack preloaded",
-         static_cast<unsigned long long>(g_budget >> 20), g_mode == 2 ? "; DRY RUN (GXV_HDTEX=2): originals uploaded"
-                                                         : (g_mode == 3 ? "; IDENTIFICATION ONLY (GXV_HDTEX=0, GXV_CHARAA on): originals uploaded" : ""));
+    Basic("hdtex: pack %s found: %u records of %u shapes, %u KiB, %s (opened in %.1f ms); %u KiB of GPU memory if every record were alive "
+          "(budget %llu KiB); eye textures %s, mip filter %s%s",
+          path, h.count, static_cast<unsigned>(g_shapes.size()), h.fileSize >> 10,
+          g_preload.size() == h.fileSize ? "all in memory" : (g_preload.empty() ? "read from the card on first use" : "the first part in memory, the rest read from the card"),
+          (NowNs() - t0) / 1e6, static_cast<unsigned>(g_totalClamped >> 10), static_cast<unsigned long long>(g_budget >> 10),
+          g_keepEyes ? "the game's own (GXV_HDTEX_EYES=0)" : "from the pack", g_mipFilter == FILT_LIN_MIP_LIN ? "trilinear" : "bilinear, nearest level",
+          g_mode == 2 ? "; DRY RUN (GXV_HDTEX=2): originals uploaded" : (g_mode == 3 ? "; IDENTIFICATION ONLY (GXV_HDTEX=0, GXV_CHARAA on): originals uploaded" : ""));
+}
+
+// One basic-log line about what the pack did since the previous call (the host calls it when a scene is destroyed): the textures replaced,
+// their bytes, those still alive and freed again, the card reads, and, when candidates were hashed and none matched, a hint. False when
+// there is no pack or nothing happened since the last call (no line, so a scene without characters costs none).
+bool SceneLine(char* buf, size_t n) {
+    if (g_index.empty() || g_mode == 0) return false;
+    static uint64_t lastHashed = 0, lastHits = 0, lastRefused = 0, lastCard = 0, lastCardBytes = 0, lastBytes = 0;
+    static HdTexStats last;
+    static unsigned scene = 0;
+    static bool warned = false;
+    HdTexStats s;
+    HdTextureStats(s);
+    const uint64_t hashed = g_hashed.load(std::memory_order_relaxed), hits = g_hits.load(std::memory_order_relaxed),
+                   refused = g_refused.load(std::memory_order_relaxed), card = g_cardReads.load(std::memory_order_relaxed),
+                   cardBytes = g_cardBytes.load(std::memory_order_relaxed), bytes = g_bytesRead.load(std::memory_order_relaxed);
+    ++scene;
+    const bool changed = hashed != lastHashed || hits != lastHits || s.uploads != last.uploads || s.freed != last.freed;
+    if (!changed) return false;
+    const unsigned long long K = 1024;
+    int len = std::snprintf(buf, n,
+                            "hdtex: scene %u: %llu HD textures substituted (%llu KiB uploaded, %llu of them in play: %llu KiB), %llu freed (%llu KiB), %llu alive (%llu KiB of %llu); "
+                            "%llu candidates hashed, %llu refused over the budget; %llu reads from the card (%llu KiB, slowest %.2f ms); since start %llu substituted of %llu candidates",
+                            scene, static_cast<unsigned long long>(s.uploads - last.uploads), static_cast<unsigned long long>((s.bytes - last.bytes) / K),
+                            static_cast<unsigned long long>(s.uploadsPlay - last.uploadsPlay), static_cast<unsigned long long>((s.bytesPlay - last.bytesPlay) / K),
+                            static_cast<unsigned long long>(s.freed - last.freed), static_cast<unsigned long long>((s.freedBytes - last.freedBytes) / K),
+                            static_cast<unsigned long long>(s.alive), static_cast<unsigned long long>(s.aliveBytes / K), static_cast<unsigned long long>(g_budget / K),
+                            static_cast<unsigned long long>(hashed - lastHashed), static_cast<unsigned long long>(refused - lastRefused),
+                            static_cast<unsigned long long>(card - lastCard), static_cast<unsigned long long>((cardBytes - lastCardBytes) / K), g_readMaxNs.load(std::memory_order_relaxed) / 1e6,
+                            static_cast<unsigned long long>(hits), static_cast<unsigned long long>(hashed));
+    if (len > 0 && static_cast<size_t>(len) < n && !warned && hashed >= 64 && hits == 0) {
+        warned = true;
+        std::snprintf(buf + len, n - static_cast<size_t>(len),
+                      "; NOTHING MATCHED: %llu textures of the pack's shapes were hashed and none is in the pack (a pack from another disc image or build of the game)", static_cast<unsigned long long>(hashed));
+    }
+    lastHashed = hashed; lastHits = hits; lastRefused = refused; lastCard = card; lastCardBytes = cardBytes; lastBytes = bytes; last = s;
+    (void)lastBytes;
+    return true;
 }
 
 void GetCounters(Counters& c) {
@@ -283,6 +396,11 @@ void GetCounters(Counters& c) {
     c.readMaxNs = g_readMaxNs.load(std::memory_order_relaxed);
     c.peakLive = g_peakLive.load(std::memory_order_relaxed);
     c.entries = static_cast<uint32_t>(g_index.size());
+    c.cardReads = g_cardReads.load(std::memory_order_relaxed);
+    c.cardBytes = g_cardBytes.load(std::memory_order_relaxed);
+    c.preloaded = static_cast<uint32_t>(g_preload.size());
+    c.fileSize = g_fileSize;
+    c.gpuAllAlive = g_totalClamped;
 }
 
 } // namespace vgx::hdtex

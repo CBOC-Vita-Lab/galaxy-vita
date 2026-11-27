@@ -37,6 +37,10 @@ public:
     void dvdCallBack(s32);
     void readAsyncCallBack(s32);
     s32 getNextBuffer(u32) const NO_INLINE;
+#ifdef TARGET_PC
+    s32 audioFramesInHand() const;  // (PETARI_MOVIE_INHAND; from Producdevity's fork, 4c7d7e4)
+    s32 decodeAudioOnly(s32 audio);
+#endif
     bool tryDvdOpen(const char*);
     void setupParams();
     void exeWait();

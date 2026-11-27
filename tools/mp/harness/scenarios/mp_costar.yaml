@@ -1,0 +1,41 @@
+# Co-Star on a Play Together pair in Good Egg 1: both consoles pick up Star Bits (SMG_MP_TEST_STARBITS: the game's own MR::gotByPlayer) and show
+# the SAME count; the guest holds the pointer on the nearest enemy that asks the hold question (an Octoomba at the start; SMG_MP_TEST_POINTER_ENEMY) and it is held on both consoles; the guest
+# brings the scenario star (SMG_MP_TEST_STAR) and the star card shows who picked up how many. Host saves only into its co-op copy.
+name: mp_costar
+description: team Star Bit count, Co-Star hold from the guest's pointer, tally card with the Star Bit counts
+seconds: 230
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_STAR, SMG_MP_TEST_STARBITS, SMG_MP_TEST_POINTER_ENEMY, SMG_MP_TEST_POINTER_STARBIT]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 800, PETARI_HANDHELD_UI: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STARBITS: "8:12"}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_TEST_STAR: 45, SMG_MP_TEST_STARBITS: "10:9", SMG_MP_TEST_POINTER_ENEMY: "20:12", SMG_MP_TEST_POINTER_STARBIT: "5:14"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] starbits init serial=\d+ role=host/'
+  - 'expect guest /\[mp\] starbits init serial=\d+ role=guest/'
+  - 'expect host /\[mp\] starbits delta got from=1 seq=1 /'
+  - 'expect guest /\[mp\] starbits total got rev=\d+ total=\d+ epoch=0 first=1/'
+  # the claim: BOTH consoles show the SAME total. Compared as captured values (count and team of every "settled" line, in order, host against
+  # guest), never as ranges: the first full-range version failed once on the ORDER of the two logs (independent processes), not on the value.
+  - 'same host,guest /\[mp\] starbits settled count=(\d+) team=(\d+) /  each'
+  - 'expect host /\[mp\] starbits settled count=21 team=21 own=12 role=host/'
+  - 'expect guest /\[mp\] starbits settled count=21 team=21 own=9 role=guest/'
+  - 'absent * /\[mp\] starbits (drop|delta got .*RATE-LIMITED|delta got .*other-scene)/'
+  - 'expect guest /\[mp\] costar hold start slot=1 actor=[0-9a-f]+ at=/'
+  - 'expect host /\[mp\] costar hold start slot=1 actor=[0-9a-f]+ at=/'
+  - 'expect * /\[mp\] costar hold end slot=1 turns=\d+ moved=0\.0/'
+  - 'expect host /\[mp\] costar sweep slot=1 starbit/'
+  - 'absent * /\[mp\] costar pointer refused/'
+  - 'expect * /\[mp\] team star id=\d+ by=1 near=[01]/'
+  - 'expect host /\[mp\] team tally got slot=1 bits=(9|1\d) /'
+  - 'expect guest /\[mp\] team tally got slot=0 bits=1[2-9] /'
+  - 'expect * /\[mp\] team card serial=\d+ team=[01] by=1 tallies=2\/2/'
+  - 'absent * /\[mp\] team drop TALLY/'
+  - 'mp_save host'
+  - 'absent guest /\[mp\] save autoconfirm/'

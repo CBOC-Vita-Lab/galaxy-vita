@@ -1,0 +1,171 @@
+Patch 0043 (vp34 post-fbo_msaa, ported from Strikers 0039 + Carbon S8, GXV_VGL_RT_POOL): LPDDR framebuffer render-target pool
+(vglSetRenderTargetPool, vglGetRenderTargetPoolStats). Reuses SceGxmRenderTarget objects of matching (w, h, refs, msaa),
+evicts excess slots on shrink, and uses atomic acquire/release fast-path reads. Default off (count=0). Applies AFTER gpu_timers.py and fbo_msaa.py.
+diff --git a/source/gxm.c b/source/gxm.c
+index c8900f9..d174f0d 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -216,6 +216,130 @@ static inline __attribute__((always_inline)) int setup_render_target(SceGxmRende
+ 	return setup_render_target_ms(rt, w, h, refs, msaa_mode);
+ }
+ 
++// patch 0043 (GXV_VGL_RT_POOL): pool framebuffer render targets by exact (w, h, refs, msaa) to avoid 40-95 ms sceGxmDestroy/CreateRenderTarget hitches.
++#define VGL_RTP_SLOTS 48
++typedef struct {
++	SceGxmRenderTarget *rt;
++	int w, h, refs;
++	SceGxmMultisampleMode mode;
++	uint32_t kib; // driver memory (sceGxmGetRenderTargetMemSize), at least 1
++	uint8_t state; // 0 free, 1 handed to an FBO, 2 kept in pool
++} vgl_rtp_slot;
++static vgl_rtp_slot vgl_rtp[VGL_RTP_SLOTS];
++static volatile int vgl_rtp_lock = 0;
++static uint32_t vgl_rtp_any = 0; // non-zero once pool has ever tracked an RT (fast-path skip when unused; atomic acq/rel)
++static uint32_t vgl_rtp_max_count = 0; // atomic acq/rel for lock-free fast path
++static uint32_t vgl_rtp_max_kib = 0;
++static uint32_t vgl_rtp_stat[6] = {0, 0, 0, 0, 0, 0}; // hits, creates, kept, let_go, kept_now, kib_now
++#define VGL_RTP_LOCK() while (__sync_lock_test_and_set(&vgl_rtp_lock, 1)) { sceKernelDelayThread(100); }
++#define VGL_RTP_UNLOCK() __sync_lock_release(&vgl_rtp_lock)
++
++void vglSetRenderTargetPool(uint32_t count, uint32_t kib) {
++	SceGxmRenderTarget *gone[VGL_RTP_SLOTS];
++	int n = 0;
++	VGL_RTP_LOCK()
++	const uint32_t max_c = count > VGL_RTP_SLOTS ? VGL_RTP_SLOTS : count;
++	__atomic_store_n(&vgl_rtp_max_count, max_c, __ATOMIC_RELEASE);
++	vgl_rtp_max_kib = kib;
++	for (int i = 0; i < VGL_RTP_SLOTS; i++) {
++		if (vgl_rtp[i].state != 2)
++			continue;
++		if (vgl_rtp_stat[4] > max_c || (vgl_rtp_max_kib && vgl_rtp_stat[5] > vgl_rtp_max_kib)) {
++			gone[n++] = vgl_rtp[i].rt;
++			vgl_rtp[i].state = 0;
++			vgl_rtp_stat[3]++;
++			vgl_rtp_stat[4]--;
++			vgl_rtp_stat[5] -= vgl_rtp[i].kib;
++		}
++	}
++	VGL_RTP_UNLOCK();
++	for (int i = 0; i < n; i++)
++		sceGxmDestroyRenderTarget(gone[i]);
++}
++void vglGetRenderTargetPoolStats(uint32_t *hits, uint32_t *creates, uint32_t *kept, uint32_t *let_go, uint32_t *kept_now, uint32_t *kib_now) {
++	VGL_RTP_LOCK()
++	if (hits) *hits = vgl_rtp_stat[0];
++	if (creates) *creates = vgl_rtp_stat[1];
++	if (kept) *kept = vgl_rtp_stat[2];
++	if (let_go) *let_go = vgl_rtp_stat[3];
++	if (kept_now) *kept_now = vgl_rtp_stat[4];
++	if (kib_now) *kib_now = vgl_rtp_stat[5];
++	VGL_RTP_UNLOCK();
++}
++
++static int setup_fbo_render_target_ms(SceGxmRenderTarget **rt, int w, int h, int refs, SceGxmMultisampleMode mode) {
++	if (!__atomic_load_n(&vgl_rtp_max_count, __ATOMIC_ACQUIRE))
++		return setup_render_target_ms(rt, w, h, refs, mode);
++	VGL_RTP_LOCK()
++	for (int i = 0; i < VGL_RTP_SLOTS; i++) {
++		vgl_rtp_slot *s = &vgl_rtp[i];
++		if (s->state == 2 && s->w == w && s->h == h && s->refs == refs && s->mode == mode) {
++			s->state = 1;
++			*rt = s->rt;
++			vgl_rtp_stat[0]++;
++			vgl_rtp_stat[4]--;
++			vgl_rtp_stat[5] -= s->kib;
++			VGL_RTP_UNLOCK();
++			return 0;
++		}
++	}
++	VGL_RTP_UNLOCK();
++	int r = setup_render_target_ms(rt, w, h, refs, mode);
++	if (r)
++		return r;
++	SceGxmRenderTargetParams params;
++	vgl_memset(&params, 0, sizeof(params));
++	params.width = w ? w : 1;
++	params.height = h ? h : 1;
++	params.scenesPerFrame = refs;
++	params.multisampleMode = mode;
++	params.driverMemBlock = -1;
++	unsigned int drv = 0;
++	if (sceGxmGetRenderTargetMemSize(&params, &drv))
++		drv = 0;
++	VGL_RTP_LOCK()
++	vgl_rtp_stat[1]++;
++	for (int i = 0; i < VGL_RTP_SLOTS; i++)
++		if (vgl_rtp[i].state == 0) {
++			vgl_rtp[i].rt = *rt;
++			vgl_rtp[i].w = w;
++			vgl_rtp[i].h = h;
++			vgl_rtp[i].refs = refs;
++			vgl_rtp[i].mode = mode;
++			vgl_rtp[i].kib = drv ? (drv + 1023) / 1024 : 1;
++			vgl_rtp[i].state = 1;
++			__atomic_store_n(&vgl_rtp_any, 1u, __ATOMIC_RELEASE);
++			break;
++		}
++	VGL_RTP_UNLOCK();
++	return 0;
++}
++
++static void vgl_rtp_release(SceGxmRenderTarget *rt) {
++	if (__atomic_load_n(&vgl_rtp_any, __ATOMIC_ACQUIRE)) {
++		VGL_RTP_LOCK()
++		const uint32_t max_c = __atomic_load_n(&vgl_rtp_max_count, __ATOMIC_RELAXED);
++		for (int i = 0; i < VGL_RTP_SLOTS; i++) {
++			vgl_rtp_slot *s = &vgl_rtp[i];
++			if (s->state != 1 || s->rt != rt)
++				continue;
++			if (max_c && vgl_rtp_stat[4] < max_c && (!vgl_rtp_max_kib || vgl_rtp_stat[5] + s->kib <= vgl_rtp_max_kib)) {
++				s->state = 2;
++				vgl_rtp_stat[2]++;
++				vgl_rtp_stat[4]++;
++				vgl_rtp_stat[5] += s->kib;
++				VGL_RTP_UNLOCK();
++				return;
++			}
++			s->state = 0;
++			vgl_rtp_stat[3]++;
++			break;
++		}
++		VGL_RTP_UNLOCK();
++	}
++	sceGxmDestroyRenderTarget(rt);
++}
++
+ #ifdef HAVE_SHARED_RENDERTARGETS
+ #define MAX_RENDER_TARGETS_NUM 47 // Maximum amount of dedicated render targets usable for fbos
+ #define MAX_SHARED_RT_SIZE 256 // Maximum  width value in pixels for shared rendertargets usage
+@@ -345,7 +469,7 @@ int garbage_collector(unsigned int args, void *arg) {
+ 		}
+ 		for (int i = 0; i < FRAME_PURGE_RENDERTARGETS_LIST_SIZE; i++) {
+ 			if (frame_rt_purge_list[frame_purge_clean_idx][i]) {
+-				sceGxmDestroyRenderTarget(frame_rt_purge_list[frame_purge_clean_idx][i]);
++				vgl_rtp_release(frame_rt_purge_list[frame_purge_clean_idx][i]); // patch 0043 (GXV_VGL_RT_POOL)
+ 				frame_rt_purge_list[frame_purge_clean_idx][i] = NULL;
+ 			} else
+ 				break;
+@@ -840,7 +964,7 @@ GLboolean scene_reset(void) {
+ #ifdef HAVE_SHARED_RENDERTARGETS
+ 				active_write_fb->target = (SceGxmRenderTarget *)get_free_render_target(active_write_fb->width, active_write_fb->height);
+ #else
+-				int r = setup_render_target_ms(&active_write_fb->target, active_write_fb->width, active_write_fb->height, gxm_fbo_rt_size, FB_MSAA(active_write_fb));
++				int r = setup_fbo_render_target_ms(&active_write_fb->target, active_write_fb->width, active_write_fb->height, gxm_fbo_rt_size, FB_MSAA(active_write_fb));
+ #ifdef LOG_ERRORS
+ 				if (r) {
+ 					vgl_log("%s:%d Failed to create a rendertarget of size %dx%d for framebuffer 0x%08X (%s).\n", __FILE__, __LINE__, active_write_fb->width, active_write_fb->height, active_write_fb, get_gxm_error_literal(r));
+diff --git a/source/vitaGL.h b/source/vitaGL.h
+index 7b18c20..2e35a94 100644
+--- a/source/vitaGL.h
++++ b/source/vitaGL.h
+@@ -1414,6 +1414,10 @@ void vglWriteCopyStats8(uint32_t *out8);
+ void vglSetTextureCopyDma(int mode);
+ void vglTextureCopyStats(uint32_t *out6);
+ 
++// patch 0043 (GXV_VGL_RT_POOL): LPDDR framebuffer render-target pool (count 0 = off)
++void vglSetRenderTargetPool(uint32_t count, uint32_t kib);
++void vglGetRenderTargetPoolStats(uint32_t *hits, uint32_t *creates, uint32_t *kept, uint32_t *let_go, uint32_t *kept_now, uint32_t *kib_now);
++
+ // Allows vitaGL to use newlib memory once all internal mempools are exhausted. Default value: GL_TRUE.
+ void vglUseExtraMem(GLboolean usage);
+ 

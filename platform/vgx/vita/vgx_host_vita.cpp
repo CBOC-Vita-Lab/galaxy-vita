@@ -1118,7 +1118,7 @@ extern "C" void vgxvita_cacheFolderStats(unsigned* made, unsigned* ms) {
     if (ms) *ms = static_cast<unsigned>(g_bucketUs / 1000u);
 }
 
-extern "C" int msc_vgl_printf(const char* format, ...) {
+extern "C" __attribute__((format(printf, 1, 2))) int msc_vgl_printf(const char* format, ...) {
     static uint32_t count = 0, compilerWarnings = 0;
     char text[512];
     va_list args;

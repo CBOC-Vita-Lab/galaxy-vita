@@ -27,6 +27,7 @@ int sceCtrlGetControllerPortInfo(SceCtrlPortInfo* info) { *info = {}; info->port
 int sceMotionStartSampling(void) { return -1; }
 int sceMotionStopSampling(void) { return 0; }
 int sceMotionGetState(SceMotionState*) { return -1; }
+int sceMotionGetSensorState(SceMotionSensorState*, int) { return -1; }
 int sceTouchGetPanelInfo(SceUInt32 port, SceTouchPanelInfo* p) {
     std::memset(p, 0, sizeof(*p));
     p->minDispX = 0; p->minDispY = 0;
@@ -93,19 +94,21 @@ int main() {
     }
     assert(moved > 90 && lastX > 0.4f && lastX < 0.95f);
 
-    // 2b. A slow, careful slide (0.6 panel units a poll, under the pad's noise step) still moves the pointer, steadily.
+    // 2b. A slow, careful slide (0.6 panel units a poll, under the pad's noise step) still moves the pointer, steadily, once a
+    //     deliberate slide has taken it (crash33: a slow movement alone no longer takes the pointer, see step 10).
     {
         for (int t = 0; t < 200; t++) poll({{3, 300, 450}});  // (the pointer of step 2 goes away: the slide starts in the middle)
         float x0 = -2, xs = 0;
         for (int t = 0; t < 400; t++) {
-            PortPadState pad = poll({{3, 300, 450}, {9, 900 + t * 0.6f + (t < 80 ? t * 0.6f : 48.0f), 400}});
+            PortPadState pad = poll({{3, 300, 450}, {9, 900 + (t < 12 ? t * 6.0f : 72.0f + (t - 12) * 0.6f), 400}});
             if (!pad.pointerValid) continue;
+            if (t < 40) continue;  // (the quick slide and its smoothing)
             if (x0 < -1) x0 = pad.pointerX;
             assert(pad.pointerX >= xs - 1e-6f || xs == 0);
             xs = pad.pointerX;
         }
-        // (after arming, 320 polls x 0.6 units = 192 units: 0.35 of the pointer's range at 2 / 1100 a unit)
-        assert(xs - x0 > 0.25f);
+        // (360 polls x 0.6 units = 216 units: 0.39 of the pointer's range at 2 / 1100 a unit)
+        assert(x0 > -1 && xs - x0 > 0.25f);
         poll({});
         lastX = poll({}).pointerX;
         lastY = poll({}).pointerY;
@@ -175,18 +178,31 @@ int main() {
     for (int t = 0; t < 20; t++) x9 = poll({{17, 1000, 400}}).pointerX;
     assert(std::fabs(x9 - 400 * 2.0f / 1100) < 0.01f);
 
-    // 10. A resting finger that creeps far enough to take the pointer starts it from where it is: no catch-up jump.
+    // 10. (crash33) A resting finger in the middle that creeps (15 units a second) never takes the pointer, however far it gets.
     for (int t = 0; t < 200; t++) poll({});
-    float prev = -2;
-    for (int t = 0; t < 240; t++) {
-        pad = poll({{18, 600 + t * 0.25f, 400}});
-        if (!pad.pointerValid) continue;
-        assert(prev > -2 ? pad.pointerX - prev < 0.005f : std::fabs(pad.pointerX) < 0.005f);
-        prev = pad.pointerX;
+    for (int t = 0; t < 2400; t++) assert(!poll({{18, 600 + t * 0.25f, 400}}).pointerValid);
+
+    // 11. (crash33) Holding the console: fingers in the side bands that wobble and slide (a grip that shifts) never take it, and
+    //     two fingers sliding together in the middle do not either.
+    for (int t = 0; t < 600; t++)
+        assert(!poll({{21, 250 + 60 * std::sin(t * 0.2f), 300 + t * 0.3f}, {22, 1700 + 80 * std::sin(t * 0.15f), 600 - t * 0.3f}}).pointerValid);
+    poll({});
+    for (int t = 0; t < 100; t++) assert(!poll({{23, 700 + t * 8.0f, 350}, {24, 800 + t * 8.0f, 550}}).pointerValid);
+
+    // 12. (crash33) A finger that aimed and then rests lets the pointer go after 1.5 s: its wobble moves nothing, and the pointer
+    //     leaves the screen 3 s after its last movement although the finger is still down.
+    poll({});
+    for (int t = 0; t < 30; t++) pad = poll({{25, 800 + t * 8.0f, 400}});
+    assert(pad.pointerValid);
+    for (int t = 0; t < 100; t++) pad = poll({{25, 1032, 400}});
+    const float restX = pad.pointerX, restY = pad.pointerY;
+    for (int t = 0; t < 300; t++) {
+        pad = poll({{25, 1032 + 15 * std::sin(t * 0.1f), 400 + 10 * std::sin(t * 0.07f)}});
+        assert(pad.pointerX == restX && pad.pointerY == restY);
     }
-    assert(prev > -2);
+    assert(!pad.pointerValid);
 
     std::puts("PASS: rear touch aiming (resting fingers ignored, tracked contact, no jumps, front wins, option and toggle, "
-              "aiming right after a reset, whole quick slides, no catch-up for a creeping finger)");
+              "aiming right after a reset, whole quick slides, creeping and gripping fingers never aim, let go at rest)");
     return 0;
 }

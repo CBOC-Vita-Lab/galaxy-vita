@@ -1,0 +1,24 @@
+# UNRUN (rules checked against the code's log lines by tests/mp/scenario_regex_test.py; the game has not played it). G10: Co-Star: the guest pings an enemy with its pointer (SMG_MP_TEST_COSTAR) while the host collects Star Bits (SMG_MP_TEST_STARBITS)
+# and the star arrives mid-hold. Expected: the hold ends cleanly ("costar hold end"), no enemy stays frozen after the scene change, star once.
+name: glitch_costar_hold_and_star
+description: "co-star hold in progress when the scene ends: nothing stays frozen, one star"
+seconds: 300
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_COSTAR, SMG_MP_TEST_STAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 8000, SMG_MP_TEST_POINTER_ENEMY: 1}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_TEST_STAR: 30}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_COSTAR: "10:60"}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] costar hold end slot=1/'
+  - 'expect guest /\[mp\] puppet slot=0 appear model=\w+ self=0/'
+  - 'expect guest /\[mp\] flow star got id=\d+ grand=\d by=0/'
+  - 'expect host /\[mp\] star delivered id=\d+ path=native/'
+  - 'count * /\[mp\] star delivered id=/ <= 1'
+  - 'absent * /\[mp\] (star delivered .*path=record|flow clear hold timeout|costar pointer refused)/'

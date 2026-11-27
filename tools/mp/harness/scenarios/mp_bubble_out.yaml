@@ -1,0 +1,35 @@
+# Bubbles, out of lives: the guest has 0 lives when he falls (SMG_MP_TEST_LIVES=0 just before the SMG_MP_TEST_DIE fall): no life
+# to take, the bubble says "out of lives" and he cannot pop it himself; he taps A every 0.3 s (inputs/file2_observatory_afast)
+# and none of it may pop the bubble. SMG_MP_TEST_BUBBLE_NEAR parks it on the host: the host's touch pops it and gives 1 life.
+name: mp_bubble_out
+description: out-of-lives guest cannot pop his bubble with A; the host's touch pops it and gives him 1 life
+seconds: 260
+requires: {strings: [SMG_MP_AUTO_MODE, SMG_MP_TEST_DIE, SMG_MP_TEST_LIVES, SMG_MP_TEST_BUBBLE_NEAR]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2000}
+processes:
+  - name: host
+    input: "@file2_observatory+30"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1"}
+  - name: guest
+    input: "@file2_observatory_afast"
+    env: {SMG_MP_AUTO: join, SMG_MP_LOOK: 1, SMG_MP_TEST_DIE: "25:1", SMG_MP_TEST_LIVES: 0, SMG_MP_TEST_BUBBLE_NEAR: 1}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'absent * /save check self-test failed/'
+  - 'expect * /\[mp\] save check limits galaxies=[1-9]\d* /'
+  - 'shots * >= 60'
+  - 'expect guest /\[mp\] bubble test die: slot 1 serial=1 damage lives=0/'
+  - 'expect guest /\[mp\] bubble on slot=1 lives=0->0 out=1 .*serial=1/ within 2s after guest /\[mp\] bubble test die/'
+  - 'expect host /\[mp\] bubble msg from=1 on=1 lives=0 by=-1 out=1/'
+  - 'expect host /\[mp\] ui: toast "guest is out of lives: pop the bubble to save them!"/'
+  # A never pops an out-of-lives bubble; the touch does, and he has 1 life again
+  - 'absent guest /\[mp\] bubble off .*why=button/'
+  - 'expect guest /\[mp\] bubble off slot=1 by=0 land=0 why=touch lives=1( |$)/ within 20s after guest /\[mp\] bubble on slot=1/'
+  - 'expect host /\[mp\] bubble msg from=1 on=0 lives=1 by=0 out=0/'
+  - 'expect host /\[mp\] bubble remote off slot=1 popped=1/'
+  - 'absent * /\[mp\] bubble restart/'
+  - 'absent guest /\[mp\] flow own move type=[57]/'
+  - 'absent * /\[mp\] bubble drop/'
+  - 'exit * == 0'

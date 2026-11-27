@@ -20,38 +20,19 @@ namespace {
 struct Words {
     const char* language;        // the end of the game's language prefix ("English" of "UsEnglish")
     const char16_t* zoom;        // the zoom row
-    const char16_t* rear;        // the rear touch row
-    const char16_t* on;
-    const char16_t* off;
-    const char16_t* stick;       // the right stick row
-    const char16_t* camera;
-    const char16_t* pointer;
+    const char16_t* settings;    // the hint row: "[Triangle] Settings" (settingsnative: the other rows moved into the native Settings menu)
+    const char16_t* note;        // mppause: the session menu's one line (the game is not paused there)
 };
 const Words kWords[] = {
-    {"English", u"Camera Zoom", u"Rear Touch Aiming", u"On", u"Off",
-     u"Right Stick", u"Camera", u"Pointer"},
-    {"French", u"Zoom de la caméra", u"Visée tactile arrière", u"Oui", u"Non",
-     u"Stick droit", u"Caméra", u"Pointeur"},
-    {"Spanish", u"Zoom de la cámara", u"Apuntar con panel trasero", u"Sí", u"No",
-     u"Palanca derecha", u"Cámara", u"Puntero"},
-    {"German", u"Kamera-Zoom", u"Zielen mit Rück-Touchpad", u"An", u"Aus",
-     u"Rechter Stick", u"Kamera", u"Pointer"},
-    {"Italian", u"Zoom della telecamera", u"Mira col pannello posteriore", u"Sì", u"No",
-     u"Levetta destra", u"Telecamera", u"Puntatore"},
-    {"Dutch", u"Camerazoom", u"Richten met achterpaneel", u"Aan", u"Uit",
-     u"Rechterstick", u"Camera", u"Aanwijzer"},
-    {"Japanese", u"カメラズーム", u"背面タッチでねらう", u"オン", u"オフ",
-     u"右スティック", u"カメラ", u"ポインター"},
+    {"English", u"Camera Zoom", u"Settings", u"The game keeps running."},
+    {"French", u"Zoom de la caméra", u"Réglages", u"La partie continue."},
+    {"Spanish", u"Zoom de la cámara", u"Ajustes", u"El juego sigue en marcha."},
+    {"German", u"Kamera-Zoom", u"Einstellungen", u"Das Spiel läuft weiter."},
+    {"Italian", u"Zoom della telecamera", u"Impostazioni", u"Il gioco continua."},
+    {"Dutch", u"Camerazoom", u"Instellingen", u"Het spel loopt door."},
+    {"Japanese", u"カメラズーム", u"設定", u"ゲームは止まりません"},
 };
 constexpr int kLanguages = sizeof(kWords) / sizeof(kWords[0]);
-// The Star Bit reach row's words, in kWords' order (from Producdevity's fork, 77119d3): its label and its last step.
-struct ReachWords { const char16_t* reach; const char16_t* all; };
-const ReachWords kReachWords[] = {
-    {u"Star Bit Reach", u"All"}, {u"Portée des fragments", u"Tous"}, {u"Alcance de trozos", u"Todos"},
-    {u"Sternteil-Reichweite", u"Alle"}, {u"Portata astroschegge", u"Tutte"}, {u"Bereik sterstukjes", u"Alle"},
-    {u"スターピース範囲", u"ぜんぶ"},
-};
-static_assert(sizeof(kReachWords) / sizeof(kReachWords[0]) == kLanguages, "a reach row's words for every language");
 
 int Length(const char16_t* s) {
     int n = 0;
@@ -250,27 +231,8 @@ struct Writer {
 
 // The characters the runs point at must outlive the plan: static, one per button.
 const char16_t kTriangleText[2] = {kPicTriangle, 0};
-const char16_t kSquareText[2] = {kPicSquare, 0};
 const char16_t kLText[2] = {kPicL, 0};
 const char16_t kRText[2] = {kPicR, 0};
-const char16_t kSelectText[2] = {kPicSelect, 0};
-
-// ---- Star Bit reach:  label   [SELECT]  ● ● ● ○ ○   value   (st.starBitReach 1..5: Off, 1.5×, 2×, 3×, All; the switch column's
-// left from sx0 to sx1)
-void ReachRow(Builder& g, Writer& t, const State& st, const Words* words, float row, float labelX, float labelMax, float cl, float sx0,
-              float sx1, float icon, float labelSize) {
-    const ReachWords* rw = &kReachWords[words - kWords];
-    if (!t.Has(FONT_MESSAGE, rw->reach) || !t.Has(FONT_MESSAGE, rw->all)) rw = &kReachWords[0];
-    t.Text(rw->reach, labelX, row, labelSize, kWhite, 0, labelMax);
-    t.Button(kPicSelect, cl + icon * 0.5f, row, icon, kSelectText);
-    const int reach = st.starBitReach < 1 ? 1 : (st.starBitReach > 5 ? 5 : st.starBitReach);
-    const float pipStep = st.compact ? 13.0f : 17.0f, pipRadius = st.compact ? 3.0f : 4.0f;
-    for (int i = 1; i <= 5; i++) g.Disc(sx0 + pipRadius + 2.0f + (i - 1) * pipStep, row, pipRadius, i <= reach ? kYellow : kPipOff);
-    static const char16_t* const kReachValues[] = {u"1.5×", u"2×", u"3×"};
-    const char16_t* value = reach == 1 ? words->off : (reach == 5 ? rw->all : kReachValues[reach - 2]);
-    const float valueLeft = sx0 + pipRadius * 2.0f + 4.0f * pipStep + 10.0f;
-    t.Text(value, sx1 - 4.0f, row, labelSize * 0.9f, reach == 1 ? kDim : kYellow, 2, sx1 - 4.0f - valueLeft);
-}
 
 }  // namespace
 
@@ -294,23 +256,22 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
 
     // words of the language, or English where the font lacks a character
     const Words* words = &kWords[st.language >= 0 && st.language < kLanguages ? st.language : 0];
-    if (!t.Has(FONT_MESSAGE, words->zoom) || !t.Has(FONT_MESSAGE, words->rear) || !t.Has(FONT_MESSAGE, words->on) ||
-        !t.Has(FONT_MESSAGE, words->off) || !t.Has(FONT_MESSAGE, words->stick) || !t.Has(FONT_MESSAGE, words->camera) ||
-        !t.Has(FONT_MESSAGE, words->pointer))
-        words = &kWords[0];
+    if (!t.Has(FONT_MESSAGE, words->zoom) || !t.Has(FONT_MESSAGE, words->settings) || !t.Has(FONT_MESSAGE, words->note)) words = &kWords[0];
 
     const float midX = st.width * 0.5f, midY = st.height * 0.5f;
+    const bool compact = st.compact || st.note;            // (the session menu has the guide band under it: the low panel)
+    const bool hintRow = st.showSettings || st.note;
     const float w = 420.0f;
     const float x0 = midX - w * 0.5f, x1 = midX + w * 0.5f;
-    const float y0 = midY + 122.0f, y1 = midY + (st.compact ? 176.0f : 220.0f);
-    // rows (middles), sizes (four rows: the fork's final layout, 77119d3)
-    const float rowZoom = y0 + (st.compact ? 8.5f : 15.0f);
+    const float y0 = midY + 122.0f;
+    // rows (middles), sizes. settingsnative: two lines, "L Camera Zoom 1.5 R" (with its 11 pips) and "[Triangle] Settings" (only where Settings can
+    // be opened: not in a multiplayer session, not where the platform has none).
+    const float rowZoom = y0 + (compact ? 8.5f : 15.0f);
     const float rowPips = y0 + 29.0f;
-    const float rowLine = y0 + (st.compact ? 15.0f : 36.0f);
-    const float rowRear = y0 + (st.compact ? 21.5f : 48.0f);
-    const float rowStick = y0 + (st.compact ? 33.5f : 67.0f);
-    const float rowReach = y0 + (st.compact ? 45.5f : 86.0f);
-    const float labelSize = st.compact ? 12.5f : 18.0f, icon = st.compact ? 13.0f : 20.0f;
+    const float rowLine = y0 + (compact ? 15.0f : 36.0f);
+    const float rowHint = y0 + (compact ? 28.0f : 52.0f);
+    const float y1 = y0 + (compact ? (hintRow ? 40.0f : 18.0f) : (hintRow ? 66.0f : 42.0f));
+    const float labelSize = compact ? 12.5f : 18.0f, icon = compact ? 13.0f : 20.0f;
     plan->x0 = x0, plan->y0 = y0, plan->x1 = x1, plan->y1 = y1;
 
     // the window: a soft dark glow round it, the indigo body with a sheen on its upper part, a light rim with a soft edge
@@ -324,7 +285,7 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
     Rgba rimClear = kRimOuter;
     rimClear.a = 0;
     g.Ring(x0, y0, x1, y1, r, -0.2f, kRimOuter, 1.0f, rimClear);
-    g.Line(x0 + 18, x1 - 18, rowLine, 1.2f, Rgba{150, 172, 255, 70});
+    if (hintRow) g.Line(x0 + 18, x1 - 18, rowLine, 1.2f, Rgba{150, 172, 255, 70});
 
     // the columns: labels from the left, the controls between cl and cr
     const float labelX = x0 + 18.0f, labelMax = 168.0f;
@@ -347,7 +308,7 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
     g.Arrow(valueX + arrowGap, rowZoom, 1, 7.0f, 11.0f, tenths < 20 ? kYellow : Fade(kDim, 0.5f));
     t.Button(kPicL, cl + icon * 0.5f, rowZoom, icon, kLText);
     t.Button(kPicR, cr - icon * 0.5f, rowZoom, icon, kRText);
-    if (!st.compact) {
+    if (!compact) {
         const float step = 12.0f;
         for (int i = 0; i <= 10; i++) {
             const float px = valueX + (i - 5) * step;
@@ -364,29 +325,17 @@ void Build(const State& st, const FontMetrics fonts[2], Plan* plan) {
         }
     }
 
-    // ---- two switches:  label   [button]  ( left | right )
-    const float sx0 = cl + icon + 8.0f, sx1 = cr, sh = st.compact ? 11.0f : 17.0f;
-    const float half = (sx1 - sx0) * 0.5f, wordSize = labelSize * 0.9f;
-    auto Switch = [&](float row, const char16_t* label, uint16_t code, const char16_t* button, const char16_t* left, const char16_t* right, float at) {
-        t.Text(label, labelX, row, labelSize, kWhite, 0, labelMax);
-        t.Button(code, cl + icon * 0.5f, row, icon, button);
-        const float sy0 = row - sh * 0.5f, sy1 = row + sh * 0.5f;
-        g.Fill(sx0, sy0, sx1, sy1, sh * 0.5f, kTrack, kTrack);
-        Rgba trackClear = kTrackRim;
-        trackClear.a = 0;
-        g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, -1.2f, kTrackRim, 0.0f, kTrackRim);
-        g.Ring(sx0, sy0, sx1, sy1, sh * 0.5f, 0.0f, kTrackRim, 0.8f, trackClear);
-        const float knob = at < 0 ? 0 : (at > 1 ? 1 : at);
-        const float kx0 = sx0 + 2.0f + knob * half, kx1 = kx0 + half - 4.0f;
-        g.Fill(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, kKnobTop, kKnobBottom);
-        g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, -1.0f, Rgba{200, 214, 255, 200}, 0.0f, Rgba{236, 242, 255, 230});
-        g.Ring(kx0, sy0 + 2.0f, kx1, sy1 - 2.0f, sh * 0.5f - 2.0f, 0.0f, Rgba{236, 242, 255, 230}, 0.8f, Rgba{236, 242, 255, 0});
-        t.Text(left, sx0 + half * 0.5f, row, wordSize, Mix(kWhite, kDim, knob), 1, half - 10.0f);
-        t.Text(right, sx0 + half * 1.5f, row, wordSize, Mix(kDim, kYellow, knob), 1, half - 10.0f);
-    };
-    Switch(rowRear, words->rear, kPicTriangle, kTriangleText, words->off, words->on, st.knob);
-    Switch(rowStick, words->stick, kPicSquare, kSquareText, words->camera, words->pointer, st.stickKnob);
-    ReachRow(g, t, st, words, rowReach, labelX, labelMax, cl, sx0, sx1, icon, labelSize);
+    // ---- the hint:  [Triangle] Settings, centred
+    if (st.note) {
+        t.Text(words->note, midX, rowHint, labelSize * 0.9f, kDim, 1, w - 36.0f);
+    } else if (hintRow) {
+        const int n = Length(words->settings);
+        const float size = labelSize;
+        const float total = icon + 8.0f + t.Width(FONT_MESSAGE, words->settings, n, size);
+        const float left = midX - total * 0.5f;
+        t.Button(kPicTriangle, left + icon * 0.5f, rowHint, icon, kTriangleText);
+        t.Text(words->settings, left + icon + 8.0f, rowHint, size, kWhite, 0, w - 60.0f - icon);
+    }
 }
 
 }  // namespace settings_panel

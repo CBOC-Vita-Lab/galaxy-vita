@@ -41,6 +41,9 @@ void WPad::update() {
     _34 = false;
 
     mButton->update();
+#ifdef TARGET_PC
+    mButton->portMpFilter();  // MP3 chat (was inside WPadButton::update: one call here keeps its control flow as c181's)
+#endif
     mCorePadAccel->update();
     mPointer->update();
     mCorePadSwing->update();

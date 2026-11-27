@@ -1,4 +1,9 @@
 #include "Game/Screen/MoviePlayerSimple.hpp"
+#ifdef TARGET_PC
+#include "port/diagnostics.h"
+#include "port/hot_knob.h"
+#include <cstdlib>
+#endif
 #include "Game/LiveActor/Nerve.hpp"
 #include "Game/Screen/THPSimplePlayerWrapper.hpp"
 #include "Game/System/GameSystem.hpp"
@@ -190,6 +195,29 @@ void MoviePlayerSimple::exePreload() {
     appear();
 }
 
+#ifdef TARGET_PC
+#if PORT_RUNTIME_DIAGNOSTICS
+void port_movie_log_turn(s32 result);  // (THPSimplePlayerWrapper.cpp: the "movie:" log line)
+#endif
+namespace {
+    // PETARI_MOVIE_INHAND (read once; default 1, 0 = one frame a turn as before; from Producdevity's fork, 4c7d7e4): a THP movie's
+    // sound in the opening cutscenes broke up (the fork's console capture of PrologueB: 438 one-block gaps, 7.8 % of the blocks
+    // silent) although the pictures kept up. The player takes one frame a turn, exactly what the sound uses, so a frame read late
+    // was lost for good and from then on the sound had nothing in hand for the next late one: a block of silence each time. With
+    // the switch, after a turn's frame the player decodes the sound of the next one too (its picture left out: that frame's
+    // picture is not shown) while fewer than 6 frames of sound are in hand, and takes no frame while 8 or more are: the console's
+    // turns come at 60.1 a second and the movie's sound at 59.94, so left alone the pictures would pull ahead of the sound (the
+    // original lets 20 frames, 1/3 s, pile up over a long movie). Fork, console, with its read-ahead ring too: silent blocks
+    // 559 of 7211 -> 0 of 6292 (PrologueB), pictures new on their turn 90 % -> 99 %. A movie without sound is not affected.
+    bool movieInHandOn() {
+        return PORT_HOT_KNOB(bool, [] {
+            const char* e = getenv("PETARI_MOVIE_INHAND");
+            return !(e && *e && atoi(e) == 0);
+        }());
+    }
+}  // namespace
+#endif
+
 void MoviePlayerSimple::exePlaying() {
     if (mMovie->mCurrentFrame + 1 == mPlayerWrapper->getTotalFrame()) {
         mMovie->_24 = 0;
@@ -202,7 +230,24 @@ void MoviePlayerSimple::exePlaying() {
     }
 
     if (!mMovie->_19) {
+#ifdef TARGET_PC
+        const bool inHandOn = movieInHandOn();
+        if (inHandOn && mPlayerWrapper->audioFramesInHand() >= 8) {
+            return;  // (PETARI_MOVIE_INHAND: the pictures do not run ahead of the sound)
+        }
+#endif
         s32 result = mPlayerWrapper->decode(0);
+#ifdef TARGET_PC
+#if PORT_RUNTIME_DIAGNOSTICS
+        port_movie_log_turn(result);
+#endif
+        if (inHandOn && result == 0) {
+            const s32 inHand = mPlayerWrapper->audioFramesInHand();
+            if (inHand >= 0 && inHand < 6) {
+                mPlayerWrapper->decodeAudioOnly(0);
+            }
+        }
+#endif
 
         switch (result) {
         case 0:

@@ -1,0 +1,64 @@
+# stage-presets-1113-big60.txt (agent big60, 13 Nov 2026, base 3388030). One fixed 3D picture size per stage, chosen at the stage's load (the screen is closed) and held:
+# size=fixed, fx=hold, edge=off, so nothing in play changes size or edge smoothing. Use with GXV_SMOOTH60=0 (the S60 ladder steps a stage in play: 61 of 73 changes in the c90 tour were hitches).
+# Rungs (GXV_WIDE_RUNGS=1, the Vita's ladder): 6 = 960x544 (direct display), 4 = 848x480, 3 = 784x440, 2 = 720x404. Rungs 3 and 2 need `emergency=` (vgx_stagepreset.h kShipFloorRung = 4).
+# Every size under 960x544 carries hud_native=1: the HUD, text and pointer at the screen's 960x544 over the upscaled 3D picture. NEVER RUN ON A CONSOLE YET (see REPORT.txt): hud_native has
+# no console run in any log, and the Quality tour that carried it died 33 s in. Judge the first console run by the 'hud-native:' line (every 600 pictures) and 0 crashes.
+# Needs the build with GXV_RUNG_PREBUILD_START=1 (PATCH.diff) in the env so a start below 848x480 takes premade targets; without it the one size change at the stage's first picture builds them (10-90 ms, under the white fade-in).
+# Stage-settable keys only (port/stage_knob.h kDesc): every alias below was checked against it by tests/smooth60_test.cpp (tools/test_smooth60.sh <dir> <this file>).
+# Estimates: STAGE-SIZES.tsv (model, +-0.6 ms) and TIERS.md. No row here reaches 60 on its own at the stages marked CANNOT in TIERS.md.
+
+@class b60base start=6 floor=6 ceil=6 size=fixed fx=hold edge=off clip_skipempty=1 colshadow_clip=1 lightvol=3 indcap_skip=1 across=2
+# CPU set A: far draws / far poses / far particles (measured +6 fps at Honeyhive, logs2 1810 -> 1811: 35 -> 41)
+@class b60-cpuA class=b60base far_draw=16 far_draw_kinds=31 far_draw_hold=30 far_draw_flush=1 char_pose=3 char_pose_lines=24 pb_ptcl=0.5
+# CPU set B: A + half-pace far chasers/ambient (far_logic=2: a time dilation, tier 2) + nearer far-decor and far-anim limits
+@class b60-cpuB class=b60-cpuA far_logic=2 pb_decor=3500 pb_anim=1500
+# unused: the owner's alternative for a stage that cannot reach 60 at any size: an even 30 at 960x544 with the quality back (needs GXV_SMOOTH60=1)
+@class b60-even30 start=6 floor=6 ceil=6 size=fixed fx=hold edge=on
+
+* class=b60base
+# GPU 18.6 -> 16.2 at 720x404 (model); game thread 17.4 over: cpu set A
+EggStarGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CANNOT reach 60: game thread 22.5, front end 21.6 (cpu set B measured +6..+7 fps); size only for the GPU lane (20.0 -> 19.0)
+HoneyBeeKingdomGalaxy class=b60-cpuB start=3 floor=3 ceil=3 hud_native=1 emergency=3
+HoneyBeeKingdomGalaxy:1 class=b60-cpuB start=3 floor=3 ceil=3 hud_native=1 emergency=3
+HoneyBeeKingdomGalaxy:2 class=b60-cpuB start=3 floor=3 ceil=3 hud_native=1 emergency=3
+# GPU 19.1 -> 16.4 at 720x404; front end 16.6
+StarDustGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# GPU 16.1 -> 14.8 at 720x404 (model); game thread 16.9 binds: cpu set A needed, about 59 fps
+BattleShipGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CANNOT reach 60: GPU 24.9 -> 21.1 (+ fold 2 -0.84 measured), game thread 20, front end 20
+HeavenlyBeachGalaxy class=b60-cpuB start=2 floor=2 ceil=2 hud_native=1 emergency=2 bloom_fold=2
+# GPU 20.4 -> 17.7 at 720x404: near 55
+PhantomGalaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CANNOT reach 60: game thread 21.4, front end 19.4
+CosmosGardenGalaxy class=b60-cpuB start=3 floor=3 ceil=3 hud_native=1 emergency=3
+# CANNOT reach 60: GPU 22.8 (R3 measured) -> 19.0 + ind_flat 2 (-1.6 measured at c79)
+IceVolcanoGalaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2 ind_flat=2
+# CANNOT reach 60: GPU 21.4 -> 18.9, game thread 19.7, front end 18.2
+SandClockGalaxy class=b60-cpuB start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CPU-bound (game thread 19.5): size only to 784x440 (GPU 17.0)
+ReverseKingdomGalaxy class=b60-cpuA start=3 floor=3 ceil=3 hud_native=1 emergency=3
+# GPU 20.8 -> 18.0 at 720x404
+OceanRingGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CPU-bound (game thread 19.3): GPU 19.0 -> 18.0
+FactoryGalaxy class=b60-cpuB start=3 floor=3 ceil=3 hud_native=1 emergency=3
+# CANNOT reach 60: GPU 21.0 -> 18.4
+OceanPhantomCaveGalaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# GPU 21.9 -> 19.1 (R4 ref run); render thread 18.8 with the reorder: CANNOT reach 60 without a cheaper planner
+CannonFleetGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2 hsr_order=1 hsr_ties=7
+# GPU 16.3 -> 14.5 at 720x404 (model); game thread 15.8 binds: cpu set A needed
+HellProminenceGalaxy class=b60-cpuA start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CANNOT reach 60: GPU 23.6 -> 20.0
+KoopaBattleVs1Galaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2 bloom_fold=2
+# CANNOT reach 60: GPU 28.2 -> 23.4 (8 EFB scenes: TA 27 ms)
+KoopaBattleVs2Galaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2
+# CANNOT reach 60: GPU 27.0 -> 23.0
+KoopaBattleVs3Galaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2 bloom_fold=2
+# GPU 14.9 at 960 direct display: a smaller size would cost the direct display (+1.8 ms) for less than it saves: stay
+TriLegLv1Galaxy class=b60base
+# GPU 15.0 at 960: stay (see TriLeg)
+KoopaJrShipLv1Galaxy class=b60base
+# GPU 14.1: holds 60 as is
+FloaterOtaKingGalaxy class=b60base
+# GPU 18.7 -> 16.5 at 720x404: near 55
+SkullSharkGalaxy class=b60base start=2 floor=2 ceil=2 hud_native=1 emergency=2

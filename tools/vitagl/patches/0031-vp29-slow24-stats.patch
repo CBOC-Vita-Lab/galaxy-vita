@@ -1,0 +1,494 @@
+diff -ruN a/source/framebuffers.c b/source/framebuffers.c
+--- a/source/framebuffers.c	2026-11-08 16:55:13.532465980 -0500
++++ b/source/framebuffers.c	2026-11-10 20:08:13.672837967 -0500
+@@ -198,6 +198,15 @@
+  * ------------------------------
+  */
+ 
++#ifdef VP29_SLOW24
++uint32_t vgl_s24_fb_active(void) { // (patch 0031: the framebuffer objects in use now)
++	uint32_t n = 0;
++	for (int i = 0; i < BUFFERS_NUM; i++)
++		n += framebuffers[i].active ? 1 : 0;
++	return n;
++}
++#endif
++
+ inline __attribute__((always_inline)) void glGenFramebuffers(GLsizei n, GLuint *ids) {
+ 	THREAD_SAFE()
+ 
+diff -ruN a/source/gxm.c b/source/gxm.c
+--- a/source/gxm.c	2026-11-10 18:31:27.997761982 -0500
++++ b/source/gxm.c	2026-11-10 20:08:49.342615897 -0500
+@@ -264,6 +264,15 @@
+ 	renderTargetParams.scenesPerFrame = refs;
+ 	renderTargetParams.multisampleMode = mode;
+ 	renderTargetParams.driverMemBlock = -1;
++#ifdef VP29_SLOW24
++	if (vgl_s24_on) { // (patch 0031)
++		const uint32_t t0 = vgl_s24_now();
++		const int r = sceGxmCreateRenderTarget(&renderTargetParams, rt);
++		vgl_s24[VGL_S24_RT_CREATE_N]++;
++		vgl_s24[VGL_S24_RT_CREATE_US] += vgl_s24_now() - t0;
++		return r;
++	}
++#endif
+ 	return sceGxmCreateRenderTarget(&renderTargetParams, rt);
+ }
+ static inline __attribute__((always_inline)) int setup_render_target(SceGxmRenderTarget **rt, int w, int h, int refs) {
+@@ -396,21 +405,47 @@
+ 			break;
+ 		}
+ #endif
++#ifdef VP29_SLOW24
++		const GLboolean s24 = vgl_s24_on; // (patch 0031: the cycle, its frees and render target destructions, on this thread)
++		const uint32_t s24_t0 = s24 ? vgl_s24_now() : 0;
++		uint32_t s24_freed = 0, s24_rts = 0, s24_rt_us = 0;
++#endif
+ 		// Purging all elements marked for deletion
+ 		for (int i = 0; i < FRAME_PURGE_LIST_SIZE; i++) {
+ 			if (frame_purge_list[frame_purge_clean_idx][i]) {
+ 				vgl_free(frame_purge_list[frame_purge_clean_idx][i]);
+ 				frame_purge_list[frame_purge_clean_idx][i] = NULL;
++#ifdef VP29_SLOW24
++				s24_freed++;
++#endif
+ 			} else
+ 				break;
+ 		}
+ 		for (int i = 0; i < FRAME_PURGE_RENDERTARGETS_LIST_SIZE; i++) {
+ 			if (frame_rt_purge_list[frame_purge_clean_idx][i]) {
++#ifdef VP29_SLOW24
++				const uint32_t s24_r0 = s24 ? vgl_s24_now() : 0;
++#endif
+ 				sceGxmDestroyRenderTarget(frame_rt_purge_list[frame_purge_clean_idx][i]);
++#ifdef VP29_SLOW24
++				if (s24) {
++					s24_rt_us += vgl_s24_now() - s24_r0;
++					s24_rts++;
++				}
++#endif
+ 				frame_rt_purge_list[frame_purge_clean_idx][i] = NULL;
+ 			} else
+ 				break;
+ 		}
++#ifdef VP29_SLOW24
++		if (s24) {
++			vgl_s24_add(VGL_S24_GC_N, 1);
++			vgl_s24_add(VGL_S24_GC_US, vgl_s24_now() - s24_t0);
++			vgl_s24_add(VGL_S24_GC_FREED, s24_freed + s24_rts);
++			vgl_s24_add(VGL_S24_RT_DESTROY_N, s24_rts);
++			vgl_s24_add(VGL_S24_RT_DESTROY_US, s24_rt_us);
++		}
++#endif
+ 		frame_purge_clean_idx = (frame_purge_clean_idx + 1) % FRAME_PURGE_FREQ;
+ 		frame_purge_idx = (frame_purge_idx + 1) % FRAME_PURGE_FREQ;
+ 		frame_elem_purge_idx = 0;
+@@ -714,6 +749,9 @@
+ }
+ 
+ static inline __attribute__((always_inline)) void scene_end(void) {
++#ifdef VP29_SLOW24
++	const uint32_t s24_t0 = vgl_s24_on ? vgl_s24_now() : 0; // (patch 0031)
++#endif
+ 	// Ends current gxm scene
+ 	query_fence.value++;
+ #ifdef GPU_TIMERS
+@@ -722,6 +760,12 @@
+ 	else
+ #endif
+ 	sceGxmEndScene(gxm_context, NULL, &query_fence);
++#ifdef VP29_SLOW24
++	if (vgl_s24_on) {
++		vgl_s24[VGL_S24_END_N]++;
++		vgl_s24[VGL_S24_END_US] += vgl_s24_now() - s24_t0;
++	}
++#endif
+ 	if (system_app_mode && vsync_interval)
+ 		sceDisplayWaitVblankStartMulti(vsync_interval);
+ }
+@@ -1180,6 +1224,10 @@
+ 		// The attempts of this frame are used up: nothing is touched, nothing is submitted
+ 		if (scene_fail_streak && scene_fail_frame == vgl_framecount && scene_fail_tries >= VGL_SCENE_TRIES_PER_FRAME)
+ 			return GL_FALSE;
++#ifdef VP29_SLOW24
++		const uint32_t s24_t0 = vgl_s24_on ? vgl_s24_now() : 0; // (patch 0031: the whole change; the begin part below)
++		uint32_t s24_tb = 0;
++#endif
+ 		scene_not_flushed = GL_TRUE;
+ 		dirty_framebuffer = GL_FALSE;
+ 		dirty_query = GL_FALSE;
+@@ -1220,6 +1268,10 @@
+ 		if (vgl_rt_gpu_on) // the host's tag for the scene beginning now (rt_gpu.c, scene timers)
+ 			vgl_rt_scene_begin();
+ #endif
++#ifdef VP29_SLOW24
++		if (vgl_s24_on)
++			s24_tb = vgl_s24_now();
++#endif
+ 		// Starting drawing scene
+ 		is_rendering_display = !active_write_fb;
+ 		VGL_COLOR_SKIP_DISPLAY_RESTORE();
+@@ -1272,7 +1324,17 @@
+ 			
+ 			// If the depthbuffer is dirty, we re-gen it
+ 			if (!(active_write_fb->depthbuffer_state & DEPTHBUFFER_READY)) {
++#ifdef VP29_SLOW24
++				const uint32_t s24_d0 = vgl_s24_on ? vgl_s24_now() : 0;
++				const GLboolean s24_ok = init_depth_stencil_buffer_ms(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL, FB_MSAA(active_write_fb));
++				if (vgl_s24_on) {
++					vgl_s24[VGL_S24_DEPTH_N]++;
++					vgl_s24[VGL_S24_DEPTH_US] += vgl_s24_now() - s24_d0;
++				}
++				if (!s24_ok)
++#else
+ 				if (!init_depth_stencil_buffer_ms(active_write_fb->width, active_write_fb->height, &active_write_fb->depthbuffer, active_write_fb->depthbuffer_state == DEPTHBUFFER_WANTS_STENCIL, FB_MSAA(active_write_fb)))
++#endif
+ 					return scene_begin_failed(); // No depth surface: the framebuffer keeps its state and the scene is not begun
+ 				active_write_fb->depthbuffer_ptr = &active_write_fb->depthbuffer;
+ 				active_write_fb->depthbuffer_state |= DEPTHBUFFER_READY;
+@@ -1348,6 +1410,15 @@
+ 		}
+ 
+ 		scene_fail_streak = 0; // The scene began
++#ifdef VP29_SLOW24
++		if (vgl_s24_on) {
++			const uint32_t s24_t1 = vgl_s24_now();
++			vgl_s24[VGL_S24_BEGIN_N]++;
++			vgl_s24[VGL_S24_BEGIN_US] += s24_t1 - s24_tb;
++			vgl_s24[VGL_S24_SCENE_N]++;
++			vgl_s24[VGL_S24_SCENE_US] += s24_t1 - s24_t0;
++		}
++#endif
+ 
+ 		// Setting back current viewport if enabled cause sceGxm will reset it at sceGxmEndScene call
+ 		if (old_framebuffer != in_use_framebuffer) {
+diff -ruN a/source/shared.h b/source/shared.h
+--- a/source/shared.h	2026-11-10 17:13:41.229428305 -0500
++++ b/source/shared.h	2026-11-10 20:08:16.714291195 -0500
+@@ -1391,6 +1391,19 @@
+ 	// Detecting requested attachment
+ 	switch (attachment) {
+ 	case GL_COLOR_ATTACHMENT0:
++#ifdef VP29_SLOW24
++		if (vgl_s24_on) {
++			vgl_s24[VGL_S24_ATTACH_N]++;
++			// (patch 0031: an attachment that gives up the object's render target and depth buffer: a detach, or another size. The
++			// object's next scene makes both again - sceGxmCreateRenderTarget and a depth/stencil allocation)
++			if (fb->target) {
++				uint32_t nw, nh;
++				vglGetTexSizes(&tex->gxm_tex, &nw, &nh);
++				if (tex_id == 0 || (int)nw != old_w || (int)nh != old_h)
++					vgl_s24[VGL_S24_RT_DIRTY_N]++;
++			}
++		}
++#endif
+ 		vglGetTexSizes(&tex->gxm_tex, &fb->width, &fb->height);
+ 		fb->stride = VGL_ALIGN(fb->width, 8) * tex_format_to_bytespp(fmt);
+ 		fb->data = vglGetTexData(&tex->gxm_tex);
+diff -ruN a/source/textures.c b/source/textures.c
+--- a/source/textures.c	2026-11-08 16:55:13.532831156 -0500
++++ b/source/textures.c	2026-11-10 20:08:24.437678021 -0500
+@@ -1730,8 +1730,17 @@
+ 	// (Galaxy port, patch 0015) from the first slot that may be free (vgl_tex_first_free): every slot below it is in use, so the
+ 	// names are the ones the walk from 1 finds - without reading hundreds of slots for every new texture.
+ 	int j = 0;
++#ifdef VP29_SLOW24
++	const GLuint s24_from = vgl_tex_first_free;
++#endif
+ 	for (GLuint i = vgl_tex_first_free; i < TEXTURES_NUM; i++) {
+ 		if (texture_slots[i].status == TEX_UNUSED) {
++#ifdef VP29_SLOW24
++			if (vgl_s24_on) { // (patch 0031: names handed out and the slots read to find them)
++				vgl_s24[VGL_S24_GENTEX_N]++;
++				vgl_s24[VGL_S24_GENTEX_WALK] += i + 1 - (j ? res[j - 1] + 1 : s24_from);
++			}
++#endif
+ 			res[j++] = i;
+ 			vgl_tex_first_free = i + 1;
+ 			texture_slots[i].status = TEX_UNINITIALIZED;
+@@ -1815,6 +1824,10 @@
+ 	}
+ #endif
+ 
++#ifdef VP29_SLOW24
++	if (vgl_s24_on && n > 0)
++		vgl_s24[VGL_S24_DELTEX_N] += n;
++#endif
+ 	// Deallocating given textures and invalidating used texture ids
+ 	for (int j = 0; j < n; j++) {
+ 		GLuint i = gl_textures[j];
+@@ -1888,6 +1901,13 @@
+ 		SET_GL_ERROR(GL_INVALID_VALUE)
+ 	}
+ #endif
++#ifdef VP29_SLOW24
++	if (vgl_s24_on) {
++		vgl_s24[VGL_S24_TEXIMG_N]++;
++		if (!data)
++			vgl_s24[VGL_S24_TEXIMG_NULL_N]++;
++	}
++#endif
+ 
+ #ifdef HAVE_UNPURE_TEXTURES
+ 	if (tex->mip_start < 0)
+diff -ruN a/source/utils/mem_utils.c b/source/utils/mem_utils.c
+--- a/source/utils/mem_utils.c	2026-11-08 16:55:13.533377409 -0500
++++ b/source/utils/mem_utils.c	2026-11-10 20:08:00.916695649 -0500
+@@ -34,6 +34,36 @@
+ 
+ GLboolean vgl_has_cdlg_support = GL_TRUE;
+ 
++#ifdef VP29_SLOW24
++// (patch 0031) see mem_utils.h. The free-space tracking: vglMemFree asks the mspace for its statistics, which (dlmalloc's
++// malloc_stats; the SDK also lists a sceClibMspaceMallocStatsFast beside it) may walk every chunk of the pool, and the pools' chunk
++// headers sit in uncached memory (CDRAM for the video pool). vglMemFreeFast instead keeps, from its first call on, the usable bytes
++// of every block allocated and freed through vgl_* in each pool and returns the exact figure taken then minus what was taken since.
++// The difference to the exact figure is the chunk overhead of the blocks made since (a few bytes each) and whatever another thread
++// allocated in the moment the base was taken; vglMemFreeFastResync takes the exact figure again.
++volatile uint32_t vgl_s24[VGL_S24_COUNT] = {1};
++GLboolean vgl_s24_on = GL_FALSE;
++static GLboolean s24_track = GL_FALSE;
++static size_t s24_base[VGL_MEM_EXTERNAL];
++static volatile int32_t s24_delta[VGL_MEM_EXTERNAL];
++static inline __attribute__((always_inline)) void s24_took(vglMemType type, void *ptr, int sign) {
++	if (s24_track && ptr && (unsigned)type < VGL_MEM_EXTERNAL) {
++		__atomic_fetch_add(&s24_delta[type], sign * (int32_t)vgl_malloc_usable_size(ptr), __ATOMIC_RELAXED);
++		__atomic_fetch_add(&vgl_s24[VGL_S24_LIVE0 + type], (uint32_t)sign, __ATOMIC_RELAXED);
++	}
++}
++#define S24_MEM_BEGIN() const uint32_t s24_t0 = vgl_s24_on ? vgl_s24_now() : 0
++#define S24_MEM_ALLOC_END(type, res) \
++	do { \
++		if (vgl_s24_on && (type) < VGL_MEM_EXTERNAL) { \
++			vgl_s24_add(VGL_S24_MEM0 + 5 * (type) + ((res) ? 0 : 4), 1); \
++			vgl_s24_add(VGL_S24_MEM0 + 5 * (type) + 1, vgl_s24_now() - s24_t0); \
++		} else if (vgl_s24_on && (type) == VGL_MEM_EXTERNAL) \
++			vgl_s24_add(VGL_S24_EXT_ALLOC_N, 1); \
++		s24_took((type), (res), 1); \
++	} while (0)
++#endif
++
+ #ifdef HAVE_WRAPPED_ALLOCATORS
+ void *__real_calloc(uint32_t nmember, uint32_t size);
+ void __real_free(void *addr);
+@@ -626,7 +656,16 @@
+ #else
+ 	} else if (mempool_size[type]) {
+ 		SceClibMspaceStats stats;
++#ifdef VP29_SLOW24
++		S24_MEM_BEGIN();
++		sceClibMspaceMallocStats(mempool_mspace[type], &stats);
++		if (vgl_s24_on) {
++			vgl_s24_add(VGL_S24_MEMFREE_N, 1);
++			vgl_s24_add(VGL_S24_MEMFREE_US, vgl_s24_now() - s24_t0);
++		}
++#else
+ 		sceClibMspaceMallocStats(mempool_mspace[type], &stats);
++#endif
+ 		return stats.capacity - stats.current_in_use;
+ 	} else
+ 		return 0;
+@@ -671,6 +710,10 @@
+ 		return;
+ 
+ 	vglMemType type = vgl_mem_get_type_by_addr(ptr);
++#ifdef VP29_SLOW24
++	S24_MEM_BEGIN();
++	s24_took(type, ptr, -1);
++#endif
+ 	if (type == VGL_MEM_EXTERNAL)
+ #ifdef HAVE_WRAPPED_ALLOCATORS
+ 		__real_free(ptr);
+@@ -692,8 +735,25 @@
+ 	else if (mempool_mspace[type])
+ 		sceClibMspaceFree(mempool_mspace[type], ptr);
+ #endif
++#ifdef VP29_SLOW24
++	if (vgl_s24_on && (unsigned)type < VGL_MEM_EXTERNAL) {
++		vgl_s24_add(VGL_S24_MEM0 + 5 * type + 2, 1);
++		vgl_s24_add(VGL_S24_MEM0 + 5 * type + 3, vgl_s24_now() - s24_t0);
++	}
++#endif
+ }
+ 
++#ifdef VP29_SLOW24
++// (patch 0031) the four allocators below are the inner ones; the counted and tracked wrappers with the public names follow them
++static void *vgl_malloc_s24(size_t size, vglMemType type);
++static void *vgl_calloc_s24(size_t num, size_t size, vglMemType type);
++static void *vgl_memalign_s24(size_t alignment, size_t size, vglMemType type);
++static void *vgl_realloc_s24(void *ptr, size_t size);
++#define vgl_malloc vgl_malloc_s24
++#define vgl_calloc vgl_calloc_s24
++#define vgl_memalign vgl_memalign_s24
++#define vgl_realloc vgl_realloc_s24
++#endif
+ void *vgl_malloc(size_t size, vglMemType type) {
+ 	if (type == VGL_MEM_EXTERNAL)
+ #ifdef HAVE_WRAPPED_ALLOCATORS
+@@ -803,3 +863,102 @@
+ 	return heap_realloc(type, ptr, size);
+ #endif
+ }
++
++#ifdef VP29_SLOW24
++#undef vgl_malloc
++#undef vgl_calloc
++#undef vgl_memalign
++#undef vgl_realloc
++void *vgl_malloc(size_t size, vglMemType type) {
++	S24_MEM_BEGIN();
++	void *res = vgl_malloc_s24(size, type);
++	S24_MEM_ALLOC_END(type, res);
++	return res;
++}
++
++void *vgl_calloc(size_t num, size_t size, vglMemType type) {
++	S24_MEM_BEGIN();
++	void *res = vgl_calloc_s24(num, size, type);
++	S24_MEM_ALLOC_END(type, res);
++	return res;
++}
++
++void *vgl_memalign(size_t alignment, size_t size, vglMemType type) {
++	S24_MEM_BEGIN();
++	void *res = vgl_memalign_s24(alignment, size, type);
++	S24_MEM_ALLOC_END(type, res);
++	return res;
++}
++
++void *vgl_realloc(void *ptr, size_t size) {
++	if (!ptr || !s24_track)
++		return vgl_realloc_s24(ptr, size);
++	// (the old block's bytes leave the tracked figure, the new block's come in; a failed realloc keeps the old block)
++	const vglMemType type = vgl_mem_get_type_by_addr(ptr);
++	const size_t old_size = (unsigned)type < VGL_MEM_EXTERNAL ? vgl_malloc_usable_size(ptr) : 0;
++	void *res = vgl_realloc_s24(ptr, size);
++	if (res && (unsigned)type < VGL_MEM_EXTERNAL) {
++		const vglMemType new_type = vgl_mem_get_type_by_addr(res);
++		__atomic_fetch_sub(&s24_delta[type], (int32_t)old_size, __ATOMIC_RELAXED);
++		if ((unsigned)new_type < VGL_MEM_EXTERNAL)
++			__atomic_fetch_add(&s24_delta[new_type], (int32_t)vgl_malloc_usable_size(res), __ATOMIC_RELAXED);
++	}
++	return res;
++}
++
++void vglSlowStatsEnable(GLboolean on) {
++	vgl_s24_on = on ? GL_TRUE : GL_FALSE;
++}
++
++// The exact free figure of every pool again, the tracking from now on.
++void vglMemFreeFastResync(void) {
++	for (int t = 0; t < VGL_MEM_EXTERNAL; t++) {
++		__atomic_store_n(&s24_delta[t], 0, __ATOMIC_RELAXED);
++		s24_base[t] = vgl_mem_get_free_space(t);
++	}
++	s24_track = GL_TRUE;
++}
++
++size_t vglMemFreeFast(vglMemType type) {
++	if (type >= VGL_MEM_EXTERNAL)
++		return vgl_mem_get_free_space(type);
++	if (!s24_track)
++		vglMemFreeFastResync();
++	const int64_t v = (int64_t)s24_base[type] - (int64_t)__atomic_load_n(&s24_delta[type], __ATOMIC_RELAXED);
++	return v > 0 ? (size_t)v : 0;
++}
++
++// One pool's statistics both ways, timed (a diagnostic for the host's profile line): out[0..3] sceClibMspaceMallocStats (capacity,
++// unk, peak_in_use, current_in_use), out[4] its us, out[5..8] sceClibMspaceMallocStatsFast, out[9] its us, out[10] vglMemFreeFast's
++// figure (0 before the tracking started), out[11] 1 when the tracking runs. All 0 for a pool without an mspace.
++void vglMemStatsProbe(vglMemType type, uint32_t *out) {
++	for (int i = 0; i < 12; i++)
++		out[i] = 0;
++#ifndef HAVE_CUSTOM_HEAP
++	if (type >= VGL_MEM_EXTERNAL || !mempool_mspace[type])
++		return;
++	SceClibMspaceStats a, b;
++	uint32_t t0 = vgl_s24_now();
++	sceClibMspaceMallocStats(mempool_mspace[type], &a);
++	uint32_t t1 = vgl_s24_now();
++	sceClibMspaceMallocStatsFast(mempool_mspace[type], &b);
++	uint32_t t2 = vgl_s24_now();
++	out[0] = a.capacity; out[1] = a.unk; out[2] = a.peak_in_use; out[3] = a.current_in_use; out[4] = t1 - t0;
++	out[5] = b.capacity; out[6] = b.unk; out[7] = b.peak_in_use; out[8] = b.current_in_use; out[9] = t2 - t1;
++	if (s24_track) {
++		const int64_t v = (int64_t)s24_base[type] - (int64_t)__atomic_load_n(&s24_delta[type], __ATOMIC_RELAXED);
++		out[10] = v > 0 ? (uint32_t)v : 0;
++		out[11] = 1;
++	}
++#endif
++}
++
++void vglGetSlowStats(uint32_t *out, uint32_t n) {
++	vgl_s24[VGL_S24_PURGE_FILL] = frame_elem_purge_idx;
++	vgl_s24[VGL_S24_RT_PURGE_FILL] = frame_rt_purge_idx;
++	vgl_s24[VGL_S24_TEX_FIRST_FREE] = vgl_tex_first_free;
++	vgl_s24[VGL_S24_FB_ACTIVE] = vgl_s24_fb_active();
++	for (uint32_t i = 0; i < n; i++)
++		out[i] = i < VGL_S24_COUNT ? vgl_s24[i] : 0;
++}
++#endif
+diff -ruN a/source/utils/mem_utils.h b/source/utils/mem_utils.h
+--- a/source/utils/mem_utils.h	2026-11-08 16:55:13.533422551 -0500
++++ b/source/utils/mem_utils.h	2026-11-10 20:08:00.917305549 -0500
+@@ -110,6 +110,42 @@
+ void *vgl_realloc(void *ptr, size_t size);
+ void vgl_free(void *ptr);
+ 
++#ifdef VP29_SLOW24
++// ---- Patch 0031 (VP29_SLOW24, slow24): counters for the Galaxy back end's copy profile, and an O(1) free-space figure.
++// Nothing is counted or timed until the host calls vglSlowStatsEnable(GL_TRUE); the tracking behind vglMemFreeFast starts at its
++// first call. Counters are running totals (the host takes differences); times are microseconds of sceKernelGetProcessTimeLow, so
++// a total wraps after 71 minutes, which a difference survives. Slots touched by other threads (the collector's frees and render
++// target destructions, other threads' allocations) are added atomically.
++enum {
++	VGL_S24_VERSION = 0,
++	VGL_S24_RT_CREATE_N, VGL_S24_RT_CREATE_US,   // sceGxmCreateRenderTarget (a framebuffer object's first scene, or after its size changed)
++	VGL_S24_RT_DESTROY_N, VGL_S24_RT_DESTROY_US, // sceGxmDestroyRenderTarget (collector thread, recycling)
++	VGL_S24_SCENE_N, VGL_S24_SCENE_US,           // scene_reset calls that changed the scene (end + begin + what they need)
++	VGL_S24_END_N, VGL_S24_END_US,               // the sceGxmEndScene of those
++	VGL_S24_BEGIN_N, VGL_S24_BEGIN_US,           // the begin part (depth buffer, render target, sceGxmBeginScene)
++	VGL_S24_DEPTH_N, VGL_S24_DEPTH_US,           // depth/stencil buffers made for a framebuffer object's scene (in the begin part)
++	VGL_S24_MEM0,                                // per pool type t (VRAM, RAM, PHYCONT, BUDGET): 5 slots from VGL_S24_MEM0 + 5 * t:
++	                                             // allocations, their us, frees, their us, failed allocations (next pool tried)
++	VGL_S24_EXT_ALLOC_N = VGL_S24_MEM0 + 20,     // allocations from the C heap (every pool full)
++	VGL_S24_MEMFREE_N, VGL_S24_MEMFREE_US,       // vglMemFree / vgl_mem_get_free_space calls (sceClibMspaceMallocStats) and their us
++	VGL_S24_GENTEX_N, VGL_S24_GENTEX_WALK,       // glGenTextures names handed out, texture slots read to find them
++	VGL_S24_DELTEX_N,                            // glDeleteTextures names
++	VGL_S24_TEXIMG_N, VGL_S24_TEXIMG_NULL_N,     // glTexImage2D calls, of them with no data (storage only)
++	VGL_S24_ATTACH_N, VGL_S24_RT_DIRTY_N,        // colour attachments made (_glFramebufferTexture2D), render targets given up by them
++	VGL_S24_PURGE_FILL, VGL_S24_RT_PURGE_FILL,   // (now) entries in the collector's list being filled
++	VGL_S24_TEX_FIRST_FREE,                      // (now) glGenTextures' first slot that may be free
++	VGL_S24_FB_ACTIVE,                           // (now) framebuffer objects in use (of 256)
++	VGL_S24_GC_N, VGL_S24_GC_US, VGL_S24_GC_FREED, // collector cycles, their us (collector thread), blocks and targets they freed
++	VGL_S24_LIVE0,                               // per pool type: blocks allocated minus freed since the tracking started (4 slots)
++	VGL_S24_COUNT = VGL_S24_LIVE0 + 4
++};
++extern volatile uint32_t vgl_s24[VGL_S24_COUNT];
++extern GLboolean vgl_s24_on;
++uint32_t vgl_s24_fb_active(void); // (framebuffers.c)
++static inline __attribute__((always_inline)) uint32_t vgl_s24_now(void) { return sceKernelGetProcessTimeLow(); }
++static inline __attribute__((always_inline)) void vgl_s24_add(int slot, uint32_t v) { __atomic_fetch_add(&vgl_s24[slot], v, __ATOMIC_RELAXED); }
++#endif
++
+ // Helper function for fastest memory copy on uncached mem
+ static inline __attribute__((always_inline)) void vgl_memcpy(void *dst, const void *src, size_t size) {
+ #ifndef DISABLE_DMAC
+diff -ruN a/source/vitaGL.h b/source/vitaGL.h
+--- a/source/vitaGL.h	2026-11-10 18:21:27.219573686 -0500
++++ b/source/vitaGL.h	2026-11-10 20:08:57.343003839 -0500
+@@ -1270,6 +1270,13 @@
+ // Gets the total amount of free and used memory in a given internal memory pool.
+ size_t vglMemTotal(vglMemType type);
+ 
++// (patch 0031, VP29_SLOW24) Diagnostics and an O(1) free-memory figure (utils/mem_utils.h lists the counters' slots).
++void vglSlowStatsEnable(GLboolean on);
++void vglGetSlowStats(uint32_t *out, uint32_t n);
++size_t vglMemFreeFast(vglMemType type);
++void vglMemFreeFastResync(void);
++void vglMemStatsProbe(vglMemType type, uint32_t *out);
++
+ // Setups a GL texture with custom internal values.
+ void vglSetupTexture(GLenum target, void *data, SceGxmTextureFormat format, SceGxmTextureType type, GLsizei width, GLsizei height, GLsizei mip_count);
+ 

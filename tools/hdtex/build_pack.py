@@ -12,8 +12,13 @@ Nothing it writes belongs in git. Pack format: tools/hdtex/README.md.
 Per texture: decode the GX level 0 -> fill the colour of fully transparent texels from their
 neighbours (so neither the network nor the filtering drags black into the edges) -> Real-ESRGAN
 4x (realesr-general-x4v3; alpha upscaled the same way, as grey) -> Lanczos down to `scale`x ->
-mip chain by area averaging down to 1x1 -> BC1 (opaque) or BC3 (any alpha below 255).
-Needs: numpy, Pillow, xxhash, torch (CPU), quicktex.
+mip chain by area averaging down to 1x1 (hdtex_model.make_mips) -> BC1 (opaque) or BC3 (any alpha below 255),
+kept only above a compression-quality floor (--psnr-floor: below it the network's detail is blended back toward a plain
+Lanczos enlargement of the original, 100 / 70 / 40 %, and a texture that still misses the floor stays out of the pack:
+the game's own image is used).
+    python3 -E -P tools/hdtex/build_pack.py --report <pack> [--manifest manifest.tsv]
+prints what a finished pack costs (GPU and main memory, per scene) and how much of it the picture can use; needs no game data.
+Needs: numpy, Pillow, xxhash, torch (CPU), quicktex (--report: numpy only).
 """
 import argparse
 import os
@@ -29,12 +34,18 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gxarc  # noqa: E402
 import gxdecode  # noqa: E402
+import hdtex_model  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 COLOUR_FORMATS = {0x4, 0x5, 0x6, 0x8, 0x9, 0xA, 0xE}
 EXCLUDE_NAMES = re.compile(r'(?i)(env|high_?light|hilight|spec|noise|noizu|^ind|ind$|testind|dummy|mask|fooline)')
 MIN_DIM = 16
 PACK_DXT1, PACK_DXT5 = 1, 3
+# Compression-quality floor: PSNR (dB, colour channels, texels the picture shows, level 0 against the image that went into the encoder). On synthetic
+# 256x256 textures through this encoder (tests/test_hdtex_builder.py): smooth gradients 43-51 dB, hard-edged art 51, soft cloth noise 40, fine noise 29,
+# white noise 19. 34 dB separates what BC1/BC3 carries from what it turns to block noise.
+PSNR_FLOOR = 34.0
+BLEND_LADDER = (1.0, 0.7, 0.4)  # the network's share of a texture that misses the floor, before it is left out
 
 
 def tex_key(fmt, w, h, level0, palette):
@@ -44,6 +55,16 @@ def tex_key(fmt, w, h, level0, palette):
     if palette:
         k = xxhash.xxh3_64_intdigest(palette, seed=k)
     return k
+
+
+def pack_bytes(w, h, alpha):
+    """Bytes of an HD pack entry (the whole BC1/BC3 mip chain down to 1x1) for w x h level 0: what the GPU holds for it."""
+    blk, tot = (16 if alpha else 8), 0
+    while True:
+        tot += ((w + 3) // 4) * ((h + 3) // 4) * blk
+        if w == 1 and h == 1:
+            return tot
+        w, h = max(1, w // 2), max(1, h // 2)
 
 
 def read_selection(path):
@@ -60,11 +81,37 @@ def read_selection(path):
 DEFAULT_DATA = os.environ.get('HDTEX_DATA', os.path.join('cooked', 'files'))
 
 
-def collect(data_root, selection):
-    """{key: dict} of the selected textures, deduplicated by content."""
+def all_archives(data_root):
+    """Every archive of ObjectData/ and StageData/ (names as selection.txt gives them; StageData ones with their folder)."""
+    out = []
+    for sub in ('ObjectData', 'StageData'):
+        d = os.path.join(data_root, sub)
+        if os.path.isdir(d):
+            out += [((sub + '/' if sub != 'ObjectData' else '') + f[:-4], None) for f in sorted(os.listdir(d)) if f.endswith('.arc')]
+    return out
+
+
+def read_keylist(path):
+    """A census selection (tools/hdtex/select_from_census.py): '<16 hex digits>' or '<archive>:<texture>' per line, '#' comments.
+    Returns (set of keys, set of 'archive:texture')."""
+    keys, names = set(), set()
+    for line in open(path):
+        line = line.split('#', 1)[0].strip().split('\t')[0].strip()
+        if not line:
+            continue
+        if re.fullmatch(r'[0-9a-fA-F]{16}', line):
+            keys.add(int(line, 16))
+        else:
+            names.add(line)
+    return keys, names
+
+
+def collect(data_root, selection, only=None):
+    """{key: dict} of the selected textures, deduplicated by content. only=(keys, names) (read_keylist): keep just those."""
     texs = {}
-    for arc, rx in selection:
-        path = os.path.join(data_root, 'ObjectData', arc + '.arc')
+    for si, (arc, rx) in enumerate(selection):
+        # (a name without a directory is an ObjectData archive; "LayoutData/Name" or any folder of the converted copy's files/ works too)
+        path = os.path.join(data_root, *(arc.split('/') if '/' in arc else ['ObjectData', arc])) + '.arc'
         if not os.path.exists(path):
             print('missing archive', arc)
             continue
@@ -92,11 +139,13 @@ def collect(data_root, selection):
                 if why:
                     continue
                 k = tex_key(t.fmt, t.w, t.h, t.level0, t.palette)
+                if only is not None and k not in only[0] and '%s:%s' % (arc, t.name) not in only[1]:
+                    continue
                 if k in texs:
                     if '%s:%s' % (arc, t.name) not in texs[k]['names']:
                         texs[k]['names'].append('%s:%s' % (arc, t.name))
                     continue
-                texs[k] = dict(key=k, names=['%s:%s' % (arc, t.name)], t=t)
+                texs[k] = dict(key=k, names=['%s:%s' % (arc, t.name)], t=t, prio=si)
     return texs
 
 
@@ -192,7 +241,7 @@ def fidelity(hd, src, shown, opaque, iters=3):
     return hd
 
 
-def make_hd(entry, net, scale, cache_dir):
+def make_hd(entry, net, scale, cache_dir, floor=PSNR_FLOOR, mip_gamma=1.0):
     import esrgan
     t = entry['t']
     img = gxdecode.decode(t.fmt, t.w, t.h, t.level0, t.palette, t.palFmt)
@@ -219,32 +268,63 @@ def make_hd(entry, net, scale, cache_dir):
     if opaque:
         hd = np.concatenate([hd, np.ones((H, W, 1), np.float32)], -1)
     hd = fidelity(hd, src, alpha > 0, opaque)
-    if not opaque and np.isin(alpha, (0, 255)).all():
-        # The original's alpha is on/off (CMPR): so is the replacement's, with the network's
-        # smoother outline (a soft rim would leak into transparent frames around the art).
-        hd[..., 3] = (hd[..., 3] >= 0.5).astype(np.float32)
+    # the plain enlargement of the original: what the network's detail is blended back toward when the compression cannot carry it
+    soft = np.clip(resize_f(src, W, H, Image.LANCZOS), 0, 1)
+    if opaque:
+        soft = np.concatenate([soft[..., :3], np.ones((H, W, 1), np.float32)], -1)
+    onoff = (not opaque) and bool(np.isin(alpha, (0, 255)).all())
+    r = finish(hd, soft, opaque, onoff, floor, mip_gamma)
+    r.update(w=W, h=H, orig=img, opaque=opaque)
+    return r
+
+
+def finish(hd, soft, opaque, onoff, floor=PSNR_FLOOR, mip_gamma=1.0):
+    """float RGBA `hd` (and `soft`, the same size) -> encoded levels. The network's share is 1.0, 0.7, 0.4 until level 0 reaches `floor` dB (0: no floor);
+    a texture that never does is `rejected` (no levels): the game's own image stays. onoff: the original's alpha is on/off, so is the replacement's
+    (a soft rim would leak into transparent frames around the art). Returns dict(fmt, levels, hd (decoded level 0), psnr, psnr_block, psnr_levels,
+    blend, rejected)."""
+    H, W = hd.shape[:2]
     fmt = PACK_DXT1 if opaque else PACK_DXT5
-    levels, decoded = [], []
-    lw, lh = W, H
-    while True:
-        lv = hd if (lw, lh) == (W, H) else resize_f(hd, lw, lh, Image.BOX)
+    best = None
+    for blend in BLEND_LADDER:
+        cand = hd if blend == 1.0 else np.clip(blend * hd + (1 - blend) * soft, 0, 1)
+        if onoff:
+            cand = cand.copy()
+            cand[..., 3] = (cand[..., 3] >= 0.5).astype(np.float32)
+        lv0 = (np.clip(cand, 0, 1) * 255 + 0.5).astype(np.uint8)
+        if opaque:
+            lv0[..., 3] = 255
+        blob, dec = encode(lv0, W, H, fmt)
+        p = hdtex_model.psnr_rgb(lv0, dec)
+        if best is None or p > best[0]:
+            best = (p, blend, cand, lv0, blob, dec)
+        if p >= floor:
+            break
+    p, blend, cand, lv0, blob, dec = best
+    out = dict(fmt=fmt, hd=dec, psnr=p, psnr_block=hdtex_model.worst_block_psnr(lv0, dec), blend=blend, rejected=None, levels=[], psnr_levels=[p])
+    if floor and p < floor:
+        out['rejected'] = 'PSNR %.1f dB under the %.0f dB floor at every blend' % (p, floor)
+        return out
+    if opaque:
+        cand = np.concatenate([cand[..., :3], np.ones(cand.shape[:2] + (1,), np.float32)], -1)
+    chain = hdtex_model.make_mips(cand, gamma=mip_gamma)
+    out['levels'].append(blob)
+    for lv in chain[1:]:
+        lh, lw = lv.shape[:2]
         lv8 = (np.clip(lv, 0, 1) * 255 + 0.5).astype(np.uint8)
         if opaque:
             lv8[..., 3] = 255
-        blob, dec = encode(lv8, lw, lh, fmt)
-        levels.append(blob)
-        decoded.append((lv8, dec))
-        if lw == 1 and lh == 1:
-            break
-        lw, lh = max(1, lw // 2), max(1, lh // 2)
-    src8, dec0 = decoded[0]
-    mse = np.mean((src8.astype(np.float32) - dec0.astype(np.float32)) ** 2)
-    psnr = 99.0 if mse == 0 else 10 * np.log10(255.0 ** 2 / mse)
-    return dict(fmt=fmt, w=W, h=H, levels=levels, orig=img, hd=dec0, psnr=psnr, opaque=opaque)
+        b, d = encode(lv8, lw, lh, fmt)
+        out['levels'].append(b)
+        if min(lw, lh) >= 8:
+            out['psnr_levels'].append(hdtex_model.psnr_rgb(lv8, d))
+    return out
 
 
 def write_pack(path, items):
-    """items: [(key, entry, hd)]; layout documented in README.md."""
+    """items: [(key, entry, hd)]; layout documented in README.md. The index is sorted by key; the data is written in the order of the selection
+    (entry['prio'], the line of selection.txt: Mario and Luigi first), so that a reader that keeps only the first part of a large pack in memory
+    (GXV_HDTEX_PRELOAD) holds the textures that are used most."""
     items = sorted(items, key=lambda x: x[0])
     names = bytearray()
     name_off = []
@@ -256,16 +336,17 @@ def write_pack(path, items):
     names_off = index_off + 32 * n
     data_off = (names_off + len(names) + 63) // 64 * 64
     blobs = bytearray()
-    index = bytearray()
-    for (k, e, hd), no in zip(items, name_off):
+    offs = {}
+    for k, e, hd in sorted(items, key=lambda x: (x[1].get('prio', 0), x[1]['names'][0], x[0])):
         while (data_off + len(blobs)) % 64:
             blobs.append(0)
-        off = data_off + len(blobs)
-        data = b''.join(hd['levels'])
-        blobs += data
+        offs[k] = data_off + len(blobs)
+        blobs += b''.join(hd['levels'])
+    index = bytearray()
+    for (k, e, hd), no in zip(items, name_off):
         t = e['t']
         flags = 0 if hd['opaque'] else 1
-        index += struct.pack('<QIIHHHHBBBBI', k, off, len(data), hd['w'], hd['h'], t.w, t.h, hd['fmt'], len(hd['levels']), t.fmt, flags, no)
+        index += struct.pack('<QIIHHHHBBBBI', k, offs[k], sum(len(b) for b in hd['levels']), hd['w'], hd['h'], t.w, t.h, hd['fmt'], len(hd['levels']), t.fmt, flags, no)
     size = data_off + len(blobs)
     hdr = struct.pack('<4sIIIIIII', b'HDTX', 1, n, index_off, names_off, data_off, size, 0)
     with open(path + '.tmp', 'wb') as f:
@@ -308,16 +389,45 @@ def main():
     ap.add_argument('--selection', default=os.path.join(HERE, 'selection.txt'))
     ap.add_argument('--scale', type=int, default=2, choices=(2, 4))
     ap.add_argument('--threads', type=int, default=2)
-    ap.add_argument('--list', action='store_true', help='only list the selected textures')
+    ap.add_argument('--psnr-floor', type=float, default=PSNR_FLOOR,
+                    help='compression PSNR (dB) a texture must reach to go in (default %.0f; 0: none): below it the network\'s share is lowered, then the texture is left out' % PSNR_FLOOR)
+    ap.add_argument('--mip-gamma', type=float, default=1.0, help='mip levels are averaged in encoded values (1, the game\'s own way) or in linear light (2.2)')
+    ap.add_argument('--list', action='store_true', help='only list the selected textures (with their size on screen verdicts)')
+    ap.add_argument('--report', metavar='PACK', help='print what a finished pack costs and how much of it the picture can use (no game data needed), then stop')
+    ap.add_argument('--manifest', default=None, help='with --report: the build\'s manifest.tsv, for the PSNR figures')
+    ap.add_argument('--list-all', action='store_true', help='ignore selection.txt: every eligible texture of ObjectData/ and StageData/, as TSV '
+                    '(key, fmt, w, h, alpha, hd bytes, names): what tools/hdtex/select_from_census.py reads')
+    ap.add_argument('--select-keys', default=None, help='a census selection file (keys and/or archive:texture lines): build exactly those, searched in '
+                    'every archive (selection.txt is not used)')
     a = ap.parse_args()
+    if a.report:
+        res = hdtex_model.report(a.report, manifest=a.manifest, floor=a.psnr_floor)
+        sys.exit(1 if res.get('problems') else 0)
     if a.model is None:
         a.model = os.path.join(a.out, 'models', 'realesr-general-x4v3.pth')
-    texs = collect(a.data, read_selection(a.selection))
-    print('%d textures selected' % len(texs))
-    if a.list:
+    if a.list_all or a.select_keys:
+        texs = collect(a.data, all_archives(a.data), read_keylist(a.select_keys) if a.select_keys else None)
+    else:
+        texs = collect(a.data, read_selection(a.selection))
+    if a.list_all:
+        print('# key\tfmt\tw\th\talpha\thd_bytes_2x\tnames')
         for k, e in sorted(texs.items(), key=lambda kv: kv[1]['names'][0]):
             t = e['t']
-            print('%016x %-6s %4dx%-4d %s' % (k, gxarc.FMT_NAME[t.fmt], t.w, t.h, ' '.join(e['names'])))
+            alpha = int(not bool((gxdecode.decode(t.fmt, t.w, t.h, t.level0, t.palette, t.palFmt)[..., 3] == 255).all()))
+            print('%016x\t%s\t%d\t%d\t%d\t%d\t%s' % (k, gxarc.FMT_NAME[t.fmt], t.w, t.h, alpha, pack_bytes(t.w * 2, t.h * 2, alpha), ' '.join(e['names'])))
+        return
+    print('%d textures selected' % len(texs))
+    table = hdtex_model.read_screensize()
+    if a.list:
+        tot = 0
+        print('%-16s %-6s %-9s %9s  %-15s %s' % ('key', 'format', 'size', 'est. KiB', 'screen', 'names (est.: the 2x replacement as DXT1 with its mip chain; DXT5 is twice that)'))
+        for k, e in sorted(texs.items(), key=lambda kv: kv[1]['names'][0]):
+            t = e['t']
+            est = (t.w * a.scale) * (t.h * a.scale) // 2 * 4 // 3
+            tot += est
+            d, ty, cl, v = hdtex_model.screen_note(e['names'], t.w, t.h, table)
+            print('%016x %-6s %4dx%-4d %9.0f  %-15s %s' % (k, gxarc.FMT_NAME[t.fmt], t.w, t.h, est / 1024.0, v, ' '.join(e['names'])))
+        print('about %.2f MiB of GPU memory if all were alive at once (%d textures)' % (tot / 1048576.0, len(texs)))
         return
     import torch
     import esrgan
@@ -326,26 +436,40 @@ def main():
     cache = os.path.join(a.out, 'cache')
     os.makedirs(cache, exist_ok=True)
     os.makedirs(os.path.join(a.out, 'sheets'), exist_ok=True)
-    items, rows = [], []
+    items, rows, left_out = [], [], []
     t0 = time.time()
     for i, (k, e) in enumerate(sorted(texs.items(), key=lambda kv: kv[1]['names'][0])):
-        hd = make_hd(e, net, a.scale, cache)
-        items.append((k, e, hd))
+        hd = make_hd(e, net, a.scale, cache, a.psnr_floor, a.mip_gamma)
+        e['hd'] = hd
         rows.append((e['names'][0], hd['orig'], hd['hd']))
-        print('[%3d/%d %5.0f s] %016x %-40s %4dx%-4d -> %4dx%-4d %s psnr %.1f' % (i + 1, len(texs), time.time() - t0, k, e['names'][0][:40], e['t'].w, e['t'].h,
-                                                                              hd['w'], hd['h'], 'DXT1' if hd['fmt'] == PACK_DXT1 else 'DXT5', hd['psnr']), flush=True)
-    size = write_pack(os.path.join(a.out, 'hdtex.pack'), items)
+        if hd['rejected']:
+            left_out.append((k, e))
+        else:
+            items.append((k, e, hd))
+        print('[%3d/%d %5.0f s] %016x %-40s %4dx%-4d -> %4dx%-4d %s psnr %.1f (worst block %.1f)%s%s' % (
+            i + 1, len(texs), time.time() - t0, k, e['names'][0][:40], e['t'].w, e['t'].h, hd['w'], hd['h'], 'DXT1' if hd['fmt'] == PACK_DXT1 else 'DXT5',
+            hd['psnr'], hd['psnr_block'], '' if hd['blend'] == 1.0 else ', network share %.0f %%' % (100 * hd['blend']),
+            ' LEFT OUT: ' + hd['rejected'] if hd['rejected'] else ''), flush=True)
+    pack = os.path.join(a.out, 'hdtex.pack')
+    size = write_pack(pack, items)
     with open(os.path.join(a.out, 'manifest.tsv'), 'w') as f:
-        f.write('key\tnames\torig_fmt\torig_w\torig_h\thd_fmt\thd_w\thd_h\tlevels\tbytes\torig_bytes\tpsnr_db\n')
-        for k, e, hd in sorted(items, key=lambda x: x[1]['names'][0]):
-            t = e['t']
-            f.write('%016x\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%.1f\n' % (k, ' '.join(e['names']), gxarc.FMT_NAME[t.fmt], t.w, t.h,
-                                                                             'DXT1' if hd['fmt'] == PACK_DXT1 else 'DXT5', hd['w'], hd['h'],
-                                                                             len(hd['levels']), sum(len(b) for b in hd['levels']), len(t.level0), hd['psnr']))
+        f.write('key\tnames\torig_fmt\torig_w\torig_h\thd_fmt\thd_w\thd_h\tlevels\tbytes\torig_bytes\tpsnr_db\tpsnr_block_db\tpsnr_mip_min_db\tnetwork_share\t'
+                'gpu_bytes_console\tdetail_px\ttypical_px\tcloseup_px\tscreen\tstatus\n')
+        for k, e in sorted(texs.items(), key=lambda kv: kv[1]['names'][0]):
+            t, hd = e['t'], e['hd']
+            ls = hdtex_model.level_sizes(hd['w'], hd['h'], max(1, len(hd['levels'])), hd['fmt'])
+            con = sum(x[2] for x in ls[:hdtex_model.console_levels(hd['w'], hd['h'], len(ls))])
+            d, ty, cl, v = hdtex_model.screen_note(e['names'], t.w, t.h, table)
+            f.write('%016x\t%s\t%s\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%d\t%.0f\t%s\t%s\t%s\t%s\n' % (
+                k, ' '.join(e['names']), gxarc.FMT_NAME[t.fmt], t.w, t.h, 'DXT1' if hd['fmt'] == PACK_DXT1 else 'DXT5', hd['w'], hd['h'], len(hd['levels']),
+                sum(len(b) for b in hd['levels']), len(t.level0), hd['psnr'], hd['psnr_block'], min(hd['psnr_levels']), hd['blend'] * 100, con, d,
+                '' if ty is None else ty, '' if cl is None else cl, v, 'left out: ' + hd['rejected'] if hd['rejected'] else 'in the pack'))
     per = 18
     for s in range(0, len(rows), per):
         sheet(os.path.join(a.out, 'sheets', 'sheet%02d.png' % (s // per)), rows[s:s + per])
-    print('pack: %s, %d textures, %.2f MiB (%.0f s)' % (os.path.join(a.out, 'hdtex.pack'), len(items), size / 1048576.0, time.time() - t0))
+    print('pack: %s, %d textures, %.2f MiB (%.0f s)%s' % (pack, len(items), size / 1048576.0, time.time() - t0,
+                                                         '; %d left out under the PSNR floor' % len(left_out) if left_out else ''))
+    hdtex_model.report(pack, manifest=os.path.join(a.out, 'manifest.tsv'), floor=a.psnr_floor)
 
 
 if __name__ == '__main__':

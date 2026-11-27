@@ -1,0 +1,18 @@
+# integ (13 Nov): pictures of the pause screen, Messages, Players and a player's page in play (host); the guest only stands there.
+name: pics_pause
+description: "pictures: pause screen, Messages grid, Players list, a player's page"
+seconds: 290
+shot_size: 960x544
+requires: {strings: [SMG_MP_AUTO_MODE]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 2500, PETARI_HANDHELD_UI: 1, PETARI_BACKEND: vgx}
+processes:
+  - name: host
+    input: "@pics_pause_host+30,200-200.3:PLUS"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 2, PETARI_STAGE: "EggStarGalaxy:1", SMG_MP_NAME: Rosalina, SMG_MP_LOOK: 3}
+  - name: guest
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join, SMG_MP_NAME: Toadette, SMG_MP_LOOK: 2}
+rules:
+  - 'nocrash *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] ui: screen session/'

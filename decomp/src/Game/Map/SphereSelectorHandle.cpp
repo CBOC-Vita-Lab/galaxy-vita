@@ -78,7 +78,17 @@ void SphereSelectorHandle::appear() {
     LiveActor::appear();
     _C0.negate(MR::getCamZdir());
     _C0.y = 0.0f;
+#ifdef TARGET_PC
+    if (MR::normalizeOrZero(&_C0)) {
+        // A vertical entrance camera has no horizontal forward. Its screen-up axis still defines the heading.
+        _C0.set(MR::getCamYdir());
+        _C0.y = 0.0f;
+        if (MR::normalizeOrZero(&_C0))
+            _C0.set<f32>(0.0f, 0.0f, -1.0f);
+    }
+#else
     MR::normalize(&_C0);
+#endif
     resetRotateParam();
     _10C = 0;
     clearPointerVelocity();
@@ -86,6 +96,10 @@ void SphereSelectorHandle::appear() {
     _DC.cross(TVec3f(0.0f, 1.0f, 0.0f), _C0);
     MR::rotateVecDegree(&_E8, TVec3f(0.0f, 1.0f, 0.0f), _DC, ::cRotateAppearX);
     MR::normalize(&_E8);
+#ifdef TARGET_PC
+    if (!mIsFileSelectMode)
+        updateBaseMtx();
+#endif
     MR::setStageBGMState(::cBgmAppearState, ::cBgmAppearFrames);
     setNerve(GET_NERVE(SphereSelectorHandle, SphereSelectorHandleNrvWait));
 }

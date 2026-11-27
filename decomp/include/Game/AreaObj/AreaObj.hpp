@@ -3,6 +3,9 @@
 #include "Game/NameObj/NameObj.hpp"
 #include "Game/Util/Array.hpp"
 #include <JSystem/JGeometry/TMatrix.hpp>
+#ifdef TARGET_PC
+#include "port/obj_cut.h"  // (GXV_OC_LIGHTFIND, objcut: every write of a validity / wake flag moves port_area_gen)
+#endif
 
 class AreaForm;
 class StageSwitchCtrl;
@@ -28,6 +31,15 @@ public:
     void setFollowMtx(const TPos3f*);
     TPos3f* getFollowMtx() const;
 
+#ifdef TARGET_PC
+    void validate() {
+        PortAreaSet(mIsValid, true);
+    }
+
+    void invalidate() {
+        PortAreaSet(mIsValid, false);
+    }
+#else
     void validate() {
         mIsValid = true;
     }
@@ -35,11 +47,21 @@ public:
     void invalidate() {
         mIsValid = false;
     }
+#endif
 
     bool isValid() const {
         return mIsValid && _15 && mIsAwake;
     }
 
+#ifdef TARGET_PC
+    void awake() {
+        PortAreaSet(mIsAwake, true);
+    }
+
+    void sleep() {
+        PortAreaSet(mIsAwake, false);
+    }
+#else
     void awake() {
         mIsAwake = true;
     }
@@ -47,6 +69,7 @@ public:
     void sleep() {
         mIsAwake = false;
     }
+#endif
 
     template < typename T >
     T* getForm() const {

@@ -26,6 +26,8 @@ namespace vgx { bool LogEnabled() { return false; } namespace host { bool Create
 namespace {
 using namespace fshalf_keys;
 constexpr uint64_t kBaseDigest = 0xe7c6226babda9132ull; // SourceDigest of the generator before GXV_FS_HALF
+// (shadowpx23) SourceDigest under GXV_FS_HALF=1 / 3 before GXV_FS_HALF_MINOR (caf5e11): with the minor switch off they must not move
+constexpr uint64_t kMode1Digest = 0xab471d2202d7ed5bull, kMode3Digest = 0xb7cef59904a7eb4aull;
 
 void Require(bool ok, const char* why) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", why); std::exit(1); }
@@ -373,7 +375,8 @@ GlTotals RunGl(const std::vector<vgx::FsKey>& keys, Rng& r, unsigned trials) {
 
 int main(int argc, char** argv) {
     const long mode = vgx::FsHalfMode();
-    std::printf("GXV_FS_HALF=%ld\n", mode);
+    const long minor = vgx::FsHalfMinorMode();
+    std::printf("GXV_FS_HALF=%ld GXV_FS_HALF_MINOR=%ld\n", mode, minor);
 
     // ---- 1. byte identity
     unsigned nk = 0;
@@ -381,6 +384,12 @@ int main(int argc, char** argv) {
     std::printf("digest (%u keys) %016llx\n", nk, static_cast<unsigned long long>(digest));
     if (mode == 0 || mode == 2) Require(digest == kBaseDigest, "switch off or 2: the generated sources are byte-identical to the generator before GXV_FS_HALF");
     else Require(digest != kBaseDigest, "switch 1 / 3 changes the text of some keys");
+    // (GXV_FS_HALF_MINOR: off, modes 1 / 3 are byte for byte as before it; on, mode 1 changes more texts; modes 0 / 2 never move, above)
+    if (mode == 1 || mode == 3) {
+        const uint64_t pin = mode == 1 ? kMode1Digest : kMode3Digest;
+        if (minor == 0) Require(digest == pin, "GXV_FS_HALF_MINOR off: the texts of GXV_FS_HALF=1 / 3 are those before the minor switch");
+        else Require(digest != pin, "GXV_FS_HALF_MINOR on: more keys are half");
+    }
     {
         Rng r(77);
         size_t changed = 0, total = 3000;
@@ -391,7 +400,8 @@ int main(int argc, char** argv) {
             vgx::GenerateFragmentShaderPrecision(k, flt, false);
             vgx::GenerateFragmentShaderPrecision(k, hlf, true);
             const bool eligible = vgx::FsHalfEligible(k);
-            Require(eligible == ((mode == 1 || mode == 3) && vgx::FsHalfAnalyse(k).Eligible(mode)), "FsHalfEligible follows the mode");
+            const vgx::FsHalfReport r0 = vgx::FsHalfAnalyse(k);
+            Require(eligible == ((mode == 1 || mode == 3) && (r0.Eligible(mode) || (minor == 1 && r0.EligibleMinor()))), "FsHalfEligible follows the mode");
             Require(src.text == (eligible ? hlf.text : flt.text), "the generated text is the half text for an eligible key and the float text for every other key");
             Require((src.text.find("hvec") != std::string::npos) == eligible, "only eligible keys mention the half types");
             if (eligible) {
@@ -498,14 +508,58 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- 5. GXV_FS_HALF_MINOR (shadowpx23): the keys it adds (bound below 2 levels, alpha tests within the strict bound)
+    if (mode == 1 && minor == 1) {
+        std::printf("GXV_FS_HALF_MINOR: random keys of the shape real materials have that mode 1 leaves float and the minor switch makes half:\n");
+        Rng gen(4242), inputs(7);
+        size_t made = 0, tried = 0, tested = 0;
+        Totals t;
+        std::vector<vgx::FsKey> added;
+        while (made < 400 && tried < 400000) {
+            ++tried;
+            const vgx::FsKey k = RandomKey(gen, false);
+            const vgx::FsHalfReport rep = vgx::FsHalfAnalyse(k);
+            if (!rep.eligibleShape || rep.Eligible(1) || !rep.EligibleMinor()) continue;
+            Require(vgx::FsHalfEligible(k), "an added key is made half");
+            ++made;
+            if (rep.alphaTested) ++tested;
+            if (added.size() < 40) added.push_back(k);
+            t.Add(RunKey(k, rep, inputs, 400));
+        }
+        std::printf("  (%zu added among %zu random keys, %zu of them alpha-tested)\n", made, tried, tested);
+        Print("keys the minor switch adds", t);
+        const double n = static_cast<double>(std::max<size_t>(t.samples, 1));
+        std::printf("  8-bit difference to the float shader: 0 in %.3f%%, 1 in %.3f%%, 2 or a discard flip in %.3f%% (max %d); discard flips %zu of %zu tested fragments\n",
+                    100.0 * t.same / n, 100.0 * t.off1 / n, 100.0 * t.off2 / n, t.maxDiff, t.discardFlips, t.discardSamples);
+        Require(made >= 50, "the minor switch adds keys");
+        Require(t.maxDiff <= 2, "added keys: the 8-bit result is at most two levels off");
+        Require(t.worstRatio <= 1.0, "the measured error never exceeds the bound");
+        Require(t.discardFlips * 1000 <= std::max<size_t>(t.discardSamples, 1), "added alpha-tested keys: the discard decision differs for at most 0.1% of the fragments");
+        if (!added.empty()) {
+            Require(vgx::host::CreateContext(), "Mesa GLES context");
+            GLuint rt = 0, fbo = 0;
+            glGenTextures(1, &rt); glActiveTexture(GL_TEXTURE0 + 7); glBindTexture(GL_TEXTURE_2D, rt);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glGenFramebuffers(1, &fbo); glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, rt, 0);
+            Require(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "RGBA8 target");
+            glViewport(0, 0, 1, 1); glDisable(GL_DITHER); glDisable(GL_BLEND); glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+            Rng glr(4711);
+            const GlTotals g = RunGl(added, glr, 12);
+            std::printf("  Mesa: %zu added keys, %zu fragments: half text == float text in %zu; CPU model == Mesa float in %zu, one level off in %zu, more in %zu\n",
+                        g.keys, g.frags, g.textSame, g.modelSame, g.modelOff1, g.modelMore);
+            Require(g.textSame == g.frags && g.modelMore == 0, "added keys: the text is the float text with half types; the model is Mesa's pipeline");
+        }
+    }
+
     // ---- the warm-up list
     if (argc > 1 && mode == 1) {
         const std::vector<vgx::FsKey> list = ReadList(argv[1]);
         Require(!list.empty(), "the warm-up list is readable");
-        size_t shape = 0, e1 = 0, e3 = 0;
+        size_t shape = 0, e1 = 0, e3 = 0, eMinor = 0;
         std::map<std::string, size_t> why;
         Rng inputs(5);
-        Totals t;
+        Totals t, tMinor;
         size_t exactKeys = 0, near95 = 0;
         double exactBound = 0.0;
         for (const vgx::FsKey& k : list) {
@@ -513,7 +567,10 @@ int main(int argc, char** argv) {
             if (!rep.eligibleShape) { ++why[rep.why]; continue; }
             ++shape;
             if (rep.Eligible(3)) ++e3;
-            if (!rep.Eligible(1)) continue;
+            if (!rep.Eligible(1)) {
+                if (minor == 1 && rep.EligibleMinor()) { ++eMinor; tMinor.Add(RunKey(k, rep, inputs, 2000)); } // (GXV_FS_HALF_MINOR's additions)
+                continue;
+            }
             ++e1;
             const Totals one = RunKey(k, rep, inputs, 2000);
             t.Add(one);
@@ -528,6 +585,14 @@ int main(int argc, char** argv) {
         std::printf("  keys with the same 8-bit result in at least 99.9%% of the fragments: %zu of %zu (largest bound among them %.2f levels); 95..99.9%%: %zu\n",
                     exactKeys, e1, exactBound, near95);
         Require(t.maxDiff <= 1 && t.worstRatio <= 1.0, "the list's eligible keys: at most one level off, bound holds");
+        if (minor == 1) {
+            std::printf("  GXV_FS_HALF_MINOR adds %zu of the list's keys (half: %zu -> %zu)\n", eMinor, e1, e1 + eMinor);
+            Print("the list's keys the minor switch adds", tMinor);
+            const double n = static_cast<double>(std::max<size_t>(tMinor.samples, 1));
+            std::printf("  8-bit difference: 0 in %.3f%%, 1 in %.3f%%, 2 or a discard flip in %.3f%% (max %d); discard flips %zu of %zu\n", 100.0 * tMinor.same / n,
+                        100.0 * tMinor.off1 / n, 100.0 * tMinor.off2 / n, tMinor.maxDiff, tMinor.discardFlips, tMinor.discardSamples);
+            Require(tMinor.maxDiff <= 2 && tMinor.worstRatio <= 1.0, "the list's added keys: at most two levels off, bound holds");
+        }
     }
     std::printf("PASS\n");
     return 0;

@@ -1,37 +1,44 @@
-Super Mario Galaxy Vita 2.2.1
-===========================
+Super Mario Galaxy for PS Vita — Version 3.0
+============================================
 
-Thanks for trying Super Mario Galaxy on your PS Vita. It runs natively, not in an
-emulator, and it was built to feel at home on the Vita: touch to point, rear
-touch to aim, tilt to steer, and a button to spin.
+Thanks for playing Super Mario Galaxy natively on PlayStation Vita! Version 3.0
+brings full-resolution 60 FPS across most of the game, hardware 2x MSAA in
+Quality 30 mode, instant ~0.4s shader loading (5,401 precompiled shaders), and
+the first-ever Super Mario Galaxy multiplayer for local Wi-Fi and online play.
 
 What You Need
 -------------
 - A PS Vita with homebrew (VitaShell)
-- About 2.5 GB free on the memory card
+- About 2.5 GB free on your memory card
 - Your own Super Mario Galaxy disc image (Wii, USA, RMGE01)
 - libshacccg.suprx set up on the Vita (once)
+- Strongly recommended for best 60 FPS performance:
+  * CapUnlocker plug-in (unlocks the Vita's 4th CPU core)
+  * PSVshell / PSVshellPlus (overclock to 500 MHz CPU / 222 MHz GPU / 222 MHz BUS)
 
-Easy Install
-------------
-Use CBOC Vita Installer: pick Super Mario Galaxy, choose your disc image,
-press Install. https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest
+Easy Install (Recommended)
+--------------------------
+Use CBOC Vita Installer: pick Super Mario Galaxy, choose your disc image, and
+click Install. https://github.com/CBOC-Vita-Lab/vita-installer/releases/latest
 
 Manual Install
 --------------
-1. Prepare your game files from your disc image, and shrink the movies
-   so they play smoothly (MANUAL-PREPARE-GAME.md, steps 1 to 3).
-2. Copy them to ux0:data/smg/game/ on the Vita.
-3. Copy Galaxy-Vita.vpk to the Vita.
-4. Install it in VitaShell and launch the bubble.
+1. Prepare your game files from your disc image (MANUAL-PREPARE-GAME.md).
+   Shrinking cutscene movies is optional and only saves card space.
+2. Copy the prepared files to ux0:data/smg/game/ on your Vita.
+3. Copy Galaxy-Vita.vpk to your Vita.
+4. Install it in VitaShell and launch from the LiveArea.
 
-Updating
---------
-Install the new VPK over the old one. Your saves and settings stay.
+Updating from 2.x
+-----------------
+Install the new 3.0 VPK right over your old one. Your saves and settings stay
+intact. If LiveArea still shows the old look, run Refresh LiveArea in VitaShell.
 
-Have Fun
---------
-Controls:     CONTROLS.md
-What's new:   CHANGELOG.md
-Known issues: KNOWN-ISSUES.md
-Project page: https://github.com/CBOC-Vita-Lab/galaxy-vita
+Guides & Links
+--------------
+3.0 Highlights: docs/RELEASE-3.0.md
+Multiplayer:    docs/MULTIPLAYER.md
+Controls:       CONTROLS.md (tilt levels also support left stick automatically)
+Full changelog: CHANGELOG.md
+Known issues:   KNOWN-ISSUES.md
+Project page:   https://github.com/CBOC-Vita-Lab/galaxy-vita

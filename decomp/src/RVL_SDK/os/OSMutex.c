@@ -125,6 +125,50 @@ void OSUnlockMutex(OSMutex* mutex) {
     OSRestoreInterrupts(enabled);
 }
 
+#if defined(__vita__)
+// defaults48 (GXV_MUTEX_GATE_FAST=1, platform/src/os/os_thread.cpp port_mutex_gate_fast: why this is safe and when it applies).
+// OSLockMutex / OSUnlockMutex without their interrupt-disable section, for the cases in which they touch nothing but the mutex and the
+// calling thread's own mutex list: 1 = done (the fields are as the game's own function leaves them), 0 = not done, the caller calls
+// the game's function. No safe point inside (no call that can switch guest threads or take an interrupt).
+extern int port_mutex_gate_fast(void) __attribute__((weak));
+int port_mutex_lock_gate_fast(OSMutex* mutex) {
+    OSThread* currentThread;
+    OSThread* ownerThread;
+    if (!port_mutex_gate_fast || !port_mutex_gate_fast()) return 0;
+    currentThread = OSGetCurrentThread();
+    if (currentThread == NULL) return 0;
+    ownerThread = mutex->thread;
+    if (ownerThread == NULL) {
+        mutex->thread = currentThread;
+        mutex->count++;
+        EnqueueTail(&currentThread->queueMutex, mutex, link);
+        return 1;
+    }
+    if (ownerThread == currentThread) {
+        mutex->count++;
+        return 1;
+    }
+    return 0;  // (another thread holds it: the game's function sleeps)
+}
+int port_mutex_unlock_gate_fast(OSMutex* mutex) {
+    OSThread* currentThread;
+    if (!port_mutex_gate_fast || !port_mutex_gate_fast()) return 0;
+    currentThread = OSGetCurrentThread();
+    if (currentThread == NULL || mutex->thread != currentThread || mutex->count <= 0) return 0;
+    if (mutex->count > 1) {
+        mutex->count--;
+        return 1;
+    }
+    // (the last unlock: only when nobody waits for it and the caller's priority was not raised by a waiter; else the game's function
+    // wakes the waiter and works the priority out)
+    if (mutex->queue.head != NULL || currentThread->priority < currentThread->base) return 0;
+    mutex->count = 0;
+    DequeueItem(&currentThread->queueMutex, mutex, link);
+    mutex->thread = NULL;
+    return 1;
+}
+#endif
+
 void __OSUnlockAllMutex(OSThread* thread) {
     OSMutex* mutex;
     while (thread->queueMutex.head) {

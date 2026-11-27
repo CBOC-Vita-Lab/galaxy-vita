@@ -20,6 +20,10 @@
 // No allocation per job or per batch (malloc'd once at Init; never operator new: on game threads it takes the game heap).
 #pragma once
 
+extern "C++" {  // (this header may be included inside an extern "C" block, as perf.cpp does; wait_bound.h has templates)
+#include "port/wait_bound.h"  // (hitch30: BoundedWait)
+}
+
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -55,6 +59,7 @@ public:
         uint32_t byRetire = 0;    // taken at the retire (nobody read them, and the worker had not reached them)
         uint32_t waits = 0;       // touches that found the worker in the middle of the job and waited for it
         uint32_t spins = 0;       // the polls of those waits
+        uint32_t byHelp = 0;      // (GXV_PAR_DL) taken by the game thread while it waited at another join (HelpOne)
     };
 
     bool Init(uint32_t capacity, RunFn fn) {
@@ -145,7 +150,28 @@ public:
         st.dispatched = pending;
         left.store(pending, std::memory_order_relaxed);  // (published with the batch by the worker dispatch's release)
         outstanding = pending != 0;
+        helpCursor = count;
         return pending;
+    }
+    // (GXV_PAR_DL, gamedraw23) The game thread, idle at another join while the batch is outstanding: runs ONE job nobody has started,
+    // walking from the end (the worker walks from the start, so the two rarely meet), as a toucher would (the same atomic claim).
+    // false: no job left to take from here on.
+    bool HelpOne() {
+        if (!outstanding) {
+            return false;
+        }
+        while (helpCursor > 0) {
+            const uint32_t i = --helpCursor;
+            uint8_t v = items[i].load(std::memory_order_acquire);
+            if (v == async_detail::kPending && items[i].compare_exchange_strong(v, async_detail::kTaken, std::memory_order_acq_rel)) {
+                run(jobs[i]);
+                items[i].store(async_detail::kDone, std::memory_order_release);
+                left.fetch_sub(1, std::memory_order_release);
+                ++st.byHelp;
+                return true;
+            }
+        }
+        return false;
     }
     // The worker's function (SpecWorker calls it on the jobs it claimed: pending -> running; it marks them done afterwards).
     static void Item(void* self, uint32_t i) {
@@ -255,10 +281,18 @@ private:
         }
         // (the worker is in it: wait until it is done)
         ++st.waits;
-        while (items[i].load(std::memory_order_acquire) != async_detail::kDone) {
-            ++st.spins;
-            async_detail::Relax();
-        }
+        // (hitch30: the worker may be a priority step below this thread, on its core: spin at most GXV_BOUND_SPIN_US, then nap)
+        std::atomic< uint8_t >& item = items[i];
+        Stats& stats = st;
+        BoundedWait(
+            [&item, &stats]() {
+                const bool w = item.load(std::memory_order_acquire) != async_detail::kDone;
+                if (w) {
+                    ++stats.spins;
+                }
+                return w;
+            },
+            AsyncWaitCensus(), WaitBoundSpinUs(), WaitBoundNapUs());
     }
 
     Job* jobs = nullptr;
@@ -268,7 +302,7 @@ private:
     Slot* keyTable = nullptr;
     Slot* outTable = nullptr;
     RunFn run = nullptr;
-    uint32_t cap = 0, mask = 0, count = 0, stamp = 0;
+    uint32_t cap = 0, mask = 0, count = 0, stamp = 0, helpCursor = 0;
     bool recording = false, outstanding = false;
     Stats st;
     alignas(64) std::atomic< uint32_t > left{0};

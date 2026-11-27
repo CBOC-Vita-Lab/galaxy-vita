@@ -2,6 +2,9 @@
 
 #include "JSystem/J3DGraphBase/J3DMaterial.hpp"
 #include "JSystem/J3DGraphBase/J3DSys.hpp"
+#ifdef TARGET_PC
+#include "JSystem/J3DGraphBase/J3DPacket.hpp"
+#endif
 
 J3DColorBlock* J3DMaterial::createColorBlock(u32 flags) {
     J3DColorBlock* rv = NULL;
@@ -199,9 +202,10 @@ void J3DMaterial::makeDisplayList_private(J3DDisplayListObj* pDLObj) {
 }
 
 void J3DMaterial::makeDisplayList() {
-    if (!j3dSys.getMatPacket()->isLocked()) {
-        j3dSys.getMatPacket()->mDiffFlag = mDiffFlag;
-        makeDisplayList_private(j3dSys.getMatPacket()->getDisplayListObj());
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+    if (!J3D_MSYS.getMatPacket()->isLocked()) {
+        J3D_MSYS.getMatPacket()->mDiffFlag = mDiffFlag;
+        makeDisplayList_private(J3D_MSYS.getMatPacket()->getDisplayListObj());
     }
 }
 
@@ -225,17 +229,22 @@ void J3DMaterial::loadSharedDL() {
 }
 
 void J3DMaterial::patch() {
-    j3dSys.getMatPacket()->mDiffFlag = mDiffFlag;
-    j3dSys.getMatPacket()->beginPatch();
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+    J3D_MSYS.getMatPacket()->mDiffFlag = mDiffFlag;
+    J3D_MSYS.getMatPacket()->beginPatch();
     mTevBlock->patch();
     mColorBlock->patch();
     mTexGenBlock->patch();
-    j3dSys.getMatPacket()->endPatch();
+    J3D_MSYS.getMatPacket()->endPatch();
 }
 
 void J3DMaterial::diff(u32 diffFlags) {
-    if (j3dSys.getMatPacket()->isEnabled_Diff()) {
-        j3dSys.getMatPacket()->beginDiff();
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+    if (J3D_MSYS.getMatPacket()->isEnabled_Diff()) {
+#ifdef TARGET_PC
+        J3DPortSetDiffKinds(diffFlags);  // (GXV_J3DNATIVE: the kinds of animation that made this differed list)
+#endif
+        J3D_MSYS.getMatPacket()->beginDiff();
 
         mTevBlock->diff(diffFlags);
         mIndBlock->diff(diffFlags);
@@ -247,12 +256,16 @@ void J3DMaterial::diff(u32 diffFlags) {
         mTexGenBlock->diff(diffFlags);
         mColorBlock->diff(diffFlags);
 
-        j3dSys.getMatPacket()->endDiff();
+        J3D_MSYS.getMatPacket()->endDiff();
+#ifdef TARGET_PC
+        J3DPortSetDiffKinds(0);
+#endif
     }
 }
 
 void J3DMaterial::calc(f32 const (*param_0)[4]) {
-    if (j3dSys.checkFlag(0x40000000)) {
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+    if (J3D_MSYS.checkFlag(0x40000000)) {
         mTexGenBlock->calcPostTexMtx(param_0);
     } else {
         mTexGenBlock->calc(param_0);
@@ -263,7 +276,8 @@ void J3DMaterial::calc(f32 const (*param_0)[4]) {
 }
 
 void J3DMaterial::calcDiffTexMtx(f32 const (*param_0)[4]) {
-    if (j3dSys.checkFlag(0x40000000)) {
+    PortDlGameEnter();  // (GXV_PAR_DL, J3DSys.hpp)
+    if (J3D_MSYS.checkFlag(0x40000000)) {
         mTexGenBlock->calcPostTexMtxWithoutViewMtx(param_0);
     } else {
         mTexGenBlock->calcWithoutViewMtx(param_0);
@@ -275,7 +289,7 @@ void J3DMaterial::setCurrentMtx() {
 }
 
 void J3DMaterial::calcCurrentMtx() {
-    if (!j3dSys.checkFlag(0x40000000)) {
+    if (!J3D_MSYS.checkFlag(0x40000000)) {
         mCurrentMtx.setCurrentTexMtx(getTexCoord(0)->getTexGenMtx(), getTexCoord(1)->getTexGenMtx(), getTexCoord(2)->getTexGenMtx(),
                                      getTexCoord(3)->getTexGenMtx(), getTexCoord(4)->getTexGenMtx(), getTexCoord(5)->getTexGenMtx(),
                                      getTexCoord(6)->getTexGenMtx(), getTexCoord(7)->getTexGenMtx());

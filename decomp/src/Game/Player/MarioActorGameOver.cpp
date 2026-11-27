@@ -1,4 +1,6 @@
 #include "Game/LiveActor/HitSensor.hpp"
+#include "Game/MP/MpBubble.hpp"  // MP3: Play Together "Bubbles" falls
+#include "Game/MP/MpGame.hpp"    // wave8: MpGame::sessionHeld() across brief reconnects
 #include "Game/Player/MarioActor.hpp"
 #include "Game/Player/MarioAnimator.hpp"
 #include "Game/Player/MarioFpView.hpp"
@@ -86,6 +88,11 @@ void MarioActor::forceKill(u32 type) {
 }
 
 void MarioActor::exeGameOver() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     mVelocity.zero();
     calcHeadPos();
     updateRealMtx();
@@ -135,6 +142,11 @@ void MarioActor::exeGameOver() {
 }
 
 void MarioActor::exeGameOverAbyss() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     mVelocity = getLastMove() * 0.99f + mCamDirZ * 35.0f * 0.01f;
     mLastMove = mVelocity;
 
@@ -161,6 +173,11 @@ void MarioActor::exeGameOverAbyss() {
 }
 
 void MarioActor::exeGameOverFire() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     mVelocity.zero();
     calcHeadPos();
     updateRealMtx();
@@ -188,6 +205,11 @@ void MarioActor::exeGameOverFire() {
 }
 
 void MarioActor::exeGameOverSink() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     mVelocity.zero();
     calcHeadPos();
     updateRealMtx();
@@ -238,6 +260,11 @@ void MarioActor::exeGameOverSink() {
 }
 
 void MarioActor::exeGameOverNonStop() {
+#ifdef TARGET_PC
+    if (MpGame::sessionHeld() && MpBubble::interceptDeath(this)) {  // MP3: Play Together "Bubbles": the fall becomes a bubble (no miss)
+        return;
+    }
+#endif
     if (!MR::isFirstStep(this)) {
         return;
     }

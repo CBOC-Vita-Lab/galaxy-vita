@@ -1,4 +1,5 @@
 #include "Game/Scene/StageDataHolder.hpp"
+#include "Game/MP/MpWorld.hpp"  // MP3: placement registry
 #include "Game/NameObj/NameObjFactory.hpp"
 #include "Game/Scene/PlacementInfoOrdered.hpp"
 #include "Game/Scene/SceneObjHolder.hpp"
@@ -166,6 +167,9 @@ void StageDataHolder::requestFileLoadScenario() {
 }
 
 void StageDataHolder::initPlacement() {
+    if (mp_active()) {  // MP3: shared world (Play Together): open this scene's placement registry
+        MpWorldSync::beginPlacement();
+    }
     MR::setInitializeStatePlacementPlayer();
     initPlacementMario();
     MR::setInitializeStatePlacementHighPriority();
@@ -175,6 +179,9 @@ void StageDataHolder::initPlacement() {
     _100->initPlacement();
     _108->initPlacement();
     _10C->initPlacement();
+    if (mp_active()) {  // MP3: shared world: registry complete (sort, keys, CRC, switch map restore)
+        MpWorldSync::placementDone();
+    }
 }
 
 JMapInfoIter StageDataHolder::getCommonPathPointInfo(const JMapInfo** ppOut, int idx) const {
@@ -416,6 +423,11 @@ void StageDataHolder::initPlacementMario() {
 
 JMapInfoIter StageDataHolder::makeMarioJMapInfoIter(const JMapIdInfo& rInfo) const {
     const StageDataHolder* hldr = getStageDataHolderFromZoneId(rInfo.mZoneID);
+#ifdef TARGET_PC
+    if (hldr == nullptr) {  // (routes25: a start id naming a zone this stage does not have; the original would dereference null)
+        return JMapInfoIter();
+    }
+#endif
     s32 id = rInfo._0;
     const JMapInfo* i = hldr->mStartObjs.begin();
 
@@ -433,13 +445,35 @@ JMapInfoIter StageDataHolder::makeMarioJMapInfoIter(const JMapIdInfo& rInfo) con
     return JMapInfoIter();
 }
 
+#ifdef TARGET_PC
+extern "C" int port_start_override_active(void);                          // (GameScene.cpp: PETARI_STAGE "Galaxy:n#id[/zone]" in this leg)
+extern "C" void port_start_override_note(int id, int zone, int found);    // (GameScene.cpp: the "start:" log line)
+#endif
+
 JMapInfoIter StageDataHolder::makeCurrentMarioJMapInfoIter() const {
     JMapIdInfo startID = MR::getCurrentMarioStartIdInfo();
     JMapInfoIter iter = makeMarioJMapInfoIter(startID);
 
     if (iter.isValid()) {
+#ifdef TARGET_PC
+        if (port_start_override_active()) {
+            port_start_override_note(startID._0, startID.mZoneID, 1);
+        }
+#endif
         return iter;
     }
+
+#ifdef TARGET_PC
+    if (port_start_override_active()) {
+        // routes25 (debug hook only): the asked start id is not in this stage: the default start (id 0, zone 0) instead of a null iterator.
+        port_start_override_note(startID._0, startID.mZoneID, 0);
+        JMapIdInfo defaultID(0, 0);
+        iter = makeMarioJMapInfoIter(defaultID);
+        if (iter.isValid()) {
+            return iter;
+        }
+    }
+#endif
 
     return JMapInfoIter();
 }

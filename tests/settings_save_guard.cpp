@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -37,12 +38,18 @@ static SaveDataHandleSequence* getSaveDataHandleSequence() { ++readinessQueries;
 #undef GET_NERVE_ANON
 
 static std::atomic<bool> sRequested{false}, sActive{false};
+static std::atomic<unsigned> sRequestSeq{0};  // (polish23: a new request starts a new series of attempts)
+extern "C" void port_settings_request(void) { if (!sRequested.exchange(true)) sRequestSeq.fetch_add(1); }
+static bool MpRefuseSettings() { return false; }  // (MP3: the multiplayer refusal in settings_runtime.cpp: no session on the host)
+static bool (*port_settings_native_request)(int) = nullptr;  // (settingsnative: no 3.0 menu on the host: the old behaviour)
+static void (*port_par_plant_close_early)(void) = nullptr;  // (GXV_PAR_PLANT_EARLY: weak in the game, absent here)
 static HoldGate sInputHold;
 static uint64_t sRetryAfter = 0;
 static std::string sStatus;
 static int paused = 0, frozen = 0, interrupts = 1, audioHeld = 0;
 static unsigned acquired = 0, menus = 0, restarts = 0;
-static bool rendererHeld = false, failRenderer = false;
+static bool rendererHeld = false, failRenderer = false, failAudio = false, audioDead = false, failMemory = false;
+static unsigned reserves = 0, reservedNow = 0;
 static ExitIntent intent = ExitIntent::Return;
 static uint64_t Now() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -56,7 +63,8 @@ extern "C" int port_settings_time_pause(int value) { const auto old = frozen; fr
 static int port_is_paused() { return paused; }
 static void port_set_paused(int value) { paused = value; }
 static int port_vita_audio_is_held() { return audioHeld; }
-static int port_vita_audio_hold(int value, unsigned) { audioHeld = value; return 1; }
+static int port_vita_audio_hold(int value, unsigned) { if (value && failAudio) return 0; audioHeld = value; return 1; }
+static int port_vita_audio_failed() { return audioDead; }
 static int port_vgx_settings_hold(unsigned, unsigned) { rendererHeld = !failRenderer; return rendererHeld; }
 static void port_vgx_settings_release(unsigned) { rendererHeld = false; }
 static void port_input_settings_rearm() {}
@@ -64,9 +72,21 @@ static void port_vita_input_settings_rearm() {}
 static int port_boot_title_is_visible() { return 1; }
 static int port_vgx_vita_splash_active() { return 0; }
 struct PortHostAllocScope { PortHostAllocScope() {} ~PortHostAllocScope() {} };
-struct Screen { bool Acquire(bool) { return true; } bool Release() { return true; } };
+// (polish23: the menu's memory is reserved before the lease; Release gives it back whether or not the menu ran)
+struct Screen {
+    const char* why = "";
+    bool reserved = false;
+    bool Reserve() {
+        if (reserved) return true;
+        ++reserves;
+        if (failMemory) { why = "no memory (test)"; return false; }
+        reserved = true; ++reservedNow; return true;
+    }
+    bool Acquire(bool) { return Reserve(); }
+    bool Release() { if (reserved) { reserved = false; --reservedNow; } return true; }
+};
 static RunResult MenuAndRetire(Screen&, OpenMode) {
-    assert(rendererHeld && paused && frozen && audioHeld && interrupts == 0);
+    assert(rendererHeld && paused && frozen && (audioHeld || audioDead) && interrupts == 0);
     ++menus;
     return {intent, true};
 }
@@ -75,8 +95,19 @@ static int sceAppMgrLoadExec(const char*, char* const*, void*) { ++restarts; ret
 
 using s32 = int32_t;
 using u32 = uint32_t;
-constexpr int NAND_RESULT_OK = 0, NAND_RESULT_EXISTS = -6, NAND_ACCESS_READ = 1, NAND_ACCESS_WRITE = 2;
-struct NANDFileInfo { int fileDescriptor = 1, accType = NAND_ACCESS_WRITE; };
+constexpr int NAND_RESULT_OK = 0, NAND_RESULT_EXISTS = -6, NAND_ACCESS_READ = 1, NAND_ACCESS_WRITE = 2, NAND_RESULT_UNKNOWN = -64;
+struct NANDFileInfo { int fileDescriptor = 1, accType = NAND_ACCESS_WRITE; unsigned char mark = 0; char origPath[64] = {}; };
+// (the 3.0 NAND write has two writers, the in-place one and the atomic one: this test is about the settings gate around the in-place one, so the atomic
+// writer's own helpers answer "not in use")
+static const unsigned char kAtomicMark = 0xA7;
+static bool takeAtomicOpen(int, std::string*) { return false; }
+static bool nandSafeOn() { return false; }
+static std::mutex sSafeMutex;
+static std::map<int, std::string> sSafeOpenHp;
+static void safeFinishWrite(const std::string&, bool) {}
+static std::string hostPath(const char* p) { return p ? p : ""; }
+static bool mp_save_is_gamedata(const std::string&) { return false; }
+static bool mp_save_commit_tmp(const char*, bool (*)(const std::string&)) { return true; }
 struct NANDRequestInfo {
     std::atomic<int> _40{1};
     int mType = 2, mResult = 0, mFsBlock = 16, mPermission = 0, mAttribute = 0, mInode = 0;
@@ -124,13 +155,14 @@ static void OSReceiveMessage(int*, OSMessage* msg, int) {
 #define write MemoryWrite
 #define fsync MemorySync
 #define close MemoryClose
+void mp_save_note_write(int) {}   // (platform/src/mp/mp_savefile.cpp: the count of writes in flight; the extracted NAND hook calls it)
 #include "settings_save_nand_actual.inc"
 #undef write
 #undef fsync
 #undef close
 
 static void AssertUnheld() {
-    assert(!sActive && !sInputHold.Requested() && !rendererHeld && !paused && !frozen && !audioHeld && interrupts == 1);
+    assert(!sActive && !sInputHold.Requested() && !rendererHeld && !paused && !frozen && !audioHeld && interrupts == 1 && reservedNow == 0);
 }
 static void Deferred() {
     const unsigned before = menus, holds = acquired;
@@ -157,6 +189,33 @@ int main(int argc, char** argv) {
     });
     sequence.state = SaveDataHandleSequenceSave;
     sRequested = true;
+    if (mode == "retry" || mode == "memory" || mode == "audio-failed") {
+        // (polish23) A request is never dropped after three failures: it is tried again (backoff), holds nothing while the memory is
+        // missing, and opens once what was missing is there. An output that failed for good does not keep the menu shut.
+        sequence.state = SaveDataHandleSequenceNoOperation;
+        port_settings_request();  // (a new request: its series of attempts)
+        sRequested = true;
+        failRenderer = mode == "retry";
+        failMemory = mode == "memory";
+        failAudio = mode == "audio-failed";
+        for (unsigned attempt = 0; attempt < 6; ++attempt) {
+            const unsigned holds = acquired;
+            sRetryAfter = 0;
+            port_settings_game_boundary(1);
+            assert(menus == 0 && sRequested);
+            assert(sRetryAfter > Now());  // (the next try is scheduled)
+            if (mode == "memory") assert(acquired == holds);  // (nothing of the game was held for a missing buffer)
+            AssertUnheld();
+        }
+        failRenderer = failMemory = false;
+        if (mode == "audio-failed") audioDead = true;  // (still no hold from the device; it has failed: nothing to silence)
+        sRetryAfter = 0;
+        port_settings_game_boundary(1);
+        assert(menus == 1 && !sRequested); AssertUnheld();
+        std::printf("PASS: actual settings save guard %s (reserves %u)\n", mode.c_str(), reserves);
+        stopInput = true; input.join();
+        return 0;
+    }
     if (mode == "disabled") {
         Deferred(); assert(!readinessQueries);
     } else if (!guarded) {

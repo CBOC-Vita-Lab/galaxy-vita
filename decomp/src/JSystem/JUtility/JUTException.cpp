@@ -158,7 +158,7 @@ void JUTException::panic_f_va(const char* file, int line, const char* format, va
     vsnprintf(buffer, sizeof(buffer) - 1, format, args);
 
     if (sErrorManager == nullptr) {
-        OSPanic(file, line, buffer);
+        OSPanic(file, line, "%s", buffer);  // (fmt32: the finished message is text, not a format: a '%' in it was read as a conversion with no argument)
     }
 
     static OSContext context;

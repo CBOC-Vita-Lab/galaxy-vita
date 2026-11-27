@@ -1,0 +1,15 @@
+# the session menu of a 2-console session (the Settings pill): file2_observatory, then Start (Plus) once play has begun (about 60 s after the barrier line)
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+8-8.5:A|B           # (old 30 s) A+B on the title
+entry+3-3.2:A             # (old 35 s) entry screen: Single Player (its cursor starts there on a fresh mp.cfg)
+single+15-23:PX=0.25|PY=0.3   # (old 50-58 s) pointer on file 2 (screen 400,310 of 640x456; pointer -1..1, y down)
+single+18-18.2:A          # (old 53 s)
+single+31-39:PX=0.52|PY=0.78  # (old 66-74 s) pointer on "Play This File" (485,405)
+single+34-34.2:A          # (old 69 s)
+mark started /\[mp\] session started/ ~80
+started+62-62.3:PLUS
+started+72-72.3:DOWN
+started+76-76.3:DOWN
+started+80-80.3:B

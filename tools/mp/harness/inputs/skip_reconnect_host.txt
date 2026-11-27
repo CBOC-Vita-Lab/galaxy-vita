@@ -1,0 +1,17 @@
+# final run (14 Nov): the host's part of scenarios/qa_skip_hold_waits_in_reconnect.yaml. The host votes twice: once at the start of the intro (a vote the cut guest may never
+# see) and again 1 s after the guest's rejoin ("slot 1 joined ... rejoin=1"), so the guest's late vote has a fresh host vote to meet whatever happened to the first one.
+# scnfix (14 Nov): NAV = the first lines below are file2_observatory.txt's menu path (title -> Single Player -> file 2 -> Play This File -> the Observatory); an SMG_MP_AUTO console only opens its session once it is IN PLAY, so a script that starts at the barrier mark never got there (final run: the guest never joined, no barrier). The host's nav is shifted +30 s, like @file2_observatory+30.
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark single /entry: chose single/ ~35.2
+title+38-38.5:A|B
+entry+33-33.2:A
+single+45-53:PX=0.25|PY=0.3
+single+48-48.2:A
+single+61-69:PX=0.52|PY=0.78
+single+64-64.2:A
+mark play /flow barrier release serial=1 / ~150
+mark intro /skip: (intro camera|fly-in) playing/ ~155
+mark back /\[mp\] slot 1 (joined name=\S+ rejoin=1|resumed)/ ~170
+intro+1-4:A
+back+1-20:A

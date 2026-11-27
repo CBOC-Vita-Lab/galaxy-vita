@@ -3,6 +3,20 @@
 #include <cstdio>
 #include <cstring>
 #include <size_t.h>
+#ifdef TARGET_PC
+#include "port/hot62_memo.h"  // (hot62: GXV_RESIDX_MEMO)
+#include "port/hot_knob.h"
+extern "C" int port_on_frame_thread(void);
+namespace {
+port::hot62::ResMemo sResMemo;
+inline bool ResIdxMemoOn() {
+    return PORT_HOT_KNOB(bool, [] {
+        const char* e = getenv("GXV_RESIDX_MEMO");
+        return e && *e && atoi(e) != 0;   // (w24: default off until a console A/B)
+    }());
+}
+}  // namespace
+#endif
 
 ResFileInfo::ResFileInfo() {
     mName = 0;
@@ -14,10 +28,16 @@ ResFileInfo::ResFileInfo() {
 }
 
 ResTable::ResTable() : mFileInfoTable(0), mCount(0) {
+#ifdef TARGET_PC
+    port::hot62::ResBump();
+#endif
 }
 
 void ResTable::newFileInfoTable(u32 count) {
     mFileInfoTable = new ResFileInfo[count];
+#ifdef TARGET_PC
+    port::hot62::ResBump();  // (hot62: a table array is a new life of its address)
+#endif
 }
 
 ResFileInfo* ResTable::add(const char* pName, void* pRes, bool stripExt) {
@@ -25,6 +45,9 @@ ResFileInfo* ResTable::add(const char* pName, void* pRes, bool stripExt) {
     curInfo->mResource = pRes;
     curInfo->setName(pName, stripExt);
     mCount++;
+#ifdef TARGET_PC
+    port::hot62::ResBump();
+#endif
     return curInfo;
 }
 
@@ -70,6 +93,13 @@ void* ResTable::findRes(const char* pName) const {
 int ResTable::getResIndex(const char* pName) const {
     u32 hash = MR::getHashCodeLower(pName);
 
+#ifdef TARGET_PC
+    // hot62 GXV_RESIDX_MEMO (port/hot62_memo.h): the same first index (or -1), remembered per (table, array, count, hash, generation).
+    if (mCount >= 8 && ResIdxMemoOn() && port_on_frame_thread()) {
+        const ResFileInfo* const pTable = mFileInfoTable;
+        return port::hot62::ResIndex(sResMemo, this, pTable, mCount, hash, [pTable](u32 i) { return pTable[i].mHashCode; });
+    }
+#endif
     for (int i = 0; i < mCount; i++) {
         u32 curHash = mFileInfoTable[i].mHashCode;
 

@@ -25,6 +25,10 @@ public:
     void moveToLower();
     void loadMaterial() const;
     void loadMaterialBloom() const;
+#ifdef TARGET_PC
+    void loadMaterialForm(bool wet) const;  // (dive27: loadMaterial with the camera's wetness given)
+    void rehearse() const;                  // (dive27 GXV_REHEARSE: the wet surface's material and one strip, in a warm-up scope)
+#endif
     // void drawDebug();
 
     // getPoint__9OceanBowlCFii from the debug maps, always inlined

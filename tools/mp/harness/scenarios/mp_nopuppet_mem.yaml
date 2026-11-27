@@ -1,0 +1,35 @@
+# memfix: SMG_MP_TEST_NO_PUPPET_MEM=1 on every console makes the scene-heap guard refuse every puppet instance (self, present, spare).
+# The host is alone in Beach Bowl, a guest drops in mid-scene (late joiner). Nobody gets a puppet: the session, the barrier, the
+# star pointer / tags / party strip keep working and nothing crashes. Each refusal is logged once.
+name: mp_nopuppet_mem
+description: "no puppet instance fits (forced): no crash, players hidden by name only, logged once, spares skipped"
+seconds: 300
+requires: {strings: [SMG_MP_TEST_NO_PUPPET_MEM]}
+env: {PETARI_GAME_CLOCK: 1, PETARI_SHOT_MS: 5000, PETARI_POSLOG: 1, SMG_MP_TEST_NO_PUPPET_MEM: 1}
+processes:
+  - name: host
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: host, SMG_MP_AUTO_SAVE: "copy:2", SMG_MP_AUTO_MODE: together, SMG_MP_AUTO_START: 1, PETARI_STAGE: "HeavenlyBeachGalaxy:1"}
+  - name: guest
+    delay: 110
+    seconds: 170
+    input: "@file2_observatory"
+    env: {SMG_MP_AUTO: join}
+rules:
+  - 'nocrash *'
+  - 'nostall *'
+  - 'save_guard *'
+  - 'expect host /\[mp\] flow move type=0 galaxy=HeavenlyBeachGalaxy/'
+  # the host's scene: every spare was refused for memory (the guard), none was made
+  - 'expect host /\[mp\] puppet spare character=\w+ skipped reason=memory/'
+  - 'absent host /\[mp\] puppet spare character=\w+$/'
+  - 'expect host /\[mp\] puppet heap init napa=\d+ .*spares=0/'
+  # the guest (Luigi, the host is Mario): no self puppet (the MarioActor keeps drawing), the host's puppet is hidden for memory
+  - 'expect guest /\[mp\] puppet slot=1 self NOT created reason=memory/'
+  - 'expect guest /\[mp\] puppet slot=0 hidden character=Mario reason=memory/'
+  - 'absent guest /\[mp\] puppet slot=\d appear model=/'
+  - 'absent host /\[mp\] puppet slot=\d appear model=/'
+  # the late joiner joined and the host kept running in the scene
+  - 'expect host /\[mp\] slot 1 joined name=guest/'
+  - 'expect host /\[mp\] puppet slot=1 hidden character=Luigi reason=nopuppet/'
+  - 'absent * /\[mp\] flow warp failed/'

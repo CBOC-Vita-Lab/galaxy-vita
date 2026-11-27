@@ -1,4 +1,5 @@
 #include "Game/System/GameSequenceDirector.hpp"
+#include "Game/MP/MpGame.hpp"
 #include "Game/NWC24/NWC24Messenger.hpp"
 #include "Game/System/FindingLuigiEventScheduler.hpp"
 #include "Game/System/GameDataTemporaryInGalaxy.hpp"
@@ -21,6 +22,8 @@ void GameSequenceDirector::initAfterResourceLoaded() {
     mSaveDataHandleSequence->initAfterResourceLoaded();
     mGameSequenceProgress->initAfterResourceLoaded();
     mNWC24Messenger->initAfterResourceLoaded();
+    // MP3: the multiplayer menus, windows and toasts (system level, every scene); nothing with SMG_MP_MENU=0
+    MpUi::createSystem();
 }
 
 void GameSequenceDirector::update() {
@@ -28,12 +31,16 @@ void GameSequenceDirector::update() {
     mGameSequenceProgress->update();
     mNWC24Messenger->movement();
     mNWC24Messenger->calcAnim();
+    // MP3: multiplayer menus (a no-op until created; idle and cheap while no menu, window or session is up)
+    MpUi::updateSystem();
 }
 
 void GameSequenceDirector::draw() const {
     mSaveDataHandleSequence->draw();
     mGameSequenceProgress->draw();
     mNWC24Messenger->draw();
+    // MP3: multiplayer menus, over the scene and under the system windows drawn after the director
+    MpUi::drawSystem();
 }
 
 bool GameSequenceDirector::isInitializedGameDataHolder() const {

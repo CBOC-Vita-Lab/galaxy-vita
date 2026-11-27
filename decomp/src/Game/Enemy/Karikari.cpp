@@ -18,6 +18,9 @@
 #include "Game/Util/SoundUtil.hpp"
 #include "Game/Util/StarPointerUtil.hpp"
 #include <JSystem/JGeometry/TUtil.hpp>
+#ifdef TARGET_PC
+#include "port/actor_lod.h"  // (GXV_ALOD: MR::portMarkActorLod)
+#endif
 
 void Karikari_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -146,6 +149,9 @@ void Karikari::init(const JMapInfoIter& rIter) {
 
     MR::onCalcGravity(this);
     MR::declareStarPiece(this, 3);
+#ifdef TARGET_PC
+    MR::portMarkActorLod(this, 4);  // (GXV_ALOD, actorlod23: family 4, see ActorTurnLod.cpp; nothing with the switch off)
+#endif
 }
 
 void Karikari::applyEnvironmentInfluenceToVelocity() {

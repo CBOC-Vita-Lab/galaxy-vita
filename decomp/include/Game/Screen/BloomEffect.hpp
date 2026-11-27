@@ -19,6 +19,9 @@ public:
 
     void preDraw() const;
     void postDraw() const;
+#ifdef TARGET_PC
+    void portRehearse() const;  // (dive27 GXV_REHEARSE)
+#endif
     u8 getIntensity1Default() const;
     u8 getIntensity2Default() const;
     bool isForEachModel() const;
@@ -44,4 +47,7 @@ public:
     /* 0x44 */ JUTTexture* _44;
     /* 0x48 */ Mtx* _48;
     /* 0x4C */ Mtx* _4C;
+#ifdef TARGET_PC
+    JUTTexture* _50 = nullptr;  // GXV_BLOOM_FOLD=2 (bloomfold25): the reduced glow's texture, 1/16 of the picture
+#endif
 };

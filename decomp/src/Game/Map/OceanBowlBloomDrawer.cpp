@@ -43,3 +43,25 @@ void OceanBowlBloomDrawer::draw() const {
         GXEnd();
     }
 }
+
+#ifdef TARGET_PC
+void OceanBowlBloomDrawer::rehearse() const {
+    mHost->loadMaterialBloom();
+    u16 zero = 0;
+    u16 one = 1;
+    GXBegin(GX_TRIANGLESTRIP, GX_VTXFMT0, 50);
+    for (s32 y = 0; y < 25; y++) {
+        OceanBowlPoint* pPoint = mHost->getPoint(1, y);
+        OceanBowlPoint* pPoint2 = mHost->getPoint(0, y);
+        GXPosition3f32(pPoint->mVertexPosition.x, pPoint->mVertexPosition.y, pPoint->mVertexPosition.z);
+        GXColor4u8(0xFF, 0xFF, 0xFF, pPoint->mAlpha);
+        GXTexCoord2s16(zero, zero);
+        GXPosition3f32(pPoint2->mVertexPosition.x, pPoint2->mVertexPosition.y, pPoint2->mVertexPosition.z);
+        GXColor4u8(0xFF, 0xFF, 0xFF, pPoint2->mAlpha);
+        GXTexCoord2s16(one, one);
+        zero += 2;
+        one += 2;
+    }
+    GXEnd();
+}
+#endif

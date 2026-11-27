@@ -1,6 +1,12 @@
 #include "port/control_bindings.h"
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <new>
+
+// settingsnative: the host heap scope (platform/src/port/heap_routing.h); weak: the unit tests link no heap routing
+extern "C" void port_host_alloc_scope_enter(void) __attribute__((weak));
+extern "C" void port_host_alloc_scope_leave(void) __attribute__((weak));
 
 namespace port::controls {
 bool PadDefaultsEnabled();
@@ -104,6 +110,16 @@ CompiledMapping makeCompiledDefaults() {
 }
 CompiledMapping active;
 bool activeSet = false;
+// settingsnative: the mapping in use is read through a pointer, so the native Settings can swap it at a frame boundary (StageActiveMapping /
+// CommitStagedMapping). Every mapping ever made is immutable and never freed (a reader may still hold the one it was given), so a swap costs
+// the readers nothing. null = `active` (the one SetActiveMapping or the defaults made).
+std::atomic<const CompiledMapping*> activePtr{nullptr};
+std::atomic<const CompiledMapping*> stagedPtr{nullptr};
+std::atomic<uint32_t> mappingGeneration{0};
+struct HostScope {
+    HostScope() { if (port_host_alloc_scope_enter) port_host_alloc_scope_enter(); }
+    ~HostScope() { if (port_host_alloc_scope_leave) port_host_alloc_scope_leave(); }
+};
 ControllerCaps activeCaps;
 bool capsSet = false;
 }
@@ -149,12 +165,40 @@ bool SetActiveMapping(const ProfileMapping& map, ProfileId id, const ControllerC
     if (activeSet) { error = "Active controls are immutable until restart"; return false; }
     if (!Compile(map, id, caps, active, error)) return false;
     activeSet = true;
+    activePtr.store(&active, std::memory_order_release);
     return true;
 }
 const CompiledMapping& ActiveMapping() {
+    const CompiledMapping* p = activePtr.load(std::memory_order_acquire);
+    if (p) return *p;
     if (!activeSet) { active = makeCompiledDefaults(); activeSet = true; }
+    activePtr.store(&active, std::memory_order_release);
     return active;
 }
+// settingsnative: compile `map` for the profile and the (frozen) controller in use and keep it ready; the input thread takes it at the top of its
+// next poll (CommitStagedMapping). A second call before the commit replaces the first (its copy is simply never used).
+bool StageActiveMapping(const ProfileMapping& map, std::string& error) {
+    const ProfileId profile = ActiveMapping().profile;
+    CompiledMapping next;
+    if (!Compile(map, profile, ActiveCapabilities(), next, error)) return false;
+    const CompiledMapping* made;
+    {
+        HostScope host;
+        made = new (std::nothrow) CompiledMapping(next);
+    }
+    if (!made) { error = "Out of memory"; return false; }
+    stagedPtr.store(made, std::memory_order_release);
+    return true;
+}
+bool CommitStagedMapping() {
+    const CompiledMapping* made = stagedPtr.exchange(nullptr, std::memory_order_acq_rel);
+    if (!made) return false;
+    ActiveMapping();   // (the first mapping exists before it is replaced)
+    activePtr.store(made, std::memory_order_release);
+    mappingGeneration.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+}
+uint32_t MappingGeneration() { return mappingGeneration.load(std::memory_order_acquire); }
 void FreezeActiveCapabilities(const ControllerCaps& caps) {
     if (!capsSet) { activeCaps = caps; capsSet = true; }
 }

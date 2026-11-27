@@ -26,6 +26,15 @@ void J3DModel::initialize() {
     mVtxColorCalc = NULL;
     mUnkCalc1 = NULL;
     mUnkCalc2 = NULL;
+#ifdef TARGET_PC
+    mPortCullPicture = 0;
+    mPortCensusStamp = 0;  // (GXV_STREAM_CENSUS)
+    mPortTinyCulled = 0;   // (GXV_TINYCULL)
+    mPortFarCulled = 0;    // (GXV_FARDRAW, cpucuts25)
+    mPortFade = 0;         // (GXV_THINFADE, q30fin26)
+    mPortBowl = 0;         // (GXV_BOWL_POSE, bowl31)
+    mPortHrwTag = 0;       // (GXV_HRW, hrw28)
+#endif
 }
 
 s32 J3DModel::entryModelData(J3DModelData* pModelData, u32 mdlFlags, u32 mtxNum) {
@@ -173,37 +182,49 @@ void J3DModel::unlock() {
 }
 
 void J3DModel::makeDL() {
-    j3dSys.setModel(this);
-    j3dSys.setTexture(mModelData->getTexture());
+    PortDlGameEnter();  // (GXV_PAR_DL: the material path, J3DSys.hpp)
+    J3D_MSYS.setModel(this);
+    J3D_MSYS.setTexture(mModelData->getTexture());
 
     u16 matNum = mModelData->getMaterialNum();
     for (u16 i = 0; i < matNum; i++) {
-        j3dSys.setMatPacket(&mMatPacket[i]);
+        J3D_MSYS.setMatPacket(&mMatPacket[i]);
         mModelData->getMaterialNodePointer(i)->makeDisplayList();
     }
 }
 
+// (GXV_PAR_DL: calcMaterial reads and writes the material path's J3DSys, J3D_MSYS; outside GXV_PAR_DL's overlap that is j3dSys itself)
 void J3DModel::calcMaterial() {
-    j3dSys.setModel(this);
+    PortDlGameEnter();
+    J3D_MSYS.setModel(this);
 
     if (checkFlag(J3DMdlFlag_SkinPosCpu)) {
-        j3dSys.onFlag(4);
+        J3D_MSYS.onFlag(4);
     } else {
-        j3dSys.offFlag(4);
+        J3D_MSYS.offFlag(4);
     }
 
     if (checkFlag(J3DMdlFlag_SkinNrmCpu)) {
-        j3dSys.onFlag(8);
+        J3D_MSYS.onFlag(8);
     } else {
-        j3dSys.offFlag(8);
+        J3D_MSYS.offFlag(8);
     }
 
+#ifdef TARGET_PC
+    // (J3DModelData::syncJ3DSysFlags, into J3D_MSYS)
+    if (mModelData->checkFlag(0x20)) {
+        J3D_MSYS.onFlag(J3DSysFlag_PostTexMtx);
+    } else {
+        J3D_MSYS.offFlag(J3DSysFlag_PostTexMtx);
+    }
+#else
     mModelData->syncJ3DSysFlags();
-    j3dSys.setTexture(mModelData->getTexture());
+#endif
+    J3D_MSYS.setTexture(mModelData->getTexture());
 
     u16 matNum = mModelData->getMaterialNum();
     for (u16 i = 0; i < matNum; i++) {
-        j3dSys.setMatPacket(&mMatPacket[i]);
+        J3D_MSYS.setMatPacket(&mMatPacket[i]);
 
         J3DMaterial* material = mModelData->getMaterialNodePointer(i);
         if (material->getMaterialAnm() != NULL) {
@@ -215,11 +236,12 @@ void J3DModel::calcMaterial() {
 }
 
 void J3DModel::calcDiffTexMtx() {
-    j3dSys.setModel(this);
+    PortDlGameEnter();  // (GXV_PAR_DL: the material path, J3DSys.hpp)
+    J3D_MSYS.setModel(this);
 
     u16 matNum = mModelData->getMaterialNum();
     for (u16 i = 0; i < matNum; i++) {
-        j3dSys.setMatPacket(&mMatPacket[i]);
+        J3D_MSYS.setMatPacket(&mMatPacket[i]);
         J3DMaterial* materialNode = mModelData->getMaterialNodePointer(i);
         materialNode->calcDiffTexMtx(getAnmMtx(materialNode->getJoint()->getJntNo()));
     }
@@ -323,6 +345,7 @@ void J3DModel::calc() {
 }
 
 void J3DModel::entry() {
+    PortDlGameEnter();  // (GXV_PAR_DL: entryIn computes and lists materials; J3DSys.hpp)
     j3dSys.setModel(this);
 
     if (checkFlag(J3DMdlFlag_SkinPosCpu)) {

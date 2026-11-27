@@ -1,0 +1,12 @@
+mark title /boot: the title screen has appeared/ ~22
+mark entry /entry: screen shown/ ~32
+mark chose /entry: chose single/ ~36
+title+8-8.5:A|B
+entry+3-3.2:A
+chose+12-20:PX=0.25|PY=0.3
+chose+15-15.2:A
+chose+28-36:PX=0.52|PY=0.78
+chose+31-31.2:A
+mark play /mem scene start probe galaxy=(?!AstroGalaxy|FileSelect)/ ~120
+mark closed /settings: closed/ ~160
+play+18-18.3:PLUS

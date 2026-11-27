@@ -1,0 +1,6 @@
+# env-hrw36-obs-2-box.txt (warp36, 14 Nov 2026): GXV_HRW36_BOX=1 alone: the player's box follows his body (no ground under his feet in it). The Comet Observatory (the hub: no stage line; load the save and walk out). Stand still, then jump on the spot 20 times, then run-and-jump across the deck, 2 minutes in all. Look at the ground round his feet and his shadow on each jump. Expect: the 'bubble' gone or reduced to a thin rim beside his legs; watch his hands in a spin (they may shiver for a picture).
+# Performance mode (its table sets GXV_HRW=5, depth mode 4 and the rest); needs a build with commit 'warp36:'. Judge on the 'hrw: warp36' line (every 5 s): ground parallax mean / max / bins, 'pairs on his ground plane', 'shaped boxes'; beside it 'fps:', 'even:', 'hrw: warp' (warp pass ms, fell back by reason).
+GXV_CHARAA_AUTO=0
+GXV_SHADERPACK=1
+GXV_PICTURE_MODE=60
+GXV_HRW36_BOX=1

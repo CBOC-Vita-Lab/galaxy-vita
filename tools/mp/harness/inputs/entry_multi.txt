@@ -1,0 +1,5 @@
+# Leaderboards / Friends) -> Back -> the entry screen again. PETARI_GAME_CLOCK=1; a fresh mp.cfg (cursor on Single Player).
+30-30.5:A|B
+35-35.2:DOWN               # entry screen: Multiplayer
+37-37.2:A
+52-52.2:B                  # Back: the entry screen again (cursor on Multiplayer)

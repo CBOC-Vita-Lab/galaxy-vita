@@ -27,6 +27,7 @@ public:
     void removeHolderIfIsEqualHeap(JKRHeap*);
     void removeFile(const char*);
     bool isNeedToLoad(const char*) const;
+    bool isNeedToLoadMp(const char*) const;  // MP3: isNeedToLoad + the stale finished request (FileLoader.cpp)
     const RequestFileInfo* getRequestFileInfoConst(const char*) const;
     RequestFileInfo* addRequest(const char*);
 

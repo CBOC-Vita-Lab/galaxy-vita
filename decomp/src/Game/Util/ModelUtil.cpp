@@ -24,7 +24,13 @@ namespace {
 
 #ifdef TARGET_PC
 bool port_dl_defer(LiveActor*, ModelManager*);
+extern const LiveActor* gPortDLOwner;  // (ModelManager.cpp, GXV_DL_GUARD)
 #endif
+#ifdef TARGET_PC
+extern "C" void port_undrawn_joint_touch(const void* model);
+#include "Game/LiveActor/PortBowlPose.hpp"  // (GXV_BOWL_POSE, bowl31)
+#endif
+
 namespace MR {
 
     void FORCE_MATCH_FUNCTION_ORDER1() {
@@ -161,8 +167,12 @@ namespace MR {
         if (port_dl_defer(pActor, pActor->mModelManager)) {
             return;
         }
-#endif
+        gPortDLOwner = pActor;  // (GXV_DL_GUARD's log line names it)
         pActor->mModelManager->updateDL(true);
+        gPortDLOwner = nullptr;
+#else
+        pActor->mModelManager->updateDL(true);
+#endif
     }
 
     bool isEnvelope(J3DMaterial* pMaterial) {
@@ -405,6 +415,12 @@ namespace MR {
     }
 
     void copyJointAnimation(J3DModel* pCopyTo, J3DModel* pCopyFrom) {
+#ifdef TARGET_PC
+        port_undrawn_joint_touch(pCopyFrom);  // (GXV_UNDRAWN_LEAN: the logic reads this model's joints; see JointUtil.cpp)
+        port_undrawn_joint_touch(pCopyTo);
+        PortBowlJointRead(pCopyFrom);  // (GXV_BOWL_POSE, bowl31: the same)
+        PortBowlJointRead(pCopyTo);
+#endif
         u16 jointNum = pCopyTo->getModelData()->getJointNum();
         for (u16 i = 0; i < jointNum; i++) {
             pCopyTo->setAnmMtx(i, pCopyFrom->getAnmMtx(i));
@@ -421,6 +437,12 @@ namespace MR {
     }
 
     void syncJointAnimation(LiveActor* pActor1, const LiveActor* pActor2) {
+#ifdef TARGET_PC
+        port_undrawn_joint_touch(getJ3DModel(pActor1));  // (GXV_UNDRAWN_LEAN: two models share one joint buffer from here on)
+        port_undrawn_joint_touch(getJ3DModel(pActor2));
+        PortBowlJointRead(getJ3DModel(pActor1));  // (GXV_BOWL_POSE, bowl31: the same)
+        PortBowlJointRead(getJ3DModel(pActor2));
+#endif
         getJ3DModel(pActor1)->mMtxBuffer = getJ3DModel(pActor2)->getMtxBuffer();
     }
 

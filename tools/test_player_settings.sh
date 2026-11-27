@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p local/settings-tests local/settings-preview
 CXX=${CXX:-clang++}
-flags=(-std=c++17 -Wall -Wextra -Werror -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -Iplatform/include)
+flags=(-std=c++17 -Wall -Wextra -Werror -Wno-misleading-indentation -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -Iplatform/include)
 core=(platform/src/settings/player_settings.cpp platform/src/settings/settings_store.cpp platform/src/input/control_bindings.cpp)
 run_test() {
   "$CXX" "${flags[@]}" "${core[@]}" "${@:2}" "tests/player_settings_$1.cpp" -o "local/settings-tests/$1"
@@ -13,6 +13,8 @@ case "${1:-all}" in
   config|store) run_test "$1" ;;
   pad) run_test pad; GXV_PAD_DEFAULTS=1 local/settings-tests/pad ;;
   launch) run_test launch platform/src/settings/settings_launch.cpp ;;
+  modes) run_test modes ;;
+  guard) run_test guard platform/src/settings/settings_guard.cpp ;;
   font) run_test font platform/src/settings/settings_font.cpp ;;
   ui) run_test ui platform/src/settings/settings_font.cpp platform/src/settings/settings_ui.cpp platform/src/settings/settings_draw.cpp ;;
   preview)
@@ -24,6 +26,6 @@ case "${1:-all}" in
     local/settings-tests/preview "${args[@]}"
     python3 tools/handheld/settings_preview_png.py "$output"
     for sub in "$output"/backdrop-*; do [[ -d $sub ]] && python3 tools/handheld/settings_preview_png.py "$sub"; done; true ;;
-  all) bash "$0" config; bash "$0" store; bash "$0" pad; bash "$0" launch; bash "$0" font; bash "$0" ui; bash "$0" preview ;;
-  *) echo 'usage: test_player_settings.sh [config|store|pad|launch|font|ui|preview|all]' >&2; exit 2 ;;
+  all) bash "$0" config; bash "$0" store; bash "$0" pad; bash "$0" launch; bash "$0" modes; bash "$0" guard; bash "$0" font; bash "$0" ui; bash "$0" preview ;;
+  *) echo 'usage: test_player_settings.sh [config|store|pad|launch|modes|guard|font|ui|preview|all]' >&2; exit 2 ;;
 esac
