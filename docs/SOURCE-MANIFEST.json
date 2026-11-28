@@ -21748,7 +21748,7 @@
     },
     {
       "path": "server/src/worker.js",
-      "sha256": "3cb7b19be7d315061fc018ff0a8646e156e097813b25b4f5ff08f919f26348fc"
+      "sha256": "716415342a30a39d286d783af1d39b3e58cac7c3305f301542fd2902ea6563ef"
     },
     {
       "path": "server/test/compat-requests.js",
@@ -21952,7 +21952,7 @@
     },
     {
       "path": "server/test/core/svc3-quota.test.js",
-      "sha256": "b974d40b062c1aed52c4520a3cb1c76f5b045e887edeb37c6d9fccba3172e674"
+      "sha256": "c905eb236dfd3dad44923c0a3b3e8dd22e41053e7376a77a20250a4d7bf15dbb"
     },
     {
       "path": "server/test/core/svc3-readme.test.js",

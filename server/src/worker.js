@@ -262,7 +262,8 @@ async function forward(request, env) {
     // clients treat it as an ordinary transient and ask again within seconds, so a live room is not left silent for a minute. The
     // text match is a heuristic (Cloudflare documents no error code for it); an unrecognised quota error just costs a few more requests.
     const msg = String((e && e.message) || e || '');
-    const quota = !(e && (e.overloaded || e.retryable)) && /exceeded|daily|quota|free tier/i.test(msg) && /limit|quota|allowed|free tier|volume/i.test(msg) && !/reset because|code was updated/i.test(msg);
+    const quota = !(e && (e.overloaded || e.retryable)) && /exceeded|daily|quota|free tier/i.test(msg) && /limit|quota|allowed|free tier|volume/i.test(msg) && !/reset because|code was updated|was reset|memory|cpu|subrequest/i.test(msg);
+    console.error(`[object-throw] ${quota ? 'quota' : 'other'}: ${msg.slice(0, 200)}`); // keeps a bug in the object visible in the logs
     if (quota) return errorResponse(new ApiError(503, 'over_budget', 'online play is busy, please try again later', { retryAfterSec: 120, reason: 'object_unavailable' }, { 'retry-after': '120' }));
     return errorResponse(new ApiError(503, 'busy', 'online play is busy, please try again in a moment', { retryAfterSec: 3, reason: 'object_error' }, { 'retry-after': '3' }));
   }
