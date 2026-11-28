@@ -255,7 +255,16 @@ namespace CameraLocalUtil {
         pDst->add(pTarget->getPosition());
     }
 
+#ifdef TARGET_PC
+extern "C" int port_free_camera_owns_reset(void) __attribute__((weak));
+#endif
+
     bool tryCameraReset() {
+#ifdef TARGET_PC
+        if (port_free_camera_owns_reset && port_free_camera_owns_reset()) {
+            return false;
+        }
+#endif
         if (getCameraDirector()->isEnableToReset()) {
             return testCameraPadButtonReset();
         }
@@ -264,6 +273,11 @@ namespace CameraLocalUtil {
     }
 
     bool tryCameraResetTrigger() {
+#ifdef TARGET_PC
+        if (port_free_camera_owns_reset && port_free_camera_owns_reset()) {
+            return false;
+        }
+#endif
         if (!getCameraDirector()->isEnableToReset()) {
             return false;
         }

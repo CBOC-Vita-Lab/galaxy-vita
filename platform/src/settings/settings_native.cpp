@@ -18,6 +18,10 @@ int port_rear_aim_enabled(void) __attribute__((weak));
 int port_rear_aim_toggle(void) __attribute__((weak));
 int port_stick_pointer_enabled(void) __attribute__((weak));
 int port_stick_pointer_toggle(void) __attribute__((weak));
+int port_right_stick_mode(void) __attribute__((weak));
+int port_right_stick_mode_set(int) __attribute__((weak));
+int port_camera_speed(void) __attribute__((weak));
+int port_camera_speed_set(int) __attribute__((weak));
 int port_star_bit_reach(void) __attribute__((weak));
 int port_star_bit_reach_next(void) __attribute__((weak));
 int port_rear_aim_set(int) __attribute__((weak));
@@ -35,6 +39,7 @@ int port_pointer_quick_enabled(void) __attribute__((weak));     // input.cpp onl
 int port_pointer_quick_set(int) __attribute__((weak));
 int port_tilt_level(void) __attribute__((weak));
 int port_tilt_level_set(int level) __attribute__((weak));
+int port_vita_input_external_pad(void) __attribute__((weak));   // vita/runtime/input.cpp: PS TV DS3/DS4 external pad default
 void port_language_set_fallback(const char*) __attribute__((weak));   // dvd.cpp
 int port_card_write_async(const char* path, int mode, const void* data, unsigned bytes) __attribute__((weak));   // os_alarm.cpp
 }
@@ -48,7 +53,7 @@ namespace {
 std::atomic<bool> sMenuOpen{false};
 const NativeHost* sTestHost = nullptr;
 const std::string kNone;
-constexpr const char* kRowKeys[kNativeRows] = {"picture", "language", "less_motion", "tilt", "tilt_strength", "pointer", "camera_zoom", "right_stick", "invert_camera", "rear_touch", "tap_to_jump", "star_bit_reach", "assist60", "allow50"};
+constexpr const char* kRowKeys[kNativeRows] = {"picture", "language", "less_motion", "tilt", "tilt_strength", "pointer", "camera_zoom", "right_stick", "invert_camera", "rear_touch", "tap_to_jump", "star_bit_reach", "assist60", "allow50", "camera_speed"};
 constexpr const char* kLevelKeys[tilt::kLevels] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"};
 constexpr const char* kZoomKeys[11] = {"1.0", "1.1", "1.2", "1.3", "1.4", "1.5", "1.6", "1.7", "1.8", "1.9", "2.0"};
 unsigned Idx(NativeRow r) { return static_cast<unsigned>(r); }
@@ -64,7 +69,8 @@ Keys RowEnvKeys(NativeRow row) {
         case NativeRow::TiltStrength: return {{"GXV_TILT_GAIN", nullptr, nullptr}};
         case NativeRow::Pointer: return {{"GXV_MOUSE_AIM", nullptr, nullptr}};
         case NativeRow::CameraZoom: return {{"PETARI_ZOOM_FORCE", nullptr, nullptr}};
-        case NativeRow::RightStick: return {{"PETARI_RSTICK", nullptr, nullptr}};
+        case NativeRow::RightStick: return {{"PETARI_RSTICK", "GXV_FREE_CAM", nullptr}};
+        case NativeRow::CameraSpeed: return {{"GXV_FREE_CAM_SPEED", nullptr, nullptr}};
         case NativeRow::TapToJump: return {{"PETARI_TOUCH_A", nullptr, nullptr}};
         case NativeRow::StarBitReach: return {{"PETARI_STAR_BIT_REACH", nullptr, nullptr}};
         case NativeRow::Assist60: return {{"GXV_HRW", nullptr, nullptr}};
@@ -74,7 +80,7 @@ Keys RowEnvKeys(NativeRow row) {
 }
 bool HostBacked(NativeRow r) {
     switch (r) {
-        case NativeRow::CameraZoom: case NativeRow::RightStick: case NativeRow::InvertCamera: case NativeRow::RearTouch: case NativeRow::TapToJump: case NativeRow::StarBitReach: return true;
+        case NativeRow::CameraZoom: case NativeRow::RightStick: case NativeRow::CameraSpeed: case NativeRow::InvertCamera: case NativeRow::RearTouch: case NativeRow::TapToJump: case NativeRow::StarBitReach: return true;
         default: return false;
     }
 }
@@ -125,10 +131,14 @@ int PortGet(void*, NativeRow row) {
     const bool handheld = port_handheld && port_handheld();
     switch (row) {
         case NativeRow::CameraZoom: return port_zoom_tenths ? std::clamp(port_zoom_tenths() - 10, 0, 10) : -1;
-        case NativeRow::RightStick: return handheld ? Flag(port_stick_pointer_enabled) : -1;
+        case NativeRow::RightStick:
+            if (!handheld) return -1;
+            if (port_right_stick_mode) return std::clamp(port_right_stick_mode(), 0, 2);
+            return port_stick_pointer_enabled ? (port_stick_pointer_enabled() ? 2 : 0) : -1;
+        case NativeRow::CameraSpeed: return handheld && port_camera_speed ? std::clamp(port_camera_speed() - 1, 0, 9) : -1;
         case NativeRow::RearTouch: return handheld ? Flag(port_rear_aim_enabled) : -1;
         case NativeRow::StarBitReach: return handheld && port_star_bit_reach ? std::clamp(port_star_bit_reach() - 1, 0, 4) : -1;
-        case NativeRow::InvertCamera: return Flag(port_invert_camera_enabled);
+        case NativeRow::InvertCamera: return port_invert_camera_enabled ? std::clamp(port_invert_camera_enabled(), 0, 3) : -1;
         case NativeRow::TapToJump: return Flag(port_tap_jump_enabled);
         case NativeRow::LessMotion: return Flag(port_less_motion_enabled);
         case NativeRow::Tilt: return Flag(port_tilt_stick_enabled);
@@ -141,7 +151,12 @@ bool PortSet(void* c, NativeRow row, int index) {
     if (index < 0 || PortGet(c, row) < 0) return false;
     switch (row) {
         case NativeRow::CameraZoom: if (!port_zoom_adjust) return false; port_zoom_adjust(index - PortGet(c, row)); break;
-        case NativeRow::RightStick: if (port_stick_pointer_set) port_stick_pointer_set(index); else if (PortGet(c, row) != index && port_stick_pointer_toggle) port_stick_pointer_toggle(); break;
+        case NativeRow::RightStick:
+            if (port_right_stick_mode_set) port_right_stick_mode_set(index);
+            else if (port_stick_pointer_set) port_stick_pointer_set(index == 2 ? 1 : 0);
+            else if (PortGet(c, row) != index && port_stick_pointer_toggle) port_stick_pointer_toggle();
+            break;
+        case NativeRow::CameraSpeed: if (!port_camera_speed_set) return false; port_camera_speed_set(index + 1); break;
         case NativeRow::RearTouch: if (port_rear_aim_set) port_rear_aim_set(index); else if (PortGet(c, row) != index && port_rear_aim_toggle) port_rear_aim_toggle(); break;
         case NativeRow::StarBitReach:
             if (port_star_bit_reach_set) port_star_bit_reach_set(index + 1);
@@ -163,6 +178,7 @@ bool PortApplyBindings(void*, const Config& c, controls::ProfileId effective) {
 }
 int PortStandard(void*, NativeRow row) {
     if (row == NativeRow::CameraZoom) return port_handheld && port_handheld() ? 5 : 0;   // 1.5 on a handheld, 1.0 elsewhere (perf.cpp)
+    if (row == NativeRow::RightStick) return port_vita_input_external_pad && port_vita_input_external_pad() ? 2 : 0;   // PS TV defaults to Pointer, handheld to Free Camera
     return -1;
 }
 const NativeLiveOps kPortOps{nullptr, PortGet, PortSet, nullptr, PortApplyBindings, PortStandard};
@@ -296,7 +312,8 @@ bool NativeModel::RowShown(NativeRow row) const {
     switch (row) {
         case NativeRow::Language: return languages_.size() >= 2;
         case NativeRow::Tilt: return host_ && host_->motion;
-        case NativeRow::InvertCamera: return live_[Idx(row)] >= 0 && live_[Idx(NativeRow::RightStick)] == 0;
+        case NativeRow::CameraSpeed: return live_[Idx(row)] >= 0 && live_[Idx(NativeRow::RightStick)] == 0;
+        case NativeRow::InvertCamera: return live_[Idx(row)] >= 0 && (live_[Idx(NativeRow::RightStick)] == 0 || live_[Idx(NativeRow::RightStick)] == 1);
         case NativeRow::RearTouch: return live_[Idx(row)] >= 0 && !ExternalPad();
         case NativeRow::Assist60: return !Mode30(working_);   // (means something only in Smooth Motion)
         case NativeRow::Allow50: return false;                // (retired from UI: clean 2-mode Picture UX; GXV_HRW_ALLOW50 env.txt stays intact)
@@ -306,8 +323,10 @@ bool NativeModel::RowShown(NativeRow row) const {
 unsigned NativeModel::ValueCount(NativeRow row) const {
     switch (row) {
         case NativeRow::Language: return 1 + static_cast<unsigned>(languages_.size());
-        case NativeRow::TiltStrength: return tilt::kLevels;
+        case NativeRow::TiltStrength: case NativeRow::CameraSpeed: return tilt::kLevels;
         case NativeRow::CameraZoom: return 11;
+        case NativeRow::RightStick: return 3;
+        case NativeRow::InvertCamera: return live_[Idx(NativeRow::RightStick)] == 1 ? 2 : 4;   // Classic mode only has Left/Right (Off / Left-Right)
         case NativeRow::StarBitReach: return 5;
         default: return 2;
     }
@@ -321,6 +340,10 @@ unsigned NativeModel::ValueIndex(NativeRow row) const {
             auto at = std::find_if(languages_.begin(), languages_.end(), [&](const std::string& n) { return SameNameNoCase(n, working_.language); });
             return working_.language.empty() || at == languages_.end() ? 0 : static_cast<unsigned>(at - languages_.begin()) + 1;
         }
+        case NativeRow::InvertCamera: {
+            const int v = std::max(0, live_[Idx(row)]);
+            return static_cast<unsigned>(live_[Idx(NativeRow::RightStick)] == 1 ? (v & 1) : (v & 3));
+        }
         default: return HostBacked(row) ? static_cast<unsigned>(std::max(0, live_[Idx(row)])) : ConfigIndex(working_, row);
     }
 }
@@ -329,11 +352,12 @@ const char* NativeModel::ValueKey(NativeRow row, unsigned i) const {
     switch (row) {
         case NativeRow::Picture: return i ? "detailed" : "smooth";
         case NativeRow::Language: return i ? "name" : "system";
-        case NativeRow::LessMotion: case NativeRow::TapToJump: case NativeRow::InvertCamera: case NativeRow::RearTouch: case NativeRow::Assist60: case NativeRow::Allow50: return i ? "on" : "off";
+        case NativeRow::LessMotion: case NativeRow::TapToJump: case NativeRow::RearTouch: case NativeRow::Assist60: case NativeRow::Allow50: return i ? "on" : "off";
+        case NativeRow::InvertCamera: { static constexpr const char* kInv[4] = {"off", "x", "y", "both"}; return kInv[i]; }
         case NativeRow::Tilt: return i ? "stick" : "console";
-        case NativeRow::TiltStrength: return kLevelKeys[i];
+        case NativeRow::TiltStrength: case NativeRow::CameraSpeed: return kLevelKeys[i];
         case NativeRow::Pointer: return i ? "quick" : "steady";
-        case NativeRow::RightStick: return i ? "pointer" : "camera";
+        case NativeRow::RightStick: { static constexpr const char* kRs[3] = {"free", "camera", "pointer"}; return kRs[i]; }
         case NativeRow::CameraZoom: return kZoomKeys[i];
         case NativeRow::StarBitReach: return kLevelKeys[i];
         default: return "";
@@ -379,8 +403,9 @@ unsigned NativeModel::StandardIndex(NativeRow row) const {
         if (s >= 0) return static_cast<unsigned>(s);
     }
     switch (row) {
-        case NativeRow::TiltStrength: return tilt::kDefaultLevel - 1;
+        case NativeRow::TiltStrength: case NativeRow::CameraSpeed: return tilt::kDefaultLevel - 1;
         case NativeRow::CameraZoom: return 5;
+        case NativeRow::RightStick: return ExternalPad() ? 2 : 0;   // PS TV defaults to Pointer, handheld to Free Camera
         case NativeRow::TapToJump: return 1;
         case NativeRow::Assist60: return 1;   // (on: c181's Performance)
         default: return 0;
@@ -417,8 +442,16 @@ StepResult NativeModel::Step(NativeRow row, int direction) {
             // restates settings_ui.cpp Change(), RowRate: without the fixed 30 only Smooth exists (a saved Full Detail steps back to it)
             next = !host_->fixed30 ? 0 : 1 - now;
             break;
-        case NativeRow::Language: next = (now + dir + n) % n; break;
-        case NativeRow::TiltStrength: case NativeRow::CameraZoom: case NativeRow::StarBitReach:
+        case NativeRow::Language: case NativeRow::RightStick: next = (now + dir + n) % n; break;
+        case NativeRow::InvertCamera:
+            if (live_[Idx(NativeRow::RightStick)] == 1) {
+                // Classic mode: toggle bit 0 (Left/Right) while preserving Free Camera's Up/Down bit 1.
+                next = (std::max(0, live_[Idx(row)]) ^ 1) & 3;
+            } else {
+                next = (now + dir + n) % n;
+            }
+            break;
+        case NativeRow::TiltStrength: case NativeRow::CameraSpeed: case NativeRow::CameraZoom: case NativeRow::StarBitReach:
             next = now + dir;
             if (next < 0 || next >= n) return StepResult::AtEnd;
             break;
@@ -427,7 +460,10 @@ StepResult NativeModel::Step(NativeRow row, int direction) {
     if (HostBacked(row)) {
         if (!host_->live || !host_->live->set || !host_->live->set(host_->live->context, row, next)) return StepResult::Unavailable;
         live_[Idx(row)] = next;
-        if (row == NativeRow::RightStick) live_[Idx(NativeRow::InvertCamera)] = LiveGet(NativeRow::InvertCamera);
+        if (row == NativeRow::RightStick) {
+            live_[Idx(NativeRow::InvertCamera)] = LiveGet(NativeRow::InvertCamera);
+            live_[Idx(NativeRow::CameraSpeed)] = LiveGet(NativeRow::CameraSpeed);
+        }
     } else SetIndex(row, static_cast<unsigned>(next));
     return StepResult::Changed;
 }
@@ -440,18 +476,33 @@ StepResult NativeModel::ResetRow(NativeRow row) {
         case RowBlock::Together: case RowBlock::StarRace: return StepResult::NotNow;
         default: return StepResult::Unavailable;
     }
-    if (ValueIndex(row) == std_) return StepResult::AtEnd;   // already standard
+    const bool alreadyStd = (row == NativeRow::InvertCamera)
+        ? (std::max(0, live_[Idx(row)]) == static_cast<int>(std_))
+        : (ValueIndex(row) == std_);
+    if (alreadyStd) return StepResult::AtEnd;   // already standard
     if (HostBacked(row)) {
         if (!host_->live || !host_->live->set || !host_->live->set(host_->live->context, row, static_cast<int>(std_))) return StepResult::Unavailable;
         live_[Idx(row)] = static_cast<int>(std_);
+        if (row == NativeRow::RightStick) {
+            live_[Idx(NativeRow::InvertCamera)] = LiveGet(NativeRow::InvertCamera);
+            live_[Idx(NativeRow::CameraSpeed)] = LiveGet(NativeRow::CameraSpeed);
+        }
     } else SetIndex(row, std_);
     return StepResult::Changed;
 }
 void NativeModel::PutEverythingBack() {
-    for (unsigned r = 0; r < kNativeRows; ++r) {
-        const auto row = static_cast<NativeRow>(r);
-        if (Blocked(row) == RowBlock::None && ValueIndex(row) != StandardIndex(row)) ResetRow(row);
-    }
+    auto resetOne = [&](NativeRow row) {
+        const bool differs = (row == NativeRow::InvertCamera)
+            ? (std::max(0, live_[Idx(row)]) != static_cast<int>(StandardIndex(row)))
+            : (ValueIndex(row) != StandardIndex(row));
+        if (Blocked(row) == RowBlock::None && differs) ResetRow(row);
+    };
+    // Pre-reset CameraSpeed & InvertCamera before RightStick (handles PS TV where RightStick resets
+    // from Free/Classic to Pointer and hides them), then reset all rows in enum order (handles
+    // handheld where RightStick resets from Pointer to Free Camera and unhides them).
+    resetOne(NativeRow::CameraSpeed);
+    resetOne(NativeRow::InvertCamera);
+    for (unsigned r = 0; r < kNativeRows; ++r) resetOne(static_cast<NativeRow>(r));
     if (Editable() && where_ != NativeWhere::Session && !BindingsOverridden()) Defaults();   // (Defaults is a no-op in a session or a read-only file)
 }
 

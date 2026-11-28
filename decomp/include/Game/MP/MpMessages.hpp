@@ -215,6 +215,8 @@ enum MpText : uint16_t {
     MP_T_SET_D_RESTART_ASK, MP_T_SET_DLG_RESTART_PAUSE,
     MP_T_SET_RESTART_WAIT, MP_T_SET_RESTART_STUCK, MP_T_SET_RESTART_STUCK_LATER, MP_T_SET_START_NOW, MP_T_SET_LATER,   // setfix31b: "Save and Start Again" waiting for a save   // setapply31: from pause, a change that needs a start: the band, and "Start the game again now?"   // setnat31: the "60 Assist" row (Smooth Motion only; starts the next time)
     MP_T_SET_D_PICTURE_SMOOTH_NEW, MP_T_SET_D_PICTURE_DETAILED_NEW,   // modeux32: the Picture sentence once the choice differs from what is running (names the restart)
+    MP_T_SET_L_CAM_SPEED, MP_T_SET_V_FREE_CAM, MP_T_SET_V_CLASSIC_CAM, MP_T_SET_V_INVERT_Y, MP_T_SET_V_INVERT_X, MP_T_SET_V_INVERT_BOTH,
+    MP_T_SET_D_RSTICK_FREE, MP_T_SET_D_CAM_SPEED, MP_T_SET_D_INVERT_Y, MP_T_SET_D_INVERT_X, MP_T_SET_D_INVERT_BOTH, MP_T_SET_D_INVERT_CLASSIC_X,   // freecam31: Free Camera settings
     MP_T_COUNT
 };
 

@@ -6,6 +6,7 @@
 #include "port/lockstep.h"  // (fmt32)
 extern "C" float port_hrw_clip_pad(void);  // (hrw27, GXV_HRW: vgx_galaxy.cpp; 1 = none)
 extern "C" float port_popin_clip_pad(float fovyDeg);  // (popin25, GXV_POPIN_LEAD: LodCtrl.cpp; 1 = none)
+extern "C" float port_free_camera_clip_pad(float fovyDeg) __attribute__((weak));  // (freecam31: CameraDirector.cpp; 1 = none)
 #endif
 
 void ClippingJudge_FORCE_MATCH_SDATA2() {
@@ -115,6 +116,7 @@ void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
     TPos3f cameraMtx;
     cameraMtx.setPositionFromLookAt(MR::getCameraViewMtx());
     f32 height = nearClip * static_cast< f32 >(tan(fovy * (JGeometry::TUtil< f32 >::PI() / 360.0f)));
+    f32 widthPad = 1.0f;
 #ifdef TARGET_PC
     // (fmt32: this is the frustum the game's own clipping judges with, and a clipped actor stops moving: in a lockstep session it is the game's, without the three pads, whose
     // size depends on this console's switches, on how fast its camera turns and on whether it is making picture pairs)
@@ -123,10 +125,20 @@ void ClippingJudge::calcViewingVolume(THex3f* pVolume, f32 farClip) {
         if (port::popin::LeadTurns() > 0.0f) {
             height *= port_popin_clip_pad(fovy);  // (popin25, GXV_POPIN_LEAD: a turning camera's sides, 1 when it is not turning)
         }
-        height *= port_hrw_clip_pad();  // (hrw27, GXV_HRW: the second picture of a pair turns up to the guard band away from the first: what it will see is drawn in the first)
+        const f32 hrwPad = port_hrw_clip_pad();  // (hrw27, GXV_HRW: the second picture of a pair turns up to the guard band away from the first: what it will see is drawn in the first)
+        const f32 freePad = port_free_camera_clip_pad ? port_free_camera_clip_pad(fovy) : 1.0f;  // (freecam31: pre-unclip leading edge across GXV_CLIP_PAIR & fast turns)
+        // Take max against hrwPad (never stack multiplicatively in GXV_HRW=1) and bias padding horizontally
+        // so yaw spins do not bloat top/bottom offscreen actor draws on heavy hubs like Observatory.
+        const f32 freeVertPad = freePad > 1.0f ? (1.0f + (freePad - 1.0f) * 0.35f) : 1.0f;
+        const f32 heightPad = hrwPad > freeVertPad ? hrwPad : freeVertPad;
+        const f32 horizPad = hrwPad > freePad ? hrwPad : freePad;
+        height *= heightPad;
+        if (horizPad > heightPad && heightPad > 0.0f) {
+            widthPad = horizPad / heightPad;
+        }
     }
 #endif
-    f32 width = aspect * height;
+    f32 width = aspect * height * widthPad;
 #ifdef TARGET_PC
     {
         // In VR, cull against what the headset actually sees.

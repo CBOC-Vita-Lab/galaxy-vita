@@ -39,7 +39,7 @@ struct FakeLive {
     NativeLiveOps ops;
     FakeLive() {
         for (auto& v : val) v = -1;   // -1: no reader (hidden)
-        val[(int)NativeRow::CameraZoom] = 5; val[(int)NativeRow::RightStick] = 0; val[(int)NativeRow::InvertCamera] = 0; val[(int)NativeRow::RearTouch] = 0;
+        val[(int)NativeRow::CameraZoom] = 5; val[(int)NativeRow::RightStick] = 0; val[(int)NativeRow::CameraSpeed] = 4; val[(int)NativeRow::InvertCamera] = 0; val[(int)NativeRow::RearTouch] = 0;
         val[(int)NativeRow::TapToJump] = 1; val[(int)NativeRow::StarBitReach] = 0;
         ops = {this,
             [](void* p, NativeRow r) -> int { return static_cast<FakeLive*>(p)->val[(int)r]; },
@@ -299,7 +299,7 @@ static void DamagedMain() {
 }
 
 static void LiveRows() {
-    for (NativeRow row : {NativeRow::CameraZoom, NativeRow::RightStick, NativeRow::RearTouch, NativeRow::TapToJump, NativeRow::StarBitReach}) {
+    for (NativeRow row : {NativeRow::CameraZoom, NativeRow::RightStick, NativeRow::CameraSpeed, NativeRow::RearTouch, NativeRow::TapToJump, NativeRow::StarBitReach}) {
         Rig r; r.Open(); auto& m = r.model;
         const int before = r.live.val[(int)row];
         CHECK(m.RowShown(row) && m.CanStep(row) && m.ValueIndex(row) == (unsigned)before && m.RowInfo(row).live && !m.RowInfo(row).restart);
@@ -326,11 +326,16 @@ static void LiveRows() {
     CHECK(m.ValueCount(NativeRow::StarBitReach) == 5 && std::string(m.ValueKey(NativeRow::StarBitReach, 4)) == "5");
     for (int i = 0; i < 4; ++i) m.Step(NativeRow::StarBitReach, +1);
     CHECK(m.Step(NativeRow::StarBitReach, +1) == StepResult::AtEnd);
-    // Invert Camera is shown only while the right stick is the camera
-    CHECK(m.RowShown(NativeRow::InvertCamera) && m.Step(NativeRow::InvertCamera, 1) == StepResult::Changed);
+    // Right Stick: Free Camera (0) -> Classic (1) -> Pointer (2).
+    // Camera Speed is shown only in Free Camera; Invert Camera is 4-way (off/x/y/both) in Free Camera, 2-way (off/x) in Classic, hidden in Pointer.
+    CHECK(m.RowShown(NativeRow::CameraSpeed) && m.ValueCount(NativeRow::CameraSpeed) == 10 && m.ValueIndex(NativeRow::CameraSpeed) == 4);
+    CHECK(m.RowShown(NativeRow::InvertCamera) && m.ValueCount(NativeRow::InvertCamera) == 4 && m.Step(NativeRow::InvertCamera, 1) == StepResult::Changed && std::string(m.ValueKey(NativeRow::InvertCamera, 1)) == "x");
+    CHECK(m.Step(NativeRow::RightStick, 1) == StepResult::Changed && std::string(m.ValueKey(NativeRow::RightStick, m.ValueIndex(NativeRow::RightStick))) == "camera");
+    CHECK(!m.RowShown(NativeRow::CameraSpeed) && m.RowShown(NativeRow::InvertCamera) && m.ValueCount(NativeRow::InvertCamera) == 2);
     CHECK(m.Step(NativeRow::RightStick, 1) == StepResult::Changed && std::string(m.ValueKey(NativeRow::RightStick, m.ValueIndex(NativeRow::RightStick))) == "pointer");
     r.live.val[(int)NativeRow::InvertCamera] = 0;
     CHECK(!m.RowShown(NativeRow::InvertCamera) && m.Step(NativeRow::InvertCamera, 1) == StepResult::Unavailable);
+    CHECK(!m.RowShown(NativeRow::CameraSpeed) && m.Step(NativeRow::CameraSpeed, 1) == StepResult::Unavailable);
     // Tap to Jump standard is On
     Rig t; t.Open(); CHECK(t.model.ValueIndex(NativeRow::TapToJump) == 1 && std::string(t.model.ValueKey(NativeRow::TapToJump, 1)) == "on");
     // Config-backed live rows (Less Motion, Tilt, Tilt Strength, Pointer) are sent to the table, and need no restart when it applies them
@@ -578,13 +583,13 @@ static void PutBack() {
     Config c = Technical(); c.fpsLimit = 30; c.performance60 = false; c.language = "french"; c.reducedMotion = true; c.tiltStick = true; c.tiltLevel = 8; c.mouseAim = true; c.safeSaves = false;
     const std::string text = Text(c, "# mine\nodd_key=3\n");
     Rig r; Put(r, text); gEnv = {"GXV_TILT_STICK"}; r.Open(); auto& m = r.model;
-    r.live.val[(int)NativeRow::CameraZoom] = 9; r.live.val[(int)NativeRow::RightStick] = 1; r.live.val[(int)NativeRow::RearTouch] = 1; r.live.val[(int)NativeRow::TapToJump] = 0; r.live.val[(int)NativeRow::StarBitReach] = 3;
+    r.live.val[(int)NativeRow::CameraZoom] = 9; r.live.val[(int)NativeRow::RightStick] = 2; r.live.val[(int)NativeRow::CameraSpeed] = 8; r.live.val[(int)NativeRow::InvertCamera] = 3; r.live.val[(int)NativeRow::RearTouch] = 1; r.live.val[(int)NativeRow::TapToJump] = 0; r.live.val[(int)NativeRow::StarBitReach] = 3;
     r.Open();
     m.Bind("jump", 0, "circle", true); m.Bind("spin", 1, "", false);
     m.PutEverythingBack();
     CHECK(m.ValueIndex(NativeRow::Picture) == 0 && m.ValueIndex(NativeRow::Language) == 0 && m.ValueIndex(NativeRow::LessMotion) == 0 && m.ValueIndex(NativeRow::Pointer) == 0 && m.ValueIndex(NativeRow::TiltStrength) == 4);
     CHECK(m.ValueIndex(NativeRow::Tilt) == 1);   // an env.txt key holds Tilt where it is
-    CHECK(m.ValueIndex(NativeRow::CameraZoom) == 5 && m.ValueIndex(NativeRow::RightStick) == 0 && m.ValueIndex(NativeRow::RearTouch) == 0 && m.ValueIndex(NativeRow::TapToJump) == 1 && m.ValueIndex(NativeRow::StarBitReach) == 0);
+    CHECK(m.ValueIndex(NativeRow::CameraZoom) == 5 && m.ValueIndex(NativeRow::RightStick) == 0 && m.ValueIndex(NativeRow::CameraSpeed) == 4 && m.ValueIndex(NativeRow::InvertCamera) == 0 && m.ValueIndex(NativeRow::RearTouch) == 0 && m.ValueIndex(NativeRow::TapToJump) == 1 && m.ValueIndex(NativeRow::StarBitReach) == 0);
     CHECK(SameBindings(m.Working().profiles[0], controls::GetControlApi().defaults(controls::ProfileId::Handheld)));
     CHECK(m.Save().status == StoreStatus::Ok);
     const auto a = Lines(text), b = Lines(r.files.inner.data[kPath]); CHECK(a.size() == b.size());
@@ -599,6 +604,18 @@ static void PutBack() {
     CHECK(back.sharpness == Sharpness::Strong && !back.hdTextures && !back.depthOfField && back.farAnimation == FarAnimation::Aggressive && back.tiltStick);
     // read-only and session: nothing moves
     Rig ro; Put(ro, "schema=2\n"); ro.Open(); ro.model.PutEverythingBack(); CHECK(!ro.model.Dirty());
+    // 3.0.1: PS TV (externalPad) PutEverythingBack resets CameraSpeed and InvertCamera BEFORE resetting RightStick to Pointer (which hides them).
+    {
+        Rig tv; tv.host.externalPad = true;
+        tv.live.val[(int)NativeRow::RightStick] = 0;   // Free Camera (temporarily showing speed & invert)
+        tv.live.val[(int)NativeRow::CameraSpeed] = 8;
+        tv.live.val[(int)NativeRow::InvertCamera] = 3;
+        tv.Open();
+        tv.model.PutEverythingBack();
+        CHECK(tv.live.val[(int)NativeRow::CameraSpeed] == 4);
+        CHECK(tv.live.val[(int)NativeRow::InvertCamera] == 0);
+        CHECK(tv.live.val[(int)NativeRow::RightStick] == 2);
+    }
 }
 
 static void RelaunchWait() {

@@ -85,6 +85,7 @@ void Sequence::cutToSafe() {
         --mDepth;
     }
     if (mDepth == 0 && mFromFileSelect) push(S_MAIN);
+    if (mSettingsOn) settingsClosed();   // settingsnative: session ended while SO_SESSION Settings was open
     if (mDepth > 0) mp_log("ui: screen %s", screenName(top().scr));
 }
 void Sequence::demoShow(Scr s, uint8_t param) {   // MP3 demo

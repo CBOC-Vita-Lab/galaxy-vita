@@ -552,7 +552,10 @@ void sceneEnd() {
     if (!sCreated || sEager) return;
     sGaveUp = false;
     sInitBusy = false;
-    if (MpMenu::sequence().settingsOpen()) MpMenu::sequence().close();   // settingsnative: the scene goes: what is changed is saved
+    if (MpMenu::sequence().settingsOpen()) {
+        HostAllocScope hostScope(true);
+        MpMenu::sequence().close();   // settingsnative: the scene goes: what is changed is saved
+    }
     sSettingsLive = false;
     sSettingsOpenAtom.store(false, std::memory_order_relaxed);
     sSetOpenFree = 0;
@@ -817,6 +820,7 @@ void openSettingsFromEntry() {   // settingsnative
     if (!sCreated || !EnsureLayouts("open")) return;
     sSettingsLive = true;   // (NOT mp_mark_entered(): see sSettingsLive)
     SetLanguage();
+    HostAllocScope hostScope(true);
     if (!MpMenu::sequence().openSettings(MpMenu::Sequence::SO_ENTRY)) sSettingsLive = false;
 }
 

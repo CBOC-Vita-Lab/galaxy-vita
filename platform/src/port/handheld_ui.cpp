@@ -139,6 +139,19 @@ struct Tok {
     int pic = 0;
 };
 
+// Valid BMG 0x1A escape tags have an even byte length 4..32 (units 2..16), and picture tags (group 3)
+// are always 6 bytes (units == 3: 0x1A, 0x0306, glyphId — where glyphId may legitimately be 0 for A).
+// Returns 0 on malformed/truncated tags so callers advance by 1 and never leap past NUL.
+inline unsigned BmgTagUnits(const uint16_t* s) {
+    const uint16_t hdr = s[1];
+    if (!hdr) return 0;
+    const unsigned size = hdr & 0xFF;
+    const unsigned group = (hdr >> 8) & 0xFF;
+    if (size < 4 || (size & 1u) != 0 || size > 32) return 0;
+    if (group == 3 && size != 6) return 0;
+    return size / 2;
+}
+
 std::vector<Tok> Tokenize(const uint16_t* s) {
     std::vector<Tok> out;
     std::u16string word;
@@ -149,8 +162,9 @@ std::vector<Tok> Tokenize(const uint16_t* s) {
         const uint16_t c = *s;
         if (c == 0x1A) {
             flush();
-            const unsigned size = s[1] & 0xFF, group = (s[1] >> 8) & 0xFF;
-            const unsigned units = size >= 4 ? size / 2 : 2;
+            const unsigned units = BmgTagUnits(s);
+            if (!units) { out.push_back(Tok{Tok::Tag, std::u16string(1, static_cast<char16_t>(c)), 0}); ++s; continue; }
+            const unsigned group = (s[1] >> 8) & 0xFF;
             if (group == 3 && units >= 3) out.push_back(Tok{Tok::Pic, std::u16string(reinterpret_cast<const char16_t*>(s), units), s[2]});
             else out.push_back(Tok{Tok::Tag, std::u16string(reinterpret_cast<const char16_t*>(s), units), 0});
             s += units;
@@ -422,8 +436,9 @@ const void* port_handheld_message(const void* original) {
     for (; s[n]; ++n) {
         h = (h ^ s[n]) * 1099511628211ull;
         if (s[n] == 0x1A) {
-            const unsigned units = (s[n + 1] & 0xFF) >= 4 ? (s[n + 1] & 0xFF) / 2 : 2;
-            if (((s[n + 1] >> 8) & 0xFF) == 3 && units >= 3 && (s[n + 2] == kPicRemote || s[n + 2] == kPicA)) candidate = true;
+            const unsigned units = BmgTagUnits(s + n);
+            if (!units) continue;
+            if (units >= 3 && ((s[n + 1] >> 8) & 0xFF) == 3 && (s[n + 2] == kPicRemote || s[n + 2] == kPicA)) candidate = true;
             for (unsigned i = 1; i < units; ++i) h = (h ^ s[n + i]) * 1099511628211ull;
             n += units - 1;
         }
@@ -454,10 +469,11 @@ const void* port_handheld_message(const void* original) {
                 size_t o = 0;
                 for (size_t i = 0; i + 1 < p.text.size() && o + 8 < sizeof line; ++i) {
                     const uint16_t c = p.text[i];
-                    if (c == 0x1A) {
+                    if (c == 0x1A && i + 1 < p.text.size() && p.text[i + 1]) {
                         const unsigned units = (p.text[i + 1] & 0xFF) >= 4 ? (p.text[i + 1] & 0xFF) / 2 : 2;
-                        if (((p.text[i + 1] >> 8) & 0xFF) == 3) o += static_cast<size_t>(snprintf(line + o, sizeof line - o, "[pic%u]", p.text[i + 2]));
-                        i += units - 1;
+                        if (units >= 3 && i + 2 < p.text.size() && ((p.text[i + 1] >> 8) & 0xFF) == 3)
+                            o += static_cast<size_t>(snprintf(line + o, sizeof line - o, "[pic%u]", p.text[i + 2]));
+                        i += (i + units <= p.text.size()) ? (units - 1) : (p.text.size() - 1 - i);
                     } else line[o++] = c == '\n' ? '/' : (c < 127 ? static_cast<char>(c) : '?');
                 }
                 line[o] = 0;

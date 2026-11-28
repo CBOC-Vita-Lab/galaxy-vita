@@ -84,11 +84,13 @@ void testSettingsScreens() {
     CHECK(!(Mod().rows[0].marks & MpPanel::MARK_NAV) && (Mod().rows[0].marks & MpPanel::MARK_ARROWS));
     CHECK((Mod().rows[2].marks & MpPanel::MARK_NAV) && (Mod().rows[3].marks & MpPanel::MARK_NAV) && (Mod().rows[4].marks & MpPanel::MARK_NAV));
     CHECK(guideHas(MP_T_SET_OPEN) && !guideHas(MP_T_CHANGE));
-    // Camera
+    // Camera: Zoom, Right Stick (Free Camera), Camera Speed (5 Normal), Invert Camera (Off)
     up(2); ok();
-    CHECK(S().screen() == Scr::S_SET_CAMERA && rowsAre({MP_T_SET_L_ZOOM, MP_T_SET_L_RSTICK, MP_T_SET_L_INVERT}));
+    CHECK(S().screen() == Scr::S_SET_CAMERA && S().itemCount() == 4);
+    CHECK(rowIs(0, MP_T_SET_L_ZOOM) && rowIs(1, MP_T_SET_L_RSTICK) && rowIs(2, MP_T_SET_L_CAM_SPEED));
     CHECK(rowValue(0) == "1.5" && BandIs(MP_T_SET_D_ZOOM));
-    down(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_CAMERA) && BandIs(MP_T_SET_D_RSTICK_CAMERA));
+    down(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_FREE_CAM) && BandIs(MP_T_SET_D_RSTICK_FREE));
+    down(); CHECK(HasNormal(2) && BandIs(MP_T_SET_D_CAM_SPEED));
     down(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_OFF) && BandIs(MP_T_SET_D_INVERT_OFF));
     back();
     CHECK(S().screen() == Scr::S_SET_MAIN && S().cursor() == 2);
@@ -132,7 +134,7 @@ void testSettingsValues() {
     left(); CHECK(Shows(MP_T_SET_L_PICTURE, MP_T_SET_V_SMOOTH) && BandIs(MP_T_SET_D_PICTURE_SMOOTH));
     ok(); CHECK(Shows(MP_T_SET_L_PICTURE, MP_T_SET_V_DETAILED));
     ok(); CHECK(Shows(MP_T_SET_L_PICTURE, MP_T_SET_V_SMOOTH) && S().cursor() == 0);
-    // Camera: Camera Zoom (1.0 to 2.0, live), Right Stick, Invert Camera (only while the right stick is the camera)
+    // Camera: Camera Zoom (1.0 to 2.0, live), Right Stick (Free Camera / Classic / Pointer), Camera Speed (Free only), Invert Camera (Off/Y/X/Both, hidden in Pointer)
     ToCamera();
     right(); CHECK(rowValue(0) == "1.6" && Live(NativeRow::CameraZoom) == 6 && logHas("settings: camera_zoom -> 1.6"));
     left(2); CHECK(rowValue(0) == "1.4" && Live(NativeRow::CameraZoom) == 4);
@@ -143,12 +145,24 @@ void testSettingsValues() {
     right(9); CHECK(rowValue(0) == "2.0");
     ok(); CHECK(rowValue(0) == "1.0");   // (Cross at the top goes round)
     right(5); CHECK(rowValue(0) == "1.5");
-    down(2);   // Invert Camera
-    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_ON) && BandIs(MP_T_SET_D_INVERT_ON) && Live(NativeRow::InvertCamera) == 1);
-    left(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_OFF));
-    up();      // Right Stick: Pointer hides Invert Camera
+    down(2);   // Camera Speed (1..10, default 5 Normal)
+    CHECK(HasNormal(2));
+    right(); CHECK(rowValue(2) == "6" && Live(NativeRow::CameraSpeed) == 5);
+    left(); CHECK(HasNormal(2) && Live(NativeRow::CameraSpeed) == 4);
+    down();    // Invert Camera in Free Camera (Off -> Left/Right -> Up/Down -> Both -> Off)
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_SET_V_INVERT_X) && BandIs(MP_T_SET_D_INVERT_X) && Live(NativeRow::InvertCamera) == 1);
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_SET_V_INVERT_Y) && BandIs(MP_T_SET_D_INVERT_Y) && Live(NativeRow::InvertCamera) == 2);
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_SET_V_INVERT_BOTH) && BandIs(MP_T_SET_D_INVERT_BOTH) && Live(NativeRow::InvertCamera) == 3);
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_OFF) && BandIs(MP_T_SET_D_INVERT_OFF) && Live(NativeRow::InvertCamera) == 0);
+    up(2);     // Right Stick: Free Camera -> Classic (hides Camera Speed, 2-way Invert) -> Pointer (hides both)
+    right(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_CLASSIC_CAM) && BandIs(MP_T_SET_D_RSTICK_CAMERA) && S().itemCount() == 3);
+    down();    // Classic Invert Camera: 2-way Off <-> Left/Right
+    CHECK(Shows(MP_T_SET_L_INVERT, MP_T_OFF) && BandIs(MP_T_SET_D_INVERT_ON));
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_SET_V_INVERT_X) && BandIs(MP_T_SET_D_INVERT_CLASSIC_X) && Live(NativeRow::InvertCamera) == 1);
+    right(); CHECK(Shows(MP_T_SET_L_INVERT, MP_T_OFF) && Live(NativeRow::InvertCamera) == 0);
+    up();
     right(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_POINTER) && BandIs(MP_T_SET_D_RSTICK_POINTER) && S().itemCount() == 2);
-    left(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_CAMERA) && S().itemCount() == 3);
+    right(); CHECK(Shows(MP_T_SET_L_RSTICK, MP_T_SET_V_FREE_CAM) && BandIs(MP_T_SET_D_RSTICK_FREE) && S().itemCount() == 4);
     back();
     // Controls
     down(); ok();
@@ -204,14 +218,19 @@ void testSettingsAvailability() {
         back();
         CHECK(!S().isOpen());   // (nothing changed)
     }
-    {   // the rule that hides Right Stick and Invert Camera on a desktop: no reader there. A console with the readers (the Vita's table answers for both) shows them
+    {   // the rule that hides Right Stick, Camera Speed and Invert Camera on a desktop: no reader there. A console with the readers shows them
         Fresh(); S().openSettings(); frames(3); ToCamera();
+        CHECK(S().itemCount() == 4);
+        down(); right();   // Classic: hides Camera Speed, keeps Invert Camera
         CHECK(rowsAre({MP_T_SET_L_ZOOM, MP_T_SET_L_RSTICK, MP_T_SET_L_INVERT}));
-        down(); right();   // (the right stick as the pointer: no camera to invert)
+        right();           // Pointer: hides both Camera Speed and Invert Camera
         CHECK(rowsAre({MP_T_SET_L_ZOOM, MP_T_SET_L_RSTICK}));
-        Fresh(); fake::cfg.live.val[static_cast<int>(NativeRow::RightStick)] = -1; fake::cfg.live.val[static_cast<int>(NativeRow::InvertCamera)] = -1;
+        Fresh();
+        fake::cfg.live.val[static_cast<int>(NativeRow::RightStick)] = -1;
+        fake::cfg.live.val[static_cast<int>(NativeRow::CameraSpeed)] = -1;
+        fake::cfg.live.val[static_cast<int>(NativeRow::InvertCamera)] = -1;
         S().openSettings(); frames(3); ToCamera();
-        CHECK(rowsAre({MP_T_SET_L_ZOOM}));   // (a desktop: no reader for either)
+        CHECK(rowsAre({MP_T_SET_L_ZOOM}));   // (a desktop: no reader for any of them)
     }
     {   // no other language on the disc: no Language row
         Fresh(); fake::cfg.languages.clear(); S().openSettings(); frames(3); ToMore();
@@ -530,6 +549,18 @@ void testSettingsSession() {
     ToCamera(); right(2);
     S().close();
     CHECK(!S().isOpen() && logHas("settings: saved (on closing)") && !FileText().empty());
+    // 3.0.1: session disconnects (cutToSafe) while SO_SESSION Settings is open: mSettingsOn & NativeMenuOpen clear cleanly and changes are saved
+    Fresh();
+    session(true, 0, MP_UI_PLAYING);
+    frames(3);
+    S().openSession(); frames(3); S().openSettings(MpMenu::Sequence::SO_SESSION); frames(2);
+    CHECK(S().settingsOpen() && port::settings::NativeMenuOpen());
+    ToCamera(); right();
+    fake::active = false;
+    fake::status.phase = MP_UI_FAILED;
+    fake::status.error = MP_ERR_TIMEOUT;
+    frames(3);
+    CHECK(!S().settingsOpen() && !port::settings::NativeMenuOpen() && logHas("settings: saved (on closing)") && logHas("settings: closed"));
     // a platform with no native Settings: nothing opens
     Fresh(); fake::cfgReset(true, true, false);
     S().openSettings(); frames(3);
@@ -618,6 +649,21 @@ void testSettingsButtons() {
     ok(); io.held = 0; frames(3);
     io.held = MaskOf("circle"); frames(2);
     CHECK(logHas("settings: jump -> circle (swapped)") && S().screen() != Scr::S_NONE && S().isOpen());   // (Circle binds: it does not back out, and the menu stays)
+    // 3.0.1: capture conflict declined (No) exits S_SET_CAPTURE to S_SET_PICK instead of soft-locking in CAP_DONE
+    ok(); io.held = 0; frames(3);
+    io.answer = MpMenu::DlgState::No;
+    io.held = MaskOf("cross"); frames(3);   // Cross is currently on Shoot Star Bits after swap above -> conflict
+    io.answer = MpMenu::DlgState::Yes;
+    io.held = 0;
+    CHECK(io.last == "MP_DYN0" && S().screen() == Scr::S_SET_PICK);
+    back();
+    CHECK(S().screen() == Scr::S_SET_BUTTONS);
+    // 3.0.1: capture returning Unavailable exits S_SET_CAPTURE to S_SET_PICK instead of soft-locking
+    ok(); io.held = 0; frames(3);
+    S().settingsTestSetWhere(MpMenu::Sequence::SO_SESSION);   // model refuses binds now
+    io.held = MaskOf("triangle"); frames(3);
+    io.held = 0;
+    CHECK(io.last == "MP_SET_UNAVAILABLE" && S().screen() == Scr::S_SET_PICK);
     S().close();
     io.held = ~0ull;
 }

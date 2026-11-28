@@ -183,6 +183,9 @@ int port_input_real_a(void);  // controller 0's A button as the player presses i
 // game's side is port_input_camera_inverted in port/compat.h).
 void port_input_set_camera_inverted(int inverted);
 int port_input_camera_inverted(void);
+void port_input_set_camera_invert_mask(int mask);
+int port_input_camera_invert_mask(void);
+void port_input_cam_stick(float* outX, float* outY);
 
 // Frame-time statistics (platform/src/port/perf.cpp), logged every 10 s.
 void port_perf_frame_begin(void);      // the game thread starts a frame

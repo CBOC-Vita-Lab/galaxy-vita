@@ -19,13 +19,11 @@ The checklist for additional console tests is in [docs/MULTIPLAYER-HARDWARE-TEST
 - **The leader has no switch for typed messages,** and the falls question cannot be changed after the first time (see [Multiplayer](docs/MULTIPLAYER.md#bubbles-and-the-falls-rule)). Each player can hide another player's messages.
 - **Hide Messages is for the session only.** It follows the player, even into another place, but it is forgotten when the session ends.
 - **Blocked Players lists only the players you blocked since the game last started.** Earlier blocks still hold on the service; **By code** unblocks one.
-- **Who Can I Play With? cannot be reached in a build made with `NP_ONLINE_URL=none`.** The game offers it only after a failed **Play with Anyone** or **Play with This Friend**. And no screen writes a support report: the Connection Test has no **Save Report** button in this build. Send `log.txt` after taking addresses, codes and names out of it.
 - **A race waits 3 minutes** after the first player finishes (it is fixed: the old setting for it has no screen).
 - **If a player's connection freezes,** the game tries to put the player back for 30 to 75 seconds (see [Multiplayer](docs/MULTIPLAYER.md#if-you-drop-out)). Only computers have shown this. In a busy game with three players, a long freeze can still drop the player.
 - **German and Italian have not been read by native speakers.** Wording may be odd.
 - **The first screen after the title** (Single Player or Multiplayer) is an extra press for everyone. The game remembers your choice. Because of it, the round two-player button on the file select is hidden (see below).
-- **A far-away code needs a router that allows it.** Some routers, mobile hotspots and shared networks block it. Let your friend be the leader instead.
-- **The far-away code is being changed.** It is being replaced by a short code. That work is in progress and not in this build's tested state; until it is finished, how a far-away invite works (and whether it needs the online service) can change.
+- **A far-away code needs a router that allows it.** Some routers, mobile hotspots and shared networks block direct connections; the online relay covers strict NATs when enabled, or let your friend host instead.
 - **Only Star Race times go to leaderboards.** Play Together times are not sent.
 - **Remove from Game is not a permanent ban.** It keeps that console out of this game, including after the leader changes, for as long as the console keeps the identity it joined with (the saved key and the session token). A console whose settings were wiped, or a different console, is a new player and can come back. The game forgets the oldest of eight removed players when a ninth is removed, and the list ends with the game.
 - **A returning player's place is held, so a newcomer can be told the game is full.** When a player's connection drops, the leader keeps that place for the returning console alone (up to 85 seconds after its last word). Someone else who tries to join meanwhile is told the game is full, and the game cannot tell them it is only for now.
@@ -56,7 +54,6 @@ Nobody has seen any of these work on a Vita. They are written from the code and 
 - **The recovery question** after a crash ("Keep its progress?") has only been tried by unit tests, never in a game.
 - **Safe Copies** (the screens, and the copy made when a new version starts) have only been run on a computer.
 - **A far-away code on real routers.** Only pretend routers on a computer have been used.
-- **The Vita's button pictures** in the multiplayer menus and messages have been seen only in screenshots from a computer, never on a console. Touch is the same.
 - **How much the multiplayer code costs in single player.** See "What multiplayer changes in single player" below. Nobody has measured the cost on a console.
 
 ### The online service
@@ -94,7 +91,9 @@ Nobody has seen any of these work on a Vita. They are written from the code and 
 - The game needs your own `RMGE01` (Wii, USA) disc image. Other regions aren't supported yet.
 - `libshacccg.suprx` must be set up on the Vita once (the installer and [Install](MANUAL-INSTALL.md) explain how).
 - **The LiveArea still shows the old look or the old Settings tile after updating:** the Vita doesn't refresh a game's LiveArea when you install over it. The Settings tile is gone from the package; Settings are in the game (**Settings** on the Single Player / Multiplayer screen, **△ Settings** in the pause menu). The old tile stays until you reinstall the game (or use VitaShell's Refresh LiveArea); tapping it opens the in-game Settings. Your saves are in `ux0:data/smg` and stay.
-- **Settings shows "Controller disconnected" and doesn't respond:** not understood yet. Please report it with `log.txt`, which controller you used and how it appeared.
+- **Controller plugins & "Controller disconnected" popups (fixed in 3.0.1):** Handheld Vitas running controller plugins such as `MiniVitaTV`, `ds4vita`, `reVita`, or third-party Bluetooth pad plugins now fail over cleanly across all active ports and plain `sceCtrlPeekBufferPositive(0)` fallback without triggering false controller-disconnect dialogs or misclassifying handhelds as PS TV. Genuine unpaired PS TV disconnect detection is preserved.
+- **Fan-translated / patched ISOs (fixed in 3.0.1):** Replacing game files over an existing install now automatically invalidates `sizes.cache` (`fst.bin`, `Message.arc`, `Font.arc`), and malformed `0x1A` text tags in custom translations are safely guarded.
+- **Sleep / LiveArea resume (fixed in 3.0.1):** CPU/GPU/bus clocks (`GXV_CLOCK_KEEP=1` by default) and pad/touch/motion sampling now refresh immediately upon waking from sleep or returning from LiveArea.
 - **Preparing the game by hand needs Python 3** on your computer, and shrinking the movies by hand (optional, to save card space) needs a C++ compiler. The full-size movies play smoothly; follow step 3 of [Prepare Your Game](MANUAL-PREPARE-GAME.md) only if you want the smaller ones. The installer does both for you.
 
 ## HD Textures

@@ -43,6 +43,7 @@
 #include <reent.h>
 
 #include "../runtime/input.h"
+#include "port/resume.h"
 #include "settings_runtime.h"
 #include "title_art_runtime.h"
 #include "port/game_progress.h"
@@ -762,9 +763,9 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
     // forkcheck23 (8 Nov; from Producdevity's fork, 4c7d7e4): a THP movie keeps 6-8 frames of sound in hand, so a frame read late no
     // longer leaves a block of silence in the opening cutscenes (MoviePlayerSimple.cpp). PETARI_MOVIE_INHAND=0: one frame a turn as before.
     setenv("PETARI_MOVIE_INHAND", "1", 0);
-    // GXV_CLOCK_KEEP (from the fork's a525f4b): the clocks that dropped (after a sleep) asked for again every 5 s; default 0 until a
-    // console check across a real sleep (see KeepClocks above).
-    setenv("GXV_CLOCK_KEEP", "0", 0);
+    // GXV_CLOCK_KEEP (3.0.1 default 1; GXV_CLOCK_KEEP=0 disables): re-applies any app-requested clocks that VitaOS
+    // dropped back to 333/111/111 MHz after sleep/suspend (leaves PSVshellPlus profiles and refused clocks untouched).
+    setenv("GXV_CLOCK_KEEP", "1", 0);
     // bootio (11 Nov; platform/include/port/bootio.h): TEST ONLY. n = the first n opens of sys/fst.bin fail artificially, to show the retry on a console.
     setenv("GXV_BOOTIO_INJECT", "0", 0);
     // polish23 (8 Nov; vita/vgx-game/settings_runtime.cpp): the in-game Settings open. Its memory is reserved before the game is held, one
@@ -2800,7 +2801,10 @@ extern "C" int port_vita_game_entry(int argc, char** argv) {
             }
         }
         static int64_t lastClockCheck = start;
-        if (now - lastClockCheck >= 5000000000ll) {  // (GXV_CLOCK_KEEP: clocks that dropped, after a sleep, are asked for again)
+        static unsigned lastClockResumeGen = 0;
+        const unsigned curResumeGen = port::ResumeGeneration() + port::ResumeAppGeneration();
+        if (curResumeGen != lastClockResumeGen || now - lastClockCheck >= 5000000000ll) {  // (GXV_CLOCK_KEEP: clocks that dropped after sleep/LiveArea are asked for again immediately + every 5 s)
+            lastClockResumeGen = curResumeGen;
             lastClockCheck = now;
             if (ClockKeepOn()) KeepClocks();
         }

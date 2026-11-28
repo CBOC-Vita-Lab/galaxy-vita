@@ -87,7 +87,17 @@ target_link_options(galaxy_native PRIVATE
     "-Wl,--require-defined=port_tilt_level" "-Wl,--require-defined=port_tilt_level_set"
     # (c186merge) C186.1's Settings link also required these two at the link itself (both are in tools/vita_must_define.txt as well):
     "-Wl,--require-defined=port_settings_hint_visible"      # platform/src/port/perf.cpp: the pause panel's hint
-    "-Wl,--require-defined=port_settings_native_request")   # decomp/src/Game/MP/MpUiSystem.cpp: Triangle opens the native Settings
+    "-Wl,--require-defined=port_settings_native_request"    # decomp/src/Game/MP/MpUiSystem.cpp: Triangle opens the native Settings
+    # freecam31: keep weak-referenced Free Camera hooks & ThinLTO-inlined reset bridges alive across --gc-sections
+    "-Wl,--require-defined=port_free_camera_enabled"
+    "-Wl,--require-defined=port_right_stick_mode" "-Wl,--require-defined=port_right_stick_mode_set"
+    "-Wl,--require-defined=port_camera_speed" "-Wl,--require-defined=port_camera_speed_set"
+    "-Wl,--require-defined=port_input_set_camera_invert_mask"
+    "-Wl,--require-defined=port_free_camera_owns_reset"
+    "-Wl,--require-defined=port_free_camera_take_parallel_reset"
+    "-Wl,--require-defined=port_free_camera_active"
+    "-Wl,--require-defined=port_free_camera_turn_blend"
+    "-Wl,--require-defined=port_free_camera_clip_pad")
 # Every symbol above, and the multiplayer / SceNet ones, are also listed in tools/vita_must_define.txt: tools/vgx_build/build.py's link stage
 # runs tools/check_weak_links.py on the ELF after the link (each must be T, and no weak-only reference may name code a link input has).
 # The Wi-Fi watch of mp_core_vita.cpp references four SceNet / SceNetCtl calls weakly (null-checked); their stubs are on the link line, but a weak
@@ -264,7 +274,7 @@ set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12")
 # key art and logo, shipped as supplied (owner, 17 Nov; never regenerated). The loading-screen pictures are made from the player's own
 # title screen on the first start (title_art_runtime.cpp, docs/ASSETS.md).
 set(sys "${CMAKE_CURRENT_SOURCE_DIR}/sce_sys")
-vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 03.00 NAME "Super Mario Galaxy"
+vita_create_vpk(smg-vgx.vpk ${SMG_TITLE_ID} eboot.bin VERSION 03.01 NAME "Super Mario Galaxy"
     FILE "${sys}/icon0.png" sce_sys/icon0.png
     FILE "${sys}/pic0.png" sce_sys/pic0.png
     FILE "${sys}/livearea/contents/bg.png" sce_sys/livearea/contents/bg.png

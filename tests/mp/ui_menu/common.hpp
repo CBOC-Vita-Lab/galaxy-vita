@@ -179,7 +179,7 @@ inline void cfgLiveReset() {
     using port::settings::NativeRow;
     Live& l = cfg.live;
     for (auto& v : l.val) v = 0;
-    l.val[(int)NativeRow::TiltStrength] = 4, l.val[(int)NativeRow::CameraZoom] = 5, l.val[(int)NativeRow::TapToJump] = 1;
+    l.val[(int)NativeRow::TiltStrength] = 4, l.val[(int)NativeRow::CameraSpeed] = 4, l.val[(int)NativeRow::CameraZoom] = 5, l.val[(int)NativeRow::TapToJump] = 1;
     l.sets = l.commits = l.binds = 0, l.bindsOk = true;
     l.ops = {&l,
         [](void* p, NativeRow r) -> int { return static_cast<Live*>(p)->val[(int)r]; },

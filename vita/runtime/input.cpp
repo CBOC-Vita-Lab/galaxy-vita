@@ -1,6 +1,7 @@
 #include "input.h"
 #include "port/pointer_aim.h"
 #include "port/rear_aim.h"
+#include "port/resume.h"
 #include "port/tilt_autostick.h"
 #include "port/tilt_gain.h"
 
@@ -11,9 +12,17 @@
 #include <psp2/ctrl.h>
 #include <psp2/motion.h>
 #include <psp2/touch.h>
+#ifdef __vita__
+#include <psp2/kernel/sysmem.h>
+#endif
 
 extern "C" int port_rear_aim_enabled(void);  // platform/src/port/perf.cpp: the option, kept in settings.ini
 extern "C" int port_stick_pointer_enabled(void);  // the same file: the right stick moves the pointer, not the camera (Settings > Camera)
+extern "C" int port_right_stick_mode(void) __attribute__((weak));  // freecam31 (perf.cpp): single source of truth (0 Free, 1 Classic, 2 Pointer); weak for vita_controls oracle
+extern "C" int port_free_camera_enabled(void) __attribute__((weak));  // freecam31 (perf.cpp): analog free camera on right stick
+extern "C" bool port_settings_native_menu_open(void) __attribute__((weak));  // settings_native.cpp: native Settings menu open (zero camX/camY)
+extern "C" int mp_menu_wants_no_idle_pointer(void) __attribute__((weak));  // MpUiSystem.cpp: MP menu/results/chat open (zero camX/camY)
+extern "C" bool mp_dialog_active(void) __attribute__((weak));  // mp_keyboard.cpp: system dialog/keyboard up (zero camX/camY)
 extern "C" int port_tap_jump_enabled(void);  // the same file (settingsnative): a tap on the screen also presses A (Settings > Controls > Tap to Jump)
 extern "C" int port_settings_hint_visible(void);  // the same file (settingsnative): the pause panel's "Triangle: Settings" is showing
 extern "C" void port_handheld_pictures_changed(void) __attribute__((weak));  // platform/src/gx/vgx_galaxy.cpp: the button pictures are made again
@@ -48,7 +57,9 @@ SceTouchPanelInfo panel, rearPanel;
 // Always: on the game's 2D menus the left stick and the D-pad move the pointer; in tilt-steered
 // levels "level" is the grip when the level starts steering, Select sets it again.
 bool rstickPointer, touchA = true, wide = true;
-bool rstickCamera;       // PETARI_RSTICK=camera: the stick stays the camera on a pad too
+bool rstickCamera;       // PETARI_RSTICK=camera or classic: classic Wii D-pad camera on the right stick (also overrides pad pointer)
+bool rstickFree;         // PETARI_RSTICK=free: force analog Free Camera on the right stick (also overrides pad pointer)
+int freeCamEnv = -1;     // GXV_FREE_CAM=0|1: -1 unset, 0 force Classic, 1 force Free Camera
 std::atomic<bool> mouseAim{false};   // GXV_MOUSE_AIM (settingsnative: Settings > Controls > Pointer sets it while the game runs: port_pointer_quick_set)
 bool mouseAimSeen;       // (the poll thread's last look at it: a flip zeroes mouseHeld there, not on the setter's thread)
 float mouseHeld;         // port::aim::State::held
@@ -91,6 +102,7 @@ int rawSource = -1;
 unsigned rawType;
 
 void resetTransient();
+bool rawFallback(SceCtrlData& data, PortVitaRawInput& out, bool* outPositive2 = nullptr);
 
 bool settingsEnabled() {
     static const bool on = [] { const char* e = getenv("GXV_SETTINGS"); return e && strcmp(e, "1") == 0; }();
@@ -125,7 +137,15 @@ constexpr unsigned kPortCachePolls = 80;
 struct PortCache { SceCtrlPortInfo info; unsigned age = kPortCachePolls; bool ok = false; } portCache;
 unsigned leanPortQueries, leanPortHits, leanRearSkips, leanMotionSkips, leanPolls;
 
-bool selectRaw(SceCtrlData& data, PortVitaRawInput& out, bool poll = false) {
+bool isVitaTvModel() {
+#ifdef __vita__
+    return sceKernelGetModelForCDialog() == SCE_KERNEL_MODEL_VITATV;
+#else
+    return false;
+#endif
+}
+
+bool selectRaw(SceCtrlData& data, PortVitaRawInput& out, bool poll = false, bool* outPositive2 = nullptr) {
     using namespace port::controls;
     SceCtrlPortInfo info{};
     if (poll && (padLean() & 1) && portCache.ok && portCache.age < kPortCachePolls) {
@@ -137,13 +157,38 @@ bool selectRaw(SceCtrlData& data, PortVitaRawInput& out, bool poll = false) {
         ++leanPortQueries;
         if (poll) { portCache.info = info; portCache.ok = true; portCache.age = 0; }
     }
-    int source = -1;
     // PSTV port 0 is a virtual alias of the first paired controller. Select exactly
     // one real port; never merge that alias or two controllers' buttons.
-    if (info.port[0] == SCE_CTRL_TYPE_PHY) source = 0;
-    else for (int i = 1; i < 5; ++i)
-        if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) { source = i; break; }
-    if (source < 0 || sceCtrlPeekBufferPositive2(source, &data, 1) <= 0) {
+    // Plugin resilience (3.0.1): build a prioritized deduplicated candidate list so a sleeping/stale
+    // first slot (e.g. DS4 on port[1] while handheld PHY is alive on port[2]) fails over cleanly:
+    //   1. Standard handheld: port[0] == PHY.
+    //   2. Standard PSTV / BT DS3/DS4: port[1..4] == DS3 || DS4.
+    //   3. MiniVitaTV on handheld Vita: port[0] == VIRT, built-in Vita moved to port[1..4] == PHY.
+    //   4. Plugins exposing DS3/DS4 directly on port[0].
+    //   5. Third-party BT plugins (x1vita, Switch2Vita, viimote, VitaControl) reporting another real type on port[1..4].
+    int cands[5];
+    int candCount = 0;
+    auto pushCand = [&](int idx) {
+        for (int k = 0; k < candCount; ++k) if (cands[k] == idx) return;
+        if (candCount < 5) cands[candCount++] = idx;
+    };
+    if (info.port[0] == SCE_CTRL_TYPE_PHY) pushCand(0);
+    for (int i = 1; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) pushCand(i);
+    for (int i = 1; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_PHY) pushCand(i);
+    if (info.port[0] == SCE_CTRL_TYPE_DS3 || info.port[0] == SCE_CTRL_TYPE_DS4) pushCand(0);
+    for (int i = 1; i < 5; ++i)
+        if (info.port[i] != SCE_CTRL_TYPE_UNPAIRED && info.port[i] != SCE_CTRL_TYPE_VIRT) pushCand(i);
+
+    int source = -1;
+    for (int k = 0; k < candCount; ++k) {
+        if (sceCtrlPeekBufferPositive2(cands[k], &data, 1) > 0) {
+            source = cands[k];
+            break;
+        }
+    }
+    if (source < 0) {
         if (poll && portCache.age > 0) portCache.age = kPortCachePolls;   // (thr24: the cached answer may be stale: the next poll asks the system)
         return false;
     }
@@ -155,6 +200,7 @@ bool selectRaw(SceCtrlData& data, PortVitaRawInput& out, bool poll = false) {
     out.caps.motion = physical && motionStarted;
     out.caps.tiltFallback = !out.caps.motion;
     out.held = normalizeButtons(data.buttons, true) & out.caps.availableButtons;
+    if (outPositive2) *outPositive2 = true;
     return true;
 }
 
@@ -456,7 +502,14 @@ extern "C" int port_vita_input_init(void) {
     pointerValid = false;
     pointerX = pointerY = 0;
     pointerLife = 0;
-    if (const char* e = getenv("PETARI_RSTICK")) { rstickPointer = strcmp(e, "pointer") == 0; rstickCamera = strcmp(e, "camera") == 0; }
+    rstickPointer = rstickCamera = rstickFree = false;
+    freeCamEnv = -1;
+    if (const char* e = getenv("PETARI_RSTICK")) {
+        rstickPointer = strcmp(e, "pointer") == 0;
+        rstickCamera = strcmp(e, "camera") == 0 || strcmp(e, "classic") == 0;
+        rstickFree = strcmp(e, "free") == 0;
+    }
+    if (const char* e = getenv("GXV_FREE_CAM"); e && *e) freeCamEnv = atoi(e) != 0 ? 1 : 0;
     if (const char* e = getenv("GXV_MOUSE_AIM")) mouseAim.store(atoi(e) != 0, std::memory_order_relaxed);  // read once; the Settings menu sets it (settings_launch.cpp), default off
     if (const char* e = getenv("PETARI_TOUCH_A")) touchA = atoi(e) != 0;
     if (const char* e = getenv("GXV_VITA_WIDE")) wide = atoi(e) != 0;
@@ -483,9 +536,19 @@ extern "C" int port_vita_input_init(void) {
     (void)port::controls::RemapEnabled();
     if (port::controls::RemapEnabled()) {
         (void)port::controls::ActiveMapping();
-        PortVitaRawInput launch;
+        PortVitaRawInput launch{};
         SceCtrlData sample{};
-        selectRaw(sample, launch);
+        bool dummyPos2 = true;
+        if (!selectRaw(sample, launch, false, &dummyPos2) && !rawFallback(sample, launch, &dummyPos2)) {
+            // Never freeze all-zero ActiveCapabilities if a transient boot-time pad read fails
+            // (or a controller plugin hasn't finished attaching yet): default to hardware nominal caps.
+            const bool tv = isVitaTvModel() && !touchStarted && !rearStarted;
+            launch.caps = port::controls::NominalCaps(tv ? port::controls::ProfileId::PlayStation : port::controls::ProfileId::Handheld);
+            launch.caps.frontTouch = !tv && touchStarted;
+            launch.caps.rearTouch = !tv && rearStarted;
+            launch.caps.motion = !tv && motionStarted;
+            launch.caps.tiltFallback = !launch.caps.motion;
+        }
         port::controls::FreezeActiveCapabilities(launch.caps);
     }
     return 1;
@@ -497,29 +560,83 @@ extern "C" int port_vita_input_raw_init(void) {
     return sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG) >= 0;
 }
 
-// bugs26 (12 Nov): GXV_PAD_RAWFALLBACK (default 1). The Settings menu reads the pad through selectRaw; when that fails (the port query errors, or
-// the extended read of port 0 returns no sample) the menu showed "Controller disconnected" and answered nothing (KNOWN-ISSUES, "not understood yet").
-// On a handheld (port 0 is the physical pad, or the query itself failed) the plain read of port 0 is tried before giving up, and the first fallback
-// is logged ("pad: ..."). A PS TV with no controller still reads as disconnected. 0 = the old behaviour.
-static bool rawFallback(SceCtrlData& data, PortVitaRawInput& out) {
+// bugs26 / 3.0.1: GXV_PAD_RAWFALLBACK (default 1). Used by BOTH Settings (port_vita_input_raw_poll) and
+// in-game polling (port_vita_input_poll) whenever selectRaw() fails (e.g. MiniVitaTV / reVita / ds4vita /
+// x1vita / Switch2Vita spoofing port[0] = VIRT, or sceCtrlPeekBufferPositive2 failing on port 0).
+// Preserves real PS TV disconnected detection when all real ports are UNPAIRED on a VitaTV with no touch hardware.
+namespace {
+bool rawFallback(SceCtrlData& data, PortVitaRawInput& out, bool* outPositive2) {
     static const bool on = [] { const char* e = getenv("GXV_PAD_RAWFALLBACK"); return !e || !*e || atoi(e) != 0; }();
     if (!on) return false;
     using namespace port::controls;
     SceCtrlPortInfo info{};
     const int q = sceCtrlGetControllerPortInfo(&info);
-    if (q >= 0 && info.port[0] != SCE_CTRL_TYPE_PHY) return false;
-    if (sceCtrlPeekBufferPositive(0, &data, 1) <= 0) return false;
-    out.source = 0; out.controllerType = SCE_CTRL_TYPE_PHY; out.timestamp = data.timeStamp;
-    out.caps = NominalCaps(ProfileId::Handheld);
-    out.caps.frontTouch = touchStarted;
-    out.caps.rearTouch = rearStarted;
-    out.caps.motion = motionStarted;
+    bool anyRealPaired = false;
+    bool anyExtPaired = false;
+    bool hasPhy = false;
+    unsigned extType = 0;
+    if (q >= 0) {
+        for (int i = 0; i < 5; ++i) {
+            const unsigned t = info.port[i];
+            if (t != SCE_CTRL_TYPE_UNPAIRED && t != SCE_CTRL_TYPE_VIRT) {
+                anyRealPaired = true;
+                if (i >= 1) {
+                    anyExtPaired = true;
+                    if (!extType) extType = t;
+                }
+            }
+            if (t == SCE_CTRL_TYPE_PHY) hasPhy = true;
+        }
+        // Genuine PS TV with no real paired controller (port[0] is VIRT or UNPAIRED, ports 1..4 UNPAIRED):
+        // stay disconnected so controller-lost warnings work as intended.
+        // On Vita hardware, isVitaTvModel() is authoritative even in boot-time Settings before touch init.
+#ifdef __vita__
+        const bool isTv = isVitaTvModel();
+#else
+        const bool isTv = (!touchStarted && !rearStarted);
+#endif
+        if (!anyRealPaired && isTv) return false;
+    }
+#ifdef __vita__
+    const bool isTv = isVitaTvModel();
+#else
+    const bool isTv = (!touchStarted && !rearStarted);
+#endif
+    // Only try sceCtrlPeekBufferPositive2(0) when selectRaw() did NOT already try Positive2 on port 0 or port 1..4
+    // (e.g. port query failed, or port[0] is VIRT/custom with ports 1..4 unpaired). Never query Positive2 on PS TV's
+    // virtual port 0 when an external controller on port 1..4 already failed Positive2.
+    const bool tryPos2Port0 = (q < 0) ||
+        (!anyExtPaired && info.port[0] != SCE_CTRL_TYPE_PHY &&
+         info.port[0] != SCE_CTRL_TYPE_DS3 && info.port[0] != SCE_CTRL_TYPE_DS4);
+    bool usedPositive2 = false;
+    if (tryPos2Port0 && sceCtrlPeekBufferPositive2(0, &data, 1) > 0) {
+        usedPositive2 = true;
+    } else if (sceCtrlPeekBufferPositive(0, &data, 1) <= 0) {
+        return false;
+    }
+    const bool handheldHw = !isTv && (hasPhy || !anyExtPaired || touchStarted || rearStarted || q < 0);
+    const unsigned fallbackExtType = extType ? extType
+        : ((q >= 0 && info.port[0] != SCE_CTRL_TYPE_UNPAIRED && info.port[0] != SCE_CTRL_TYPE_VIRT) ? info.port[0] : SCE_CTRL_TYPE_DS4);
+    out.source = 0;
+    out.controllerType = handheldHw ? SCE_CTRL_TYPE_PHY : fallbackExtType;
+    out.timestamp = data.timeStamp;
+    out.caps = NominalCaps(handheldHw ? ProfileId::Handheld : ProfileId::PlayStation);
+    out.caps.frontTouch = handheldHw && touchStarted;
+    out.caps.rearTouch = handheldHw && rearStarted;
+    out.caps.motion = handheldHw && motionStarted;
     out.caps.tiltFallback = !out.caps.motion;
-    out.held = normalizeButtons(data.buttons, false) & out.caps.availableButtons;
+    out.held = normalizeButtons(data.buttons, usedPositive2) & out.caps.availableButtons;
+    if (outPositive2) *outPositive2 = usedPositive2;
     static bool logged = false;
-    if (!logged && port_log_summary) { logged = true; port_log_summary("pad: the raw pad read (port query %d) failed; the plain read of port 0 is used for the menu (GXV_PAD_RAWFALLBACK=0 turns this off)", q); }
+    if (!logged && port_log_summary) {
+        logged = true;
+        port_log_summary("pad: selectRaw fallback active (port query %d, ports=[%u,%u,%u,%u,%u], pos2=%d, handheld=%d; GXV_PAD_RAWFALLBACK=0 disables)",
+                         q, (unsigned)info.port[0], (unsigned)info.port[1], (unsigned)info.port[2], (unsigned)info.port[3], (unsigned)info.port[4],
+                         usedPositive2 ? 1 : 0, handheldHw ? 1 : 0);
+    }
     return true;
 }
+}  // namespace
 
 bool port_vita_input_raw_poll(PortVitaRawInput& out) {
     out = {};
@@ -553,13 +670,35 @@ extern "C" int port_pointer_quick_set(int on) { mouseAim.store(on != 0, std::mem
 // Valid before port_vita_input_init: the Settings start-up uses it to choose the profile.
 extern "C" int port_vita_input_external_pad(void) {
     SceCtrlPortInfo info{};
-    if (sceCtrlGetControllerPortInfo(&info) < 0 || info.port[0] == SCE_CTRL_TYPE_PHY) return 0;
-    for (int i = 1; i < 5; ++i)
+    if (sceCtrlGetControllerPortInfo(&info) < 0) return 0;
+    // Check ALL ports for PHY so MiniVitaTV on a handheld Vita (port[0]=VIRT, port[1]=PHY) is not misclassified as a PS TV.
+    for (int i = 0; i < 5; ++i)
+        if (info.port[i] == SCE_CTRL_TYPE_PHY) return 0;
+    for (int i = 0; i < 5; ++i)
         if (info.port[i] == SCE_CTRL_TYPE_DS3 || info.port[i] == SCE_CTRL_TYPE_DS4) return 1;
     return 0;
 }
 
 extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
+    // 3.0.1: Refresh pad/touch/motion sampling & tilt neutral after PS Vita system sleep/suspend or LiveArea resume.
+    static unsigned seenResumeGen = 0;
+    const unsigned resumeGen = port::ResumeGeneration() + port::ResumeAppGeneration();
+    if (resumeGen != seenResumeGen) {
+        seenResumeGen = resumeGen;
+        portCache.ok = false;
+        portCache.age = kPortCachePolls;
+        calibrated = false;
+        touching = false;
+        touchMoved = false;
+        tapA = 0;
+        holdPulsed = false;
+        autoStick.Reset();
+        sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+        if (touchStarted) sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+        if (rearStarted) sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+        if (motionStarted) sceMotionStartSampling();
+        if (port_log_summary) port_log_summary("input: system/app resume %u, refreshed pad/touch/motion sampling", resumeGen);
+    }
     // The UI cannot consume this flag. Reset before even the first resumed SDK read.
     if (pendingReset.exchange(false, std::memory_order_acq_rel)) resetTransient();
     // settingsnative: a button swap the Settings staged (platform/src/input/control_bindings.cpp) takes effect here, between two polls, and the
@@ -570,10 +709,12 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     }
     *pad = {};
     SceCtrlData control{};
-    PortVitaRawInput sampled;
+    PortVitaRawInput sampled{};
     const bool remap = port::controls::RemapEnabled();
-    bool ok = remap ? selectRaw(control, sampled, true) : sceCtrlPeekBufferPositive(0, &control, 1) > 0;
-    if (!ok && remap && portCache.age == kPortCachePolls && (padLean() & 1)) ok = selectRaw(control, sampled, true);   // (thr24: a cached port failed: once more with a fresh query)
+    bool usedPositive2 = true;
+    bool ok = remap ? selectRaw(control, sampled, true, &usedPositive2) : (usedPositive2 = false, sceCtrlPeekBufferPositive(0, &control, 1) > 0);
+    if (!ok && remap && portCache.age == kPortCachePolls && (padLean() & 1)) ok = selectRaw(control, sampled, true, &usedPositive2);   // (thr24: a cached port failed: once more with a fresh query)
+    if (!ok && remap) ok = rawFallback(control, sampled, &usedPositive2);
     if (!ok) { heldNormalized.store(0, std::memory_order_relaxed); resetTransient(); gameSource = -1; gameType = 0; mappingAvailable.store(false); return; }
     if (remap && (sampled.source != gameSource || sampled.controllerType != gameType)) resetTransient();
     gameSource = remap ? sampled.source : 0; gameType = remap ? sampled.controllerType : SCE_CTRL_TYPE_PHY;
@@ -592,7 +733,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     if (remap) {
         using namespace port::controls;
         const auto& active = ActiveMapping();
-        uint64_t normalized = normalizeButtons(control.buttons, true) & sampled.caps.availableButtons;
+        uint64_t normalized = normalizeButtons(control.buttons, usedPositive2) & sampled.caps.availableButtons;
         heldNormalized.store(normalized, std::memory_order_relaxed);   // settingsnative: the capture hook (port_vita_input_held_buttons)
         commandButtons = 0;
         if (normalized & L1) commandButtons |= SCE_CTRL_LTRIGGER;
@@ -634,7 +775,7 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
                 menuKeys |= mapping->masks[static_cast<size_t>(a)];
             normalized &= ~((zoomSessionMenu() ? (L1 | R1) : (L1 | R1 | Triangle | Select)) & ~menuKeys);
         }
-        padPointer = port::controls::PadDefaultsEnabled() && !rstickCamera && sampled.controllerType != SCE_CTRL_TYPE_PHY &&
+        padPointer = port::controls::PadDefaultsEnabled() && !rstickCamera && !rstickFree && sampled.controllerType != SCE_CTRL_TYPE_PHY &&
             mapping->profile == ProfileId::PlayStation;
         const auto translated = Translate(*mapping, normalized);
         mappedSpin = translated.spin;
@@ -672,9 +813,15 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
     const bool aiming = (control.buttons & SCE_CTRL_CIRCLE) != 0;
     const bool mouseAimNow = mouseAim.load(std::memory_order_relaxed);
     if (mouseAimNow != mouseAimSeen) { mouseAimSeen = mouseAimNow; mouseHeld = 0; }   // settingsnative: a flip starts the quick pointer from rest
-    const bool stickPointerSetting = !rstickCamera && port_stick_pointer_enabled();  // (the pause menu's Right Stick: Pointer)
+    // freecam31: When perf.cpp's port_right_stick_mode() is linked (real Vita), it is the single source
+    // of truth for Settings + PETARI_RSTICK + GXV_FREE_CAM + PS TV defaults (eliminating input/camera desync).
+    // When absent (standalone vita_controls oracle tests), fall back to legacy flags.
+    const bool hasUnifiedMode = port_right_stick_mode != nullptr;
+    const int unifiedMode = hasUnifiedMode ? port_right_stick_mode() : -1;
+    const bool usePointer = aiming || (hasUnifiedMode ? (unifiedMode == 2)
+                                                      : (rstickPointer || padPointer || (!rstickCamera && !rstickFree && port_stick_pointer_enabled())));
     if (aiming) ++pc.circle;
-    if (rstickPointer || padPointer || stickPointerSetting || aiming) {
+    if (usePointer) {
         const float cx0 = pointerX, cy0 = pointerY;
         if (aiming && pointerLife <= 0) pointerX = pointerY = 0; // (a fresh aim starts from the middle)
         if (mouseAimNow) {
@@ -693,10 +840,22 @@ extern "C" void port_vita_input_poll(float elapsedSeconds, PortPadState* pad) {
         pcMove(kSrcStick, cx0, cy0);
     } else {
         mouseHeld = 0;
-        if (rx < -0.5f) pad->buttons |= 0x0001;
-        if (rx > 0.5f) pad->buttons |= 0x0002;
-        if (ry < -0.6f) pad->buttons |= 0x0004;
-        if (ry > 0.6f) pad->buttons |= 0x0008;
+        const bool freeCam = hasUnifiedMode
+            ? (unifiedMode == 0)
+            : (!rstickCamera && (rstickFree || (freeCamEnv >= 0 ? (freeCamEnv != 0) : (port_free_camera_enabled && port_free_camera_enabled() != 0))));
+        if (freeCam) {
+            const bool inUi = zoomMenu || port_pointer_on_menus() != 0 ||
+                (port_settings_native_menu_open && port_settings_native_menu_open()) ||
+                (mp_menu_wants_no_idle_pointer && mp_menu_wants_no_idle_pointer() != 0) ||
+                (mp_dialog_active && mp_dialog_active());
+            pad->camX = inUi ? 0.0f : rx;
+            pad->camY = inUi ? 0.0f : ry;
+        } else {
+            if (rx < -0.5f) pad->buttons |= 0x0001;
+            if (rx > 0.5f) pad->buttons |= 0x0002;
+            if (ry < -0.6f) pad->buttons |= 0x0004;
+            if (ry > 0.6f) pad->buttons |= 0x0008;
+        }
     }
     // On the game's 2D menus (file select, pause, yes/no, the galaxy domes) the left stick and
     // the D-pad move the pointer too and it stays on screen: everything can be chosen with

@@ -25,6 +25,7 @@ typedef struct PortPadState {
     float pointerX, pointerY;  // -1..1 screen space (right / down positive, like KPAD)
     float pointerDist;     // metres from the "sensor bar"
     int touched;           // a finger is on the touch screen (handhelds)
+    float camX, camY;      // analog Free Camera right stick, -1..1 (right / up positive; 0 when Classic/Pointer)
 } PortPadState;
 
 // Called by the input layer (any thread).

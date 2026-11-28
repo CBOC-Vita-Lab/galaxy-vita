@@ -93,6 +93,7 @@ extern "C" int port_hrw_camera(float out[12]) __attribute__((weak));  // GXV_HRW
 extern "C" void port_hrw_fresh_scene_view(void) __attribute__((weak));  // (warp32 PATCH22; GameScene.cpp)
 extern "C" void port_hrw_fresh_camera_take(void) __attribute__((weak));  // (mariolag31; GameScene.cpp)
 extern "C" unsigned port_late_turn_slept_us(void) __attribute__((weak));  // (mariolag31; platform/src/port/perf.cpp: what this turn slept on purpose, GXV_LATE_TURN)
+extern "C" float port_free_camera_turn_blend(void) __attribute__((weak));  // (freecam31; CameraDirector.cpp: [0..1] active turn blend)
 extern "C" void port_hrw_fresh_view_take(unsigned* out) __attribute__((weak));  // (warp32 PATCH21; GameScene.cpp)
 extern "C" int port_hrw_fresh_scene(unsigned pairId, int pointer) __attribute__((weak));  // GXV_HRW (hrw27; decomp/src/Game/Scene/GameScene.cpp): the partial draw of a pair's second picture; 0 when nothing was drawn
 extern "C" unsigned port_hrw_scene_drops(void) __attribute__((weak));  // (crash1114, GameScene.cpp: scenes destroyed while the partial draw's pointer named them)
@@ -2915,7 +2916,10 @@ extern "C" void port_hrw_undrawn_begin(void) {
     if (rot > g.maxRot) g.maxRot = rot;
     if (tr > g.maxTrans) g.maxTrans = tr;
     ++g.rotBin[rot < 0.1f ? 0 : rot < 0.5f ? 1 : rot < 1.0f ? 2 : rot < 2.0f ? 3 : 4];
-    static const float rotMax = static_cast<float>(vgx::EnvInt("GXV_HRW_ROT_DEG", 4));
+    static const bool rotMaxExplicit = [] { const char* e = std::getenv("GXV_HRW_ROT_DEG"); return e && *e; }();
+    static const float rotMaxEnv = static_cast<float>(vgx::EnvInt("GXV_HRW_ROT_DEG", 4));
+    const float rotMax = (!rotMaxExplicit && port_free_camera_turn_blend && port_free_camera_turn_blend() > 0.05f && rotMaxEnv < 4.6f)
+        ? 4.6f : rotMaxEnv;
     static const float trMax = static_cast<float>(vgx::EnvInt("GXV_HRW_TRANS", 600));
     if (rot > rotMax || tr > trMax) { ++g.guarded; HrwFeelLost(port::hrwfeel::kGame); return; }
     if (m == 3) return;

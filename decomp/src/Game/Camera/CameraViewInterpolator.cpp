@@ -9,6 +9,10 @@
 #include "Game/Util/MapUtil.hpp"
 #include "Game/Util/MathUtil.hpp"
 #include "Game/Util/TriangleFilter.hpp"
+#ifdef TARGET_PC
+extern "C" int port_free_camera_active(void) __attribute__((weak));
+extern "C" float port_free_camera_turn_blend(void) __attribute__((weak));
+#endif
 
 void CameraViewInterpolator_FORCE_MATCH_SDATA2() {
     (void)1.0f;
@@ -140,7 +144,15 @@ bool CameraViewInterpolator::calcCollision(const TPos3f& rMtx) {
     mIsCollided = false;
     mLErpOffset.zero();
 
+#ifdef TARGET_PC
+    // freecam31: Free Camera already applies smooth LOS wall pull-in and floor lift; keep mBinder
+    // for sideways near-plane safety, but do not brake orbit motion by 75% on every wall/floor graze.
+    if (!(port_free_camera_active && port_free_camera_active() != 0)) {
+        bindDir *= 0.25f;
+    }
+#else
     bindDir *= 0.25f;
+#endif
     TVec3f newPos = pos;
     newPos += bindDir;
     TVec3f front = newPos - mTargetPosition;
@@ -229,11 +241,24 @@ void CameraViewInterpolator::reduceOscillation() {
     TVec3f pos;
     mMtx.getTrans(pos);
 
-    f32 invRate = 1.0f - mRate;
+    f32 rate = mRate;
+#ifdef TARGET_PC
+    // freecam31: Free Camera already smooths angular velocity spherically; smoothly tighten the
+    // Cartesian anti-oscillation blend while orbiting to eliminate chord lag and double-damping
+    // while preserving full footstep damping when the stick is still.
+    if (port_free_camera_turn_blend) {
+        const f32 blend = port_free_camera_turn_blend();
+        if (blend > 0.0f) {
+            const f32 b = blend > 1.0f ? 1.0f : blend;
+            rate = mRate * (1.0f - 0.55f * b);
+        }
+    }
+#endif
+    f32 invRate = 1.0f - rate;
     TQuat4f interpRot;
     rot.slerp(targetRot, invRate);
     rot.normalize();
-    pos = pos * mRate + targetPos * invRate;
+    pos = pos * rate + targetPos * invRate;
 
     mMtx.makeQuat(rot);
     mMtx.setTrans(pos);

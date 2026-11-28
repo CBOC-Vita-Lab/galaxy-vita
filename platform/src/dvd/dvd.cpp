@@ -620,10 +620,32 @@ static bool sizeCacheEnabled() {
     return !e || e[0] != '0';
 }
 
-// The file table with the place each file has on the card (bucket folders included).
+// The file table with the place each file has on the card (bucket folders included), plus raw sys/fst.bin
+// contents and stat(size, mtime) of fst.bin / Message.arc / Font.arc so dropping a patched or translated
+// ISO (e.g. PT-BR) over an existing game folder immediately invalidates sizes.cache before DVDFastOpen.
 static u32 sizeCacheSignature() {
     u32 h = 2166136261u;
     auto mix = [&h](unsigned char c) { h = (h ^ c) * 16777619u; };
+    auto mix64 = [&](uint64_t v) {
+        for (int b = 0; b < 8; ++b) mix(static_cast<unsigned char>((v >> (b * 8)) & 0xFFu));
+    };
+    auto mixStat = [&](const std::string& path) {
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0) {
+            mix64(static_cast<uint64_t>(st.st_size));
+            mix64(static_cast<uint64_t>(st.st_mtime));
+        } else {
+            mix(0xFFu);
+        }
+    };
+    {
+        std::lock_guard<std::mutex> lk(sFstCacheMu);
+        if (sFstCacheRoot == sDataRoot) {
+            mix64(static_cast<uint64_t>(sFstCacheData.size()));
+            for (u8 b : sFstCacheData) mix(b);
+        }
+    }
+    mixStat(sDataRoot + "/sys/fst.bin");
     for (const FstEntry& fe : sFst) {
         mix(fe.isDir ? 1 : 0);
         for (char c : fe.name) {
@@ -634,6 +656,9 @@ static u32 sizeCacheSignature() {
             mix((unsigned char)c);
         }
         mix(0);
+        if (!fe.isDir && (strcasecmp(fe.name.c_str(), "Message.arc") == 0 || strcasecmp(fe.name.c_str(), "Font.arc") == 0)) {
+            mixStat(fe.hostPath);
+        }
     }
     return h;
 }

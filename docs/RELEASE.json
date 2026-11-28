@@ -1,13 +1,13 @@
 {
   "schemaVersion": 2,
-  "releaseId": "galaxy-v3.0",
-  "version": "3.0",
+  "releaseId": "galaxy-v3.0.1",
+  "version": "3.0.1",
   "date": "2026-11-27",
   "titleId": "SMGV00001",
   "package": {
     "path": "Galaxy-Vita.vpk",
-    "sha256": "8abf68949444a1d897d8bb7deb8d2457a1f40547a8933573c03c8d197f2bd8f5",
-    "runtimeSha256": "1f2ed6d6bff4bcfb20c552c61c08cfd2c9539b6bfff22dba8eed89f4c70490cc"
+    "sha256": "13945b58e1bcb8d1e21c5d2da6275dfc50cb280819d32a0f124d8840346c3408",
+    "runtimeSha256": "a0db8f756c471f6a11e78b58f53c8756f33a94ba4b04286385fc29c65b4068b6"
   },
   "source": {
     "revision": "c04cc968",
@@ -33,12 +33,12 @@
     "destination": "ux0:data/smg/game"
   },
   "verification": {
-    "hostTests": "tests/mp unit & ASan/UBSan fuzz suites, release30_gates.py, public_scan.py, check_vita_format.py, stagetags.py checkvpk",
+    "hostTests": "tests/free_camera, tests/zoom_clip, tests/popin, tests/dome_zoom, tests/control_prompts, tests/vita_controls (12 modes incl. freecam + 9 plugin cases), tests/settings_native, tests/mp/ui_menu (1,085,591 checks, 920 five-language box-fit checks, 180k monkey presses), tests/hrw_feel, tests/hrw_steady, tests/vgx_pace, tests/latency24, tests/pace32_test, tests/view_cone, stagetags.py checkvpk",
     "emulator": "Armhf PGO profile recording across 8 gameplay routes (tools/pgo/smg.profdata.gz)",
-    "earlierConsoleRuns": "2.x and 3.0 bring-up builds on PS Vita (498 MHz, CapUnlocker) from 4 to 26 Nov 2026",
+    "earlierConsoleRuns": "2.x and 3.0 bring-up builds on PS Vita (498 MHz, CapUnlocker) from 4 to 27 Nov 2026",
     "physicalVita": true,
     "desktopInstaller": false,
-    "consoleRuns": "26-27 Nov 2026 on a PS Vita (498 MHz, CapUnlocker): Fresh-PGO Performance 60 (Honeyhive 59.9 fps native, Melty Molten 55-59.6 fps, Dreadnought 55-57 fps + locked even-30 fallback); Quality 30 2x MSAA (Dreadnought & Melty Molten 30.0 fps locked, Beach Bowl 28.6-30.2 fps); live 2P Wi-Fi Play Together (Flipswitch 60.0 fps, Good Egg locked even-30, smooth remote movement, zero fly-in push, full Luigi face-first fly-in, bubble follow camera); native 5,401-shader Wave 6 harvest across all 134 Galaxy:Scenario stops, 18 bosses, all 7 power-ups, MP menus/puppets, and Settings; true cold first-boot verification from an empty card cache (404 ms RAM pack preload, 0 cold shader compiles across Title, Observatory, Good Egg, Honeyhive, Beach Bowl, Melty Molten, and Dreadnought, 0 crashes, 0 0x805b)"
+    "consoleRuns": "27 Nov 2026 on a PS Vita (498 MHz, CapUnlocker): 3.0.1 PGO build verified live across AstroGalaxy (Observatory), EggStarGalaxy (Good Egg), and HoneyBeeKingdomGalaxy (Honeyhive) with 0 crashes (0 new .psp2dmp); full analog right-stick Free Camera (360° yaw + pitch, spherical planet anchoring, smooth LOS wall pull-in, floor lift, Triangle recenter, 18-67 us raycast overhead); Phase 3 camera-turn smoothness A/B cut Observatory turning hitches by 67% (6 -> 2) and total visible holds >=3 refreshes by 71% (7 -> 2, 335 ms -> 123 ms) with 0 hitches during post-spin pitch, 360° run-orbit (60 fps), and recenter; controller-plugin resilience, Settings fixes, resume clock/input refresh, and patched-ISO cache invalidation verified."
   },
   "publicReleaseAccepted": true
 }

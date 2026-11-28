@@ -772,8 +772,8 @@ extern "C" int native_sys_param_int(int id, int* value) __asm__("sceAppUtilSyste
 namespace {
 bool NativeRelaunch() {   // (the menu has polled relaunchReady frame by frame; nothing waits here)
     if (mp_port_quit) mp_port_quit(300);
+    if (port_zoom_save_now) port_zoom_save_now();             // enqueue pending settings.ini write BEFORE flushing card queue
     if (port_card_write_flush) port_card_write_flush(3000);   // the queued card writes (GXV_CARD_ASYNC) land before the process goes
-    if (port_zoom_save_now) port_zoom_save_now();             // a zoom change otherwise waits 45 idle turns
     port_log_flush();
     return Relaunch();
 }

@@ -124,7 +124,8 @@ extern "C" void port_input_set(int chan, const PortPadState* stateIn) {
         state = &testPad;
     }
     if (chan == 0 && state->connected &&
-        ((state->buttons & 0xFFFF) != 0 || __builtin_fabsf(state->stickX) > 0.3f || __builtin_fabsf(state->stickY) > 0.3f))
+        ((state->buttons & 0xFFFF) != 0 || __builtin_fabsf(state->stickX) > 0.3f || __builtin_fabsf(state->stickY) > 0.3f ||
+         __builtin_fabsf(state->camX) > 0.2f || __builtin_fabsf(state->camY) > 0.2f))
         sLastActiveNs.store(port_host_time_ns(), std::memory_order_relaxed);
     if (chan == 0) sPadSampleNs.store(port_host_time_ns(), std::memory_order_relaxed);
     std::lock_guard<std::mutex> lk(sInputMutex);
@@ -198,11 +199,32 @@ extern "C" void port_input_settings_rearm(void) {
 }
 
 // The camera's turns swapped (the invert_camera setting), see compat.h.
+// Mask bits (freecam31): bit 0 = invert X (Left/Right, 3.0 compatible), bit 1 = invert Y (Up/Down).
 static std::atomic<int> sCameraInverted{0};
+static std::atomic<int> sCameraInvertMask{0};
 
-extern "C" void port_input_set_camera_inverted(int inverted) { sCameraInverted.store(inverted); }
+extern "C" void port_input_set_camera_inverted(int inverted) {
+    const int on = inverted ? 1 : 0;
+    sCameraInverted.store(on, std::memory_order_relaxed);
+    sCameraInvertMask.store(on ? 1 : 0, std::memory_order_relaxed);
+}
 
-extern "C" int port_input_camera_inverted(void) { return sCameraInverted.load(); }
+extern "C" int port_input_camera_inverted(void) { return sCameraInverted.load(std::memory_order_relaxed); }
+
+extern "C" void port_input_set_camera_invert_mask(int mask) {
+    const int m = mask & 3;
+    sCameraInvertMask.store(m, std::memory_order_relaxed);
+    sCameraInverted.store((m & 1) ? 1 : 0, std::memory_order_relaxed);
+}
+
+extern "C" int port_input_camera_invert_mask(void) { return sCameraInvertMask.load(std::memory_order_relaxed); }
+
+extern "C" void port_input_cam_stick(float* outX, float* outY) {
+    std::lock_guard<std::mutex> lk(sInputMutex);
+    const bool ok = sPad[0].connected != 0;
+    if (outX) *outX = ok ? sPad[0].camX : 0.0f;
+    if (outY) *outY = ok ? sPad[0].camY : 0.0f;
+}
 
 static std::atomic<int64_t> sTiltUsedAt{0};
 static std::atomic<float> sTiltNeutralPitch{0.0f};

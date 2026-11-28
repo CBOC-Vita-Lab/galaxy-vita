@@ -610,6 +610,8 @@ int64_t port_thread_cpu_us(void) {
 // A change shows when the game resumes (the camera is not updated while paused): CameraContext eases to it in 0.4 s.
 // (file scope, not inside the anonymous namespace below: there g++ sees it as an overload of port.h's declaration and "if (port_input_set_camera_inverted)" fails to compile; tools/test_pace24.sh)
 extern "C" void port_input_set_camera_inverted(int) __attribute__((weak));   // (weak: the host tests build this file without wpad.cpp)
+extern "C" void port_input_set_camera_invert_mask(int) __attribute__((weak));   // freecam31: bit 0 = X (Left/Right), bit 1 = Y (Up/Down)
+extern "C" int port_vita_input_external_pad(void) __attribute__((weak));   // vita/runtime/input.cpp: PS TV DS3/DS4 external pad default
 namespace {
 constexpr int kZoomMin = 10, kZoomMax = 20;
 std::atomic<int> sZoomTenths{-1};   // -1: not read yet
@@ -646,14 +648,22 @@ int ZoomFromFile() {
 }
 
 // "rear_aim = 1" in the same file: the rear touch pad aims the pointer; "stick_pointer = 1": the right stick moves the pointer, not the
-// camera (vita/runtime/input.cpp). Off unless chosen: -1 = not read.
+// camera (vita/runtime/input.cpp); "free_camera = 1" (default ON since 3.0.1): analog Free Camera on the right stick (0 = Classic D-pad);
+// "camera_speed = 1..10" (default 5): Free Camera orbit speed. Single source of truth for PETARI_RSTICK and GXV_FREE_CAM env overrides.
 std::atomic<int> sRearAim{-1};
 std::atomic<int> sStickPointer{-1};
-int OptionFromFile(const char* key, int fallback = 0) {
+std::atomic<int> sFreeCamera{-1};
+std::atomic<int> sRightStickMode{-1};  // 0 = Free Camera, 1 = Classic, 2 = Pointer (-1 = not read; stores user/file value, never env override)
+std::atomic<int> sRightStickEnv{-2};   // cached PETARI_RSTICK / GXV_FREE_CAM (-2 = unread, -1 = unset, 0..2 = override)
+std::atomic<int> sCameraSpeed{-1};     // stores user/file value (1..10), never env override
+std::atomic<int> sCameraSpeedEnv{-2};  // cached GXV_FREE_CAM_SPEED (-2 = unread, -1 = unset, 1..10 = override)
+constexpr int kCameraSpeedLevels = 10;
+constexpr int kCameraSpeedDefault = 5;
+int IntOptionFromFile(const char* key, int minVal, int maxVal, int fallback) {
     if (sZoomFile.empty()) return fallback;
     FILE* f = fopen(sZoomFile.c_str(), "r");
     if (!f) return fallback;
-    int on = fallback;
+    int val = fallback;
     char line[160];
     while (fgets(line, sizeof(line), f)) {
         const char* p = line;
@@ -665,11 +675,50 @@ int OptionFromFile(const char* key, int fallback = 0) {
         if (*p != '=') continue;
         ++p;
         while (*p == ' ' || *p == '\t') ++p;
-        if (*p == '1') on = 1;
-        else if (*p == '0') on = 0;   // (anything else leaves the default: a damaged line must not turn a default-on option off)
+        char* end = nullptr;
+        const long parsed = strtol(p, &end, 10);
+        if (end != p && (*end == '\0' || *end == '\n' || *end == '\r' || *end == ' ' || *end == '\t') &&
+            parsed >= minVal && parsed <= maxVal) {
+            val = static_cast<int>(parsed);
+        }
     }
     fclose(f);
-    return on;
+    return val;
+}
+int OptionFromFile(const char* key, int fallback = 0) {
+    return IntOptionFromFile(key, 0, 1, fallback);
+}
+// Cached once per boot/port_zoom_set_root: single source of truth for PETARI_RSTICK & GXV_FREE_CAM (-1 = unset).
+int RightStickEnvOverride() {
+    int c = sRightStickEnv.load(std::memory_order_relaxed);
+    if (c != -2) return c;
+    int v = -1;
+    if (const char* e = getenv("PETARI_RSTICK"); e && *e) {
+        if (strcmp(e, "free") == 0) v = 0;
+        else if (strcmp(e, "camera") == 0 || strcmp(e, "classic") == 0) v = 1;
+        else if (strcmp(e, "pointer") == 0) v = 2;
+    }
+    if (v < 0) {
+        if (const char* e = getenv("GXV_FREE_CAM"); e && *e) {
+            v = atoi(e) != 0 ? 0 : 1;
+        }
+    }
+    int expected = -2;
+    sRightStickEnv.compare_exchange_strong(expected, v);
+    return sRightStickEnv.load(std::memory_order_relaxed);
+}
+int CameraSpeedEnvOverride() {
+    int c = sCameraSpeedEnv.load(std::memory_order_relaxed);
+    if (c != -2) return c;
+    int v = -1;
+    if (const char* force = getenv("GXV_FREE_CAM_SPEED"); force && *force) {
+        char* end = nullptr;
+        const long parsed = strtol(force, &end, 10);
+        if (end != force && *end == '\0' && parsed >= 1 && parsed <= kCameraSpeedLevels) v = static_cast<int>(parsed);
+    }
+    int expected = -2;
+    sCameraSpeedEnv.compare_exchange_strong(expected, v);
+    return sCameraSpeedEnv.load(std::memory_order_relaxed);
 }
 int RearAimRead() {
     int v = sRearAim.load(std::memory_order_relaxed);
@@ -679,19 +728,59 @@ int RearAimRead() {
     if (sRearAim.compare_exchange_strong(expected, v)) port_log_summary("rear touch aiming: %s", v ? "on (from the settings file)" : "off");
     return sRearAim.load();
 }
-int StickPointerRead() {
-    int v = sStickPointer.load(std::memory_order_relaxed);
+// Underlying user/file Right Stick mode (never polluted by temporary env overrides, so ZoomFileText never clobbers settings.ini).
+int RightStickFileModeRead() {
+    int v = sRightStickMode.load(std::memory_order_relaxed);
     if (v >= 0) return v;
-    v = OptionFromFile("stick_pointer");
+    const int filePtr = IntOptionFromFile("stick_pointer", 0, 1, -1);
+    const int fileFree = IntOptionFromFile("free_camera", 0, 1, -1);
+    const bool extPad = (port_vita_input_external_pad && port_vita_input_external_pad());
+    if (filePtr == 1) {
+        v = 2;
+    } else if (fileFree == 0) {
+        v = 1;
+    } else if (fileFree == 1) {
+        v = 0;
+    } else if (filePtr == 0 && !extPad) {
+        v = 0;
+    } else {
+        // Fresh file or 3.0 PS TV upgrade (stick_pointer=0 without free_camera): PS TV defaults to Pointer, handheld Vita defaults to Free Camera.
+        v = extPad ? 2 : 0;
+    }
     int expected = -1;
-    if (sStickPointer.compare_exchange_strong(expected, v)) port_log_summary("right stick: %s", v ? "pointer (from the settings file)" : "camera");
-    return sStickPointer.load();
+    if (sRightStickMode.compare_exchange_strong(expected, v)) {
+        static const char* kNames[3] = {"free camera", "classic camera", "pointer"};
+        sStickPointer.store(v == 2 ? 1 : 0, std::memory_order_relaxed);
+        sFreeCamera.store(v == 0 ? 1 : 0, std::memory_order_relaxed);
+        port_log_summary("right stick: %s%s", kNames[v], (filePtr >= 0 || fileFree >= 0) ? " (from the settings file)" : "");
+    }
+    return sRightStickMode.load();
+}
+int RightStickModeRead() {
+    const int envMode = RightStickEnvOverride();
+    if (envMode >= 0) return envMode;
+    return RightStickFileModeRead();
+}
+int StickPointerRead() { return RightStickModeRead() == 2 ? 1 : 0; }
+int FreeCameraRead() { return RightStickModeRead() == 0 ? 1 : 0; }
+int CameraSpeedFileRead() {
+    int v = sCameraSpeed.load(std::memory_order_relaxed);
+    if (v >= 1) return v;
+    v = IntOptionFromFile("camera_speed", 1, kCameraSpeedLevels, kCameraSpeedDefault);
+    int expected = -1;
+    if (sCameraSpeed.compare_exchange_strong(expected, v))
+        port_log_summary("camera speed: %d (%s)", v, v != kCameraSpeedDefault ? "from the settings file" : "default");
+    return sCameraSpeed.load();
+}
+int CameraSpeedRead() {
+    const int envSpeed = CameraSpeedEnvOverride();
+    if (envSpeed >= 1) return envSpeed;
+    return CameraSpeedFileRead();
 }
 
 // settingsnative: "tap_jump = 1" (default ON): a short tap on the front screen also presses A where it lands, a finger held still holds A
 // (vita/runtime/input.cpp reads it as `touchA && port_tap_jump_enabled()`; PETARI_TOUCH_A=0 still turns it off whatever this says);
-// "invert_camera = 1" (default off): the camera's turns swapped (port_input_set_camera_inverted, platform/src/input/wpad.cpp; applied when the
-// folder is given, at start). -1 = not read.
+// "invert_camera = 0..3" (default 0; freecam31: 0 Off, 1 Left/Right [3.0 compatible], 2 Up/Down, 3 Both). -1 = not read.
 std::atomic<int> sTapJump{-1};
 std::atomic<int> sInvertCamera{-1};
 int TapJumpRead() {
@@ -705,10 +794,17 @@ int TapJumpRead() {
 int InvertCameraRead() {
     int v = sInvertCamera.load(std::memory_order_relaxed);
     if (v >= 0) return v;
-    v = OptionFromFile("invert_camera", 0);
+    v = IntOptionFromFile("invert_camera", 0, 3, 0);
     int expected = -1;
-    if (sInvertCamera.compare_exchange_strong(expected, v)) port_log_summary("invert camera: %s", v ? "on (from the settings file)" : "off");
+    if (sInvertCamera.compare_exchange_strong(expected, v)) {
+        static const char* kNames[4] = {"off", "left/right", "up/down", "both"};
+        port_log_summary("invert camera: %s%s", kNames[v & 3], v ? " (from the settings file)" : "");
+    }
     return sInvertCamera.load();
+}
+void ApplyInvertCamera(int mode) {
+    if (port_input_set_camera_invert_mask) port_input_set_camera_invert_mask(mode & 3);
+    else if (port_input_set_camera_inverted) port_input_set_camera_inverted((mode & 1) ? 1 : 0);
 }
 
 // "star_bit_reach = 1" to 5 in the same file (pause menu: Select steps it): 1 is the original game; 2, 3, 4 widen the screen radius the
@@ -750,13 +846,15 @@ int StarBitReachRead() {
 }
 
 // The text of settings.ini (settingsnative: the keys of the native Settings' live rows, written whole every time).
+// Always serialize underlying user/file Right Stick & Camera Speed values so temporary env.txt overrides never clobber settings.ini.
 int ZoomFileText(char* text, size_t size) {
     const int t = sZoomTenths.load();
+    const int rsFile = RightStickFileModeRead();
     return snprintf(text, size,
-                    "# Settings of the Vita port, kept by the game's Settings (Camera Zoom, Right Stick, Rear Touch, Tap to Jump, Invert Camera, Star Bit Reach;\n"
+                    "# Settings of the Vita port, kept by the game's Settings (Camera Zoom, Right Stick, Free Camera, Camera Speed, Rear Touch, Tap to Jump, Invert Camera, Star Bit Reach;\n"
                     "# L and R in the pause menu set the zoom). Star Bit reach: 1 the game's own to 5 every Star Bit on screen.\n"
-                    "zoom = %d.%d\nrear_aim = %d\nstick_pointer = %d\nstar_bit_reach = %d\ntap_jump = %d\ninvert_camera = %d\n",
-                    t / 10, t % 10, RearAimRead(), StickPointerRead(), StarBitReachRead(), TapJumpRead(), InvertCameraRead());
+                    "zoom = %d.%d\nrear_aim = %d\nstick_pointer = %d\nfree_camera = %d\ncamera_speed = %d\nstar_bit_reach = %d\ntap_jump = %d\ninvert_camera = %d\n",
+                    t / 10, t % 10, RearAimRead(), rsFile == 2 ? 1 : 0, rsFile == 0 ? 1 : 0, CameraSpeedFileRead(), StarBitReachRead(), TapJumpRead(), InvertCameraRead());
 }
 
 void ZoomSave() {
@@ -769,8 +867,9 @@ void ZoomSave() {
         const int len = ZoomFileText(text, sizeof text);
         if (len > 0 && len < static_cast<int>(sizeof text) && port_card_write_async(sZoomFile.c_str(), 0, text, static_cast<unsigned>(len))) {
             sZoomSavedChange = sZoomChange.load();
-            port_log_summary("zoom: %d.%d, rear touch aiming %s, right stick %s, Star Bit reach %d, queued for %s (card-write thread)", t / 10, t % 10,
-                             RearAimRead() ? "on" : "off", StickPointerRead() ? "pointer" : "camera", StarBitReachRead(), sZoomFile.c_str());
+            static const char* kRsNames[3] = {"free", "classic", "pointer"};
+            port_log_summary("zoom: %d.%d, rear touch aiming %s, right stick %s (speed %d, invert %d), Star Bit reach %d, queued for %s (card-write thread)", t / 10, t % 10,
+                             RearAimRead() ? "on" : "off", kRsNames[RightStickModeRead()], CameraSpeedRead(), InvertCameraRead(), StarBitReachRead(), sZoomFile.c_str());
             return;
         }
         // (queue full: sZoomSavedChange stays as it was, so the next turn of the menu asks again)
@@ -792,8 +891,9 @@ void ZoomSave() {
         }
     }
     sZoomSavedChange = sZoomChange.load();
-    port_log_summary("zoom: %d.%d, rear touch aiming %s, right stick %s, Star Bit reach %d, saved in %s", t / 10, t % 10,
-                     RearAimRead() ? "on" : "off", StickPointerRead() ? "pointer" : "camera", StarBitReachRead(), sZoomFile.c_str());
+    static const char* kRsNames[3] = {"free", "classic", "pointer"};
+    port_log_summary("zoom: %d.%d, rear touch aiming %s, right stick %s (speed %d, invert %d), Star Bit reach %d, saved in %s", t / 10, t % 10,
+                     RearAimRead() ? "on" : "off", kRsNames[RightStickModeRead()], CameraSpeedRead(), InvertCameraRead(), StarBitReachRead(), sZoomFile.c_str());
 }
 
 int ZoomRead() {
@@ -832,10 +932,15 @@ extern "C" void port_zoom_set_root(const char* saveRoot) {
     sZoomTenths.store(-1);  // (read again, with the file)
     sRearAim.store(-1);
     sStickPointer.store(-1);
+    sFreeCamera.store(-1);
+    sRightStickMode.store(-1);
+    sRightStickEnv.store(-2);
+    sCameraSpeed.store(-1);
+    sCameraSpeedEnv.store(-2);
     sStarBitReach.store(-1);
     sTapJump.store(-1);
     sInvertCamera.store(-1);
-    if (port_input_set_camera_inverted) port_input_set_camera_inverted(InvertCameraRead());   // settingsnative: Invert Camera is applied at start
+    ApplyInvertCamera(InvertCameraRead());   // settingsnative: Invert Camera is applied at start
 }
 
 // Rear touch aiming (pause menu: Triangle toggles it; saved with the zoom). 1 = on.
@@ -850,10 +955,13 @@ extern "C" int port_rear_aim_toggle(void) {
 // The right stick (pause menu: Square switches it; saved with the zoom). 1 = it moves the pointer, 0 = it turns the camera.
 extern "C" int port_stick_pointer_enabled(void) { return port_handheld() ? StickPointerRead() : 0; }
 extern "C" int port_stick_pointer_toggle(void) {
-    const int now = StickPointerRead() ? 0 : 1;
-    sStickPointer.store(now);
+    const int was = RightStickFileModeRead();
+    const int nowMode = (was == 2) ? 0 : 2;
+    sRightStickMode.store(nowMode);
+    sStickPointer.store(nowMode == 2 ? 1 : 0);
+    sFreeCamera.store(nowMode == 0 ? 1 : 0);
     sZoomChange.fetch_add(1);
-    return now;
+    return nowMode == 2 ? 1 : 0;
 }
 
 // Star Bit reach (pause menu: Select steps through the levels; saved with the zoom). 1 = the original game; elsewhere than the handhelds
@@ -874,12 +982,31 @@ extern "C" int port_tap_jump_set(int on) {
     if (TapJumpRead() != now) { sTapJump.store(now); sZoomChange.fetch_add(1); }
     return now;
 }
-// settingsnative: Invert Camera (Settings > Camera; saved with the zoom, applied at start through port_input_set_camera_inverted).
+// settingsnative: Invert Camera (Settings > Camera; 0 Off, 1 Left/Right [3.0 compatible], 2 Up/Down, 3 Both).
 extern "C" int port_invert_camera_enabled(void) { return InvertCameraRead(); }
-extern "C" int port_invert_camera_set(int on) {
-    const int now = on ? 1 : 0;
+extern "C" int port_invert_camera_set(int mode) {
+    const int now = mode < 0 ? 0 : (mode > 3 ? 3 : mode);
     if (InvertCameraRead() != now) { sInvertCamera.store(now); sZoomChange.fetch_add(1); }
-    if (port_input_set_camera_inverted) port_input_set_camera_inverted(now);
+    ApplyInvertCamera(now);
+    return now;
+}
+// freecam31: Right Stick mode (0 = Free Camera, 1 = Classic, 2 = Pointer) and Camera Speed (1..10, default 5).
+extern "C" int port_free_camera_enabled(void) { return port_handheld() && RightStickModeRead() == 0 ? 1 : 0; }
+extern "C" int port_right_stick_mode(void) { return port_handheld() ? RightStickModeRead() : 0; }
+extern "C" int port_right_stick_mode_set(int mode) {
+    const int m = mode < 0 ? 0 : (mode > 2 ? 2 : mode);
+    if (RightStickFileModeRead() != m) {
+        sRightStickMode.store(m);
+        sStickPointer.store(m == 2 ? 1 : 0);
+        sFreeCamera.store(m == 0 ? 1 : 0);
+        sZoomChange.fetch_add(1);
+    }
+    return m;
+}
+extern "C" int port_camera_speed(void) { return port_handheld() ? CameraSpeedRead() : kCameraSpeedDefault; }
+extern "C" int port_camera_speed_set(int level) {
+    const int now = level < 1 ? 1 : (level > kCameraSpeedLevels ? kCameraSpeedLevels : level);
+    if (CameraSpeedFileRead() != now) { sCameraSpeed.store(now); sZoomChange.fetch_add(1); }
     return now;
 }
 // settingsnative: Right Stick / Rear Touch / Star Bit Reach set to a value (the toggles above flip or step; these go straight to it).
@@ -889,9 +1016,14 @@ extern "C" int port_rear_aim_set(int on) {
     return now;
 }
 extern "C" int port_stick_pointer_set(int on) {
-    const int now = on ? 1 : 0;
-    if (StickPointerRead() != now) { sStickPointer.store(now); sZoomChange.fetch_add(1); }
-    return now;
+    const int target = on ? 2 : 0;
+    if ((RightStickFileModeRead() == 2) != (on != 0)) {
+        sRightStickMode.store(target);
+        sStickPointer.store(on ? 1 : 0);
+        sFreeCamera.store(on ? 0 : 1);
+        sZoomChange.fetch_add(1);
+    }
+    return on ? 1 : 0;
 }
 extern "C" int port_star_bit_reach_set(int level) {
     const int now = level < 1 ? 1 : (level > kStarBitReachLevels ? kStarBitReachLevels : level);
@@ -923,6 +1055,7 @@ extern "C" unsigned port_zoom_limit_hits(void) { return sZoomLimitHits.load(std:
 // The settings panel under the pause menu (platform/src/port/settings_panel.cpp): its sounds and animation step once per turn of
 // the game thread. (weak: the host tests build this file without it)
 extern "C" void port_settings_panel_turn(int selecting) __attribute__((weak));
+extern "C" bool port_settings_native_menu_open(void) __attribute__((weak));
 
 // The pause menu (game thread, once per turn): `selecting` is 1 while the buttons take input. The value is written to the file
 // when the menu closes, and after three quarters of a second without a change, whichever comes first.
@@ -936,7 +1069,11 @@ extern "C" void port_zoom_menu(int selecting) {
     } else if (sZoomIdle < 100000) {
         ++sZoomIdle;
     }
-    if (changes != sZoomSavedChange && ((was && !selecting) || sZoomIdle >= 45)) ZoomSave();
+    // While native Settings is open, do NOT auto-flush live preview edits after 45 idle frames;
+    // otherwise choosing "Don't Save" would still leave discarded changes written on disk.
+    // Every Save path in MpMenuSettings.cpp calls port_zoom_save_now() explicitly.
+    const bool nativeSettingsOpen = port_settings_native_menu_open && port_settings_native_menu_open();
+    if (!nativeSettingsOpen && changes != sZoomSavedChange && ((was && !selecting) || sZoomIdle >= 45)) ZoomSave();
     if (port_settings_panel_turn) port_settings_panel_turn(selecting);
 #if VGX_COLDTRACE
     port_vgx_coldtrace_pause(selecting);
@@ -5606,6 +5743,7 @@ int64_t sLtWorkDoneNs = 0, sLtBeginNs = 0, sLtLogNs = 0;
 }  // namespace
 extern "C" int port_hrw_mode(void) __attribute__((weak));   // (vgx_galaxy.cpp)
 extern "C" void port_hrw_fresh_deadline_push(long long sleepNs) __attribute__((weak));   // (vgx_galaxy.cpp: GXV_LATE_TURN with the fresh player)
+extern "C" float port_free_camera_turn_blend(void) __attribute__((weak));   // (freecam31: CameraDirector.cpp)
 static bool LateTurnOn() {
     static const bool on = [] {
         port::lateturn::Config c;
@@ -5631,13 +5769,24 @@ extern "C" void port_late_turn_wait(int code) {
     const bool rhythm = fixed30 || sSteadyOn.load(std::memory_order_relaxed) || hrw == 1 || (hrw == 5 && !(port_hrw_plain60 && port_hrw_plain60())) || (port_hrw_even30_noassist && port_hrw_even30_noassist() != 0);
     const bool quiet = port_screen_quiet && port_screen_quiet() != 0;
     static bool wasRhythm = false;
+    static bool wasFreeCamSpin = false;
     if (!rhythm || quiet) {
         if (wasRhythm) sLt.Reset();   // (a covered screen, the even 30 left: the idle times measured are not the next rhythm's)
         wasRhythm = false;
+        wasFreeCamSpin = false;
         return;
     }
     wasRhythm = true;
     if (code != 1) return;
+    // freecam31: Keep full pipeline headroom (skip phase-sync pre-sleep) while Free Camera is actively spinning
+    // so rapid draw-count bursts across dense hubs (e.g. Observatory 139 -> 306 draws) don't miss vblanks,
+    // and reset pre-spin slack once on spin entry so stopping in a heavier view direction re-measures safely.
+    if (port_free_camera_turn_blend && port_free_camera_turn_blend() > 0.10f) {
+        if (!wasFreeCamSpin) sLt.Reset();
+        wasFreeCamSpin = true;
+        return;
+    }
+    wasFreeCamSpin = false;
     sLtEligible = true;
     const uint32_t d = sLt.Plan();
     if (!d) return;

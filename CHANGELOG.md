@@ -1,3 +1,23 @@
+# Version 3.0.1 — November 2026
+
+A focused quality-of-life and stability update on top of 3.0 — **fully cross-compatible with 3.0 multiplayer sessions and online play (`galaxy.psvita.dev`)**. Upgrading from 3.0 keeps all saves, settings, and your 5,401-shader cache intact.
+
+### Right-Stick Free Camera (New Default on Handheld & PS TV)
+- **Full analog 360° Free Camera on the right stick:** Orbit smoothly around Mario with full horizontal yaw and vertical pitch (`-5°` to `+65°`) on eligible 3D gameplay cameras, including **spherical planet anchoring** so orbits stay level as you walk around curved planets.
+- **Smart auto-yield:** Automatically yields cleanly to 2D/fixed/rail/boss/pipe/event cameras, opening flyovers, first-person view, Pull Star aiming, menus, and the multiplayer bubble-follow camera.
+- **Smooth collision & recenter:** Real-time line-of-sight wall pull-in (`18–67 µs`), low-angle floor lift, and **△** to smoothly recenter behind Mario.
+- **In-game Settings (all 5 languages):** Choose **Free Camera** (default), **Camera** (classic 45° snap), or **Pointer** under **Settings > Controls > Right Stick**, plus new **Camera Speed (1–10)** and **Invert Camera (Off / Horizontal / Vertical / Both)** rows.
+- **Camera-turn scenery smoothness (30 fps & 60 fps):** Removed SMG's 75% wall/floor-graze orbit brake and double-damping Cartesian chord lag, added horizontal-biased leading-edge frustum pre-unclipping across `GXV_CLIP_PAIR` frames, paused/reset `GXV_LATE_TURN` pre-sleep during spins, and widened `60 Assist` turn guard bands (`4.0° -> 4.6°`) — cutting Observatory turning hitches by **67%** (`6 -> 2`) and visible multi-refresh holds by **71%** (`7 -> 2`) on real PS Vita hardware.
+
+### Controller Plugins & Bug Fixes
+- **Permanent fix for "Controller disconnected" popups with Vita plugins (`MiniVitaTV`, `ds4vita`, `reVita`, Bluetooth plugins):** 5-tier port failover across active ports plus `sceCtrlPeekBufferPositive(0)` fallback and `Positive2` trigger normalization; handheld Vitas with virtual pad plugins are no longer misclassified as PS TV, while genuine unpaired PS TV disconnect detection is preserved.
+- **Controller init fallback:** `port_vita_input_init` now handles zero-cap boot states cleanly.
+- **Settings UI hardening:** Fixed button-capture deadlock (`S_SET_CAPTURE` exits cleanly on conflict/disconnect), added `HostAllocScope` across Settings UI allocations, closed Settings cleanly on forced scene cuts, suppressed background `ZoomSave` while Settings is open, flushed camera zoom on clean exit, and fixed **Put Everything Back** so `Camera Speed` and `Invert Camera` always reset cleanly.
+- **Fan-translated / patched ISO compatibility:** Replacing game files over an existing install now automatically invalidates `sizes.cache` (`fst.bin`, `Message.arc`, `Font.arc`), and malformed `0x1A` BMG text tags are safely guarded without breaking standard Wii button icon tags.
+- **Sleep / LiveArea resume:** CPU/GPU/bus clocks (`GXV_CLOCK_KEEP=1` by default) and pad/touch/motion sampling now refresh immediately upon waking from sleep or returning from LiveArea.
+
+---
+
 # Version 3.0 — November 2026
 
 This version includes everything in 2.3 (listed under Version 2.3 below), adds multiplayer, upgrades both **Performance (60 fps)** and **Quality (30 fps, hardware 2× MSAA)** modes with major GPU/shader/CPU speed-ups, ships refreshed Home Screen bubble, LiveArea and launch splash artwork (`content-rev 5`), and packs a complete **5,401-shader native PS Vita seed pack** so the game boots and plays cleanly with zero cold shader compiles across galaxies. **Hardware-verified on a real PS Vita (498 MHz, 4 cores) on 26–27 November 2026**, including live two-player Wi-Fi Play Together sessions (menus, gathering screen, fly-in, play, bubble rescue, checkpoints and leaving at 5–16 ms ping). **Two physical Vitas together, Nearby (ad hoc) play and far-away codes on real routers have not been tried on consoles yet.** [Known Issues](KNOWN-ISSUES.md) lists what is open and what has not been seen on a console yet.

@@ -1,5 +1,6 @@
 #include "input.h"
 #include "port/pointer_aim.h"
+#include "port/resume.h"
 #include <psp2/ctrl.h>
 #include <psp2/motion.h>
 #include <psp2/touch.h>
@@ -15,23 +16,34 @@ static SceCtrlData raw;
 static SceTouchData front, rear;
 static int type = SCE_CTRL_TYPE_PHY, readResult = 1, menus = 0, zoom = 0, tilt = 0;
 static int reads = 0, zoomSteps = 0, toggles = 0, stickToggles = 0, stickPointer = 0, stickFollows = 0, reachSteps = 0;
-static bool motionOk = true;
+static bool motionOk = true, touchOk = true, customPorts = false;
+static SceCtrlPortInfo customPortInfo = {};
+static int pos2Result = 1, portInfoResult = 0, expectedPos2Port = -1, failPos2Port = -1;
+static unsigned mockResumeGen = 0;
 static SceMotionState motionState;
 extern "C" {
+unsigned port_resume_generation(void) { return mockResumeGen; }
 int oracle_init(); void oracle_poll(float, PortPadState*); void oracle_shutdown();
 int sceCtrlSetSamplingMode(SceCtrlPadInputMode) { return 0; }
 int sceCtrlPeekBufferPositive(int port, SceCtrlData* out, int) { assert(port == 0); ++reads; *out = raw; return readResult; }
 int sceCtrlPeekBufferPositive2(int port, SceCtrlData* out, int) {
-    assert(port == (type == SCE_CTRL_TYPE_PHY ? 0 : 1));
+    if (expectedPos2Port >= 0) assert(port == expectedPos2Port);
+    else if (expectedPos2Port == -1) assert(port == (type == SCE_CTRL_TYPE_PHY ? 0 : 1));
     ++reads; *out = raw;
-    if (type == SCE_CTRL_TYPE_PHY) {
+    if (failPos2Port >= 0 && port == failPos2Port) return -1;
+    const bool translateTriggers = customPorts
+        ? (port >= 0 && port < 5 && customPortInfo.port[port] == SCE_CTRL_TYPE_PHY)
+        : (type == SCE_CTRL_TYPE_PHY);
+    if (translateTriggers) {
         out->buttons &= ~(SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER);
         if (raw.buttons & SCE_CTRL_LTRIGGER) out->buttons |= SCE_CTRL_L1;
         if (raw.buttons & SCE_CTRL_RTRIGGER) out->buttons |= SCE_CTRL_R1;
     }
-    return readResult;
+    return pos2Result != 1 ? pos2Result : readResult;
 }
 int sceCtrlGetControllerPortInfo(SceCtrlPortInfo* info) {
+    if (portInfoResult < 0) return portInfoResult;
+    if (customPorts) { *info = customPortInfo; return 0; }
     *info = {}; info->port[0] = type == SCE_CTRL_TYPE_PHY ? type : SCE_CTRL_TYPE_VIRT;
     if (type != SCE_CTRL_TYPE_PHY) info->port[1] = type;
     return 0;
@@ -40,6 +52,7 @@ int sceMotionStartSampling() { return motionOk ? 0 : -1; }
 int sceMotionStopSampling() { return 0; }
 int sceMotionGetState(SceMotionState* out) { *out = motionState; return motionOk ? 0 : -1; }
 int sceTouchGetPanelInfo(SceUInt32 port, SceTouchPanelInfo* out) {
+    if (!touchOk) return -1;
     *out = {}; out->maxDispX = 1919; out->maxDispY = port == SCE_TOUCH_PORT_FRONT ? 1087 : 889; return 0;
 }
 int sceTouchSetSamplingState(SceUInt32, SceTouchSamplingState) { return 0; }
@@ -70,6 +83,120 @@ int main(int argc, char** argv) {
     const bool defaults = std::strcmp(argv[1], "default") == 0;
     setenv("GXV_REMAP", off ? "0" : "1", 1);
     neutral(); motionState.acceleration.y = -1;
+    if (std::strcmp(argv[1], "freecam") == 0) {
+        // freecam31: With GXV_FREE_CAM=1 (or PETARI_RSTICK=free), right stick emits analog camX/camY
+        // without synthesizing digital Wii D-pad bits; holding Circle still hands right stick to the
+        // Star Bit pointer; menus/pause zero camX/camY; physical D-pad still works for first-person & turns.
+        setenv("GXV_FREE_CAM", "1", 1);
+        assert(port_vita_input_init()); poll();
+        neutral(); raw.rx = 255; raw.ry = 128; auto p = poll();
+        assert(p.camX > 0.95f && std::fabs(p.camY) < 0.05f && !(p.buttons & 0x000Fu) && !p.pointerValid);
+        neutral(); raw.rx = 255; raw.ry = 0; p = poll();
+        assert(p.camX > 0.68f && p.camY > 0.68f && !(p.buttons & 0x000Fu) && !p.pointerValid);
+        // Holding Circle switches right stick to pointer and clears camX/camY.
+        raw.buttons = SCE_CTRL_CIRCLE; p = poll();
+        assert(p.pointerValid && p.camX == 0.0f && p.camY == 0.0f && (p.buttons & 0x0400u));
+        // Menus & pause zero camX/camY.
+        raw.buttons = 0; menus = 1; p = poll();
+        assert(p.camX == 0.0f && p.camY == 0.0f);
+        menus = 0; zoom = 1; p = poll();
+        assert(p.camX == 0.0f && p.camY == 0.0f);
+        zoom = 0;
+        // Physical D-pad still works normally alongside Free Camera.
+        neutral(); raw.buttons = SCE_CTRL_UP; p = poll();
+        assert((p.buttons & 0x0008u) && p.camX == 0.0f && p.camY == 0.0f);
+        // GXV_FREE_CAM=0 restores Classic digital Wii D-pad right stick.
+        setenv("GXV_FREE_CAM", "0", 1);
+        assert(port_vita_input_init()); poll();
+        neutral(); raw.rx = 255; p = poll();
+        assert((p.buttons & 0x0002u) && p.camX == 0.0f && p.camY == 0.0f);
+        std::puts("PASS: freecam input path (analog camX/camY, no fake D-pad, Circle pointer handoff, UI zeroing, Classic fallback)");
+        return 0;
+    }
+    if (std::strcmp(argv[1], "plugins") == 0) {
+        // 3.0.1 CONT_10 permanent fix: Vita controller plugins (MiniVitaTV, ds4vita, third-party BT, broken Positive2),
+        // boot-time zero-caps guard, genuine unpaired PS TV disconnect detection, and sleep/resume sampling refresh.
+        // 1. Boot-time pad read failure must NOT freeze zero ActiveCapabilities.
+        customPorts = true; customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_PHY;
+        expectedPos2Port = 0; readResult = -1; pos2Result = -1;
+        assert(port_vita_input_init());
+        assert(ActiveCapabilities().availableButtons != 0 && ActiveCapabilities().frontTouch && ActiveCapabilities().rearTouch);
+        readResult = 1; pos2Result = 1;
+
+        // 2. MiniVitaTV on handheld Vita: port[0]=VIRT, port[1]=PHY -> handheld (not external pad), touch/motion intact, buttons work.
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_VIRT; customPortInfo.port[1] = SCE_CTRL_TYPE_PHY;
+        expectedPos2Port = 1;
+        assert(port_vita_input_external_pad() == 0);
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS | SCE_CTRL_LTRIGGER;
+        auto p = poll();
+        assert(p.connected && (p.buttons & 0x0800u) && (p.buttons & 0x2000u));
+        PortVitaRawInput ui{};
+        assert(port_vita_input_raw_poll(ui) && ui.source == 1 && ui.caps.frontTouch && ui.caps.rearTouch && ui.caps.motion);
+
+        // 3. Plugin exposing DS4 directly on port[0] (ports 1..4 unpaired).
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_DS4;
+        expectedPos2Port = 0;
+        assert(port_vita_input_external_pad() == 1);
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u));
+
+        // 3b. Multi-candidate failover: stale/sleeping DS4 on port[1] fails Positive2 while handheld PHY on port[2] is alive.
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_VIRT; customPortInfo.port[1] = SCE_CTRL_TYPE_DS4; customPortInfo.port[2] = SCE_CTRL_TYPE_PHY;
+        expectedPos2Port = -2; failPos2Port = 1;
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u));
+        assert(port_vita_input_raw_poll(ui) && ui.source == 2 && ui.caps.frontTouch);
+        failPos2Port = -1;
+
+        // 4. Third-party BT plugin on port[1] with custom non-UNPAIRED type (e.g. x1vita / Switch2Vita).
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_VIRT; customPortInfo.port[1] = 0x20;
+        expectedPos2Port = 1;
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u));
+
+        // 5. Plugin breaking sceCtrlPeekBufferPositive2 while plain sceCtrlPeekBufferPositive(0) succeeds:
+        // LTRIGGER and RTRIGGER must decode properly (positive2=false -> L1/R1 -> Z crouch / Spin).
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_PHY;
+        expectedPos2Port = 0; pos2Result = -1; readResult = 1;
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS | SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER; raw.timeStamp += 16667;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u) && (p.buttons & 0x2000u) && p.accX != 0.0f);
+        pos2Result = 1;
+
+        // 6. Plugin spoofing port[0]=VIRT with ports 1..4 UNPAIRED on a handheld Vita (touch present) recovers via port 0.
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_VIRT;
+        expectedPos2Port = 0;
+        neutral(); poll();
+        raw.buttons = SCE_CTRL_CROSS;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u));
+
+        // 7. Sleep/resume notification refreshes input state cleanly without losing connection.
+        ++mockResumeGen;
+        p = poll();
+        assert(p.connected && (p.buttons & 0x0800u));
+
+        // 8. Genuine PS TV with no paired controller (port[0]=VIRT, ports 1..4 UNPAIRED, no touch panels):
+        // MUST report disconnected so controller-lost warnings still work on PS TV.
+        touchOk = false; motionOk = false;
+        assert(port_vita_input_init());
+        customPortInfo = {}; customPortInfo.port[0] = SCE_CTRL_TYPE_VIRT;
+        expectedPos2Port = 0;
+        neutral();
+        p = poll();
+        assert(!p.connected);
+
+        std::puts("PASS: Vita controller plugin resilience (MiniVitaTV, ds4vita, BT plugins, Positive2 fallback, boot caps, resume, PS TV disconnect)");
+        return 0;
+    }
     if (std::strcmp(argv[1], "escape") == 0) {
         // Jump, Star Bits and Pause moved onto the zoom/rear-aim buttons must still reach the game in
         // the pause menu (confirm, back, unpause); an unbound zoom button still does not.

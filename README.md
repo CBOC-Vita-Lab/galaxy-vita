@@ -1,14 +1,14 @@
-# Super Mario Galaxy for PS Vita — Version 3.0
+# Super Mario Galaxy for PS Vita — Version 3.0.1
 
-**The full Nintendo Wii classic running natively on PlayStation Vita — now at full-resolution 60 FPS across most of the game, with the first-ever Super Mario Galaxy multiplayer for local and online play.**
+**The full Nintendo Wii classic running natively on PlayStation Vita — now with smooth analog right-stick Free Camera, full-resolution 60 FPS across most of the game, and the first-ever Super Mario Galaxy multiplayer for local and online play.**
 
-No emulator, no PC streaming, no compromises on portability: Super Mario Galaxy's own code runs directly on the PS Vita's ARM CPU and GPU, rebuilt from the ground up for handheld controls — touch screen Wii pointer, optional rear-touch Star Bit aiming, motion-sensor (or stick) tilt steering, and instant button spin.
+No emulator, no PC streaming, no compromises on portability: Super Mario Galaxy's own code runs directly on the PS Vita's ARM CPU and GPU, rebuilt from the ground up for handheld controls — smooth right-stick Free Camera, touch screen Wii pointer, optional rear-touch Star Bit aiming, motion-sensor (or stick) tilt steering, and instant button spin.
 
 ![Super Mario Galaxy on the PS Vita](store/screenshots/3.0/hero.png)
 
-**[Download Version 3.0](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [3.0 Showcase & Release Notes](docs/RELEASE-3.0.md) · [Multiplayer Guide](docs/MULTIPLAYER.md) · [Install Guide](MANUAL-INSTALL.md) · [Controls](CONTROLS.md) · [Full Changelog](CHANGELOG.md)
+**[Download Version 3.0.1](https://github.com/CBOC-Vita-Lab/galaxy-vita/releases/latest)** · [3.0 Showcase & Release Notes](docs/RELEASE-3.0.md) · [Multiplayer Guide](docs/MULTIPLAYER.md) · [Install Guide](MANUAL-INSTALL.md) · [Controls](CONTROLS.md) · [Full Changelog](CHANGELOG.md)
 
-> You'll need your own legally dumped copy of Super Mario Galaxy (Wii, USA, `RMGE01`). **Upgrading from 2.x?** Just install the new VPK over your existing install — your saves and settings stay intact.
+> You'll need your own legally dumped copy of Super Mario Galaxy (Wii, USA, `RMGE01`). **Upgrading from 2.x or 3.0?** Just install the new VPK over your existing install — your saves, settings, and shader cache stay intact, and 3.0.1 stays fully cross-compatible with 3.0 multiplayer.
 
 ---
 

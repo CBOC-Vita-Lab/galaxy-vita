@@ -38,7 +38,18 @@
 #include "port/mp_bridge.h"  // MP3: D-pad down is the greeting in a session
 #include <cstring>
 #ifdef TARGET_PC
+#include "Game/Map/HitInfo.hpp"
+#include "Game/Util/AreaObjUtil.hpp"
+#include "Game/Util/MapUtil.hpp"
+#include "Game/Util/TriangleFilter.hpp"
+#include "port/free_camera.h"
+#include <cmath>
+#include <cstdlib>
 extern "C" void port_hrw_camera_cut(void);  // GXV_HRW (platform/src/gx/vgx_galaxy.cpp): an explicit camera change (event, reset, end of event): the pair in flight is not re-projected
+extern "C" int port_zoom_menu_active(void) __attribute__((weak));
+extern "C" bool port_settings_native_menu_open(void) __attribute__((weak));
+extern "C" int mp_menu_wants_no_idle_pointer(void) __attribute__((weak));
+extern "C" int port_turn_skipped_raw(void) __attribute__((weak));
 #endif
 
 void CameraDirector_FORCE_MATCH_SDATA2() {
@@ -68,7 +79,374 @@ namespace {
     static const char* sMpWatchCameraName = "MpWatch";
     // static const s32 sAnimCameraName =
     // static const s32 sAnimCameraZoneID =
+#ifdef TARGET_PC
+    // freecam31: Gravity-aware right-stick Free Camera state (scoped to the active CameraDirector).
+    struct FreeCamRuntime {
+        port::freecam::State state;
+        const CameraDirector* owner = nullptr;
+        const CameraHolder* maskHolder = nullptr;
+        uint64_t ineligibleMask = 0;
+        uint64_t worldAnchoredMask = 0;
+        const CameraParamChunk* prevChunk = nullptr;
+        int64_t prevWallNs = 0;
+        bool pendingHardCut = false;
+        bool pendingParallelReset = false;
+        bool lastEligible = false;
+        unsigned logCounter = 0;
+        float lastHitFrac = 2.0f;
+        float lastDesiredLift = 0.0f;
+        unsigned floorProbeTick = 0;
+        int64_t raycastSumNs = 0;
+        unsigned raycastTicks = 0;
+        bool lastModified = false;
+        float turnBlend = 0.0f;
+
+        // Explicitly called from CameraDirector::CameraDirector() so deterministic JKRHeap address
+        // reuse across stage loads never leaves a stale prevChunk or single-player/MP mask.
+        void resetForNewDirector(const CameraDirector* dir) {
+            owner = dir;
+            maskHolder = nullptr;
+            ineligibleMask = 0;
+            worldAnchoredMask = 0;
+            prevChunk = nullptr;
+            prevWallNs = 0;
+            pendingHardCut = false;
+            pendingParallelReset = false;
+            lastEligible = false;
+            logCounter = 0;
+            lastHitFrac = 2.0f;
+            lastDesiredLift = 0.0f;
+            floorProbeTick = 0;
+            raycastSumNs = 0;
+            raycastTicks = 0;
+            lastModified = false;
+            turnBlend = 0.0f;
+            state.ResetHard();
+        }
+
+        void ensureMasks(const CameraHolder* holder) {
+            if (holder == nullptr) {
+                maskHolder = nullptr;
+                ineligibleMask = ~0ull;
+                worldAnchoredMask = 0;
+                return;
+            }
+            if (maskHolder == holder) return;
+            maskHolder = holder;
+            ineligibleMask = 0;
+            worldAnchoredMask = 0;
+            // Cameras that MUST yield: 2D/2.5D, fixed-eye, cutscenes/demos, talk, death, black hole,
+            // first-person, MP spectate, pointer-aim DPD, and MedianPlanet (reads getCameraInvViewMtx()
+            // every frame, which would otherwise feed FreeCam output back into itself).
+            static const char* const kBlocked[] = {
+                "CAM_TYPE_2D_SLIDE",
+                "CAM_TYPE_FRONT_AND_BACK",
+                "CAM_TYPE_POINT_FIX",
+                "CAM_TYPE_EYEPOS_FIX",
+                "CAM_TYPE_EYEPOS_FIX_THERE",
+                "CAM_TYPE_RAIL_DEMO",
+                "CAM_TYPE_SPIRAL_DEMO",
+                "CAM_TYPE_TALK",
+                "CAM_TYPE_DEAD",
+                "CAM_TYPE_BLACK_HOLE",
+                "CAM_TYPE_ANIM",
+                "CAM_TYPE_SUBJECTIVE",
+                "CAM_TYPE_MP_WATCH",
+                "CAM_TYPE_DPD",
+                "CAM_TYPE_MEDIAN_PLANET",
+            };
+            for (const char* name : kBlocked) {
+                const s32 idx = holder->getIndexOf(name);
+                if (idx >= 0 && idx < 64) {
+                    ineligibleMask |= (1ull << static_cast<unsigned>(idx));
+                }
+            }
+            // Free-tracking cameras whose underlying basePos drifts or stays fixed on a sphere while
+            // Mario moves: use parallel-transport world-anchored orbit so Mario never crosses an
+            // invisible underlying camera pole.
+            static const char* const kWorldAnchored[] = {
+                "CAM_TYPE_FOLLOW",
+                "CAM_TYPE_WONDER_PLANET",
+                "CAM_TYPE_CUBE_PLANET",
+                "CAM_TYPE_WATER_FOLLOW",
+                "CAM_TYPE_WATER_PLANET",
+                "CAM_TYPE_WATER_PLANET_BOSS",
+                "CAM_TYPE_FOO_FIGHTER",
+                "CAM_TYPE_FOO_FIGHTER_PLANET",
+                "CAM_TYPE_GROUND",
+                "CAM_TYPE_RACE_FOLLOW",
+                "CAM_TYPE_TRIPOD_PLANET",
+                "CAM_TYPE_INWARD_SPHERE",
+                "CAM_TYPE_TRUNDLE",
+            };
+            for (const char* name : kWorldAnchored) {
+                const s32 idx = holder->getIndexOf(name);
+                if (idx >= 0 && idx < 64) {
+                    worldAnchoredMask |= (1ull << static_cast<unsigned>(idx));
+                }
+            }
+        }
+    };
+
+    static FreeCamRuntime sFreeCam;
+
+    static bool freeCamLogOn() {
+        static const bool on = [] {
+            const char* e = std::getenv("GXV_FREE_CAM_LOG");
+            return e && *e && std::atoi(e) != 0;
+        }();
+        return on;
+    }
+
+    static bool isFreeCamEligible(const CameraDirector* dir, bool* outWorldAnchored = nullptr) {
+        if (outWorldAnchored) *outWorldAnchored = false;
+        if (dir == nullptr || dir->mCameraManGame == nullptr || dir->mPoseParam1 == nullptr) return false;
+        if (!MR::isEqualSceneName("Game") || MR::isStageFileSelect() ||
+            MR::isEqualStageName("AstroDome") || MR::isEqualStageName("EpilogueDemoStage")) return false;
+        if (dir->mIsStartCameraActive || dir->mIsSubjectiveCamera || dir->mIsStartSubjectiveCamera) return false;
+        if (MR::isDemoActive() || MR::isEventCameraActive() || MR::isPlayerDead() ||
+            MR::isPowerStarGetDemoActive() || MR::isStageStateScenarioOpeningCamera() ||
+            MR::isExecScenarioStarter()) return false;
+        if (dir->getCurrentCameraMan() != static_cast<const CameraMan*>(dir->mCameraManGame)) return false;
+        if (port_zoom_menu_active && port_zoom_menu_active()) return false;
+        if (port_settings_native_menu_open && port_settings_native_menu_open()) return false;
+        if (mp_menu_wants_no_idle_pointer && mp_menu_wants_no_idle_pointer() != 0) return false;
+        if (mp_dialog_active()) return false;
+        const CameraManGame* man = dir->mCameraManGame;
+        if (man->mCamera == nullptr || man->mHolder == nullptr) return false;
+        const s32 camIdx = man->mHolder->getIndexOf(man->mCamera);
+        if (camIdx < 0 || camIdx >= 64) return false;
+        sFreeCam.ensureMasks(man->mHolder);
+        const uint64_t bit = 1ull << static_cast<unsigned>(camIdx);
+        if ((sFreeCam.ineligibleMask & bit) != 0) return false;
+        // Read live roll from mCameraManGame (never stale mPoseParam1 before calcPose()).
+        if (std::fabs(CameraLocalUtil::getRoll(man)) > 0.35f) return false;
+        if (MR::isExistSceneObj(SceneObj_AreaObjContainer)) {
+            if (const CameraTargetObj* target = dir->mTargetHolder ? dir->mTargetHolder->get() : nullptr) {
+                const TVec3f& tpos = target->getPosition();
+                if (MR::getAreaObj("PlaneModeCube", tpos) != nullptr ||
+                    MR::getAreaObj("PlaneCircularModeCube", tpos) != nullptr ||
+                    MR::getAreaObj("PipeModeCube", tpos) != nullptr) return false;
+            }
+        }
+        if (outWorldAnchored) *outWorldAnchored = (sFreeCam.worldAnchoredMask & bit) != 0;
+        return true;
+    }
+
+    static bool isFreeCamResetAvailable(const CameraDirector* dir) {
+        if (!port_free_camera_enabled()) return false;
+        return isFreeCamEligible(dir);
+    }
+
+    static port::freecam::Vec3 toFcVec(const TVec3f& v) { return {v.x, v.y, v.z}; }
+
+    static void applyFreeCamera(CameraDirector* dir) {
+        if (sFreeCam.owner != dir) sFreeCam.resetForNewDirector(dir);
+        const bool enabled = port_free_camera_enabled() != 0;
+        if (!enabled && sFreeCam.state.IsNeutral() && !sFreeCam.pendingHardCut) {
+            sFreeCam.prevWallNs = 0;
+            sFreeCam.lastModified = false;
+            sFreeCam.turnBlend = 0.0f;
+            return;
+        }
+
+        // Galaxy ALWAYS simulates CameraDirector::movement() at a fixed 60 logical turns/s
+        // (even in 60 Assist HRW and Quality 30, where wall-time alternates ~5ms/~27ms per pair).
+        // Always step with fixed dt = 1/60s to prevent HRW sawtooth judder; use wall-clock ONLY
+        // to detect real pause/suspend gaps (> 200 ms) so stale velocity is zeroed on resume.
+        const int64_t nowNs = port_host_time_ns();
+        const bool resumePause = (sFreeCam.prevWallNs > 0 && nowNs > sFreeCam.prevWallNs && (nowNs - sFreeCam.prevWallNs) > 200000000ll);
+        sFreeCam.prevWallNs = nowNs;
+
+        bool worldAnchored = false;
+        const bool eligible = isFreeCamEligible(dir, &worldAnchored);
+        // Restrict subjective freeze strictly to live gameplay FP view (never carry into interrupting demos/events).
+        const bool holdForSubjective = enabled &&
+            (dir->mIsSubjectiveCamera || dir->mIsStartSubjectiveCamera) &&
+            !MR::isDemoActive() && !MR::isEventCameraActive() &&
+            dir->getCurrentCameraMan() == static_cast<const CameraMan*>(dir->mCameraManGame);
+        float camX = 0.0f, camY = 0.0f;
+        if (enabled && eligible) {
+            port_input_cam_stick(&camX, &camY);
+        }
+
+        const CameraParamChunk* curChunk = (dir->mCameraManGame != nullptr) ? dir->mCameraManGame->mChunk : nullptr;
+        const bool chunkChanged = (sFreeCam.prevChunk != nullptr && curChunk != sFreeCam.prevChunk);
+        sFreeCam.prevChunk = curChunk;
+
+        const bool hardCut = sFreeCam.pendingHardCut ||
+            (dir->mViewInterpolator != nullptr && dir->mViewInterpolator->mIsForceCameraChange);
+        sFreeCam.pendingHardCut = false;
+
+        port::freecam::StepInput in;
+        in.dt = 1.0f / 60.0f;
+        in.stickX = camX;
+        in.stickY = camY;
+        in.enabled = enabled;
+        in.eligible = eligible;
+        in.hold = holdForSubjective;
+        in.worldAnchored = worldAnchored;
+        in.hardCut = hardCut;
+        in.resumePause = resumePause;
+        in.chunkChanged = chunkChanged;
+        in.resetTrigger = enabled && eligible && CameraLocalUtil::testCameraPadTriggerReset();
+        in.invertMask = port_input_camera_invert_mask();
+        in.speedLevel = port_camera_speed();
+        in.basePos = toFcVec(dir->mPoseParam1->mPos);
+        in.baseWatch = toFcVec(dir->mPoseParam1->mWatchPos);
+        in.baseUp = toFcVec(dir->mPoseParam1->mUpVec);
+        in.watchUp = toFcVec(dir->mPoseParam1->mWatchUpVec);
+        if (const CameraTargetObj* target = dir->mTargetHolder ? dir->mTargetHolder->get() : nullptr) {
+            in.targetGravity = toFcVec(target->getGravityVector());
+            in.targetFront = toFcVec(target->getFrontVec());
+        }
+
+        const port::freecam::StepOutput out = sFreeCam.state.Step(in);
+        if (out.releasedNative) {
+            sFreeCam.pendingParallelReset = true;
+        }
+        if (!out.modified || hardCut) {
+            sFreeCam.lastHitFrac = 2.0f;
+            sFreeCam.lastDesiredLift = 0.0f;
+        }
+        const bool activeOrbit = out.modified && out.needsLosCheck && !hardCut;
+        sFreeCam.lastModified = activeOrbit;
+        sFreeCam.turnBlend = activeOrbit ? sFreeCam.state.TurnBlend() : 0.0f;
+        if (out.modified) {
+            if (!out.needsLosCheck) sFreeCam.lastHitFrac = 2.0f;
+            if (!out.needsFloorCheck) sFreeCam.lastDesiredLift = sFreeCam.state.floorLift;
+            port::freecam::Vec3 finalPos = out.pos;
+            port::freecam::Vec3 finalUp = out.up;
+            // Skip map collision raycasts on undrawn/skipped turns (reuse cached hit/lift while still
+            // advancing smooth exponential filters) to save 1-3 ms/turn on heavy stages like Observatory.
+            const bool undrawnTurn = (port_turn_skipped_raw && port_turn_skipped_raw() != 0);
+            const bool doLogTime = freeCamLogOn();
+            const int64_t rcT0 = doLogTime ? port_host_time_ns() : 0;
+            TriangleFilterFunc filter(&MR::isCameraCodeThrough);
+            if (out.needsLosCheck && out.baseDist > 1.0f) {
+                if (!undrawnTurn) {
+                    float hitFrac = 2.0f;
+                    const TVec3f watch(in.baseWatch.x, in.baseWatch.y, in.baseWatch.z);
+                    const TVec3f ray(out.pos.x - in.baseWatch.x, out.pos.y - in.baseWatch.y, out.pos.z - in.baseWatch.z);
+                    TVec3f hitPos;
+                    Triangle tri;
+                    if (MR::getFirstPolyOnLineToMap(&hitPos, &tri, watch, ray, nullptr, &filter)) {
+                        const TVec3f toHit = hitPos - watch;
+                        hitFrac = toHit.length() / out.baseDist;
+                    }
+                    sFreeCam.lastHitFrac = hitFrac;
+                }
+                finalPos = sFreeCam.state.ApplyCollisionPull(in.baseWatch, out.pos, sFreeCam.lastHitFrac, {0.0f, 0.0f, 0.0f}, sFreeCam.state.smoothUp, in.dt);
+            }
+            if (out.needsFloorCheck) {
+                // Continuous downward floor probe + upward ceiling clamp (prevents near-plane/mBinder
+                // floor clipping with zero 1-frame binary vertical pops and zero ceiling clipping).
+                // Probe every drawn turn whenever near a floor, actively pitching, or recentering;
+                // otherwise every 2nd drawn turn (30 Hz at 60 fps, 15 Hz at 30 fps) to keep heavy stages locked.
+                const port::freecam::Vec3& up = sFreeCam.state.smoothUp;
+                if (!undrawnTurn) {
+                    const bool activeFloor = (sFreeCam.state.floorLift >= 0.5f || sFreeCam.lastDesiredLift >= 0.5f);
+                    const bool pitching = (std::fabs(camY) > 0.05f || std::fabs(sFreeCam.state.velPitch) > 0.05f || sFreeCam.state.recentering);
+                    const unsigned interval = (activeFloor || pitching) ? 1u : 2u;
+                    if ((++sFreeCam.floorProbeTick % interval) == 0u) {
+                        const float kProbeAbove = 60.0f;
+                        const float kProbeLen = kProbeAbove + port::freecam::kFloorClearance;
+                        const TVec3f probeStart(finalPos.x + up.x * kProbeAbove, finalPos.y + up.y * kProbeAbove, finalPos.z + up.z * kProbeAbove);
+                        const TVec3f probeDown(-up.x * kProbeLen, -up.y * kProbeLen, -up.z * kProbeLen);
+                        TVec3f floorHit;
+                        Triangle floorTri;
+                        float desiredLift = 0.0f;
+                        if (MR::getFirstPolyOnLineToMap(&floorHit, &floorTri, probeStart, probeDown, nullptr, &filter)) {
+                            const TVec3f* fn = floorTri.getNormal(0);
+                            if (fn != nullptr && (fn->x * up.x + fn->y * up.y + fn->z * up.z) > 0.5f) {
+                                const float heightAboveFloor =
+                                    (finalPos.x - floorHit.x) * up.x +
+                                    (finalPos.y - floorHit.y) * up.y +
+                                    (finalPos.z - floorHit.z) * up.z;
+                                if (heightAboveFloor < port::freecam::kFloorClearance) {
+                                    desiredLift = port::freecam::kFloorClearance - heightAboveFloor;
+                                    if (desiredLift > 1.0f) {
+                                        const float kCeilMargin = 30.0f;
+                                        const TVec3f ceilStart(finalPos.x, finalPos.y, finalPos.z);
+                                        const TVec3f ceilRay(up.x * (desiredLift + kCeilMargin), up.y * (desiredLift + kCeilMargin), up.z * (desiredLift + kCeilMargin));
+                                        TVec3f ceilHit;
+                                        Triangle ceilTri;
+                                        if (MR::getFirstPolyOnLineToMap(&ceilHit, &ceilTri, ceilStart, ceilRay, nullptr, &filter)) {
+                                            const float ceilDist =
+                                                (ceilHit.x - finalPos.x) * up.x +
+                                                (ceilHit.y - finalPos.y) * up.y +
+                                                (ceilHit.z - finalPos.z) * up.z;
+                                            const float maxLift = ceilDist - kCeilMargin;
+                                            desiredLift = maxLift > 0.0f ? (desiredLift < maxLift ? desiredLift : maxLift) : 0.0f;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        sFreeCam.lastDesiredLift = desiredLift;
+                    }
+                }
+                finalPos = sFreeCam.state.ApplyFloorLift(in.baseWatch, finalPos, up, sFreeCam.lastDesiredLift, in.dt, &finalUp);
+            }
+            if (doLogTime) {
+                sFreeCam.raycastSumNs += (port_host_time_ns() - rcT0);
+                ++sFreeCam.raycastTicks;
+            }
+            dir->mPoseParam1->mPos.set(finalPos.x, finalPos.y, finalPos.z);
+            dir->mPoseParam1->mUpVec.set(finalUp.x, finalUp.y, finalUp.z);
+        }
+
+        if (freeCamLogOn()) {
+            const bool stateFlipped = (eligible != sFreeCam.lastEligible);
+            const bool activeStick = (std::fabs(camX) > 0.05f || std::fabs(camY) > 0.05f);
+            if (stateFlipped || out.handledReset || ((activeStick || out.modified) && (++sFreeCam.logCounter % 30u == 1u))) {
+                const char* camName = (dir->mCameraManGame && dir->mCameraManGame->mHolder && dir->mCameraManGame->mCamera)
+                    ? dir->mCameraManGame->mHolder->getNameStrOf(dir->mCameraManGame->mHolder->getIndexOf(dir->mCameraManGame->mCamera))
+                    : "none";
+                const unsigned avgRcUs = sFreeCam.raycastTicks ? static_cast<unsigned>((sFreeCam.raycastSumNs / sFreeCam.raycastTicks) / 1000ll) : 0u;
+                sFreeCam.raycastSumNs = 0;
+                sFreeCam.raycastTicks = 0;
+                port_log_summary("freecam: en=%d elig=%d anch=%d cam=%s stick=(%.2f,%.2f) yaw=%.1fdeg pitch=%.1fdeg pull=%.2f lift=%.0f rcUs=%u mod=%d rst=%d",
+                                 enabled ? 1 : 0, eligible ? 1 : 0, sFreeCam.state.anchored ? 1 : 0,
+                                 camName ? camName : "?", camX, camY,
+                                 sFreeCam.state.yaw * (180.0f / port::freecam::kPi),
+                                 sFreeCam.state.pitch * (180.0f / port::freecam::kPi),
+                                 sFreeCam.state.pull, sFreeCam.state.floorLift, avgRcUs, out.modified ? 1 : 0, out.handledReset ? 1 : 0);
+            }
+        }
+        sFreeCam.lastEligible = eligible;
+    }
+#endif
 };  // namespace
+
+#ifdef TARGET_PC
+extern "C" int port_free_camera_owns_reset(void) {
+    if (!port_free_camera_enabled()) return 0;
+    if (!MR::isExistSceneObj(SceneObj_CameraDirector)) return 0;
+    return isFreeCamEligible(MR::getCameraDirector()) ? 1 : 0;
+}
+
+extern "C" int port_free_camera_take_parallel_reset(void) {
+    if (!sFreeCam.pendingParallelReset) return 0;
+    sFreeCam.pendingParallelReset = false;
+    return 1;
+}
+
+extern "C" int port_free_camera_active(void) {
+    if (!MR::isExistSceneObj(SceneObj_CameraDirector)) return 0;
+    return sFreeCam.lastModified ? 1 : 0;
+}
+
+extern "C" float port_free_camera_turn_blend(void) {
+    if (!MR::isExistSceneObj(SceneObj_CameraDirector)) return 0.0f;
+    return sFreeCam.turnBlend;
+}
+
+extern "C" float port_free_camera_clip_pad(float fovyDeg) {
+    if (!MR::isExistSceneObj(SceneObj_CameraDirector) || !sFreeCam.lastModified) return 1.0f;
+    return sFreeCam.state.ClipPadFactor(fovyDeg);
+}
+#endif
 
 CameraDirector::CameraDirector(const char* pName) : NameObj(pName) {
     mTargetObj = nullptr;
@@ -114,6 +492,9 @@ CameraDirector::CameraDirector(const char* pName) : NameObj(pName) {
     mCameraManSubjective->owned(this);
     mViewMtx.identity();
     MR::createCenterScreenBlur();
+#ifdef TARGET_PC
+    sFreeCam.resetForNewDirector(this);
+#endif
 }
 
 void CameraDirector::init(const JMapInfoIter& rIter) {
@@ -126,6 +507,9 @@ void CameraDirector::movement() {
     mTargetHolder->movement();
     updateCameraMan();
     calcPose();
+#ifdef TARGET_PC
+    applyFreeCamera(this);
+#endif
     createViewMtx();
     getCurrentCameraMan()->mMatrix.set(MR::getCameraInvViewMtx());
     mPoseParam2->copyFrom(*getCurrentCameraMan()->mPoseParam);
@@ -732,7 +1116,12 @@ void CameraDirector::controlCameraSE() {
     }
 
     if (CameraLocalUtil::testCameraPadTriggerReset()) {
-        if (isEnableToReset()) {
+#ifdef TARGET_PC
+        const bool canReset = isEnableToReset() || isFreeCamResetAvailable(this);
+#else
+        const bool canReset = isEnableToReset();
+#endif
+        if (canReset) {
             if (isPlayableCameraSE(false)) {
                 MR::startSystemSE("SE_SY_CAMERA_RESET");
                 MR::startSystemSE("SE_SY_CAMERA_MOVE");
@@ -841,6 +1230,7 @@ bool CameraDirector::isPlayableCameraSE(bool checkSubjective) {
 void CameraDirector::resetCameraMan() {
 #ifdef TARGET_PC
     port_hrw_camera_cut();
+    sFreeCam.pendingHardCut = true;
 #endif
     setInterpolation(0);
 

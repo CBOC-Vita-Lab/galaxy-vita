@@ -34,6 +34,7 @@ void NameObj::calcViewAndEntry() {}
 int port_vr_cull_view(float*, float*, float*) { return 0; }
 extern "C" float port_popin_clip_pad(float) { return 1.0f; }  // (popin25, GXV_POPIN_LEAD: the pad of a turning camera; none here)
 extern "C" float port_hrw_clip_pad() { return 1.0f; }  // This fixture exercises the original, unwarped camera.
+extern "C" float port_free_camera_clip_pad(float) { return 1.0f; }  // (freecam31: no free-camera turn in this fixture)
 // (the port's C versions: platform/src/sdk/mtx.c, decomp/src/JSystem/JMath/JMath.cpp)
 extern "C" f32 PSVECMag(const Vec* v) { return sqrtf(v->x * v->x + v->y * v->y + v->z * v->z); }
 extern "C" void PSVECNormalize(const Vec* src, Vec* unit) {

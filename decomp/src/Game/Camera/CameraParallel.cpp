@@ -87,6 +87,11 @@ void CameraParallel::calcIdealPose() {
     CameraLocalUtil::setWatchUpVec(this, up);
 }
 
+#ifdef TARGET_PC
+extern "C" int port_free_camera_owns_reset(void) __attribute__((weak));
+extern "C" int port_free_camera_take_parallel_reset(void) __attribute__((weak));
+#endif
+
 void CameraParallel::calcRound() {
     if (!mIsEnableValid) {
         return;
@@ -111,7 +116,13 @@ void CameraParallel::calcRound() {
 
     f32 roundInterval = MR::toRadian(360.0f / ::sRoundDiv);
 
+#ifdef TARGET_PC
+    const bool fcOwns = (port_free_camera_owns_reset && port_free_camera_owns_reset() != 0);
+    const bool fcRelease = (port_free_camera_take_parallel_reset && port_free_camera_take_parallel_reset() != 0);
+    if ((fcRelease && MR::abs(mRoundAngle) > 1e-4f) || (!fcOwns && CameraLocalUtil::testCameraPadTriggerReset())) {
+#else
     if (CameraLocalUtil::testCameraPadTriggerReset()) {
+#endif
         mRoundTarget = 0.0f;
         mIsRounding = true;
         mRoundAddition = ::sRoundAddition * 2.0f;

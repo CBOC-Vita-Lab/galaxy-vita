@@ -1,5 +1,5 @@
 {
-  "release": "galaxy-v3.0",
+  "release": "galaxy-v3.0.1",
   "scope": "Every source file of the release (decomp/, platform/, vita/, tests/, tools/, armhf/ and the root build files) with its SHA-256",
   "files": [
     {
@@ -2768,7 +2768,7 @@
     },
     {
       "path": "decomp/include/Game/MP/MpMessages.hpp",
-      "sha256": "98fde9ab110f14ca520b0e6ba65ded7c99f34ece31118a6ec2dbd982615c38ca"
+      "sha256": "91d60f8a2beb32781dad392545329c445f60e521255ba7f332f7374969acb763"
     },
     {
       "path": "decomp/include/Game/MP/MpPanelDraw.hpp",
@@ -10780,7 +10780,7 @@
     },
     {
       "path": "decomp/src/Game/Camera/CameraDirector.cpp",
-      "sha256": "a67729a51d83406c5b3ee3c051eb4bafa5f00b3fc52a2594bbd806269c8e5bd3"
+      "sha256": "99b6bfecca4729c73c14c1ecdcd73c0dc5b6e161f0e96657a382bb7a36f5e8c3"
     },
     {
       "path": "decomp/src/Game/Camera/CameraFix.cpp",
@@ -10836,7 +10836,7 @@
     },
     {
       "path": "decomp/src/Game/Camera/CameraLocalUtil.cpp",
-      "sha256": "29ea3827ce6fcab509f12d05b94df902293d99921946462bee665e14ecdf5062"
+      "sha256": "69533e943783a1a50234abc4cdc7c755d6968d337ce0863099a2e6eca524f8a9"
     },
     {
       "path": "decomp/src/Game/Camera/CameraMan.cpp",
@@ -10880,7 +10880,7 @@
     },
     {
       "path": "decomp/src/Game/Camera/CameraParallel.cpp",
-      "sha256": "184a1505a3077ac0441f781292b214d9244889a6efc13f365b3b97ced995f6ff"
+      "sha256": "4981cfc561959807767387bd7b1843840f41a0f881d2d32b58f766a7341b816a"
     },
     {
       "path": "decomp/src/Game/Camera/CameraParamChunk.cpp",
@@ -11016,7 +11016,7 @@
     },
     {
       "path": "decomp/src/Game/Camera/CameraViewInterpolator.cpp",
-      "sha256": "41e495b6929abb5910cacee3682e2b8761df422379f9cb0919f76bb9efd8b7ff"
+      "sha256": "9d7433e98cb2331ed49daeed39445e9be567c18c28a9c9330a2d98ca550e5544"
     },
     {
       "path": "decomp/src/Game/Camera/CameraWaterFollow.cpp",
@@ -11852,7 +11852,7 @@
     },
     {
       "path": "decomp/src/Game/LiveActor/ClippingJudge.cpp",
-      "sha256": "309f98c33119b6e2554711c35e279a236d1e71969548e466ff8488ffefa1a785"
+      "sha256": "f5fdc78c7d5c79d936acd74aa1c1d8e14e29218186f2dad4df2da931ef4c1d38"
     },
     {
       "path": "decomp/src/Game/LiveActor/DisplayListMaker.cpp",
@@ -12036,7 +12036,7 @@
     },
     {
       "path": "decomp/src/Game/MP/MpAway.cpp",
-      "sha256": "84843c01f8ebff7e3be0e2c6b686a32a6d52e3b1232603342687ce1de91e94f7"
+      "sha256": "7f31f0d07d983a9451d8e97c89f2ee9f350fc3c5a457d6d1c0a9ba81d5d440ec"
     },
     {
       "path": "decomp/src/Game/MP/MpBubble.cpp",
@@ -12128,7 +12128,7 @@
     },
     {
       "path": "decomp/src/Game/MP/MpMenuSequence.cpp",
-      "sha256": "f7bb5e3f829f227957cb291e6bc1e3fe4cbb6c370d180f3c1545cf7d0f995746"
+      "sha256": "55be9958fa814f97c06e6106a33ba5199d1add4b29ba1a0e2b9056910611a1f3"
     },
     {
       "path": "decomp/src/Game/MP/MpMenuSession.cpp",
@@ -12136,15 +12136,15 @@
     },
     {
       "path": "decomp/src/Game/MP/MpMenuSettings.cpp",
-      "sha256": "212292042b7ffbbd535990123efd769c95f2b8805abe4b74a997a1bea3636722"
+      "sha256": "f005189641b30b281e19f5d42ed690213a40466d4f8368d337d2ef1fdf0a508b"
     },
     {
       "path": "decomp/src/Game/MP/MpMessages.cpp",
-      "sha256": "caba0b536a00ad89423f4b493cf8990a2bbce8de046e048071cfbdfc40e96854"
+      "sha256": "4bddd58cfa0fc8af09b132af542f0bb8ec169748e6e120a3f5264c1ead131046"
     },
     {
       "path": "decomp/src/Game/MP/MpMessagesExtra.cpp",
-      "sha256": "121152f04161ab0c88daaeb59e07c158a40a9e686aa9b9f9a6f378c7ca4715ee"
+      "sha256": "af16170d3f37b4253388789ee63c501562cf224bbd79bc64fea55ed938f7e1fb"
     },
     {
       "path": "decomp/src/Game/MP/MpNameTag.cpp",
@@ -12208,7 +12208,7 @@
     },
     {
       "path": "decomp/src/Game/MP/MpUiSystem.cpp",
-      "sha256": "36370fc06d0a5ef90e274d07fd5d001048a701a66dba0774d7d1d84f42caebc2"
+      "sha256": "a43b57d5b8533f9900287dd9d23fc25a49320c757e4619b4833a056e1126c01e"
     },
     {
       "path": "decomp/src/Game/MP/MpWarm.cpp",
@@ -19452,7 +19452,7 @@
     },
     {
       "path": "platform/include/port/compat.h",
-      "sha256": "8d3eb30c1710a7fd4f984f049de38d4331ad8b027552514f4f2d0a0efc58ef83"
+      "sha256": "e9dbf53f3f142f3c0829cfc6ba15a615ece11fdd23f8fae2fd78d648e0ef6183"
     },
     {
       "path": "platform/include/port/console_stdio.h",
@@ -19565,6 +19565,10 @@
     {
       "path": "platform/include/port/frame_pace.h",
       "sha256": "8907c5d5db779989222ddf3c61e75b046737be58e8ebedb75ef9b7c053ce9695"
+    },
+    {
+      "path": "platform/include/port/free_camera.h",
+      "sha256": "9bdbb3f96f11951ed3f745bbaea7321081b227cb3e7ae8c01795521ea77e0221"
     },
     {
       "path": "platform/include/port/fur25.h",
@@ -19696,11 +19700,11 @@
     },
     {
       "path": "platform/include/port/input.h",
-      "sha256": "811aca0337175a552b0e385b741b5f8c446ee0bff0e7dd9dd9b903a9728c5888"
+      "sha256": "e672a6493c948a78c3726c1279e2d585b968d981c0cdf225950dd9b7b1588269"
     },
     {
       "path": "platform/include/port/input_script.h",
-      "sha256": "54db116ef4e147f05705790da10e1b88fb4bd15ffbeb5e956d0b2d38f6170729"
+      "sha256": "94cfc57c1ef748ec4844d874061c52b69e0ccddee4d09fa86ebd856f8eaa37df"
     },
     {
       "path": "platform/include/port/io_policy.h",
@@ -19940,7 +19944,7 @@
     },
     {
       "path": "platform/include/port/port.h",
-      "sha256": "575e38010da6abf04f4373bb4635d284ce12099b5b2fac60c865d5c6d19f3de6"
+      "sha256": "b8ccaee36a6295a29077ce9b334ffd910b03ef9377a12f7d1c3f052497c38719"
     },
     {
       "path": "platform/include/port/pose_ondraw.h",
@@ -20060,7 +20064,7 @@
     },
     {
       "path": "platform/include/port/settings_native.h",
-      "sha256": "2932e8bd4001b1ab0fd4b4b8feba53d4b350467df114692327b5a8427558947f"
+      "sha256": "df1d1685f48857ac509dd56693d2278006e0e9dd5d9eb6c8ccda04acc8f47770"
     },
     {
       "path": "platform/include/port/settings_ui.h",
@@ -20232,7 +20236,7 @@
     },
     {
       "path": "platform/src/dvd/dvd.cpp",
-      "sha256": "3a113db134c050e7ee2a00c35540d58e723b663792dcfe69f11c11f25ea10a70"
+      "sha256": "4b3a9ae2a448fa6d9e14b15c4c43d0c0cd941771ee15c69daa54ddcea2d076f8"
     },
     {
       "path": "platform/src/gx/cpu_xf.cpp",
@@ -20356,7 +20360,7 @@
     },
     {
       "path": "platform/src/gx/vgx_galaxy.cpp",
-      "sha256": "49a3d399dffcc1ef0a89b9155003a64cced3541006629f57373d1b3b475a5c9c"
+      "sha256": "83bec349fcc5ea3fac4e2d2628e7c385fcc74a879c21e949dd3bc9355daffec9"
     },
     {
       "path": "platform/src/gx/vgx_galaxy.h",
@@ -20432,7 +20436,7 @@
     },
     {
       "path": "platform/src/input/wpad.cpp",
-      "sha256": "85d34eded40c583b90eeedd68e434e6663cb99a282fbdefe711620457a3a003a"
+      "sha256": "a286f4a868dec6d274992a69b237025aef5650e5980d19ef87e1fa16c944f038"
     },
     {
       "path": "platform/src/mp/mp_boot.cpp",
@@ -20716,7 +20720,7 @@
     },
     {
       "path": "platform/src/port/handheld_ui.cpp",
-      "sha256": "6ffb99556150c771dafa1064a63d39368705280ad0de13af68aff30521e45549"
+      "sha256": "ded447d8dd64e7bcfb89e14a69bc23a216a6439bf96c9406cffff698ff4b5292"
     },
     {
       "path": "platform/src/port/missing_game.cpp",
@@ -20732,7 +20736,7 @@
     },
     {
       "path": "platform/src/port/perf.cpp",
-      "sha256": "34a4feefb2174094744fad60d213b75f6595a12c5e985cfb03bb11acc2d587a0"
+      "sha256": "def17a20797896d76f88991330e08027e1f278b2ec7c982eb3a6adb11e6ad5d4"
     },
     {
       "path": "platform/src/port/phase_cpu.h",
@@ -20812,7 +20816,7 @@
     },
     {
       "path": "platform/src/settings/settings_native.cpp",
-      "sha256": "007224eea8a43b5ac66fcd71a4c47a09c5b03cd5cf4077e8d428e486a4d46c1a"
+      "sha256": "5a869326b528709173e532a843a68a641857558343c005b59c5a99719a78e109"
     },
     {
       "path": "platform/src/settings/settings_native_host.cpp",
@@ -22364,7 +22368,7 @@
     },
     {
       "path": "tests/control_prompts.cpp",
-      "sha256": "f8dac12c5016ba39fe2ff12506ad58f38aa2a61199bf008c098baa70a5dfb8a8"
+      "sha256": "26585b227c8f1cd177ef921c8720b2e6e354a750353b61992eeb617beaee88cb"
     },
     {
       "path": "tests/copy49_smallcopy_test.cpp",
@@ -22480,7 +22484,7 @@
     },
     {
       "path": "tests/dome_zoom_settings.cpp",
-      "sha256": "44a528cdf4f49c8e57bed54a8050fbd6999a1357f42785451b256a69f2f481c6"
+      "sha256": "8c83fd7dd36b52415616bd0563f299d25b498160ff3470bc9b04a7b2dbaef570"
     },
     {
       "path": "tests/draw_pipe.cpp",
@@ -22617,6 +22621,10 @@
     {
       "path": "tests/flipbook31_backend.cpp",
       "sha256": "cd9618c8cb4b8dcdd496b196367a36e60eec82ee1e4d8dd4871562b44c0fd29d"
+    },
+    {
+      "path": "tests/free_camera.cpp",
+      "sha256": "fa749d8d06ab0a1b81037a7e10ae6351f88a6677f4e610f519befcb459e8371d"
     },
     {
       "path": "tests/fur25.cpp",
@@ -23936,7 +23944,7 @@
     },
     {
       "path": "tests/mp/ui_menu/boxfit_test.cpp",
-      "sha256": "fd27a7551314e8abcffa1257d130779fb3f14a261f22999b478a02c8e86aa9ef"
+      "sha256": "b44d4d0cc59879739edb1000eae9659adc5ddcc9608f4d4c4d62fbf7a9624d7d"
     },
     {
       "path": "tests/mp/ui_menu/build.sh",
@@ -23944,7 +23952,7 @@
     },
     {
       "path": "tests/mp/ui_menu/common.hpp",
-      "sha256": "1b9fd83d5153587559e0e29019c0e1e327b2f3f0f85e93623650e217508c1abd"
+      "sha256": "fb439a4ce04ab7ecd494394474547e3891388c31844af534aea0f1dd699a054d"
     },
     {
       "path": "tests/mp/ui_menu/conntest_test.cpp",
@@ -24024,7 +24032,7 @@
     },
     {
       "path": "tests/mp/ui_menu/settings_test.cpp",
-      "sha256": "96d383538a7822c1941c80207762ee801645e96caa859b8a9ea391ec0afc758f"
+      "sha256": "5970cd62ac0e1d36c79a016cad0c1ddd9932f354e133617373349740dd38767d"
     },
     {
       "path": "tests/mp/ui_menu/words_test.cpp",
@@ -24552,7 +24560,7 @@
     },
     {
       "path": "tests/settings_native.cpp",
-      "sha256": "e657f666d841143018b825f054fc9631abd0bdb10775bec5ff711f22160d151c"
+      "sha256": "ef44432dfade1e12989eb76fef0ae4cf473636d39ba8ec621d0866e058b6aaf7"
     },
     {
       "path": "tests/settings_render_bench.cpp",
@@ -26056,7 +26064,7 @@
     },
     {
       "path": "tests/vita_controls.cpp",
-      "sha256": "c3829e2b920bb4ee1f81f13638f277047674faa066aba4ebb8d2c33c24f0e64a"
+      "sha256": "640e5a3e4fecb4145eb45ccbc9fb9759760e13d3cf408625316a72df46298378"
     },
     {
       "path": "tests/vita_cook_pack.cpp",
@@ -26220,7 +26228,7 @@
     },
     {
       "path": "tests/zoom_clip.cpp",
-      "sha256": "7c38c42af11d32b2ef2109eb87fb7e55e9de8e8c6344ffdfeabab0b5d8002ea9"
+      "sha256": "6567e019d62d5236ea2a0eeefe3dae447167df11c1eac7259048ca658c4e705b"
     },
     {
       "path": "tools/Dockerfile.native",
@@ -28024,7 +28032,7 @@
     },
     {
       "path": "tools/prepare_dome_zoom_fixture.py",
-      "sha256": "939f72561ead2152541f096c30ea141f3cb323047b2390e894187d8abb6c1b04"
+      "sha256": "520afab3d5d34b1218e73062ab3ea9c75a14e3973e65e2e91d0dc0285750b0c9"
     },
     {
       "path": "tools/prepare_settings_host_fixture.py",
@@ -28653,6 +28661,10 @@
     {
       "path": "tools/test_flipbook31_backend.sh",
       "sha256": "bd86729ef9380fb954fcc8b14eb296db1e3fcbf2a92ef2655c674f776f051c79"
+    },
+    {
+      "path": "tools/test_free_camera.sh",
+      "sha256": "0fddaaba96c61813e780f84c8fb9f42a65fb78282c650e09ed9db95530087e80"
     },
     {
       "path": "tools/test_fur25.sh",
@@ -30540,7 +30552,7 @@
     },
     {
       "path": "tools/vita_must_define.txt",
-      "sha256": "cd424d677bd7043603d7098b07928a6455743fb815a0437c809bb298eb041815"
+      "sha256": "23d63cba6d3d5aa5be8428b2bc3abc5fb371755c481f73075982b843e22c72fd"
     },
     {
       "path": "tools/vita_shader_pack.cpp",
@@ -30988,7 +31000,7 @@
     },
     {
       "path": "vita/runtime/input.cpp",
-      "sha256": "55d1d131d482cfeaa295b6f4f14bb6eebb9e8ebc81a9a7318f240b063d058dd0"
+      "sha256": "870e15826aff800d7259c5dd602df6c02a13b1baba0b9a972cbf15bdf15013b0"
     },
     {
       "path": "vita/runtime/input.h",
@@ -31020,7 +31032,7 @@
     },
     {
       "path": "vita/vgx-game/CMakeLists.txt",
-      "sha256": "e1225b58712dc1de46c2f50884f13e8dedfac1b87a26cc5d99539766fc9fbab2"
+      "sha256": "f689d861d0dfbe0ddb21982a5573f7512664411b4a8e64cc221351c47e149e34"
     },
     {
       "path": "vita/vgx-game/alloc_wrap.cpp",
@@ -31040,7 +31052,7 @@
     },
     {
       "path": "vita/vgx-game/entry.cpp",
-      "sha256": "a81bfd4e72c88231e3d96616b46082622ae7b50d2520c505313ba02cd93594e5"
+      "sha256": "a3041fa97800b0acaf8308e9e59568e3d692e6a6882301efb0290de0bd1d82f7"
     },
     {
       "path": "vita/vgx-game/fast_tls.c",
@@ -31088,7 +31100,7 @@
     },
     {
       "path": "vita/vgx-game/settings_runtime.cpp",
-      "sha256": "a67789d5d57c2bc7575287c1fafff971a9bfecd5cf4caa4042c594d49eea0c67"
+      "sha256": "6ebb39ed50c0f3b40282c54cebab00aeafe9e386e6413837ba8fbeda7300b463"
     },
     {
       "path": "vita/vgx-game/settings_runtime.h",

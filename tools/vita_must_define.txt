@@ -81,3 +81,18 @@ port_vgx_shader_compile_seq      # platform/vgx/src/vgx_backend_gl.cpp: monotoni
 port_vgx_vita_boot_loading       # platform/vgx/vita/vgx_host_galaxy_vita.cpp: 1 while boot splash is actively loading (kDirect/kGl, !failed, !stalled)
 port_settings_native_open        # decomp/src/Game/MP/MpUiSystem.cpp: 1 while native in-game Settings UI is open
 port_dvd_cached_fst_copy         # platform/src/dvd/dvd.cpp: cached sys/fst.bin copy for mp_boot StageDataHash (weak ref)
+
+# --- freecam31: gravity-aware analog Free Camera & Settings > Camera live hooks ---
+port_free_camera_enabled         # platform/src/port/perf.cpp: 1 when Free Camera right-stick mode is active
+port_right_stick_mode            # platform/src/port/perf.cpp: single source of truth (0 Free, 1 Classic, 2 Pointer)
+port_right_stick_mode_set        # platform/src/port/perf.cpp: live setter for Settings > Camera > Right Stick
+port_camera_speed                # platform/src/port/perf.cpp: Free Camera speed level 1..10 (default 5)
+port_camera_speed_set            # platform/src/port/perf.cpp: live setter for Settings > Camera > Camera Speed
+port_input_set_camera_invert_mask # platform/src/input/wpad.cpp: 2-bit invert mask (bit 0 = X, bit 1 = Y)
+port_input_camera_invert_mask    # platform/src/input/wpad.cpp: read 2-bit invert mask
+port_input_cam_stick             # platform/src/input/wpad.cpp: read analog Free Camera stick (camX, camY)
+port_free_camera_owns_reset      # decomp/src/Game/Camera/CameraDirector.cpp: Free Camera owns Triangle/C recenter when eligible
+port_free_camera_take_parallel_reset # decomp/src/Game/Camera/CameraDirector.cpp: 2nd-tap Triangle native release resets CameraParallel::mRoundAngle
+port_free_camera_active          # decomp/src/Game/Camera/CameraDirector.cpp: Free Camera active (prevents mBinder 75% orbit brake)
+port_free_camera_turn_blend      # decomp/src/Game/Camera/CameraDirector.cpp: smooth [0..1] turn activity (ViewInterpolator, HRW, GXV_LATE_TURN)
+port_free_camera_clip_pad        # decomp/src/Game/Camera/CameraDirector.cpp: frustum lead pad for GXV_CLIP_PAIR & fast turns

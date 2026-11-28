@@ -21,7 +21,7 @@ namespace port::settings {
 // env.txt's GXV_HRW overrides it (read from the mode-key snapshot, port/mode_keys.h UserHas). Appended last so the other rows keep their numbers.
 // Allow50 (retired from Settings UI in Wave 4): enum kept for ABI stability; RowShown always returns false, NativeRetire forces Config::allow50 off,
 // and ApplyStartup ignores it (GXV_HRW_ALLOW50 in env.txt remains as the escape hatch; legacy allow50=1 files still parse cleanly).
-enum class NativeRow : uint8_t { Picture, Language, LessMotion, Tilt, TiltStrength, Pointer, CameraZoom, RightStick, InvertCamera, RearTouch, TapToJump, StarBitReach, Assist60, Allow50, Count };
+enum class NativeRow : uint8_t { Picture, Language, LessMotion, Tilt, TiltStrength, Pointer, CameraZoom, RightStick, InvertCamera, RearTouch, TapToJump, StarBitReach, Assist60, Allow50, CameraSpeed, Count };
 constexpr unsigned kNativeRows = static_cast<unsigned>(NativeRow::Count);
 
 // The live rows read and write the thing that uses them, through this table (the real one sits next to the readers: perf.cpp's port_zoom_*,

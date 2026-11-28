@@ -11,10 +11,22 @@ Super Mario Galaxy was made for the Wii Remote and Nunchuk. On the Vita, every o
 | **Square** or **R** | Spin | Shake |
 | **L** | Crouch, ground pound, long jump, backflip | Z |
 | **Circle** | Shoot a Star Bit at the pointer; hold and use the right stick to aim | B |
-| **Right stick** | Camera: left and right turn, up for first person, down to look back | D-pad |
-| **Triangle** | Camera behind Mario | C |
+| **Right stick** | **Free Camera** (360° analog orbit & vertical pitch, default on Vita). Switchable to **Classic** or **Pointer** in **Settings > Camera** | D-pad |
+| **D-pad** | Classic camera turns (left/right), first-person view (up), look back (down) | D-pad |
+| **Triangle** | Tap once to center Free Camera behind Mario; tap again to return to the game's native camera | C |
 | **START** | Pause | + |
 | **Select** | Reset tilt (in tilt levels) | − |
+
+### Free Camera (3.0.1)
+
+On Vita handhelds, the right stick defaults to **Free Camera**: full analog 360° horizontal orbit and smooth vertical pitch with automatic wall and floor clearance.
+
+- **Switch modes anytime** under **Settings > Camera > Right Stick**: **Free Camera** (default on Vita), **Classic** (original Wii D-pad camera turns), or **Pointer** (default on PS TV).
+- **Camera Speed (`1–10`, default `5 Normal`)**: adjusts Free Camera turn and pitch speed.
+- **Invert Camera**: **Off**, **Left / Right**, **Up / Down**, or **Both** in Free Camera mode (and **Off** / **Left / Right** in Classic mode).
+- **Quick recenter & release**: press **Triangle** once to glide behind Mario; press **Triangle** a second time (within 1.5 s) to release back to the game's original automatic camera angle.
+- **Star Bit aiming**: holding **Circle** temporarily hands the right stick to the Star Bit pointer and returns immediately to Free Camera on release.
+- **Automatic yield**: Free Camera yields automatically during cutscenes, fixed/boss cameras, launch stars, first-person view (`D-pad Up`), and menus.
 
 In multiplayer (see docs/MULTIPLAYER.md): **D-pad down** greets the others, holding the Star Bit button (**Circle**, or **R2** on a pad) or a finger on the screen shows them where you point,
 and holding **Cross** while landing on a friend's head is a super jump.
@@ -23,8 +35,8 @@ message (in the tilt levels Select still levels the tilt).
 
 ## Multiplayer controls
 
-Only used while you are in a multiplayer session or its menus. Every button picture on the multiplayer screens is meant to be the Vita's own, and to follow
-your button settings (Settings > Controls). This has been seen only in screenshots and tests on a computer, never on a console. Cross chooses and Circle goes back, as everywhere else in the game.
+Only used while you are in a multiplayer session or its menus. Every button picture on the multiplayer screens is the Vita's own and follows
+your button settings (**Settings > Controls**). Cross chooses and Circle goes back, as everywhere else in the game.
 
 | What | Vita | Touch |
 |---|---|---|
@@ -37,7 +49,7 @@ your button settings (Settings > Controls). This has been seen only in screensho
 | **Session menu** in play (START again or Circle closes it) | **START** | |
 | **Quick messages** | Hold **SELECT**, press a D-pad direction. One message every 2 seconds. In tilt levels SELECT still levels the tilt. | START, Stamps, tap a tile. |
 | **Typed messages** (off until the player who opened the game turns them on) | START, Stamps, **Write a Message** (the Vita's keyboard) | Tap the tile. |
-| **Say hello** | D-pad down (the right stick down too, while it is the camera) | |
+| **Say hello** | D-pad down (the right stick down too, when Right Stick is set to Classic) | |
 | **Show your pointer** to the others, and hold an enemy for Co-Star | Hold **Circle** and aim with the right stick | Keep a finger on the screen. |
 | **Watch** the previous / next player (when you are out and waiting) | **L** / **Square** (or **R**) | Tap a head of the strip. |
 | **Pick a character** | D-pad or left stick, then **Cross** | Tap a head. |
@@ -66,7 +78,7 @@ With a PS3 or PS4 controller on a PS TV, the controls are laid out for a pad:
 | **Triangle** | Camera behind Mario |
 | **START** / **Select** | Pause / reset tilt |
 
-This is the default when no profile has been chosen by hand in **Settings**. Every button can be changed under **Settings > Controls > Change Buttons**, which also lists L2, R2, L3 and R3 for a pad. The Vita's own controls are as in the table above.
+This is the default when no profile has been chosen by hand in **Settings**. On PS TV, **Right Stick** defaults to **Pointer** and can be switched to **Free Camera** or **Classic** anytime under **Settings > Camera > Right Stick**. Every button can be changed under **Settings > Controls > Change Buttons**, which also lists L2, R2, L3 and R3 for a pad. The Vita's own controls are as in the table above.
 
 **Mouse-style aiming (Settings > Controls, off by default).** The stick still sets how fast the pointer moves, but small pushes move it slowly and exactly, a full push sweeps across the screen, and the pointer speeds up the longer you keep pushing. It works the same at 30 and 60 FPS.
 

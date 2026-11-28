@@ -14,7 +14,13 @@ MpAwayLogic::State sState;
 bool anyInput() {
     if (MR::testCorePadTriggerAnyWithoutHome(0)) return true;
     if (MR::testCorePadButtonA(0) || MR::testCorePadButtonB(0) || MR::testSubPadButtonZ(0) || MR::testSubPadButtonC(0)) return true;
-    return fabsf(MR::getSubPadStickX(0)) > 0.25f || fabsf(MR::getSubPadStickY(0)) > 0.25f;
+    if (fabsf(MR::getSubPadStickX(0)) > 0.25f || fabsf(MR::getSubPadStickY(0)) > 0.25f) return true;
+#ifdef TARGET_PC
+    float cx = 0.0f, cy = 0.0f;
+    port_input_cam_stick(&cx, &cy);
+    if (fabsf(cx) > 0.25f || fabsf(cy) > 0.25f) return true;
+#endif
+    return false;
 }
 }  // namespace
 

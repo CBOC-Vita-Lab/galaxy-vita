@@ -19,8 +19,8 @@
 typedef struct PortInputEvent {
     int t0, t1;  // ms
     uint32_t buttons;
-    int spin, hasStick, hasPointer, hasTilt;
-    float sx, sy, px, py, pitch, roll;
+    int spin, hasStick, hasPointer, hasTilt, hasCamStick;
+    float sx, sy, px, py, pitch, roll, camX, camY;
 } PortInputEvent;
 
 static const struct {
@@ -61,6 +61,10 @@ static inline int portParseInputScript(const char* spec, PortInputEvent* out, in
                 e.hasTilt = 1, e.pitch = (float)atof(item + 6);
             } else if (!strncmp(item, "ROLL=", 5)) {
                 e.hasTilt = 1, e.roll = (float)atof(item + 5);
+            } else if (!strncmp(item, "CAMX=", 5)) {
+                e.hasCamStick = 1, e.camX = (float)atof(item + 5);
+            } else if (!strncmp(item, "CAMY=", 5)) {
+                e.hasCamStick = 1, e.camY = (float)atof(item + 5);
             } else if (!strcmp(item, "SPIN")) {
                 e.spin = 1;
             } else {
@@ -100,6 +104,7 @@ static inline int portApplyInputScript(const PortInputEvent* ev, int count, int 
         active = 1;
         pad->buttons |= e->buttons;
         if (e->hasStick) pad->stickX = e->sx, pad->stickY = e->sy;
+        if (e->hasCamStick) pad->camX = e->camX, pad->camY = e->camY;
         if (e->hasPointer) pad->pointerValid = 1, pad->pointerX = e->px, pad->pointerY = e->py;
         if (e->hasTilt) {
             // Down in the controller's axes (x right, y up, z where it aims).

@@ -20,9 +20,19 @@ extern "C" int port_language_count(void) __attribute__((weak));        // port/p
 extern "C" const char* port_language_name(int index) __attribute__((weak));
 extern "C" void port_zoom_save_now(void) __attribute__((weak));        // perf.cpp: a Camera Zoom change is written now (it otherwise waits for idle turns)
 extern "C" void port_zoom_menu(int selecting) __attribute__((weak));   // perf.cpp: settings.ini is only written from here (every frame at the entry screen and in a session)
+extern "C" void port_host_alloc_scope_enter(void) __attribute__((weak));
+extern "C" void port_host_alloc_scope_leave(void) __attribute__((weak));
 
 namespace MpMenu {
 namespace {
+
+// 3.0.1: Keep every NativeModel / STL allocation inside Settings on the host C heap (never JKRHeap),
+// covering SO_SESSION, SO_ENTRY, SO_PAUSE, and sceneEnd() teardown cleanly (nest-safe via tlsHostAllocDepth).
+struct SetHostAllocScope {
+    SetHostAllocScope() { if (port_host_alloc_scope_enter) port_host_alloc_scope_enter(); }
+    ~SetHostAllocScope() { if (port_host_alloc_scope_leave) port_host_alloc_scope_leave(); }
+};
+#define SET_HOST_ALLOC SetHostAllocScope setHostAllocScope_
 
 using port::settings::BindOutcome;
 using port::settings::NativeHost;
@@ -108,7 +118,7 @@ int SpecsOf(Scr s, Spec* out) {
         value(NativeRow::Picture), value(NativeRow::Assist60), nav(R_CAMERA), nav(R_CONTROLS), nav(R_MORE);   // (60 Assist: only while Picture is Smooth Motion)
         break;
     case S_SET_CAMERA:
-        value(NativeRow::CameraZoom), value(NativeRow::RightStick), value(NativeRow::InvertCamera);
+        value(NativeRow::CameraZoom), value(NativeRow::RightStick), value(NativeRow::CameraSpeed), value(NativeRow::InvertCamera);
         break;
     case S_SET_CONTROLS:
         value(NativeRow::Tilt), value(NativeRow::TiltStrength), value(NativeRow::Pointer), value(NativeRow::RearTouch), value(NativeRow::TapToJump);
@@ -143,6 +153,7 @@ MpText LabelOf(NativeRow r) {
     case NativeRow::Pointer: return MP_T_SET_L_POINTER;
     case NativeRow::CameraZoom: return MP_T_SET_L_ZOOM;
     case NativeRow::RightStick: return MP_T_SET_L_RSTICK;
+    case NativeRow::CameraSpeed: return MP_T_SET_L_CAM_SPEED;
     case NativeRow::InvertCamera: return MP_T_SET_L_INVERT;
     case NativeRow::RearTouch: return MP_T_SET_L_REAR;
     case NativeRow::TapToJump: return MP_T_SET_L_TAPJUMP;
@@ -194,13 +205,16 @@ void ValueText(const NativeModel& m, NativeRow row, char16_t* out, int cap) {
         else LanguageText(m.LanguageName(i), out, cap);
         break;
     case NativeRow::LessMotion:
-    case NativeRow::InvertCamera:
     case NativeRow::RearTouch:
     case NativeRow::TapToJump:
     case NativeRow::Assist60:
     case NativeRow::Allow50: Text(out, cap, i ? MP_T_ON : MP_T_OFF); break;
+    case NativeRow::InvertCamera:
+        Text(out, cap, i == 0 ? MP_T_OFF : (i == 1 ? MP_T_SET_V_INVERT_X : (i == 2 ? MP_T_SET_V_INVERT_Y : MP_T_SET_V_INVERT_BOTH)));
+        break;
     case NativeRow::Tilt: Text(out, cap, i ? MP_T_SET_V_LEFT_STICK : MP_T_SET_V_CONSOLE); break;
     case NativeRow::TiltStrength:   // 1 to 10; 5 is the normal one
+    case NativeRow::CameraSpeed:
         Number(out, cap, static_cast<int>(i) + 1, false);
         if (i == 4) {   // "5 (Normal)": only the normal one carries the word
             char16_t w[24];
@@ -213,7 +227,9 @@ void ValueText(const NativeModel& m, NativeRow row, char16_t* out, int cap) {
         }
         break;
     case NativeRow::CameraZoom: Number(out, cap, 10 + static_cast<int>(i), true); break;   // 1.0 to 2.0
-    case NativeRow::RightStick: Text(out, cap, i ? MP_T_SET_V_POINTER : MP_T_SET_V_CAMERA); break;
+    case NativeRow::RightStick:
+        Text(out, cap, i == 0 ? MP_T_SET_V_FREE_CAM : (i == 1 ? MP_T_SET_V_CLASSIC_CAM : MP_T_SET_V_POINTER));
+        break;
     case NativeRow::StarBitReach: Number(out, cap, static_cast<int>(i) + 1, false); break;
     default: Text(out, cap, i ? MP_T_SET_V_QUICK : MP_T_SET_V_STEADY); break;
     }
@@ -242,8 +258,13 @@ MpText DescOf(const NativeModel& m, NativeRow row) {
     case NativeRow::TiltStrength: return MP_T_SET_D_TILT_POWER;
     case NativeRow::Pointer: return i ? MP_T_SET_D_POINTER_QUICK : MP_T_SET_D_POINTER_STEADY;
     case NativeRow::CameraZoom: return MP_T_SET_D_ZOOM;
-    case NativeRow::RightStick: return i ? MP_T_SET_D_RSTICK_POINTER : MP_T_SET_D_RSTICK_CAMERA;
-    case NativeRow::InvertCamera: return i ? MP_T_SET_D_INVERT_ON : MP_T_SET_D_INVERT_OFF;
+    case NativeRow::RightStick: return i == 0 ? MP_T_SET_D_RSTICK_FREE : (i == 1 ? MP_T_SET_D_RSTICK_CAMERA : MP_T_SET_D_RSTICK_POINTER);
+    case NativeRow::CameraSpeed: return MP_T_SET_D_CAM_SPEED;
+    case NativeRow::InvertCamera: {
+        const bool classic = m.ValueIndex(NativeRow::RightStick) == 1;
+        if (classic) return i == 0 ? MP_T_SET_D_INVERT_ON : MP_T_SET_D_INVERT_CLASSIC_X;
+        return i == 0 ? MP_T_SET_D_INVERT_OFF : (i == 1 ? MP_T_SET_D_INVERT_X : (i == 2 ? MP_T_SET_D_INVERT_Y : MP_T_SET_D_INVERT_BOTH));
+    }
     case NativeRow::RearTouch: return i ? MP_T_SET_D_REAR_ON : MP_T_SET_D_REAR_OFF;
     case NativeRow::TapToJump: return i ? MP_T_SET_D_TAPJUMP_ON : MP_T_SET_D_TAPJUMP_OFF;
     case NativeRow::Assist60: return i ? MP_T_SET_D_ASSIST_ON : MP_T_SET_D_ASSIST_OFF;
@@ -361,7 +382,7 @@ bool StepRow(Io* io, NativeRow row, int dir, bool wrapEnd) {
     LogValue(row);
     return true;
 }
-bool WrapsAtEnd(NativeRow r) { return r == NativeRow::TiltStrength || r == NativeRow::CameraZoom || r == NativeRow::StarBitReach; }
+bool WrapsAtEnd(NativeRow r) { return r == NativeRow::TiltStrength || r == NativeRow::CameraSpeed || r == NativeRow::CameraZoom || r == NativeRow::StarBitReach; }
 
 void Toast(MpText id) {
     char16_t t[96];
@@ -391,6 +412,7 @@ void BuildButtons(const MoveRow& mv) {
 // ------------------------------------------------------------------ opening and closing
 int Sequence::settingsOrigin() const { return sSet.origin; }
 void Sequence::settingsTestSwap() {
+    SET_HOST_ALLOC;
     if (!mSettingsOn) return;
     for (const MoveRow& mv : sSet.moves)
         if (mv.id == "jump" && mv.slot == 0) {
@@ -414,6 +436,7 @@ void settingsBootToast() {
 }
 
 bool Sequence::openSettings(int origin) {
+    SET_HOST_ALLOC;
     const NativeHost* host = port::settings::NativeHostGet();
     if (!host || !host->available) {
         mp_log("settings: not available on this console");
@@ -460,6 +483,7 @@ bool Sequence::openSettings(int origin) {
 // Every way out ends here: the menu is gone. Changes that are still unsaved are saved (a forced close: the session ended, a cut to safety;
 // the player only loses them by choosing Don't Save).
 void Sequence::settingsClosed() {
+    SET_HOST_ALLOC;
     if (!mSettingsOn) return;
     mSettingsOn = false;
     NativeModel& m = sSet.model;
@@ -479,6 +503,7 @@ void Sequence::settingsClosed() {
 
 // ------------------------------------------------------------------ the family's hooks
 bool Sequence::itemsSettings(Scr s, uint8_t param, int* out, int* np) const {
+    SET_HOST_ALLOC;
     int& n = *np;
     auto add = [&](int i) { if (n < kItems) out[n++] = i; };
     switch (s) {
@@ -511,6 +536,7 @@ bool Sequence::itemsSettings(Scr s, uint8_t param, int* out, int* np) const {
 }
 
 bool Sequence::chooseSettings(int item) {
+    SET_HOST_ALLOC;
     if (!mSettingsOn || mDepth == 0 || !IsSet(top().scr)) return false;
     Io* io = mIo;
     auto decide = [io] { if (io) io->sound(Se::Decide); };
@@ -687,13 +713,23 @@ void Sequence::finishSettings(bool toast) {
 }
 
 bool Sequence::dialogSettings(int purpose, bool yes, int param) {
+    SET_HOST_ALLOC;
     (void)param;
     NativeModel& m = sSet.model;
+    auto exitCaptureToPick = [&] {
+        if (mDepth > 0 && top().scr == S_SET_CAPTURE) {
+            const int row = sSet.capRow;
+            pop();
+            if (row >= 0 && row < static_cast<int>(sSet.moves.size())) openPick(row);
+        }
+    };
     switch (purpose) {
     case P_SET_RO:
     case P_SET_SAVE_FAIL:
+        return true;
     case P_SET_LOST:
     case P_SET_UNAVAILABLE:
+        exitCaptureToPick();
         return true;
     case P_SET_RESTART:   // setapply31: from pause, "Start the game again now?" Yes: save and start again; No: the leave question again
         if (!yes) {
@@ -709,7 +745,10 @@ bool Sequence::dialogSettings(int purpose, bool yes, int param) {
         finishSettings(true);
         return true;
     case P_SET_CONFLICT:
-        if (!yes) return true;   // (the pick screen again)
+        if (!yes) {
+            exitCaptureToPick();
+            return true;   // (the pick screen again)
+        }
         {
             const BindOutcome o = m.Bind(sSet.pendMove, sSet.pendSlot, sSet.pendButton, true);
             if (o.kind == BindOutcome::Ok) {
@@ -774,6 +813,7 @@ void Sequence::cancelRestart() {
 }
 
 bool Sequence::tickSettings(Scr scr, const Input& in, bool* stop) {
+    SET_HOST_ALLOC;
     (void)in;
     if (!IsSet(scr) || !mSettingsOn) return false;
     if (sSet.origin != SO_PAUSE && port_zoom_menu) port_zoom_menu(0);   // (settings.ini is only written from there: the pause menu calls it itself)
@@ -859,6 +899,7 @@ bool Sequence::tickSettings(Scr scr, const Input& in, bool* stop) {
 }
 
 bool Sequence::labelSettings(int item, MpPanel::Row& r, const Frame& f) const {
+    SET_HOST_ALLOC;
     using namespace MpPanel;
     if (!mSettingsOn || !IsSet(f.scr)) return false;
     const NativeModel& m = sSet.model;
@@ -911,6 +952,7 @@ bool Sequence::labelSettings(int item, MpPanel::Row& r, const Frame& f) const {
 }
 
 bool Sequence::modelSettings(MpPanel::Model* m, const Frame& f, int cursorItem, int count, const int* it) const {
+    SET_HOST_ALLOC;
     using namespace MpPanel;
     if (!mSettingsOn || !IsSet(f.scr)) return false;
     (void)count, (void)it;
@@ -1003,6 +1045,7 @@ bool Sequence::modelSettings(MpPanel::Model* m, const Frame& f, int cursorItem, 
 
 // Left / Right on a value row change it (before the core's own changeValue); Triangle on the button list asks to put the buttons back.
 bool Sequence::pressSettings(Scr scr, const Input& in, int item, int count, int stage) {
+    SET_HOST_ALLOC;
     if (!mSettingsOn || !IsSet(scr)) return false;
     if (sSet.restarting > 0) {   // setfix31b: on the wait window Left / Right move between its two choices too; nothing else works the menu meanwhile
         if (scr == S_SET_RESTART && stage == 0 && (in.up || in.down || in.left || in.right)) moveCursor(in.up || in.left ? -1 : 1, count);
@@ -1028,6 +1071,7 @@ bool Sequence::pressSettings(Scr scr, const Input& in, int item, int count, int 
 
 // Back: on Settings with changes, the leave question (Back there is Keep Editing); a capture is answered by every button, so it never gets here.
 bool Sequence::leaveSettings(Scr scr, uint8_t param, int phase) {
+    SET_HOST_ALLOC;
     (void)param;
     if (mSettingsOn && sSet.restarting > 0 && IsSet(scr)) {   // setfix31b: Circle on the wait window is Later; nothing else backs out meanwhile
         if (phase == 0 && scr == S_SET_RESTART) {

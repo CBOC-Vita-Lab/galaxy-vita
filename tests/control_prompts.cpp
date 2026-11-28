@@ -79,5 +79,20 @@ int main(int argc, char** argv) {
     // Non-English words stay in their regional source; only their pictures change.
     const auto regional = u"Inclinez " + remote;
     assert(message(regional) == regional);
-    std::puts("PASS: immutable active prompts, standalone textures and capability wording");
+    // 3.0.1: malformed / truncated / oversized 0x1A BMG tags (e.g. fan-translated ISOs) must never read past NUL under ASan.
+    {
+        const char16_t trunc1[] = {u'O', u'K', 0x1a, 0};                 // NUL immediately after 0x1A
+        const char16_t trunc2[] = {u'O', u'K', 0x1a, 0x0304, 0};         // group 3 pic tag with only 4 bytes (invalid size != 6)
+        const char16_t trunc3[] = {u'O', u'K', 0x1a, 0x0302, 0};         // byteSize < 4
+        const char16_t trunc4[] = {u'O', u'K', 0x1a, 0x0308, 0};         // group 3 pic tag claiming 8 bytes followed by NUL
+        const char16_t trunc5[] = {u'H', u'i', 0x1a, 0x03ff, u'!', 0};   // corrupt huge odd byte count past NUL
+        const char16_t trunc6[] = {u'H', u'i', 0x1a, 0x01fe, u'!', 0};   // corrupt huge even byte count (>32) past NUL
+        assert(port_handheld_message(trunc1) != nullptr);
+        assert(port_handheld_message(trunc2) != nullptr);
+        assert(port_handheld_message(trunc3) != nullptr);
+        assert(port_handheld_message(trunc4) != nullptr);
+        assert(port_handheld_message(trunc5) != nullptr);
+        assert(port_handheld_message(trunc6) != nullptr);
+    }
+    std::puts("PASS: immutable active prompts, standalone textures, capability wording and truncated 0x1A guard");
 }
