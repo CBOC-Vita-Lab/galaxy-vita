@@ -353,7 +353,9 @@ describe('quota32: the object refusing a call (its daily limit) reaches the play
   });
 
   it('fix33 (S2): any other thrown error (object reset by a deploy, overload) answers 503 `busy` with a short retry, not over_budget', async () => {
-    for (const msg of ['Durable Object reset because its code was updated.', 'Durable Object is overloaded. Requests queued for too long.', 'internal error']) {
+    for (const msg of ['Durable Object reset because its code was updated.', 'Durable Object is overloaded. Requests queued for too long.', 'internal error',
+      // watch F3b: these name a limit but are transient (the object was reset), not the day's quota
+      'Durable Object exceeded its memory limit and was reset.', 'Durable Object exceeded its CPU time limit and was reset.', 'Subrequest depth limit exceeded']) {
       const w = await makeWorker({});
       w.env.GAME = { idFromName: (n) => n, get: () => ({ fetch: async () => { throw new Error(msg); } }) };
       const r = await w.call('POST', '/v1/register', { ip: '198.51.100.21', body: { name: 'Busy' } });
